@@ -1,11 +1,3 @@
-#![cfg_attr(
-    test,
-    expect(
-        clippy::unwrap_used,
-        clippy::panic,
-        reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
-    )
-)]
 //! HTTP surface for the control plane. Shared envelope without the host-only
 //! `local` block.
 
@@ -24,7 +16,6 @@ pub struct AppState {
     pub control_plane: ControlPlane,
 }
 
-#[must_use]
 pub fn router(control_plane: ControlPlane) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
@@ -106,10 +97,8 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                         db: HealthDb {
                             status: "current",
                             schema_init_at: snap.schema_init_at.map(|t| {
-                                t.format(
-                                    &time::format_description::well_known::Iso8601::DEFAULT,
-                                )
-                                .unwrap_or_default()
+                                t.format(&time::format_description::well_known::Iso8601::DEFAULT)
+                                    .unwrap_or_default()
                             }),
                             migration_count: snap.migration_count,
                         },
@@ -145,7 +134,11 @@ fn err_response(
         status: "error",
         data: None,
         warnings: Vec::new(),
-        error: Some(ErrorBody { code, message, hint }),
+        error: Some(ErrorBody {
+            code,
+            message,
+            hint,
+        }),
     };
     (status, Json(env)).into_response()
 }

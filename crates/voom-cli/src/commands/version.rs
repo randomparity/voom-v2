@@ -18,7 +18,11 @@ pub fn run() -> io::Result<()> {
     let semver = env!("CARGO_PKG_VERSION");
     let sha = env!("VOOM_GIT_SHA");
     let dirty = matches!(env!("VOOM_GIT_DIRTY"), "true");
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let info = build_version_info(semver, sha, dirty, profile);
     emit_ok("version", info, None, Vec::new())
 }

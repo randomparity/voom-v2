@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
 use voom_store::{SchemaState, connect, probe_schema};
@@ -12,10 +11,16 @@ use voom_store::{SchemaState, connect, probe_schema};
 #[tokio::test]
 async fn connect_then_probe_leaves_db_uninitialized() {
     let pool = connect("sqlite::memory:").await.unwrap();
-    assert_eq!(probe_schema(&pool).await.unwrap(), SchemaState::Uninitialized);
+    assert_eq!(
+        probe_schema(&pool).await.unwrap(),
+        SchemaState::Uninitialized
+    );
 
     // Re-probe; still uninitialized.
-    assert_eq!(probe_schema(&pool).await.unwrap(), SchemaState::Uninitialized);
+    assert_eq!(
+        probe_schema(&pool).await.unwrap(),
+        SchemaState::Uninitialized
+    );
 
     // Direct inspection: _sqlx_migrations table must not exist.
     let exists: i64 = sqlx::query_scalar(

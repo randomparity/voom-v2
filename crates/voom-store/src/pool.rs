@@ -4,14 +4,14 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, SqlitePool};
 use voom_core::VoomError;
 
-/// Open a SQLite pool against an existing database. **Never creates files or
+/// Open a `SQLite` pool against an existing database. **Never creates files or
 /// directories.** Used by every read-side path; the explicit `connect_or_create`
 /// is reserved for `init()`.
 pub async fn connect(url: &str) -> Result<SqlitePool, VoomError> {
     connect_inner(url, /* create = */ false).await
 }
 
-/// Open a SQLite pool, creating the database file and any missing parent
+/// Open a `SQLite` pool, creating the database file and any missing parent
 /// directories. Only `init()` should call this.
 pub async fn connect_or_create(url: &str) -> Result<SqlitePool, VoomError> {
     connect_inner(url, /* create = */ true).await
@@ -49,7 +49,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
 
     SqlitePoolOptions::new()
         .max_connections(pool_size)
-        .min_connections(if is_memory { 1 } else { 0 })
+        .min_connections(u32::from(is_memory))
         .connect_with(options)
         .await
         .map_err(|e| {
@@ -120,7 +120,10 @@ mod tests {
         .fetch_optional(&pool)
         .await
         .unwrap();
-        assert!(exists.is_none(), "connect() must not create migration tracking table");
+        assert!(
+            exists.is_none(),
+            "connect() must not create migration tracking table"
+        );
     }
 
     #[tokio::test]
@@ -131,7 +134,10 @@ mod tests {
 
         let err = connect(&url).await.unwrap_err();
         assert_eq!(err.code(), "DB_UNREACHABLE");
-        assert!(!missing.exists(), "connect() must NOT create the database file");
+        assert!(
+            !missing.exists(),
+            "connect() must NOT create the database file"
+        );
     }
 
     #[tokio::test]
@@ -143,7 +149,10 @@ mod tests {
         let url = format!("sqlite://{}", nested.display());
         let err = connect(&url).await.unwrap_err();
         assert_eq!(err.code(), "DB_UNREACHABLE");
-        assert!(!nested.parent().unwrap().exists(), "connect() must NOT mkdir parents");
+        assert!(
+            !nested.parent().unwrap().exists(),
+            "connect() must NOT mkdir parents"
+        );
         assert!(!nested.exists());
     }
 
@@ -151,14 +160,20 @@ mod tests {
     async fn connect_or_create_creates_missing_parent_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("a/b/c/voom.db");
-        assert!(!nested.parent().unwrap().exists(), "parent must not exist yet");
+        assert!(
+            !nested.parent().unwrap().exists(),
+            "parent must not exist yet"
+        );
 
         let url = format!("sqlite://{}", nested.display());
         let pool = connect_or_create(&url).await.unwrap();
         let row: (i64,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await.unwrap();
         assert_eq!(row.0, 1);
 
-        assert!(nested.parent().unwrap().exists(), "connect_or_create() must mkdir -p the parent");
+        assert!(
+            nested.parent().unwrap().exists(),
+            "connect_or_create() must mkdir -p the parent"
+        );
         assert!(nested.exists(), "sqlite must have created the db file");
     }
 

@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
 use tempfile::NamedTempFile;
@@ -37,7 +36,10 @@ async fn health_against_uninitialized_db_returns_exit_code_2() {
 
     let cp = ControlPlane::open(url.clone()).await.unwrap();
     let code = health::run(&cp, local_for(&url)).await.unwrap();
-    assert_eq!(code, 2, "uninitialized DB must surface as DB_UNINITIALIZED with exit code 2");
+    assert_eq!(
+        code, 2,
+        "uninitialized DB must surface as DB_UNINITIALIZED with exit code 2"
+    );
 }
 
 #[tokio::test]

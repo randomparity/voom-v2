@@ -76,8 +76,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             match ControlPlane::open(cfg.database_url).await {
                 Ok(cp) => Ok(health::run(&cp, local).await?),
                 Err(err) => {
-                    let hint = (err.code() == "DB_UNREACHABLE")
-                        .then(|| "Run: voom init".to_owned());
+                    let hint =
+                        (err.code() == "DB_UNREACHABLE").then(|| "Run: voom init".to_owned());
                     voom_cli::envelope::emit_err(
                         "health",
                         err.code(),

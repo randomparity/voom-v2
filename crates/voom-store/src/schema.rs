@@ -14,7 +14,10 @@ pub enum SchemaState {
     Partial { applied: u32, expected: u32 },
     /// Exactly as many migrations applied as this binary ships AND every
     /// applied version is known to the embedded MIGRATOR.
-    Current { migration_count: u32, schema_init_at: OffsetDateTime },
+    Current {
+        migration_count: u32,
+        schema_init_at: OffsetDateTime,
+    },
     /// At least one applied migration version is not in the embedded MIGRATOR
     /// — either a newer binary touched this DB or migrations were renumbered.
     TooNew { applied: u32, expected: u32 },
@@ -58,9 +61,7 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
         sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations")
             .fetch_all(pool)
             .await
-            .map_err(|e| {
-                VoomError::Database(format!("reading _sqlx_migrations failed: {e}"))
-            })?;
+            .map_err(|e| VoomError::Database(format!("reading _sqlx_migrations failed: {e}")))?;
 
     let expected = expected_migrations();
     let known = embedded_versions();
@@ -77,10 +78,16 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
     //   4. successful_count < expected → Partial.
     //   5. Else Current.
     if unknown_version_present {
-        return Ok(SchemaState::TooNew { applied: successful_count, expected });
+        return Ok(SchemaState::TooNew {
+            applied: successful_count,
+            expected,
+        });
     }
     if any_failed {
-        return Ok(SchemaState::Partial { applied: successful_count, expected });
+        return Ok(SchemaState::Partial {
+            applied: successful_count,
+            expected,
+        });
     }
 
     let any_drift = all_rows.iter().any(|(version, checksum, _)| {
@@ -89,11 +96,17 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
             .is_some_and(|known_checksum| known_checksum.as_slice() != checksum.as_slice())
     });
     if any_drift {
-        return Ok(SchemaState::TooNew { applied: successful_count, expected });
+        return Ok(SchemaState::TooNew {
+            applied: successful_count,
+            expected,
+        });
     }
 
     if successful_count < expected {
-        return Ok(SchemaState::Partial { applied: successful_count, expected });
+        return Ok(SchemaState::Partial {
+            applied: successful_count,
+            expected,
+        });
     }
 
     // successful_count == expected AND every (version, checksum) matches.
@@ -121,7 +134,10 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
         ))
     })?;
 
-    Ok(SchemaState::Current { migration_count: successful_count, schema_init_at })
+    Ok(SchemaState::Current {
+        migration_count: successful_count,
+        schema_init_at,
+    })
 }
 
 #[cfg(test)]
@@ -145,7 +161,10 @@ mod tests {
     #[tokio::test]
     async fn probe_returns_uninitialized_on_fresh_db() {
         let pool = connect("sqlite::memory:").await.unwrap();
-        assert_eq!(probe_schema(&pool).await.unwrap(), SchemaState::Uninitialized);
+        assert_eq!(
+            probe_schema(&pool).await.unwrap(),
+            SchemaState::Uninitialized
+        );
     }
 
     #[tokio::test]
@@ -159,7 +178,10 @@ mod tests {
         // not in the embedded MIGRATOR. Seed migrations table by hand — no
         // dependency on init_on (which lands in Task 11).
         let pool = connect("sqlite::memory:").await.unwrap();
-        sqlx::query(CREATE_MIGRATIONS_TABLE).execute(&pool).await.unwrap();
+        sqlx::query(CREATE_MIGRATIONS_TABLE)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO _sqlx_migrations \
              (version, description, installed_on, success, checksum, execution_time) \

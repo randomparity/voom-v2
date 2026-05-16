@@ -75,8 +75,7 @@ fn emit_snapshot(snap: &HealthSnapshot, local: Local) -> io::Result<i32> {
                      refusing to operate against unknown schema"
                 ),
                 Some(
-                    "Use a newer voom binary or roll the database back to a known migration"
-                        .into(),
+                    "Use a newer voom binary or roll the database back to a known migration".into(),
                 ),
                 Some(local),
             )?;
@@ -95,8 +94,7 @@ fn emit_snapshot(snap: &HealthSnapshot, local: Local) -> io::Result<i32> {
             migration_count: snap.migration_count,
         },
         runtime: HealthRuntime {
-            tokio_workers: std::thread::available_parallelism()
-                .map_or(1, std::num::NonZero::get),
+            tokio_workers: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
         },
     };
     emit_ok("health", data, Some(local), Vec::new())?;

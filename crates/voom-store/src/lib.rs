@@ -6,7 +6,7 @@
         reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
     )
 )]
-//! Storage layer: SQLite pool, migrations, repositories.
+//! Storage layer: `SQLite` pool, migrations, repositories.
 
 pub mod init;
 pub mod migrator;

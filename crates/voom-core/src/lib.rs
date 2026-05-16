@@ -2,8 +2,7 @@
     test,
     expect(
         clippy::unwrap_used,
-        clippy::panic,
-        reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
+        reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
 //! Core domain types shared by every voom-* crate.

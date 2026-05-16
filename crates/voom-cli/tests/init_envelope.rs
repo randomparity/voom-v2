@@ -1,9 +1,3 @@
-#![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
-)]
-
 use voom_cli::commands::init::InitData;
 
 #[test]

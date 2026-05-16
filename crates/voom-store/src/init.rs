@@ -43,9 +43,10 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
 
     let before_count: u32 = match &before {
         SchemaState::Uninitialized => 0,
-        SchemaState::Partial { applied, .. } => *applied,
-        SchemaState::Current { migration_count, .. } => *migration_count,
-        SchemaState::TooNew { applied, .. } => *applied,
+        SchemaState::Partial { applied, .. } | SchemaState::TooNew { applied, .. } => *applied,
+        SchemaState::Current {
+            migration_count, ..
+        } => *migration_count,
     };
     let already_initialized = matches!(before, SchemaState::Current { .. });
 
@@ -55,7 +56,11 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         .map_err(|e| VoomError::Migration(format!("running migrations failed: {e}")))?;
 
     let after = probe_schema(pool).await?;
-    let SchemaState::Current { migration_count, schema_init_at } = after else {
+    let SchemaState::Current {
+        migration_count,
+        schema_init_at,
+    } = after
+    else {
         return Err(VoomError::Migration(format!(
             "post-init schema state is not Current: {after:?}"
         )));
@@ -63,7 +68,11 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
 
     let migrations_applied = migration_count.saturating_sub(before_count);
 
-    Ok(InitReport { migrations_applied, schema_init_at, already_initialized })
+    Ok(InitReport {
+        migrations_applied,
+        schema_init_at,
+        already_initialized,
+    })
 }
 
 #[cfg(test)]
@@ -135,7 +144,10 @@ mod tests {
     async fn probe_after_init_then_checksum_mutation_returns_too_new() {
         let pool = connect("sqlite::memory:").await.unwrap();
         init_on(&pool).await.unwrap();
-        assert!(matches!(probe_schema(&pool).await.unwrap(), SchemaState::Current { .. }));
+        assert!(matches!(
+            probe_schema(&pool).await.unwrap(),
+            SchemaState::Current { .. }
+        ));
 
         sqlx::query("UPDATE _sqlx_migrations SET checksum = X'DEADBEEF' WHERE version = 1")
             .execute(&pool)

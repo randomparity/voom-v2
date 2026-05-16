@@ -7,14 +7,17 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_REF");
 
-    let git_root = env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .map(|p| p.join("../..").join(".git"))
-        .unwrap_or_else(|_| PathBuf::from("../../.git"));
+    let git_root = env::var("CARGO_MANIFEST_DIR").map_or_else(
+        |_| PathBuf::from("../../.git"),
+        |s| PathBuf::from(s).join("../..").join(".git"),
+    );
 
     // Watch HEAD and packed-refs unconditionally.
     println!("cargo:rerun-if-changed={}", git_root.join("HEAD").display());
-    println!("cargo:rerun-if-changed={}", git_root.join("packed-refs").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_root.join("packed-refs").display()
+    );
 
     // If HEAD is a symbolic ref, also watch the file backing the current branch.
     if let Ok(out) = Command::new("git")

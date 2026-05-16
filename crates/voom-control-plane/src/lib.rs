@@ -2,8 +2,7 @@
     test,
     expect(
         clippy::unwrap_used,
-        clippy::panic,
-        reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
+        reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
 //! App-services layer: wraps voom-store and exposes commands consumed by API/CLI.
@@ -43,7 +42,10 @@ impl ControlPlane {
             SchemaState::Partial { applied, expected } => {
                 (DbStatus::Partial, None, Some(applied), Some(expected))
             }
-            SchemaState::Current { migration_count, schema_init_at } => (
+            SchemaState::Current {
+                migration_count,
+                schema_init_at,
+            } => (
                 DbStatus::Current,
                 Some(schema_init_at),
                 Some(migration_count),
@@ -78,7 +80,7 @@ pub struct HealthSnapshot {
     pub schema_init_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_count: Option<u32>,
-    /// Present whenever `db_status` is Partial or TooNew; otherwise None.
+    /// Present whenever `db_status` is `Partial` or `TooNew`; otherwise `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_migrations: Option<u32>,
 }

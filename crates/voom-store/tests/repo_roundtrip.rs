@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
 use tempfile::NamedTempFile;

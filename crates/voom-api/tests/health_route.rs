@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
 use axum::body::Body;
@@ -41,7 +40,10 @@ async fn health_on_uninitialized_returns_503_db_uninitialized() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "DB_UNINITIALIZED");
-    assert!(json.get("local").is_none(), "API must NEVER include local block");
+    assert!(
+        json.get("local").is_none(),
+        "API must NEVER include local block"
+    );
 }
 
 #[tokio::test]
@@ -58,7 +60,10 @@ async fn health_on_initialized_returns_200_current() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["db"]["status"], "current");
     assert_eq!(json["data"]["db"]["migration_count"], 1);
-    assert!(json.get("local").is_none(), "API must NEVER include local block");
+    assert!(
+        json.get("local").is_none(),
+        "API must NEVER include local block"
+    );
 }
 
 #[tokio::test]
@@ -90,5 +95,8 @@ async fn health_on_too_new_db_returns_503_db_schema_too_new() {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "DB_SCHEMA_TOO_NEW");
-    assert!(json.get("local").is_none(), "API must NEVER include local block");
+    assert!(
+        json.get("local").is_none(),
+        "API must NEVER include local block"
+    );
 }

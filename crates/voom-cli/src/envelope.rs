@@ -72,15 +72,15 @@ pub fn emit_err(
         data: None,
         local,
         warnings: Vec::new(),
-        error: Some(ErrorBody { code, message, hint }),
+        error: Some(ErrorBody {
+            code,
+            message,
+            hint,
+        }),
     };
     write_json(&env)
 }
 
-#[expect(
-    clippy::print_stdout,
-    reason = "envelope writer is the one place CLI output is allowed to reach stdout"
-)]
 fn write_json<T: Serialize>(value: &T) -> io::Result<()> {
     let s = serde_json::to_string(value).map_err(io::Error::other)?;
     let mut out = io::stdout().lock();

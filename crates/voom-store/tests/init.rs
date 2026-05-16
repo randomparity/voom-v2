@@ -21,7 +21,10 @@ async fn init_on_disk_creates_schema_meta() {
 
     let pool = connect(&url).await.unwrap();
     let state = probe_schema(&pool).await.unwrap();
-    let SchemaState::Current { migration_count, .. } = state else {
+    let SchemaState::Current {
+        migration_count, ..
+    } = state
+    else {
         panic!("expected Current, got {state:?}");
     };
     assert_eq!(migration_count, 1);

@@ -55,7 +55,9 @@ pub struct MapEnv {
 impl MapEnv {
     #[must_use]
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     #[must_use]
@@ -98,7 +100,12 @@ impl Config {
             .unwrap_or_else(|| "json".to_owned());
         let log_format = LogFormat::parse(&log_format_str)?;
         let config_path = default_config_path()?;
-        Ok(Self { database_url, log_level, log_format, config_path })
+        Ok(Self {
+            database_url,
+            log_level,
+            log_format,
+            config_path,
+        })
     }
 
     /// Production entry point — reads from the live process environment.
@@ -151,13 +158,7 @@ mod tests {
     #[test]
     fn override_takes_priority_over_env() {
         let env = MapEnv::new().with("VOOM_DATABASE_URL", "sqlite::env");
-        let cfg = Config::resolve_from(
-            &env,
-            Some("sqlite::override".into()),
-            None,
-            None,
-        )
-        .unwrap();
+        let cfg = Config::resolve_from(&env, Some("sqlite::override".into()), None, None).unwrap();
         assert_eq!(cfg.database_url, "sqlite::override");
     }
 

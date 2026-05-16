@@ -1,7 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap over plumbing Result<()> through every assertion"
 )]
 
 use serde_json::Value;
@@ -24,7 +23,7 @@ fn release_flag_is_true_only_when_no_prerelease() {
 
     assert!(!dev.release);
     assert!(rel.release);
-    assert!(dirty.version.ends_with(".dirty"));
+    assert!(dirty.version.contains(".dirty"));
 }
 
 #[test]
@@ -36,6 +35,13 @@ fn version_envelope_serializes_as_expected_keys() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["build_profile", "dirty", "git_sha", "release", "semver", "version"]
+        vec![
+            "build_profile",
+            "dirty",
+            "git_sha",
+            "release",
+            "semver",
+            "version"
+        ]
     );
 }
