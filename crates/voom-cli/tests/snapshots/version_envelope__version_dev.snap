@@ -1,0 +1,13 @@
+---
+source: crates/voom-cli/tests/version_envelope.rs
+assertion_line: 15
+expression: "&info"
+---
+{
+  "version": "0.1.0-dev+abc1234",
+  "semver": "0.1.0-dev",
+  "git_sha": "abc1234",
+  "dirty": false,
+  "release": false,
+  "build_profile": "debug"
+}

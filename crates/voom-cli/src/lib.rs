@@ -9,5 +9,6 @@
 //! Internal library exposing CLI plumbing to integration tests.
 
 pub mod cli;
+pub mod commands;
 pub mod envelope;
 pub mod logging;
