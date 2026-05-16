@@ -17,7 +17,7 @@ members = [
 [workspace.package]
 version = "0.1.0-dev"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["VOOM contributors"]
 repository = "https://github.com/randomparity/voom-v2"
