@@ -21,11 +21,15 @@ async fn main() -> ExitCode {
             let kind = e.kind();
             // --help/--version use clap's success-exit path; let it through
             // verbatim because there's no JSON envelope yet for those.
+            //
+            // DisplayHelpOnMissingArgumentOrSubcommand is deliberately NOT
+            // treated as success: invoking `voom` with no subcommand is a
+            // malformed call from an agent's perspective (no envelope on
+            // stdout, no idea which command ran), so it falls through to the
+            // BAD_ARGS arm below and exits 1.
             if matches!(
                 kind,
-                clap::error::ErrorKind::DisplayHelp
-                    | clap::error::ErrorKind::DisplayVersion
-                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
                 e.print().ok();
                 return ExitCode::from(0);

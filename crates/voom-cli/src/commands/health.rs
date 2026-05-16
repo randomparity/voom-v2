@@ -81,6 +81,31 @@ fn emit_snapshot(snap: &HealthSnapshot, local: Local) -> io::Result<i32> {
             )?;
             return Ok(2);
         }
+        DbStatus::Dirty => {
+            let detail = json!({
+                "failed_version": snap.failed_version,
+                "applied": snap.migration_count,
+                "expected": snap.expected_migrations,
+            });
+            emit_err(
+                "health",
+                "DB_DIRTY_MIGRATION",
+                format!(
+                    "a previous migration left the schema in a dirty (failed) state: \
+                     {detail}; sqlx will not run further migrations until the dirty \
+                     row is resolved"
+                ),
+                Some(
+                    "Manual recovery required: remove the failed row from \
+                     _sqlx_migrations (e.g. DELETE FROM _sqlx_migrations WHERE version \
+                     = <failed_version>) or restore from backup. Do NOT just re-run \
+                     voom init — it will fail the same way."
+                        .into(),
+                ),
+                Some(local),
+            )?;
+            return Ok(2);
+        }
         DbStatus::Current => "current",
     };
 

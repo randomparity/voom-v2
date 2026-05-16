@@ -29,3 +29,29 @@ fn unknown_flag_produces_bad_args_envelope_on_stdout() {
     assert_eq!(json["error"]["code"], "BAD_ARGS");
     assert_eq!(json["command"], "cli");
 }
+
+/// Invoking the binary with no subcommand must NOT exit 0 with plain help
+/// text — that would silently violate the JSON envelope contract for agents.
+/// Clap surfaces this as `DisplayHelpOnMissingArgumentOrSubcommand`; main
+/// routes it through the `BAD_ARGS` arm and exits 1 with a JSON envelope.
+#[test]
+fn no_subcommand_produces_bad_args_envelope_on_stdout() {
+    let bin = env!("CARGO_BIN_EXE_voom");
+    let output = Command::new(bin).output().unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "no subcommand must exit 1 (not 0); stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be a JSON envelope; got {stdout:?}: {e}"));
+
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+    assert_eq!(json["command"], "cli");
+}

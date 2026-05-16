@@ -41,9 +41,29 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         )));
     }
 
+    // Dirty migration rows require manual cleanup — sqlx refuses to migrate
+    // over them, so a generic `voom init` rerun would just fail again. Surface
+    // a precise pointer and remediation path instead.
+    if let SchemaState::Dirty {
+        failed_version,
+        applied,
+        expected,
+    } = before
+    {
+        return Err(VoomError::DirtyMigration(format!(
+            "cannot init: migration version {failed_version} is recorded as failed \
+             (success=0) in _sqlx_migrations ({applied}/{expected} successful); sqlx \
+             will not run further migrations over a dirty schema. Remove the failed \
+             row manually (e.g. `DELETE FROM _sqlx_migrations WHERE version = \
+             {failed_version}`) or restore from backup before re-running voom init"
+        )));
+    }
+
     let before_count: u32 = match &before {
         SchemaState::Uninitialized => 0,
-        SchemaState::Partial { applied, .. } | SchemaState::TooNew { applied, .. } => *applied,
+        SchemaState::Partial { applied, .. }
+        | SchemaState::TooNew { applied, .. }
+        | SchemaState::Dirty { applied, .. } => *applied,
         SchemaState::Current {
             migration_count, ..
         } => *migration_count,
@@ -163,7 +183,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_returns_partial_when_known_version_row_marked_failed() {
+    async fn probe_returns_dirty_when_known_version_row_marked_failed() {
         let pool = connect("sqlite::memory:").await.unwrap();
         init_on(&pool).await.unwrap();
 
@@ -173,12 +193,44 @@ mod tests {
             .unwrap();
 
         match probe_schema(&pool).await.unwrap() {
-            SchemaState::Partial { applied, expected } => {
+            SchemaState::Dirty {
+                failed_version,
+                applied,
+                expected,
+            } => {
+                assert_eq!(
+                    failed_version, 1,
+                    "failed_version must point at the dirty row"
+                );
                 assert_eq!(applied, 0, "no successful migrations remain");
                 assert_eq!(expected, expected_migrations());
             }
-            other => panic!("expected Partial, got {other:?}"),
+            other => panic!("expected Dirty, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn init_refuses_when_schema_is_dirty() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        init_on(&pool).await.unwrap();
+
+        // Synthesize a dirty state: known version with success=0.
+        sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = init_on(&pool).await.unwrap_err();
+        assert_eq!(err.code(), "DB_DIRTY_MIGRATION");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("version 1"),
+            "error must name the dirty version: {msg}"
+        );
+        assert!(
+            msg.contains("DELETE FROM _sqlx_migrations") || msg.contains("restore"),
+            "error must point at manual remediation: {msg}"
+        );
     }
 
     #[tokio::test]

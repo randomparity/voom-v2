@@ -88,6 +88,22 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 ),
                 Some("Upgrade the server binary or roll the database back".into()),
             ),
+            DbStatus::Dirty => err_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "DB_DIRTY_MIGRATION",
+                format!(
+                    "a previous migration left the schema in a dirty (failed) state \
+                     (failed_version={:?}, applied={:?}, expected={:?}); sqlx will \
+                     not run further migrations until the dirty row is resolved",
+                    snap.failed_version, snap.migration_count, snap.expected_migrations
+                ),
+                Some(
+                    "Manual recovery required: remove the failed row from \
+                     _sqlx_migrations or restore from backup. Do NOT just re-run \
+                     voom init."
+                        .into(),
+                ),
+            ),
             DbStatus::Current => {
                 let env = Envelope {
                     schema_version: SCHEMA_VERSION,

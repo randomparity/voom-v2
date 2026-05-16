@@ -6,6 +6,8 @@ pub enum VoomError {
     Database(String),
     #[error("migration error: {0}")]
     Migration(String),
+    #[error("dirty migration: {0}")]
+    DirtyMigration(String),
     #[error("schema is newer than this binary: {0}")]
     SchemaTooNew(String),
     #[error("config error: {0}")]
@@ -23,6 +25,7 @@ impl VoomError {
         match self {
             Self::Database(_) => "DB_UNREACHABLE",
             Self::Migration(_) => "DB_PARTIAL_SCHEMA",
+            Self::DirtyMigration(_) => "DB_DIRTY_MIGRATION",
             Self::SchemaTooNew(_) => "DB_SCHEMA_TOO_NEW",
             Self::Config(_) => "CONFIG_INVALID",
             Self::NotFound(_) => "NOT_FOUND",
@@ -57,5 +60,11 @@ mod tests {
     fn internal_variant_has_internal_code() {
         let err = VoomError::Internal("unexpected".into());
         assert_eq!(err.code(), "INTERNAL");
+    }
+
+    #[test]
+    fn dirty_migration_variant_has_dirty_migration_code() {
+        let err = VoomError::DirtyMigration("version 1 is dirty".into());
+        assert_eq!(err.code(), "DB_DIRTY_MIGRATION");
     }
 }

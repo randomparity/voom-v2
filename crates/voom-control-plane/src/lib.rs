@@ -37,30 +37,45 @@ impl ControlPlane {
     /// Read-only health snapshot.
     pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
         let schema = probe_schema(&self.pool).await?;
-        let (db_status, schema_init_at, migration_count, expected) = match schema {
-            SchemaState::Uninitialized => (DbStatus::Uninitialized, None, None, None),
+        let mut snap = HealthSnapshot {
+            db_status: DbStatus::Uninitialized,
+            schema_init_at: None,
+            migration_count: None,
+            expected_migrations: None,
+            failed_version: None,
+        };
+        match schema {
+            SchemaState::Uninitialized => {}
             SchemaState::Partial { applied, expected } => {
-                (DbStatus::Partial, None, Some(applied), Some(expected))
+                snap.db_status = DbStatus::Partial;
+                snap.migration_count = Some(applied);
+                snap.expected_migrations = Some(expected);
             }
             SchemaState::Current {
                 migration_count,
                 schema_init_at,
-            } => (
-                DbStatus::Current,
-                Some(schema_init_at),
-                Some(migration_count),
-                None,
-            ),
-            SchemaState::TooNew { applied, expected } => {
-                (DbStatus::TooNew, None, Some(applied), Some(expected))
+            } => {
+                snap.db_status = DbStatus::Current;
+                snap.migration_count = Some(migration_count);
+                snap.schema_init_at = Some(schema_init_at);
             }
-        };
-        Ok(HealthSnapshot {
-            db_status,
-            schema_init_at,
-            migration_count,
-            expected_migrations: expected,
-        })
+            SchemaState::TooNew { applied, expected } => {
+                snap.db_status = DbStatus::TooNew;
+                snap.migration_count = Some(applied);
+                snap.expected_migrations = Some(expected);
+            }
+            SchemaState::Dirty {
+                failed_version,
+                applied,
+                expected,
+            } => {
+                snap.db_status = DbStatus::Dirty;
+                snap.migration_count = Some(applied);
+                snap.expected_migrations = Some(expected);
+                snap.failed_version = Some(failed_version);
+            }
+        }
+        Ok(snap)
     }
 }
 
@@ -71,6 +86,9 @@ pub enum DbStatus {
     Partial,
     Current,
     TooNew,
+    /// One or more migration rows recorded as `success=0` — requires manual
+    /// recovery before further migrations can run.
+    Dirty,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -80,9 +98,14 @@ pub struct HealthSnapshot {
     pub schema_init_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_count: Option<u32>,
-    /// Present whenever `db_status` is `Partial` or `TooNew`; otherwise `None`.
+    /// Present whenever `db_status` is `Partial`, `TooNew`, or `Dirty`;
+    /// otherwise `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_migrations: Option<u32>,
+    /// Present only when `db_status` is `Dirty`; identifies the migration row
+    /// recorded as `success=0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed_version: Option<i64>,
 }
 
 #[cfg(test)]
@@ -137,6 +160,27 @@ mod tests {
         let second = voom_store::init(&url).await.unwrap();
         assert!(second.already_initialized);
         assert_eq!(second.migrations_applied, 0);
+    }
+
+    #[tokio::test]
+    async fn health_maps_dirty_state() {
+        let (_keep, url) = fresh_url();
+        voom_store::init(&url).await.unwrap();
+
+        // Synthesize a dirty migration: known version, success=0.
+        {
+            let pool = voom_store::connect(&url).await.unwrap();
+            sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 1")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let cp = ControlPlane::open(url).await.unwrap();
+        let snap = cp.health().await.unwrap();
+        assert_eq!(snap.db_status, DbStatus::Dirty);
+        assert_eq!(snap.failed_version, Some(1));
+        assert!(snap.expected_migrations.is_some());
     }
 
     #[tokio::test]

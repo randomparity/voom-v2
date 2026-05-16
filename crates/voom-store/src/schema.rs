@@ -10,7 +10,8 @@ use crate::migrator::MIGRATOR;
 pub enum SchemaState {
     /// `_sqlx_migrations` table absent.
     Uninitialized,
-    /// Fewer migrations applied than this binary ships.
+    /// Fewer migrations applied than this binary ships. Safe to rerun
+    /// `voom init`.
     Partial { applied: u32, expected: u32 },
     /// Exactly as many migrations applied as this binary ships AND every
     /// applied version is known to the embedded MIGRATOR.
@@ -21,6 +22,16 @@ pub enum SchemaState {
     /// At least one applied migration version is not in the embedded MIGRATOR
     /// — either a newer binary touched this DB or migrations were renumbered.
     TooNew { applied: u32, expected: u32 },
+    /// One or more migration rows are recorded with `success=0` — a previous
+    /// migration attempt aborted mid-flight. sqlx refuses to migrate further
+    /// against a dirty schema, so this requires manual operator action
+    /// (remove the failed row from `_sqlx_migrations` or restore from
+    /// backup) rather than a simple `voom init` rerun.
+    Dirty {
+        failed_version: i64,
+        applied: u32,
+        expected: u32,
+    },
 }
 
 /// Number of migrations this build ships, derived from the embedded MIGRATOR
@@ -73,9 +84,11 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
 
     // Order matters:
     //   1. Unknown-version rows (success or not) → TooNew.
-    //   2. Any failed row with only known versions → Partial.
+    //   2. Any failed row with only known versions → Dirty. sqlx will refuse
+    //      to migrate over a dirty row; this is operator-attention material,
+    //      NOT a `voom init` rerun.
     //   3. Checksum drift on a successful known row → TooNew.
-    //   4. successful_count < expected → Partial.
+    //   4. successful_count < expected → Partial. Safe to rerun init.
     //   5. Else Current.
     if unknown_version_present {
         return Ok(SchemaState::TooNew {
@@ -84,7 +97,14 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
         });
     }
     if any_failed {
-        return Ok(SchemaState::Partial {
+        // Surface the first failed version so operators get a precise
+        // pointer into _sqlx_migrations for manual cleanup.
+        let failed_version = all_rows
+            .iter()
+            .find(|(_, _, success)| !*success)
+            .map_or(0, |(v, _, _)| *v);
+        return Ok(SchemaState::Dirty {
+            failed_version,
             applied: successful_count,
             expected,
         });
