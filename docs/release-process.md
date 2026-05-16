@@ -41,6 +41,15 @@ SemVer suffix between releases. The release process is run from `main`.
    the binary, commit an empty change (`git commit --allow-empty`), build
    again, run `voom version`, and confirm the reported SHA advanced.
 
+   Dirty-flag smoke check (run once per release candidate against a debug
+   build): from a clean tree, `cargo build -p voom-cli` and confirm
+   `voom version` reports `dirty: false`. Edit any tracked file
+   (`touch -m crates/voom-cli/src/main.rs` doesn't qualify — the file must
+   actually change), rebuild, and confirm `voom version` now reports
+   `dirty: true`. Debug builds re-probe via `git status --porcelain` at
+   runtime so they reflect tree state regardless of build-script caching.
+   Release binaries trust the compile-time flag captured by `build.rs` in CI.
+
 ## Never
 
 - Amend tags after creation.
