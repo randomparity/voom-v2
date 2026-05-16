@@ -31,7 +31,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     options = options
         .create_if_missing(create || is_memory)
         .foreign_keys(true)
-        .busy_timeout(std::time::Duration::from_millis(5000));
+        .busy_timeout(std::time::Duration::from_secs(5));
 
     if is_memory {
         options = options.shared_cache(true);
