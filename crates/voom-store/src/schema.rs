@@ -62,6 +62,30 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
     .map_err(|e| VoomError::Database(format!("probing for _sqlx_migrations failed: {e}")))?;
 
     if migrations_table_exists == 0 {
+        // Identity guard. An empty SQLite file with no tables is a fresh DB
+        // we own. An existing DB that already has user tables but lacks
+        // `_sqlx_migrations` belongs to some other application — running
+        // `voom init` against it would silently add VOOM schema and
+        // permanently entangle the two. A mistyped --database-url is the
+        // common way to reach this; refuse loudly rather than mutate.
+        let foreign_table: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' \
+             AND name NOT LIKE 'sqlite_%' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| {
+            VoomError::Database(format!(
+                "scanning sqlite_master for foreign tables failed: {e}"
+            ))
+        })?;
+        if let Some(name) = foreign_table {
+            return Err(VoomError::Config(format!(
+                "database appears to belong to another application: contains \
+                 table {name:?} but no _sqlx_migrations table. Refusing to \
+                 migrate. Check --database-url; use a fresh path for VOOM"
+            )));
+        }
         return Ok(SchemaState::Uninitialized);
     }
 
@@ -230,6 +254,37 @@ mod tests {
     #[tokio::test]
     async fn expected_migrations_matches_embedded_count() {
         assert_eq!(expected_migrations(), 1);
+    }
+
+    #[tokio::test]
+    async fn probe_refuses_foreign_database_with_no_sqlx_migrations() {
+        // An existing SQLite DB that has unrelated user tables but lacks
+        // `_sqlx_migrations` belongs to someone else. probe_schema must
+        // refuse rather than report Uninitialized — otherwise voom init
+        // would happily add VOOM tables to a foreign DB after a typo'd
+        // --database-url.
+        let pool = connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE someone_elses_data (id INTEGER PRIMARY KEY, payload TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = probe_schema(&pool).await.unwrap_err();
+        assert_eq!(err.code(), "CONFIG_INVALID");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("someone_elses_data") || msg.contains("another application"),
+            "error must identify the foreign table or surface the wrong-DB diagnosis: {msg}"
+        );
+
+        // And: the DB was NOT mutated — the foreign table is still alone.
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(table_count, 1, "probe must not have created any tables");
     }
 
     #[tokio::test]

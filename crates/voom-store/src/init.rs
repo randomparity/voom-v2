@@ -73,24 +73,53 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     let migrate_result = MIGRATOR.run(pool).await;
 
     if let Err(e) = migrate_result {
-        // Race recovery. Between our pre-init probe and the migration run,
-        // another process may have applied the same migrations against the
-        // same on-disk database (sqlx's per-DB migration lock is best-effort
-        // on SQLite). The loser then sees a sqlx error like "table already
-        // exists" or "version already applied". Re-probe: if the post-error
-        // state is Current, treat this as an idempotent success — the work
-        // is done, just not by us.
+        // Re-probe and classify by the post-error state, not the raw sqlx
+        // error. This handles three distinct scenarios that all surface as
+        // a `MigrateError` from sqlx but mean different things to operators:
+        //
+        // * `Current`  — race recovery. Between our pre-init probe and the
+        //                migration run, another process applied the same
+        //                migrations. Treat as idempotent success.
+        // * `Dirty`    — a migration ran far enough to insert a success=0
+        //                row in `_sqlx_migrations`, then failed. sqlx will
+        //                refuse to retry; surface as DB_DIRTY_MIGRATION so
+        //                operators perform manual cleanup instead of just
+        //                re-running init.
+        // * `TooNew`   — schema is now ahead of this binary (rare after a
+        //                run-time failure, but possible if a concurrent
+        //                peer migrated past us). Surface as
+        //                DB_SCHEMA_TOO_NEW so operators upgrade the binary.
+        // * otherwise  — propagate the original sqlx error as a generic
+        //                Migration (DB_PARTIAL_SCHEMA) so the message
+        //                surfaces verbatim.
         let after = probe_schema(pool).await?;
-        if let SchemaState::Current { schema_init_at, .. } = after {
-            return Ok(InitReport {
+        return match after {
+            SchemaState::Current { schema_init_at, .. } => Ok(InitReport {
                 migrations_applied: 0,
                 schema_init_at,
                 already_initialized: true,
-            });
-        }
-        return Err(VoomError::Migration(format!(
-            "running migrations failed: {e}"
-        )));
+            }),
+            SchemaState::Dirty {
+                failed_version,
+                applied,
+                expected,
+            } => Err(VoomError::DirtyMigration(format!(
+                "migration failed and left version {failed_version} recorded \
+                 as failed (success=0) in _sqlx_migrations ({applied}/{expected} \
+                 successful). sqlx will not retry over a dirty schema. Remove \
+                 the failed row manually (DELETE FROM _sqlx_migrations WHERE \
+                 version = {failed_version}) or restore from backup. \
+                 (underlying error: {e})"
+            ))),
+            SchemaState::TooNew { applied, expected } => Err(VoomError::SchemaTooNew(format!(
+                "migration failed and post-probe shows schema is now too new for \
+                 this binary ({applied}/{expected}). Upgrade the voom binary or \
+                 roll back the database. (underlying error: {e})"
+            ))),
+            _ => Err(VoomError::Migration(format!(
+                "running migrations failed: {e}"
+            ))),
+        };
     }
 
     let after = probe_schema(pool).await?;
