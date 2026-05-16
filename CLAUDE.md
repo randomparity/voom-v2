@@ -66,3 +66,34 @@ Adding a new crate: add it to `[workspace] members`, set `version.workspace = tr
 - Migrations: `migrations/*.sql` (bundled into `voom-store::MIGRATOR`)
 - Insta snapshots: `crates/voom-cli/tests/snapshots/`
 - Clippy/lints config: `[workspace.lints]` in root `Cargo.toml` (pedantic on, panic/unwrap/expect denied)
+
+## Testing layout
+
+Unit tests live in a **sibling file** named `<source>_test.rs`, linked
+from the parent source via `#[path]`:
+
+```rust
+// At the bottom of foo.rs
+#[cfg(test)]
+#[path = "foo_test.rs"]
+mod tests;
+```
+
+```rust
+// foo_test.rs
+use super::*;
+
+#[test]
+fn something() { /* ... */ }
+```
+
+Integration tests stay in `crates/*/tests/` (no change). The
+feature-gated helper `crates/voom-store/src/test_support.rs` stays
+as-is and is classified as test code by SonarCloud.
+
+`just check-test-layout` (also wired into `just ci`) enforces the
+convention: no inline `#[cfg(test)] mod tests { ... }` in `src/`, and
+every `*_test.rs` must have a matching `#[path]` declaration in its
+sibling source file. See `docs/adr/0004-sibling-unit-tests.md`.
+
+`just coverage` produces `lcov.info` consumed by SonarCloud.
