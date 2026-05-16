@@ -102,10 +102,17 @@ out a class of accidents: a `health` call (or any other read-side caller)
 cannot upgrade a DB the operator didn't intend to touch — relevant when a
 newer client connects to an older DB during a partial rollout.
 
-The `voom-store` API exposes two entry points:
+The `voom-store` API exposes three entry points, separated by mutation intent:
 
 ```rust
+// Read-side. Never creates files or directories. Used by health, the API,
+// and every other path that must not mutate filesystem state.
 pub async fn connect(url: &str) -> Result<SqlitePool, VoomError>;
+
+// Write-side. create_if_missing(true) + mkdir parent. Used only by init().
+pub async fn connect_or_create(url: &str) -> Result<SqlitePool, VoomError>;
+
+// Open via connect_or_create, then apply migrations idempotently.
 pub async fn init(url: &str) -> Result<InitReport, VoomError>;
 
 pub struct InitReport {
@@ -115,8 +122,14 @@ pub struct InitReport {
 }
 ```
 
-`connect()` returns `Ok` on any openable DB — empty, partially-migrated, or
-fully-current. Schema state is the caller's responsibility, probed via:
+`connect()` errors with `DB_UNREACHABLE` against a missing file or directory —
+a typo'd URL fails loudly instead of silently creating an empty DB. Only
+`init()` is allowed to create filesystem state. This is the contract that
+makes `voom health` genuinely read-only.
+
+`connect()` returns `Ok` on any *existing* openable DB — empty,
+partially-migrated, fully-current, or too-new. Schema state is the caller's
+responsibility, probed via:
 
 ```rust
 pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError>;
@@ -125,8 +138,15 @@ pub enum SchemaState {
     Uninitialized,                                  // _sqlx_migrations missing
     Partial { applied: u32, expected: u32 },        // applied < expected
     Current { migration_count: u32, schema_init_at: OffsetDateTime },
+    TooNew { applied: u32, expected: u32 },         // applied > expected
 }
 ```
+
+The `TooNew` variant is the critical version-skew guard: when an older binary
+opens a DB that a newer binary has already migrated, `probe_schema()` returns
+`TooNew` and every consumer (CLI, API) surfaces `DB_SCHEMA_TOO_NEW`. The old
+binary refuses to operate against unknown schema rather than risking
+mis-interpreted writes.
 
 `init()` opens the pool, runs `MIGRATOR.run(&pool).await?`, and returns
 `InitReport`. It is idempotent: re-running against an already-current DB is a
@@ -172,11 +192,13 @@ These tests are the template Sprint 1's repository tests follow.
 ### Top-level args
 
 - `--database-url <url>` — overrides env and default.
-- `--format=json|plain` — default `json` (agent-friendly mandate); `plain` is an
-  opt-in for humans.
 - `--log-level <level>` — `error|warn|info|debug|trace`, default `info`.
-- `--log-format=text|json` — default mirrors `--format`.
-- `--no-color` — disable ANSI in plain mode.
+- `--log-format=text|json` — default `json` so stderr logs and stdout envelope
+  are both machine-parseable.
+
+Sprint 0 commands always emit the tagged JSON envelope on stdout. A human-
+readable `--format=plain` is intentionally deferred — adding the flag without
+implementing it in every emitter would be a phantom feature.
 
 ### Envelope `data` vs `local` split
 
@@ -236,9 +258,9 @@ because version data has no host context):
 }
 ```
 
-`db.status` is `"current"`, `"partial"`, or `"uninitialized"` — read-only;
-`health` never advances schema. The API form of this envelope is identical
-except the `local` block is absent.
+`db.status` is `"current"`, `"partial"`, `"uninitialized"`, or `"too_new"` —
+read-only; `health` never advances schema. The API form of this envelope is
+identical except the `local` block is absent.
 
 `voom init` payload (CLI):
 
@@ -275,6 +297,7 @@ Sprint 0 stable error codes:
 | `DB_UNREACHABLE` | Pool open failed (path unwritable, sqlite error) | Check filesystem permissions on the DB path |
 | `DB_UNINITIALIZED` | `health` invoked against a DB with no migrations applied | Run: `voom init` |
 | `DB_PARTIAL_SCHEMA` | `health` saw a DB partially migrated by a different version | Run: `voom init` against the current binary |
+| `DB_SCHEMA_TOO_NEW` | `health` saw a DB with more migrations than this binary ships — a newer voom touched it first | Upgrade the voom binary or roll the database back |
 | `BAD_ARGS` | clap argument parse failure | (clap's own message) |
 | `INTERNAL` | Unexpected failure | Re-run with `--log-level=debug` and file a bug |
 
