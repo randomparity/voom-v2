@@ -229,14 +229,20 @@ host-side multi-table helper rather than a domain repo. Each of its
 four entry points — `prepare_destructive_commit`,
 `authorize_destructive_commit`, `finalize_destructive_commit`, and
 `abort_destructive_commit` — owns its own IMMEDIATE transaction
-internally and accepts `&dyn EventRepo` (and `finalize` additionally
-`&dyn IdentityRepo`; `authorize` and `prepare` additionally
-`&dyn AliasResolver`) so it can interleave closure reads, evidence
-revalidation, the durable identity mutation, and event writes in the
-precise order the architectural spec mandates. The filesystem
-mutation supplied by the caller runs **between** `authorize` and
-`finalize`, outside any DB transaction; the `commit_intents` journal
-is what makes the three-phase split safe across caller crashes.
+internally and accepts the repo dependencies that phase needs.
+`prepare` and `authorize` accept `&dyn AliasResolver` (for closure
+walking) and `&dyn EventRepo`. `finalize` accepts `&dyn AliasResolver`
+(for the Phase C trip-wire recompute of `closure_final`),
+`&dyn EventRepo`, and `&dyn IdentityRepo` (for every Sprint 1
+`CommitTarget` variant — all of which resolve to a durable
+identity-table mutation). `abort` accepts only `&dyn EventRepo`
+since it never recomputes or applies. Bundle-target commits
+(`ArchiveBundle` / `DeleteBundle`) are deferred to Sprint 5, so no
+`&dyn BundleRepo` parameter is needed in Sprint 1's gate API. The
+filesystem mutation supplied by the caller runs **between**
+`authorize` and `finalize`, outside any DB transaction; the
+`commit_intents` journal is what makes the three-phase split safe
+across caller crashes.
 
 ### 5.3 Repository ownership
 
@@ -937,22 +943,66 @@ The repo never produces `RenameReconciled` from `record_discovered_file`;
 that outcome is reserved for `reconcile_rename`. Identity collapse via a
 `merge` operation does not exist in Sprint 1.
 
-**No pending-commit lock on observation paths.** Neither the
-`AliasAttached` branch of `record_discovered_file_in_tx` nor
-`reconcile_rename_in_tx` consults the pending-commit lock. The
+**Pending-commit lock consultation (alias-attach branch).** The
 architectural spec is explicit (`docs/specs/voom-control-plane-design.md`
-lines 678 and 697–708): byte-preserving operations that record
-durable state to match physical reality always proceed, even during
-in-flight destructive commits. The physical bytes have already moved
-or been hardlinked on disk; refusing to record them would only leave
-durable state stale exactly when closure accuracy matters most. The
-safety property the architectural spec requires — that no destructive
-commit acts on an out-of-date closure — is enforced by the Phase B
-authorize recheck in the Commit Safety Gate (§9.3.2): immediately
-before the irreversible filesystem mutation, the gate recomputes the
-closure and aborts the commit if it has shifted or grown. The
-`NewFileAsset` outcome similarly proceeds — a newly-discovered file
-asset is by definition not in any pre-existing closure.
+lines 1038–1043) that while a destructive commit is in progress, new
+`FileLocation`s that alias discovery would attach to an in-scope
+`FileVersion` are blocked or held. Alias attachment is therefore
+**not** exempt from the lock — only external rename/move
+reconciliation is exempt (arch spec lines 697–708), because the
+physical bytes have moved on disk outside the host's authority and
+refusing to record that would leave durable state stale. An
+alias-attach is different: the host is recording that bytes the
+scanner observed at a new path are the same physical bytes as an
+existing `FileVersion`, and that record adds a new `FileLocation` to
+the closure of any in-flight destructive commit on that version.
+Before inserting the new `file_location` row, the
+`AliasAttached` branch consults `commit_intent_scope_members`
+against the resolved `file_version_id` (and, transitively, the
+parent `file_asset_id` and any bundle membership the version
+inherits — the lock query is the same UNION-of-FK-columns shape as
+§9.2):
+
+```sql
+SELECT csm.commit_intent_id
+  FROM commit_intent_scope_members csm
+  JOIN commit_intents ci ON ci.id = csm.commit_intent_id
+ WHERE ci.state IN ('pending', 'authorized')
+   AND (
+        csm.scope_version_id = :file_version_id
+     OR csm.scope_asset_id   = :parent_file_asset_id
+     OR csm.scope_bundle_id  IN (:bundle_ids_for_asset)
+       )
+ LIMIT 1;
+```
+
+If any row returns → `VoomError::BlockedByPendingCommit(...)` →
+`ErrorCode::BlockedByPendingCommit` (§12.1). The lock covers both
+`pending` and `authorized` states so the architectural recheck
+window is never crossed by a fresh alias attach. The `NewFileAsset`
+outcome does **not** consult the lock — a newly-discovered file
+asset is by definition not in any pre-existing closure. The
+`AliasResolver` (used by the gate during Phase A `prepare` and
+Phase B `authorize`) is a separate path that resolves cross-host
+aliases of bytes the host already knows about; it is what picks up
+between-phase closure shifts driven by remote mounts coming online
+or object-store probes succeeding on retry. The Phase B authorize
+recheck (§9.3.2) observes those resolver-driven shifts and rename
+reconciliation-driven shifts, but does **not** need to observe
+local alias-attach shifts because the lock prevents them from
+landing during the in-flight window.
+
+**No pending-commit lock on rename reconciliation.**
+`reconcile_rename_in_tx` is the **one** byte-preserving operation
+the architectural spec exempts from the pending-commit lock
+(`docs/specs/voom-control-plane-design.md` lines 697–708): "The
+`Commit Safety Gate` does not block reconciliation: the physical
+move has already happened outside the host's authority, and
+refusing to record it would only leave durable state stale." A
+rename reconciliation that lands while a destructive commit is
+in-flight shifts the closure, and the Phase B `authorize` recheck
+(§9.3.2) catches that shift and aborts the commit with
+`BlockedByClosureGrew { added_locations, removed_locations }`.
 
 Behavior of `reconcile_rename_in_tx` (M2 form):
 
@@ -1126,14 +1176,20 @@ the recovery path needs.
 A `commit_intents` row in `state IN ('pending', 'authorized')` acts as
 an application-level reservation: while the row is in the in-flight
 window, no new blocking or advisory `asset_use_lease` may be acquired
-on its closure (the pending-commit lock; §9.2). The lock does **not**
-apply to byte-preserving observation-of-reality operations
-(`IdentityRepo::record_discovered_file_in_tx` alias-attach branch and
-`IdentityRepo::reconcile_rename_in_tx`) — those record reality as it
-already exists on disk and are caught by the Phase B authorize
-recheck instead (§8.7, §9.3.2). The closure is recorded in
-`commit_intents.closure_initial` as JSON for audit, but JSON is opaque
-to SQL and to the lease-acquire fast path. `commit_intent_scope_members`
+on its closure (§9.2) **and** no new `FileLocation` may be attached
+as an alias of an in-scope `FileVersion` via
+`IdentityRepo::record_discovered_file_in_tx`'s `AliasAttached`
+branch (§8.7). External rename/move reconciliation
+(`IdentityRepo::reconcile_rename_in_tx`) is the one byte-preserving
+operation exempt from the lock — the architectural spec at lines
+697–708 mandates this exemption because the physical bytes have
+already moved on disk outside the host's authority, and refusing to
+record the move would leave durable state stale. A rename that
+lands during an in-flight commit shifts the closure; the Phase B
+`authorize` recheck (§9.3.2) catches the shift and aborts the
+commit. The closure is recorded in `commit_intents.closure_initial`
+as JSON for audit, but JSON is opaque to SQL and to the
+lease-acquire and alias-attach fast paths. `commit_intent_scope_members`
 expands the same closure across the four granularities the
 architectural spec serializes against, giving the lock-consultation
 query a direct equality match by FK column:
@@ -1178,19 +1234,19 @@ inside the Phase A IMMEDIATE transaction (§9.3.2) and is updated by
 when the recomputed closure differs from `closure_initial` (rows are
 deleted for removed members and inserted for added members, so the
 pending-commit lock continues to cover the recomputed closure). The
-lock-consultation query in `UseLeaseRepo::acquire_in_tx` (§9.2) is the
-same shape: any match against a row whose parent intent is in
-`state IN ('pending', 'authorized')` returns
+lock-consultation query in `UseLeaseRepo::acquire_in_tx` (§9.2) and
+in `IdentityRepo::record_discovered_file_in_tx`'s `AliasAttached`
+branch (§8.7) is the same shape: any match against a row whose
+parent intent is in `state IN ('pending', 'authorized')` returns
 `VoomError::BlockedByPendingCommit(...)` (§12.1) and the caller's
-acquire is rejected before it lands. The lock is **not** consulted
-by `IdentityRepo` paths — observation-of-physical-reality operations
-always record reality, even during in-flight destructive commits, and
-the Phase B authorize recheck (§9.3.2) is the architectural safety
-gate that catches closures shifting underneath an in-flight commit.
-Because all the relevant entry points run under IMMEDIATE transactions,
-the SQLite write-lock serializes them: whichever transaction commits
-first wins, the other observes the committed row and rejects with no
-race window.
+mutation is rejected before it lands. The lock is **not** consulted
+by `IdentityRepo::reconcile_rename_in_tx` — rename reconciliation is
+the architecturally-mandated exception (arch spec lines 697–708),
+and the Phase B authorize recheck is what catches rename-driven
+closure shifts during an in-flight commit. Because all the relevant
+entry points run under IMMEDIATE transactions, the SQLite write-lock
+serializes them: whichever transaction commits first wins, the
+other observes the committed row and rejects with no race window.
 
 ### 9.2 `UseLeaseRepo` lifecycle
 
@@ -1324,8 +1380,12 @@ pub enum CommitTarget {
     ArchiveFileVersion(FileVersionId),
     ReplaceFileLocation { retired: FileLocationId, new: FileLocationProposal },
     MoveFileLocation     { retired: FileLocationId, new: FileLocationProposal },
-    ArchiveBundle(BundleId),
-    DeleteBundle(BundleId),
+    // `ArchiveBundle(BundleId)` and `DeleteBundle(BundleId)` deferred
+    // to Sprint 5: the `asset_bundles` schema does not carry the
+    // soft-delete/archive columns those targets need, and no Sprint 1
+    // worker initiates a bundle commit. Adding them later is purely
+    // additive (a new enum variant + new `BundleRepo` methods + a
+    // schema migration); the three-phase gate protocol is unchanged.
 }
 
 pub struct AffectedScopeClosure {
@@ -1492,9 +1552,16 @@ pub async fn authorize_destructive_commit(
 /// `MutationOutcome::NotPerformed`). The permit is consumed by value
 /// to discourage stale-permit reuse; the durable `commit_intents`
 /// row's `epoch` is still checked inside the transaction so a
-/// concurrent abort racing the finalize is caught.
+/// concurrent abort racing the finalize is caught. Takes the same
+/// `&dyn AliasResolver` as `prepare` and `authorize` because Phase C
+/// recomputes `closure_final` against current state for the
+/// defensive trip-wire (§9.3.2). Takes `&dyn IdentityRepo` for the
+/// durable identity mutation that every Sprint 1 `CommitTarget`
+/// variant resolves to (see the trimmed `CommitTarget` enum
+/// above — `ArchiveBundle`/`DeleteBundle` are deferred to Sprint 5).
 pub async fn finalize_destructive_commit(
     pool: &SqlitePool,
+    alias_resolver: &dyn AliasResolver,
     event_repo: &dyn EventRepo,
     identity_repo: &dyn IdentityRepo,
     permit: CommitPermit,
@@ -1551,16 +1618,17 @@ closure until the intent transitions out of the in-flight window.
 Those rows are the durable backing-store for the pending-commit lock
 that `UseLeaseRepo::acquire` (§9.2) consults before issuing a new
 lease. The lock is an implementation detail behind the gate — no API
-signature changes for `UseLeaseRepo`, no new field on `CommitIntent`
-beyond the `epoch` echoed onto `CommitPermit`. The
+signature changes for `UseLeaseRepo` or `IdentityRepo`, no new field
+on `CommitIntent` beyond the `epoch` echoed onto `CommitPermit`. The
 `commit.intent_recorded` and `commit.authorized` event payloads carry
 `closure_initial` and `closure_authorized` respectively, which are the
 source of truth for the `scope_members` rows, so audit can reconstruct
 the lock from events without a separate field. The error
 `BlockedByPendingCommit` (§12.1) shows up on the existing
-`Result<_, VoomError>` returns of `UseLeaseRepo::acquire`; structured
-detail (which `commit_intent_scope_members` row matched) lives on a
-`BlockedByPendingCommitDetail` struct in
+`Result<_, VoomError>` returns of `UseLeaseRepo::acquire` and
+`IdentityRepo::record_discovered_file_in_tx`'s `AliasAttached`
+branch; structured detail (which `commit_intent_scope_members` row
+matched) lives on a `BlockedByPendingCommitDetail` struct in
 `voom-store::repo::commit_safety_gate`, parallel to the existing
 `CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`
 types, for Sprint 9 report consumers.
@@ -1646,13 +1714,15 @@ spec's serialization point.
    revalidated_evidence, override_token: { actor, reason, bypass }
    | null }`. COMMIT. Once the transaction commits, the pending-commit
    lock is live: from this point until the intent transitions out of
-   the in-flight window (`pending` or `authorized`), no new use-lease
-   acquire on the closure can succeed (§9.2). The lock does **not**
-   apply to byte-preserving observation-of-reality operations
-   (`IdentityRepo::record_discovered_file_in_tx` alias-attach branch
-   and `IdentityRepo::reconcile_rename_in_tx`) — those record reality
-   that has already happened on disk and are caught by the Phase B
-   authorize recheck (§8.7, §9.3.2 Phase B).
+   the in-flight window (`pending` or `authorized`), no new
+   `UseLeaseRepo::acquire` on the closure can succeed (§9.2) and no
+   new `IdentityRepo::record_discovered_file_in_tx` `AliasAttached`
+   can succeed against an in-closure `FileVersion` (§8.7). The lock
+   does **not** apply to `IdentityRepo::reconcile_rename_in_tx` —
+   rename reconciliation is the architecturally-exempt
+   observation-of-reality path (arch spec lines 697–708), and
+   rename-driven closure shifts are caught by the Phase B authorize
+   recheck (§9.3.2 Phase B).
 5. Return `CommitIntent`. The caller's next step is to call
    `authorize_destructive_commit` to obtain a `CommitPermit` before
    performing any filesystem mutation. No filesystem mutation is
@@ -1857,12 +1927,18 @@ filesystem (or the caller has decided not to mutate; see
    genuine lock-bypass or a resolver that changes its mind between
    authorize and finalize.
 4. Otherwise (trip-wire silent): apply the matching durable
-   mutation via the identity/bundle repos inside this same
-   transaction (e.g., `IdentityRepo::retire_file_location_in_tx`
-   for a `DeleteFileLocation` target, `BundleRepo::archive_in_tx`
-   for an `ArchiveBundle` target). The durable mutation is what
-   makes the closure check meaningful — it must run inside the same
-   tx as the recheck and the intent transition.
+   mutation via `IdentityRepo` inside this same transaction. Every
+   Sprint 1 `CommitTarget` variant resolves to an identity-table
+   mutation: `DeleteFileLocation` →
+   `IdentityRepo::retire_file_location_in_tx`; `DeleteFileVersion`
+   → `IdentityRepo::retire_file_version_in_tx`; `ArchiveFileVersion`
+   → `IdentityRepo::archive_file_version_in_tx`;
+   `ReplaceFileLocation` and `MoveFileLocation` → an
+   `IdentityRepo::replace_file_location_in_tx` that atomically
+   retires the prior location and records the new one on the same
+   `FileVersion`. The durable mutation is what makes the closure
+   check meaningful — it must run inside the same tx as the recheck
+   and the intent transition.
 5. Update the `commit_intents` row to `state = 'completed'`,
    `finalized_at = now`, bump `epoch`. Emit `commit.completed` with
    payload `{ commit_id, target, closure_initial,
@@ -2294,7 +2370,10 @@ JSON for at least:
   forced invocation of the relevant control-plane use case. The
   `BLOCKED_BY_CLOSURE_GREW` envelope is shaped by triggering the
   Phase B authorize-recheck closure-shift abort against a fixture
-  that records an alias attach between `prepare` and `authorize`.
+  that runs an external rename reconciliation between `prepare` and
+  `authorize` (rename is the architecturally-exempt path that
+  shifts the closure; local alias attach is blocked by the
+  pending-commit lock and cannot reach authorize).
 
 ## 12. Cross-cutting Concerns
 
@@ -2450,9 +2529,10 @@ Cross-repo flows live as integration tests:
   and manual leases; pinned evidence is preserved (not rewritten); new
   evidence appended; events emitted. A dedicated sub-test confirms that
   `reconcile_rename_in_tx` proceeds even when a pending or authorized
-  `commit_intents` row covers the affected `FileVersion` — the
-  pending-commit lock does not apply to observation-of-reality paths
-  (§8.7).
+  `commit_intents` row covers the affected `FileVersion` — rename
+  reconciliation is the one architecturally-exempt observation path
+  (arch spec lines 697–708); local alias attachment is **not** exempt
+  and is covered by separate tests in `commit_safety_gate.rs` below.
 - `commit_safety_gate.rs` — covers each abort path under the
   three-phase prepare/authorize/finalize/abort API (§9.3.1).
 
@@ -2475,26 +2555,32 @@ Cross-repo flows live as integration tests:
   "immediately before" gate, which is now the primary detection
   surface for closure shifts, fresh leases, and stale evidence that
   appear between prepare and authorize:**
-  - `authorize_blocked_by_closure_grew_alias_discovery`: prepare with
-    closure C₁; between prepare and authorize, attach a new
-    `FileLocation` to an in-closure `FileVersion` via
-    `IdentityRepo::record_discovered_file_in_tx`'s alias-attach
-    branch (which is **not** blocked by the pending intent — see the
-    reconciliation-exempt tests below). Authorize observes the
-    enlarged closure, transitions the intent to `aborted` with
-    `abort_reason = 'closure_grew'`, emits
+  - `authorize_blocked_by_closure_grew_resolver`: prepare with
+    closure C₁ against a stateful `AliasResolver` that returns C₁
+    during Phase A; between prepare and authorize, the resolver
+    starts returning C₂ ⊋ C₁ (simulating a remote mount coming
+    online or an object-store probe succeeding on retry). Authorize
+    observes the enlarged closure, transitions the intent to
+    `aborted` with `abort_reason = 'closure_grew'`, emits
     `commit.aborted_by_closure_grew` with `payload.phase = 'authorize'`,
-    returns `BlockedByClosureGrew { added_locations: [L_new],
-    removed_locations: [], ... }`. Asserts no durable identity
-    mutation ran.
+    returns `BlockedByClosureGrew { added_locations, ... }`.
+    Asserts no durable identity mutation ran. (Local alias attach
+    via `IdentityRepo::record_discovered_file_in_tx`'s `AliasAttached`
+    branch is *blocked by the pending-commit lock* and so cannot be
+    used to construct this scenario; the resolver-driven path is
+    the architecturally-mandated escape that authorize observes —
+    arch spec line 1047 "picking up any `FileLocation`s that have
+    been attached as aliases of in-scope `FileVersion`s since the
+    initial gate check".)
   - `authorize_blocked_by_closure_grew_rename`: prepare with closure
     C₁ including `FileLocation` L_old; between prepare and authorize,
     call `IdentityRepo::reconcile_rename_in_tx` to retire L_old and
-    record L_new. Authorize observes the shift, transitions the
-    intent to `aborted` with `abort_reason = 'closure_grew'`, emits
-    `commit.aborted_by_closure_grew` with the same `payload.phase`,
-    returns `BlockedByClosureGrew { added_locations: [L_new],
-    removed_locations: [L_old], ... }`.
+    record L_new (rename is the architecturally-exempt path; it
+    proceeds despite the in-flight intent). Authorize observes the
+    shift, transitions the intent to `aborted` with `abort_reason =
+    'closure_grew'`, emits `commit.aborted_by_closure_grew` with the
+    same `payload.phase`, returns `BlockedByClosureGrew {
+    added_locations: [L_new], removed_locations: [L_old], ... }`.
   - `authorize_blocked_by_use_lease`: a blocking lease that landed
     via a lock-bypass path (test inserts via direct SQL between
     prepare and authorize) is detected, transitions the intent to
@@ -2584,35 +2670,54 @@ Cross-repo flows live as integration tests:
     `recovery_required`, and the returned `CommitGateResult` is
     `BlockedByClosureGrew`.
 
-  **Reconciliation-exempt observation paths (the second Codex
-  finding):**
-  - `alias_attach_during_pending_intent_proceeds`: a pending
+  **IdentityRepo paths during in-flight intents:**
+
+  *Alias attachment is locked (arch spec lines 1038–1043):*
+  - `alias_attach_during_pending_intent_blocked`: a pending
     `commit_intents` row covers `FileVersion` V; a subsequent call
     to `IdentityRepo::record_discovered_file_in_tx` (alias-attach
-    branch, with an `alias_proof` resolving to V) **succeeds** and
-    records the new `FileLocation`. The architectural spec at lines
-    678 and 697–708 mandates that byte-preserving operations record
-    reality even during in-flight commits. The companion
-    `authorize_blocked_by_closure_grew_alias_discovery` test above
-    is what catches the safety property: the commit aborts at the
-    next authorize.
+    branch, with an `alias_proof` resolving to V) is **rejected**
+    with `BlockedByPendingCommit`. The architectural spec at lines
+    1038–1043 requires that `FileLocation`s alias discovery would
+    attach to an in-scope `FileVersion` are blocked or held during
+    an in-flight destructive commit.
+  - `alias_attach_during_authorized_intent_blocked`: same as above
+    but the intent is in `state = 'authorized'`. Confirms the
+    pending-commit lock covers the full in-flight window for
+    alias attach.
+  - Granularity coverage: a pending intent on `BundleId` blocks an
+    alias-attach whose resolved `FileVersion` belongs (transitively
+    via `FileAsset`) to that bundle. A pending intent on
+    `FileAssetId` blocks an alias-attach against any
+    `FileVersion` of that asset. A pending intent on
+    `FileVersionId` blocks an alias-attach against that version.
+  - `alias_attach_new_file_asset_proceeds_during_pending_intent`:
+    negative test — `record_discovered_file_in_tx` called with no
+    `alias_proof` (NewFileAsset outcome) **succeeds** even while a
+    pending intent exists, because a newly-discovered file asset is
+    not in any pre-existing closure.
+  - `alias_attach_proceeds_after_intent_resolves`: after
+    `finalize_destructive_commit` (completed) or
+    `abort_destructive_commit` (aborted) terminates the intent, the
+    same alias-attach call succeeds.
+
+  *Rename reconciliation is exempt (arch spec lines 697–708):*
   - `rename_during_pending_intent_proceeds`: a pending
     `commit_intents` row covers `FileVersion` V; a subsequent call
     to `IdentityRepo::reconcile_rename_in_tx` against a live
     `FileLocation` on V **succeeds** (retires the prior location,
     records the new one, emits the move events). The companion
-    `authorize_blocked_by_closure_grew_rename` test is what catches
-    the safety property.
-  - `alias_attach_during_authorized_intent_proceeds`: same as
-    `alias_attach_during_pending_intent_proceeds` but the intent is
-    in `state = 'authorized'`. Confirms the in-flight window of the
-    lock (pending + authorized) does **not** cover IdentityRepo
-    observation paths.
-  - `rename_during_authorized_intent_proceeds`: as above for rename
-    reconciliation.
+    `authorize_blocked_by_closure_grew_rename` test catches the
+    safety property: the in-flight commit aborts at the next
+    authorize.
+  - `rename_during_authorized_intent_proceeds`: same as above but
+    the intent is in `state = 'authorized'`. Confirms the
+    rename-reconciliation exemption applies through the entire
+    in-flight window.
 
   **Pending-commit-lock coverage on `UseLeaseRepo::acquire` (the
-  one path that still consults the lock — §9.1, §9.2):**
+  second path that consults the lock alongside the alias-attach
+  branch covered above — §9.1, §9.2):**
   - A pending intent over `FileLocation` Y blocks a subsequent
     `UseLeaseRepo::acquire(LeaseScope::Location(Y))` with
     `BlockedByPendingCommit`.
@@ -2741,9 +2846,16 @@ See §1 for the full list. The most likely-to-be-asked exclusions:
   opaque key.
 - No CLI write commands. Sprint 1's CLI is read-only inspection;
   durable writes go through `ControlPlane` use cases exercised by tests.
+- No `ArchiveBundle` / `DeleteBundle` `CommitTarget` variants. The
+  `asset_bundles` table does not carry the soft-delete/archive
+  columns those targets need, and no Sprint 1 worker initiates a
+  bundle commit. Sprint 5 adds the schema columns, the
+  `BundleRepo::archive_in_tx` / `delete_in_tx` verbs, and the new
+  `CommitTarget` variants; the three-phase gate protocol is unchanged
+  (the gate gains a `&dyn BundleRepo` parameter on `finalize` then).
 - No filesystem-aware recovery of stuck `commit_intents` rows. Sprint 1
-  ships the durable intent table, the prepare / finalize / abort /
-  list API, and the `commit.recovery_required` event kind; the
+  ships the durable intent table, the prepare / authorize / finalize /
+  abort / list API, and the `commit.recovery_required` event kind; the
   reconciliation worker that inspects filesystem state and decides
   whether to roll forward or roll back lives with the real workers
   (Sprint 5+).
