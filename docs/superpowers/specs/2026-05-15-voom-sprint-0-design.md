@@ -13,11 +13,12 @@ references:
 ## 1. Goal & Scope
 
 Sprint 0 produces an **empty-but-real** VOOM: a Cargo workspace with all the
-crate boundaries the top-level design names, a working SQLite migration runner
-used by both disk and in-memory modes, a CLI that prints `version` and `health`
-JSON through the envelope future commands will reuse, an axum API skeleton
-serving `/health`, and the engineering guardrails (lints, hooks, CI, ADRs,
-versioning policy, developer convenience) every later sprint inherits.
+crate boundaries the top-level design names, a SQLite migration runner gated
+behind an explicit `voom init` (read-side commands never migrate), a CLI that
+emits `version`, `health`, and `init` JSON envelopes future commands will
+reuse, an axum API skeleton serving `/health` (host paths redacted), and the
+engineering guardrails (lints, hooks, CI, ADRs, versioning policy, developer
+convenience) every later sprint inherits.
 
 **Sprint 0 does NOT** implement any domain logic — no jobs, no leases, no
 policies, no workers, no events. Those land in Sprint 1+. The crates that hold
@@ -41,7 +42,7 @@ explicitly (no globs) so adding a crate is a deliberate act.
 | Crate | Kind | Sprint 0 contents | Owns (eventually) |
 |---|---|---|---|
 | `voom-core` | lib | Newtype IDs (`MediaId`, `TicketId`, `LeaseId`, `WorkerId`, `JobId`, `EventId`), `VoomError` enum, `VersionInfo`, `Config`, time abstraction | Domain types and traits referenced by every other crate |
-| `voom-store` | lib | `sqlx::SqlitePool` builder for `:memory:` and on-disk URLs, embedded migration runner (`sqlx::migrate!`), one no-op migration (`0001_init.sql` creating `schema_meta`), `SchemaMetaRepo` trait + Sqlite impl | Repositories for jobs, leases, events, artifacts, etc. |
+| `voom-store` | lib | `connect()` (open pool, never migrate), `init()` (idempotent migration), `probe_schema()`, embedded migration runner (`sqlx::migrate!`), one migration (`0001_init.sql` creating `schema_meta`), `SchemaMetaRepo` trait + Sqlite impl | Repositories for jobs, leases, events, artifacts, etc. |
 | `voom-events` | lib | Empty (placeholder `pub mod kind`) | Append-only event log writer and projections |
 | `voom-policy` | lib | Empty | Policy grammar, parser, compiler |
 | `voom-plan` | lib | Empty | Planner: snapshot → compliance report → ExecutionPlan DAG |
@@ -50,7 +51,7 @@ explicitly (no globs) so adding a crate is a deliberate act.
 | `voom-worker-protocol` | lib | Empty | HTTP/JSON + NDJSON wire types shared by host and workers |
 | `voom-control-plane` | lib | Wires `voom-store`; exposes a `ControlPlane` handle consumed by API and CLI | App-services layer used by API/CLI/daemon |
 | `voom-api` | lib | axum `Router` with `GET /health`; no server binary yet | REST surface |
-| `voom-cli` | bin | clap-derive command tree with `version` and `health` subcommands, tagged-envelope writer | All operator commands |
+| `voom-cli` | bin | clap-derive command tree with `version`, `health`, and `init` subcommands, tagged-envelope writer (CLI variant emits `local` block) | All operator commands |
 
 **Naming convention.** Every crate is `voom-*`; the binary inside `voom-cli` is
 named `voom`. Crates live under `crates/<name>/` (flat, no nesting). The repo
@@ -93,11 +94,43 @@ no separate post-migration write.
 This proves migrations run end-to-end without committing to any domain tables.
 Sprint 1 adds real schema.
 
-### Run-on-open contract
+### Initialization (explicit, never implicit)
 
-`connect()` runs `MIGRATOR.run(&pool).await?` before returning. There is no
-separate `voom migrate` command in Sprint 0 — opening the DB is migration.
-Sprint 5 can split them when `voom init` lands.
+`connect()` opens the pool and **does not** run migrations. Migrations only
+execute when an operator explicitly invokes them via `voom init`. This rules
+out a class of accidents: a `health` call (or any other read-side caller)
+cannot upgrade a DB the operator didn't intend to touch — relevant when a
+newer client connects to an older DB during a partial rollout.
+
+The `voom-store` API exposes two entry points:
+
+```rust
+pub async fn connect(url: &str) -> Result<SqlitePool, VoomError>;
+pub async fn init(url: &str) -> Result<InitReport, VoomError>;
+
+pub struct InitReport {
+    pub migrations_applied: u32,
+    pub schema_init_at: OffsetDateTime,
+    pub already_initialized: bool,
+}
+```
+
+`connect()` returns `Ok` on any openable DB — empty, partially-migrated, or
+fully-current. Schema state is the caller's responsibility, probed via:
+
+```rust
+pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError>;
+
+pub enum SchemaState {
+    Uninitialized,                                  // _sqlx_migrations missing
+    Partial { applied: u32, expected: u32 },        // applied < expected
+    Current { migration_count: u32, schema_init_at: OffsetDateTime },
+}
+```
+
+`init()` opens the pool, runs `MIGRATOR.run(&pool).await?`, and returns
+`InitReport`. It is idempotent: re-running against an already-current DB is a
+no-op that returns `already_initialized: true, migrations_applied: 0`.
 
 ### Repository trait stubs
 
@@ -117,13 +150,18 @@ Sprint 1 adds the rest in this shape.
 
 ### Tests
 
-- `voom-store/tests/migration.rs` — runs migrations against `:memory:` and
-  against a `tempfile`-backed disk DB; asserts `schema_meta` has the init row
-  in both.
+- `voom-store/tests/init.rs` — runs `init()` against `:memory:` and against a
+  `tempfile`-backed disk DB; asserts `schema_meta` has the init row in both;
+  asserts a second `init()` returns `already_initialized: true,
+  migrations_applied: 0`.
+- `voom-store/tests/health_no_migrate.rs` — opens a fresh DB via `connect()`,
+  asserts `probe_schema` returns `Uninitialized`, then re-probes after a
+  *failed* health-style read path and confirms no `_sqlx_migrations` table
+  exists. Proves the read-side cannot upgrade schema even by accident.
 - `voom-store/tests/repo_roundtrip.rs` — writes and reads through
-  `SchemaMetaRepo` on both backends.
+  `SchemaMetaRepo` on both backends (initialized via `init()` first).
 
-These two tests are the template Sprint 1's repository tests follow.
+These tests are the template Sprint 1's repository tests follow.
 
 ## 4. CLI Shape (`voom-cli`)
 
@@ -140,9 +178,21 @@ These two tests are the template Sprint 1's repository tests follow.
 - `--log-format=text|json` — default mirrors `--format`.
 - `--no-color` — disable ANSI in plain mode.
 
+### Envelope `data` vs `local` split
+
+The envelope's `data` field is the **public** payload: safe to emit over the
+network, identical between CLI and API for any given command. A separate
+optional `local` field carries host-only diagnostics (absolute paths, the
+resolved SQLite URL, the user's config path). The CLI populates `local`
+because it runs on the operator's machine; the API never emits `local` — the
+envelope writer has no code path that does. This split is the contract that
+lets §5's API skeleton reuse the CLI's command shapes without leaking host
+information across a network boundary.
+
 ### Sprint 0 subcommands
 
-`voom version` payload (see §6 for full version semantics):
+`voom version` payload (see §6 for full version semantics; no `local` block
+because version data has no host context):
 
 ```json
 {
@@ -162,7 +212,7 @@ These two tests are the template Sprint 1's repository tests follow.
 }
 ```
 
-`voom health` payload:
+`voom health` payload (CLI form, with `local` block):
 
 ```json
 {
@@ -171,21 +221,62 @@ These two tests are the template Sprint 1's repository tests follow.
   "status": "ok",
   "data": {
     "db": {
-      "url": "sqlite:///Users/dave/Library/Application Support/voom/voom.db",
+      "status": "current",
       "schema_init_at": "2026-05-15T18:23:00Z",
       "migration_count": 1
     },
-    "config_path": "/Users/dave/Library/Preferences/voom/config.toml",
     "runtime": { "tokio_workers": 8 }
+  },
+  "local": {
+    "db_url": "sqlite:///Users/dave/Library/Application Support/voom/voom.db",
+    "config_path": "/Users/dave/Library/Preferences/voom/config.toml"
   },
   "warnings": [],
   "error": null
 }
 ```
 
-On failure both commands return the same envelope with
+`db.status` is `"current"`, `"partial"`, or `"uninitialized"` — read-only;
+`health` never advances schema. The API form of this envelope is identical
+except the `local` block is absent.
+
+`voom init` payload (CLI):
+
+```json
+{
+  "schema_version": "0",
+  "command": "init",
+  "status": "ok",
+  "data": {
+    "migrations_applied": 1,
+    "schema_init_at": "2026-05-15T18:23:00Z",
+    "already_initialized": false
+  },
+  "local": {
+    "db_url": "sqlite:///Users/dave/Library/Application Support/voom/voom.db",
+    "config_path": "/Users/dave/Library/Preferences/voom/config.toml"
+  },
+  "warnings": [],
+  "error": null
+}
+```
+
+`voom init` is the **only** Sprint 0 command that writes to the schema. It is
+idempotent (`already_initialized: true, migrations_applied: 0` on re-run).
+
+On failure all three commands return the same envelope with
 `status: "error"`, `data: null`,
-`error: { "code": "DB_UNREACHABLE", "message": "...", "hint": "..." }`.
+`error: { "code": "<CODE>", "message": "...", "hint": "..." }`.
+
+Sprint 0 stable error codes:
+
+| Code | Meaning | Hint |
+|---|---|---|
+| `DB_UNREACHABLE` | Pool open failed (path unwritable, sqlite error) | Check filesystem permissions on the DB path |
+| `DB_UNINITIALIZED` | `health` invoked against a DB with no migrations applied | Run: `voom init` |
+| `DB_PARTIAL_SCHEMA` | `health` saw a DB partially migrated by a different version | Run: `voom init` against the current binary |
+| `BAD_ARGS` | clap argument parse failure | (clap's own message) |
+| `INTERNAL` | Unexpected failure | Re-run with `--log-level=debug` and file a bug |
 
 ### Envelope writer
 
@@ -225,7 +316,15 @@ pub fn router(control_plane: ControlPlane) -> axum::Router;
 ```
 
 One route: `GET /health` returns the same envelope shape as the CLI `health`
-command, so the agent contract is one shape, not two.
+command **with the `local` block omitted** (per §4's `data` vs `local`
+split). The shared shape is the `data` payload; `local` is a CLI-only
+extension. The envelope writer is implemented so that the API code path
+cannot emit `local` — it is structurally absent, not nulled-out.
+
+Like the CLI, the API never advances schema. If the DB is uninitialized when
+`/health` is queried, the API returns the error envelope with
+`code: "DB_UNINITIALIZED"`; the operator must run `voom init` on the host
+that owns the DB.
 
 ### No server binary
 
@@ -552,14 +651,26 @@ deny:
 run *ARGS:
     cargo run -p voom-cli -- {{ARGS}}
 
-# Run version + health end-to-end against an ephemeral on-disk DB
+# Run version + init + health end-to-end against an ephemeral on-disk DB
 smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     db=$(mktemp -t voom-smoke.XXXXXX.db)
+    url="sqlite://$db"
     trap 'rm -f "$db"' EXIT
-    cargo run -q -p voom-cli -- --database-url "sqlite://$db" version | jq -e '.status == "ok"'
-    cargo run -q -p voom-cli -- --database-url "sqlite://$db" health  | jq -e '.status == "ok"'
+    # version: no DB touch
+    cargo run -q -p voom-cli -- --database-url "$url" version | jq -e '.status == "ok"'
+    # health before init: must error with DB_UNINITIALIZED (read-only proof)
+    cargo run -q -p voom-cli -- --database-url "$url" health | \
+        jq -e '.status == "error" and .error.code == "DB_UNINITIALIZED"'
+    # init: idempotent migration
+    cargo run -q -p voom-cli -- --database-url "$url" init | \
+        jq -e '.status == "ok" and .data.already_initialized == false'
+    cargo run -q -p voom-cli -- --database-url "$url" init | \
+        jq -e '.status == "ok" and .data.already_initialized == true'
+    # health after init: ok
+    cargo run -q -p voom-cli -- --database-url "$url" health | \
+        jq -e '.status == "ok" and .data.db.status == "current"'
 
 # Remove build artifacts
 clean:
@@ -588,13 +699,14 @@ humans) call it.
 | Exit criterion | How it's verified |
 |---|---|
 | Empty app starts | `cargo run -p voom-cli -- version` exits 0 with valid envelope JSON; CI runs this via `just smoke`. |
-| DB initializes on disk and in memory | `voom-store/tests/migration.rs` covers both; `cargo run -p voom-cli -- health --database-url 'sqlite::memory:'` and `... 'sqlite:///tmp/voom-test.db'` both return `status: "ok"`. |
-| CLI prints version and health JSON | Snapshot tests (`insta`) on both envelopes; `just smoke` validates JSON parse with `jq` in CI. |
+| DB initializes on disk and in memory | `voom-store/tests/init.rs` covers `init()` against `:memory:` and a `tempfile`-backed disk DB; asserts idempotency on second invocation. `just smoke` calls `voom init` then `voom health` against an ephemeral on-disk DB. |
+| `health` never advances schema | `voom-store/tests/health_no_migrate.rs` opens a freshly-`connect()`ed (un-`init`ed) DB, asserts `probe_schema` returns `Uninitialized`, and asserts the schema is still uninitialized after a CLI `health` invocation (which must return `DB_UNINITIALIZED`). |
+| API `/health` does not leak `local` block | `voom-api/tests/health_route.rs` deserializes the response and asserts the absence of a `local` key in the JSON, against both initialized and uninitialized DB fixtures. |
+| CLI prints version, health, and init JSON | Snapshot tests (`insta`) on all three envelopes — initialized, uninitialized, and post-init states. |
 | CI-equivalent local checks pass | `just ci` exits 0 from a fresh clone after `just setup`. `ci.yml` calls `just ci` so the two cannot drift. |
 
 ## 11. Out of Scope (Sprint 0 non-goals — explicit)
 
-- No `voom init` command (Sprint 5).
 - No daemon binary, no listening HTTP server (Sprint 6).
 - No worker protocol implementation (Sprint 2).
 - No job/lease/event/policy/plan tables — only `schema_meta` (Sprint 1+).
