@@ -1,9 +1,8 @@
 use std::io;
 
 use serde::Serialize;
-use serde_json::json;
-use voom_control_plane::{ControlPlane, DbStatus, HealthSnapshot};
-use voom_core::format_iso8601;
+use voom_control_plane::{ControlPlane, HealthSnapshot};
+use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 use crate::envelope::{Local, emit_err, emit_ok};
 
@@ -29,112 +28,85 @@ pub struct HealthRuntime {
 
 pub async fn run(cp: &ControlPlane, local: Local) -> io::Result<i32> {
     match cp.health().await {
-        Ok(snap) => emit_snapshot(&snap, local),
+        Ok(snap) => emit_snapshot(snap, local),
         Err(err) => {
-            // Provide actionable remediation per error code. The default
-            // `voom init` advice is wrong for DB_PARTIAL_SCHEMA from a probe
-            // failure: init re-runs probe_schema and would loop on the same
-            // corruption error.
-            let hint = match err.code() {
-                "DB_PARTIAL_SCHEMA" => Some(
-                    "Schema metadata is corrupted (e.g. schema_meta dropped \
-                     or malformed). `voom init` cannot repair this state — \
-                     restore from backup or manually repair the schema_meta \
-                     table."
-                        .to_owned(),
-                ),
-                "DB_UNREACHABLE" => Some("Run: voom init".to_owned()),
-                _ => None,
-            };
-            emit_err("health", err.code(), err.to_string(), hint, Some(local))?;
+            emit_err(
+                "health",
+                err.code(),
+                err.to_string(),
+                voom_error_hint(&err),
+                Some(local),
+            )?;
             Ok(2)
         }
     }
 }
 
-fn emit_snapshot(snap: &HealthSnapshot, local: Local) -> io::Result<i32> {
-    let status_str = match snap.db_status {
-        DbStatus::Uninitialized => {
-            emit_err(
-                "health",
-                "DB_UNINITIALIZED",
-                "database has no migrations applied".into(),
-                Some("Run: voom init".into()),
-                Some(local),
-            )?;
-            return Ok(2);
-        }
-        DbStatus::Partial => {
-            let detail = json!({
-                "applied": snap.migration_count,
-                "expected": snap.expected_migrations,
-            });
-            emit_err(
-                "health",
-                "DB_PARTIAL_SCHEMA",
-                format!("database partially migrated: {detail}"),
-                Some("Run: voom init against the current binary".into()),
-                Some(local),
-            )?;
-            return Ok(2);
-        }
-        DbStatus::TooNew => {
-            let detail = json!({
-                "applied": snap.migration_count,
-                "expected": snap.expected_migrations,
-            });
-            emit_err(
-                "health",
-                "DB_SCHEMA_TOO_NEW",
-                format!(
-                    "database has migrations this binary does not know about: {detail}; \
-                     refusing to operate against unknown schema"
-                ),
-                Some(
-                    "Use a newer voom binary or roll the database back to a known migration".into(),
-                ),
-                Some(local),
-            )?;
-            return Ok(2);
-        }
-        DbStatus::Dirty => {
-            let detail = json!({
-                "failed_version": snap.failed_version,
-                "applied": snap.migration_count,
-                "expected": snap.expected_migrations,
-            });
-            emit_err(
-                "health",
-                "DB_DIRTY_MIGRATION",
-                format!(
-                    "a previous migration left the schema in a dirty (failed) state: \
-                     {detail}; sqlx will not run further migrations until the dirty \
-                     row is resolved"
-                ),
-                Some(
-                    "Manual recovery required: remove the failed row from \
-                     _sqlx_migrations (e.g. DELETE FROM _sqlx_migrations WHERE version \
-                     = <failed_version>) or restore from backup. Do NOT just re-run \
-                     voom init — it will fail the same way."
-                        .into(),
-                ),
-                Some(local),
-            )?;
-            return Ok(2);
-        }
-        DbStatus::Current => "current",
-    };
+/// Per-`ErrorCode` remediation hint for failures bubbling out of
+/// `ControlPlane::open` / `health`. Exhaustive so a new variant fails to
+/// compile here rather than silently shipping no hint.
+///
+/// Shared by both `health::run` and the open-path in `main::dispatch` so the
+/// two CLI sites cannot drift apart.
+#[must_use]
+pub fn voom_error_hint(err: &VoomError) -> Option<String> {
+    match err.error_code() {
+        ErrorCode::DbUnreachable => Some(
+            "Database file is missing or unreachable — run `voom init` to \
+             create it, or verify --database-url and filesystem permissions"
+                .to_owned(),
+        ),
+        ErrorCode::DbPartialSchema => Some(
+            "Schema metadata is corrupted (e.g. schema_meta dropped or \
+             malformed). `voom init` cannot repair this state — restore from \
+             backup or manually repair the schema_meta table."
+                .to_owned(),
+        ),
+        // Codes the control plane doesn't return today; surface no hint
+        // rather than invent generic advice.
+        ErrorCode::DbUninitialized
+        | ErrorCode::DbSchemaTooNew
+        | ErrorCode::DbDirtyMigration
+        | ErrorCode::ConfigInvalid
+        | ErrorCode::NotFound
+        | ErrorCode::Internal
+        | ErrorCode::BadArgs => None,
+    }
+}
 
-    let data = HealthData {
-        db: HealthDb {
-            status: status_str,
-            schema_init_at: snap.schema_init_at.map(format_iso8601),
-            migration_count: snap.migration_count,
-        },
-        runtime: HealthRuntime {
-            tokio_workers: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
-        },
-    };
-    emit_ok("health", data, Some(local), Vec::new())?;
-    Ok(0)
+fn emit_snapshot(snap: HealthSnapshot, local: Local) -> io::Result<i32> {
+    match snap {
+        HealthSnapshot::Current {
+            migration_count,
+            schema_init_at,
+        } => {
+            let data = HealthData {
+                db: HealthDb {
+                    status: "current",
+                    schema_init_at: Some(format_iso8601(schema_init_at)),
+                    migration_count: Some(migration_count),
+                },
+                runtime: HealthRuntime {
+                    tokio_workers: std::thread::available_parallelism()
+                        .map_or(1, std::num::NonZero::get),
+                },
+            };
+            emit_ok("health", data, Some(local), Vec::new())?;
+            Ok(0)
+        }
+        other => {
+            // `diagnostic()` returns Some for every non-Current variant.
+            let diag = other
+                .diagnostic()
+                .unwrap_or_else(|| unreachable!("non-Current snapshot has a diagnostic"));
+            emit_err(
+                "health",
+                diag.code.as_str(),
+                diag.message,
+                diag.hint,
+                Some(local),
+            )?;
+            Ok(2)
+        }
+    }
 }

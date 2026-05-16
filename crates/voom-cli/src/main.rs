@@ -8,7 +8,7 @@ use voom_cli::commands::{health, init, version};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
 use voom_control_plane::ControlPlane;
-use voom_core::{Config, VoomError};
+use voom_core::{Config, ErrorCode, VoomError};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
@@ -37,7 +37,7 @@ async fn main() -> ExitCode {
             // Everything else is a user error — emit BAD_ARGS envelope.
             let _ = voom_cli::envelope::emit_err(
                 "cli",
-                "BAD_ARGS",
+                ErrorCode::BadArgs.as_str(),
                 e.to_string(),
                 Some("Run `voom --help` for usage".into()),
                 None,
@@ -52,15 +52,15 @@ async fn main() -> ExitCode {
         Err(err) => {
             // Preserve VoomError codes through anyhow so a user-correctable
             // CONFIG_INVALID isn't collapsed into a generic INTERNAL envelope.
-            let code = err
+            let error_code = err
                 .downcast_ref::<VoomError>()
-                .map_or("INTERNAL", VoomError::code);
-            let hint = if code == "INTERNAL" {
+                .map_or(ErrorCode::Internal, VoomError::error_code);
+            let hint = if matches!(error_code, ErrorCode::Internal) {
                 Some("Re-run with --log-level=debug and file a bug".to_owned())
             } else {
                 None
             };
-            let _ = emit_err("internal", code, err.to_string(), hint, None);
+            let _ = emit_err("internal", error_code.as_str(), err.to_string(), hint, None);
             2
         }
     };
@@ -109,8 +109,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             match ControlPlane::open(&cfg.database_url).await {
                 Ok(cp) => Ok(health::run(&cp, local).await?),
                 Err(err) => {
-                    let hint =
-                        (err.code() == "DB_UNREACHABLE").then(|| "Run: voom init".to_owned());
+                    // Share the hint mapper with `health::run` so the two
+                    // open-failure paths cannot give different operator
+                    // guidance for the same error code.
+                    let hint = health::voom_error_hint(&err);
                     voom_cli::envelope::emit_err(
                         "health",
                         err.code(),
