@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 time = { version = "0.3.45", features = ["serde", "formatting"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync"] }
 voom-core = { version = "0.1.0-dev", path = "../voom-core" }

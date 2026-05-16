@@ -1,0 +1,10 @@
+[advisories]
+# RUSTSEC-2023-0071 — Marvin Attack in `rsa` crate (no upstream fix). Pulled
+# transitively via sqlx-macros-core, which hard-depends on sqlx-mysql,
+# sqlx-postgres, and sqlx-sqlite regardless of which backend features we
+# enable. We only use SQLite, so the vulnerable MySQL code path is never
+# exercised at runtime. Re-evaluate when sqlx ships a fix that decouples
+# backends or when `rsa` releases a constant-time implementation.
+ignore = ["RUSTSEC-2023-0071"]
+informational_warnings = ["unmaintained", "notice"]
+severity_threshold = "low"
