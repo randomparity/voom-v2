@@ -122,6 +122,32 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
         });
     }
 
+    // Ordered-prefix invariant: the set of successful applied versions must
+    // be exactly the first N versions of the embedded MIGRATOR (where N is
+    // the successful row count). A gap (e.g., MIGRATOR has [1, 2] but the DB
+    // has only [2]) would otherwise be classified as Partial and `voom init`
+    // would happily apply version 1 *after* version 2 — a migration-order
+    // violation with data-corruption risk. Surface gaps and out-of-order
+    // known versions as TooNew so operators must restore/repair manually.
+    let mut applied_versions: Vec<i64> = all_rows
+        .iter()
+        .filter_map(|(v, _, s)| if *s { Some(*v) } else { None })
+        .collect();
+    applied_versions.sort_unstable();
+
+    let expected_prefix: Vec<i64> = MIGRATOR
+        .iter()
+        .map(|m| m.version)
+        .take(applied_versions.len())
+        .collect();
+
+    if applied_versions != expected_prefix {
+        return Ok(SchemaState::TooNew {
+            applied: successful_count,
+            expected,
+        });
+    }
+
     if successful_count < expected {
         return Ok(SchemaState::Partial {
             applied: successful_count,

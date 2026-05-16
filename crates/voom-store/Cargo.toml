@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "time"] }
 time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }

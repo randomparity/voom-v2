@@ -2183,6 +2183,7 @@ name = "voom-store"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "libsqlite3-sys",
  "sqlx",
  "tempfile",
  "time",

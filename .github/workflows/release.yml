@@ -35,6 +35,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Compute dirty flag from tag commit
+        # Release builds come from clean tag pushes, but record the actual
+        # state authoritatively so build.rs doesn't have to depend on cargo's
+        # cache invalidation heuristics. This value is passed to build.rs via
+        # the VOOM_GIT_DIRTY env var.
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "VOOM_GIT_DIRTY=false" >> "$GITHUB_ENV"
+          else
+            echo "VOOM_GIT_DIRTY=true" >> "$GITHUB_ENV"
+          fi
       - name: Build
         env:
           # Set linker via env so the checkout stays clean — build.rs probes
@@ -42,6 +53,14 @@ jobs:
           # release binary's `dirty` flag.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --package voom-cli --target ${{ matrix.target }}
+      - name: Verify release binary provenance (native targets only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        run: |
+          out=$(./target/${{ matrix.target }}/release/voom version)
+          echo "$out"
+          # Tag pushes must produce non-dirty release binaries.
+          echo "$out" | jq -e '.data.dirty == false' >/dev/null
+          echo "$out" | jq -e '.data.build_profile == "release"' >/dev/null
       - name: Package
         run: |
           name="voom-${{ github.ref_name }}-${{ matrix.target }}"
