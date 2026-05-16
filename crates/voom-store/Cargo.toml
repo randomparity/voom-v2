@@ -24,5 +24,6 @@ voom-core = { version = "0.1.0-dev", path = "../voom-core" }
 test-support = []
 
 [dev-dependencies]
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
