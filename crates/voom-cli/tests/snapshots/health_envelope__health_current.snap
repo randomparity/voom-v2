@@ -1,0 +1,15 @@
+---
+source: crates/voom-cli/tests/health_envelope.rs
+assertion_line: 22
+expression: "&payload"
+---
+{
+  "db": {
+    "status": "current",
+    "schema_init_at": "2026-05-15T18:23:00.000Z",
+    "migration_count": 1
+  },
+  "runtime": {
+    "tokio_workers": 8
+  }
+}

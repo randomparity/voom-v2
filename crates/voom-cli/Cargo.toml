@@ -35,3 +35,4 @@ voom-store = { version = "0.1.0-dev", path = "../voom-store" }
 insta = { version = "1.47.2", features = ["json"] }
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+voom-store = { path = "../voom-store" }
