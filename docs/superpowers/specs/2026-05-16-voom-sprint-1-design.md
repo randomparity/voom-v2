@@ -96,9 +96,9 @@ versions and locations, and report its event/evidence history"* passes.
 
 ### M3 — Use leases, commit safety gate, ancillary registries, inspection CLI
 
-Tables: `asset_use_leases`, `external_systems`, `external_system_links`,
-`external_path_mappings`, `issues`, `issue_links`,
-`quality_scoring_profiles`, `quality_scores`. Migration:
+Tables: `asset_use_leases`, `commit_intents`, `external_systems`,
+`external_system_links`, `external_path_mappings`, `issues`,
+`issue_links`, `quality_scoring_profiles`, `quality_scores`. Migration:
 `0004_use_leases_ancillary.sql`.
 
 Implements:
@@ -134,7 +134,7 @@ rename re-anchors leases).
 | `voom-store` | `repo/jobs.rs`, `repo/tickets.rs`, `repo/leases.rs`, `repo/workers.rs`, `repo/artifacts.rs`, `repo/events.rs`, `repo/identity.rs`, `repo/bundles.rs`, `repo/use_leases.rs`, `repo/commit_safety_gate.rs`, `repo/external_systems.rs`, `repo/issues.rs`, `repo/quality_scores.rs`. Three new SQL migrations under `migrations/`. |
 | `voom-events` | `EventKind` enum (one variant per state transition Sprint 1 emits), `EventEnvelope`, per-kind typed payload structs, the `Event` sum type that pairs kind with payload, `AssertionKind` enum used by `identity_evidence.assertion_type` validation. No DB code — emission goes through `voom-store::repo::events::EventRepo`. |
 | `voom-control-plane` | One use-case method per durable write the tests need (job/ticket creation, dependency declaration, lease lifecycle calls, ingest, rename reconciliation, evidence acceptance, use-lease lifecycle, destructive-commit runner, bundle membership, issue lifecycle, score recording, external-system registration). Each use case opens one transaction and composes the repo `_in_tx` calls. |
-| `voom-cli` | `commands/` module subdirectory with one file per resource group (job, ticket, lease, worker, artifact, work, variant, bundle, asset, evidence, issue, score, external-system, use-lease, event). Read-only verbs only. |
+| `voom-cli` | `commands/` module subdirectory with one file per resource group (job, ticket, lease, worker, artifact, work, variant, bundle, asset, evidence, issue, score, external-system, use-lease, commit-intent, event). Read-only verbs only. |
 | `voom-api`, `voom-policy`, `voom-plan`, `voom-scheduler`, `voom-artifact`, `voom-worker-protocol` | Untouched. No Sprint 1 deliverables land here. |
 
 `voom-control-plane`'s exposed methods consumed by `voom-cli`'s inspection
@@ -153,7 +153,7 @@ target on review.
 |---|---|---|
 | `0002_durable_execution.sql` | M1 | `jobs`, `tickets`, `ticket_dependencies`, `leases`, `workers`, `worker_capabilities`, `worker_grants`, `artifact_handles`, `artifact_locations`, `artifact_lineage`, `events` |
 | `0003_identity.sql` | M2 | `media_works`, `media_variants`, `asset_bundles`, `asset_bundle_members`, `file_assets`, `file_versions`, `file_locations`, `identity_evidence`, `media_snapshots` |
-| `0004_use_leases_ancillary.sql` | M3 | `asset_use_leases`, `external_systems`, `external_system_links`, `external_path_mappings`, `issues`, `issue_links`, `quality_scoring_profiles`, `quality_scores` |
+| `0004_use_leases_ancillary.sql` | M3 | `asset_use_leases`, `commit_intents`, `external_systems`, `external_system_links`, `external_path_mappings`, `issues`, `issue_links`, `quality_scoring_profiles`, `quality_scores` |
 
 All tables are `STRICT` with explicit `NOT NULL` and `CHECK` constraints.
 Primary keys are `INTEGER PRIMARY KEY` (SQLite rowid, mapped to `u64`
@@ -172,11 +172,12 @@ history matters: `file_locations`, `file_versions`, `file_assets`, `leases`
 are immortal facts enforced by SQL triggers (see §6).
 
 Tables that face concurrent writers (`tickets`, `leases`,
-`asset_use_leases`, `file_locations`, `issues`, `media_works`,
-`media_variants`) carry an `epoch INTEGER NOT NULL DEFAULT 0` column. Every
-UPDATE includes `WHERE id = ? AND epoch = ?` and bumps `epoch = epoch + 1`.
-A zero-rows-affected result becomes `VoomError::Conflict` →
-`ErrorCode::Conflict` so callers retry without manual re-reads.
+`asset_use_leases`, `commit_intents`, `file_locations`, `issues`,
+`media_works`, `media_variants`) carry an `epoch INTEGER NOT NULL DEFAULT 0`
+column. Every UPDATE includes `WHERE id = ? AND epoch = ?` and bumps
+`epoch = epoch + 1`. A zero-rows-affected result becomes
+`VoomError::Conflict` → `ErrorCode::Conflict` so callers retry without
+manual re-reads.
 
 The full SQL lives in the migrations. Per-column descriptions appear in
 each domain section below (§§6–10).
@@ -218,11 +219,17 @@ repo focused on one table and lets reviewers see the event contract
 whenever they read a use case.
 
 The one named exception is the commit safety gate (§9.3), which is a
-host-side multi-table helper rather than a domain repo. It accepts
-`&dyn EventRepo` and owns its own IMMEDIATE transaction internally
-because the gate's algorithm interleaves closure reads, evidence
-revalidation, the caller-supplied mutation, and event writes in a
-specific order that no outer use-case caller can fully express.
+host-side multi-table helper rather than a domain repo. Each of its
+three entry points — `prepare_destructive_commit`,
+`finalize_destructive_commit`, and `abort_destructive_commit` — owns
+its own IMMEDIATE transaction internally and accepts `&dyn EventRepo`
+(and `finalize` additionally `&dyn IdentityRepo`) so it can interleave
+closure reads, evidence revalidation, the durable identity mutation,
+and event writes in the precise order the architectural spec mandates.
+The filesystem mutation supplied by the caller runs **between**
+`prepare` and `finalize`, outside any DB transaction; the
+`commit_intents` journal is what makes the two-phase split safe across
+caller crashes.
 
 ### 5.3 Repository ownership
 
@@ -238,7 +245,11 @@ always operate on both:
 - `IdentityRepo` → `media_works` + `media_variants` + `file_assets` + `file_versions` + `file_locations` + `identity_evidence` + `media_snapshots`
 - `BundleRepo` → `asset_bundles` + `asset_bundle_members`
 - `UseLeaseRepo` → `asset_use_leases`
-- `commit_safety_gate` module → no repo trait; exposes `run_destructive_commit(...)`
+- `commit_safety_gate` module → no repo trait; exposes the two-phase
+  protocol `prepare_destructive_commit(...)`,
+  `finalize_destructive_commit(...)`, `abort_destructive_commit(...)`,
+  and `list_pending_commit_intents(...)` against the `commit_intents`
+  table
 - `ExternalSystemRepo` → `external_systems` + `external_system_links` + `external_path_mappings`
 - `IssueRepo` → `issues` + `issue_links`
 - `QualityScoreRepo` → `quality_scoring_profiles` + `quality_scores`
@@ -335,12 +346,15 @@ pub enum EventKind {
     UseLeaseForceReleased,              // 'use_lease.force_released'
     UseLeaseRecoveredStaleIssuer,       // 'use_lease.recovered_stale_issuer'
     UseLeaseReanchoredByMove,           // 'use_lease.reanchored_by_move'
-    CommitCompleted,                    // 'commit.completed'
-    CommitAbortedByUseLease,            // 'commit.aborted_by_use_lease'
-    CommitAbortedByStaleEvidence,       // 'commit.aborted_by_stale_evidence'
-    CommitAbortedByClosureIncomplete,   // 'commit.aborted_by_closure_incomplete'
-    CommitAbortedByMutation,            // 'commit.aborted_by_mutation'
-    CommitForcedOverride,               // 'commit.forced_override'
+    CommitIntentRecorded,               // 'commit.intent_recorded' — Phase A success
+    CommitCompleted,                    // 'commit.completed' — Phase B success
+    CommitAbortedByUseLease,            // 'commit.aborted_by_use_lease' — Phase A
+    CommitAbortedByStaleEvidence,       // 'commit.aborted_by_stale_evidence' — Phase A
+    CommitAbortedByClosureIncomplete,   // 'commit.aborted_by_closure_incomplete' — Phase A
+    CommitAbortedPreMutation,           // 'commit.aborted_pre_mutation' — Phase C / Phase B NotPerformed
+    CommitAbortedPostMutation,          // 'commit.aborted_post_mutation' — Phase B closure_grew_or_lease_acquired
+    CommitRecoveryRequired,             // 'commit.recovery_required' — emitted by the Sprint 5+ recovery worker
+    CommitForcedOverride,               // 'commit.forced_override' — Phase A closure-bypass audit
     ExternalSystemRegistered,           // 'external_system.registered'
     ExternalSystemHealthChanged,        // 'external_system.health_changed'
     ExternalSystemLinked,               // 'external_system.linked'
@@ -463,7 +477,7 @@ plan. Sprint 1 jobs have no plan.
 | `priority` | INTEGER NOT NULL DEFAULT 0 | |
 | `payload` | TEXT NOT NULL | JSON; opaque to the repo |
 | `result` | TEXT NULL | JSON; opaque; populated on `succeeded`/`failed` |
-| `attempt` | INTEGER NOT NULL DEFAULT 0 | Incremented on each lease |
+| `attempt` | INTEGER NOT NULL DEFAULT 0 | Number of times this ticket has been acquired by a worker. New tickets start at 0. Each successful `LeaseRepo::acquire` increments by 1. Never decremented; never bumped on `fail`/`expire_due` (the bump happens on the next acquire). |
 | `max_attempts` | INTEGER NOT NULL DEFAULT 1 | |
 | `next_eligible_at` | TEXT NOT NULL | ISO-8601; used for backoff after retriable failure. New tickets default to `created_at`; `LeaseRepo::fail(retriable=true)` sets it to `now + backoff(attempt)` |
 | `created_at` | TEXT NOT NULL | |
@@ -478,9 +492,9 @@ State transitions, all atomic via `_in_tx`:
   dependent of the ticket that just completed.
 - `ready` → `leased` via `LeaseRepo::acquire`.
 - `leased` → `succeeded` via `LeaseRepo::release`.
-- `leased` → `ready` via `LeaseRepo::fail` when `retriable && attempt + 1 < max_attempts`. Sets `attempt = attempt + 1` and `next_eligible_at = now + backoff(attempt)`. Sprint 1 uses a fixed backoff (5s × attempt); the policy will live in `voom-scheduler` later.
+- `leased` → `ready` via `LeaseRepo::fail` when `retriable && ticket.attempt < ticket.max_attempts`. `next_eligible_at` is set to `now + backoff(attempt)`. `attempt` is **not** bumped here — the bump happens on the next `acquire`. Sprint 1 uses a fixed backoff (5s × attempt); the policy will live in `voom-scheduler` later.
 - `leased` → `failed` via `LeaseRepo::fail` otherwise.
-- `leased` → `ready` via `LeaseRepo::expire_due` if retries remain; `leased` → `failed` otherwise.
+- `leased` → `ready` via `LeaseRepo::expire_due` if retries remain (`ticket.attempt < ticket.max_attempts`); `leased` → `failed` otherwise. Same convention: no bump on requeue; the next `acquire` increments.
 
 ### 7.3 `ticket_dependencies`
 
@@ -517,9 +531,10 @@ Index on `(state, expires_at)` filtered to non-terminal rows to keep
 ### 7.5 `LeaseRepo` lifecycle
 
 - `acquire(NewLease) -> Result<Lease>` — IMMEDIATE transaction: pick the
-  ticket row by ID, assert `state = 'ready' AND next_eligible_at <= now AND attempt < max_attempts`,
-  transition to `leased`, increment `attempt`, insert lease row with
-  `expires_at = now + ttl`. Use case emits `ticket.leased` + `lease.acquired`.
+  ticket row by ID, assert `state = 'ready' AND next_eligible_at <= now AND attempt < max_attempts`.
+  Transition `state` to `leased`. Increment `attempt` by 1. Insert lease
+  row with `expires_at = now + ttl`. Use case emits `ticket.leased` +
+  `lease.acquired`.
 - `heartbeat(lease_id) -> Result<Lease>` — assert `state = 'held'`, set
   `last_heartbeat_at = now`, `expires_at = now + ttl`. No event in
   Sprint 1 (Sprint 6 daemon may emit a recovery event after a previously
@@ -529,23 +544,38 @@ Index on `(state, expires_at)` filtered to non-terminal rows to keep
   `result` JSON. Use case emits `ticket.succeeded` + `lease.released`,
   then calls `TicketRepo::mark_ready_if_unblocked` for every dependent ticket.
 - `fail(lease_id, FailureReason, retriable: bool) -> Result<()>` — assert
-  `state = 'held'`. If `retriable && ticket.attempt + 1 < ticket.max_attempts`,
-  transition ticket to `ready` with bumped attempt and `next_eligible_at`;
-  emit `ticket.failed_retriable`. Else transition ticket to `failed`; emit
-  `ticket.failed_terminal`. Lease transitions to `released` with
-  `release_reason = 'failed_retriable' | 'failed_terminal'`; emit
-  `lease.released`.
+  `state = 'held'`. If `retriable && ticket.attempt < ticket.max_attempts`,
+  transition ticket to `ready`, set `next_eligible_at = now + backoff(attempt)`,
+  do **not** bump `attempt`; emit `ticket.failed_retriable`. Else transition
+  ticket to `failed`; emit `ticket.failed_terminal`. Lease transitions to
+  `released` with `release_reason = 'failed_retriable' | 'failed_terminal'`;
+  emit `lease.released`.
 - `expire_due(now) -> Result<ExpireReport>` — bulk: find leases with
   `state = 'held' AND expires_at < now`. Per row: transition lease to
   `expired` (`release_reason = 'issuer_lost'`, `released_at = now`),
-  transition ticket to `ready` if retries remain or `failed` otherwise.
-  Emit `lease.expired` + `ticket.requeued_after_lease_expiry` or
-  `ticket.failed_terminal` per row. Returns
-  `ExpireReport { expired_leases: Vec<LeaseId>, requeued_tickets: Vec<TicketId>, failed_tickets: Vec<TicketId> }`.
+  transition ticket to `ready` if retries remain
+  (`ticket.attempt < ticket.max_attempts`) or `failed` otherwise. Same
+  convention as `fail`: do **not** bump `attempt` on requeue — `acquire`
+  will bump on the next dispatch. Emit `lease.expired` +
+  `ticket.requeued_after_lease_expiry` or `ticket.failed_terminal` per row.
+  Returns `ExpireReport { expired_leases: Vec<LeaseId>, requeued_tickets: Vec<TicketId>, failed_tickets: Vec<TicketId> }`.
 - `force_release(lease_id, actor, reason, also_requeue: bool) -> Result<()>` —
   admin/test path: transition lease to `force_released`, ticket to
   `ready` if `also_requeue` else `failed`. Emit `lease.force_released`
   with `{ actor, reason }` in the payload.
+
+**Worked example: `max_attempts = 2`.** This sequence yields the expected
+two dispatched attempts before terminal failure:
+
+1. Initial: `attempt = 0`, `state = ready`.
+2. `acquire` → `attempt = 1`, `state = leased`.
+3. `fail(retriable = true)` → `attempt = 1`, `state = ready` (1 < 2).
+4. `acquire` → `attempt = 2`, `state = leased`.
+5. `fail(retriable = true)` → `attempt = 2`, `state = failed` (2 < 2 is
+   false, so the ticket transitions to terminal failure).
+
+Total dispatched attempts: 2. The same convention applies to
+`expire_due` in place of `fail`.
 
 ### 7.6 `workers`, `worker_capabilities`, `worker_grants`
 
@@ -909,9 +939,9 @@ Behavior of `reconcile_rename_in_tx` (M2 form):
 M3 extends `reconcile_rename_in_tx` to additionally:
 
 - Find all non-terminal `asset_use_leases` with
-  `(scope_type = 'location', scope_id = prior_location_id)`.
-- Update their `scope_id = new_location_id`, preserving all other lease
-  state.
+  `scope_location_id = prior_location_id`.
+- Update their `scope_location_id = new_location_id` and bump `epoch`,
+  preserving all other lease state.
 - Emit `use_lease.reanchored_by_move` per affected lease (blocking,
   advisory, and manual locks all re-anchor).
 
@@ -927,8 +957,10 @@ CREATE TABLE asset_use_leases (
     id                  INTEGER PRIMARY KEY,
     kind                TEXT NOT NULL,        -- 'playback'|'scan'|'copy'|'manual_lock'
                                               -- |'external_lock'|'worker_operation'
-    scope_type          TEXT NOT NULL,        -- 'asset'|'bundle'|'version'|'location'
-    scope_id            INTEGER NOT NULL,
+    scope_asset_id      INTEGER NULL REFERENCES file_assets(id)    ON DELETE RESTRICT,
+    scope_bundle_id     INTEGER NULL REFERENCES asset_bundles(id)  ON DELETE RESTRICT,
+    scope_version_id    INTEGER NULL REFERENCES file_versions(id)  ON DELETE RESTRICT,
+    scope_location_id   INTEGER NULL REFERENCES file_locations(id) ON DELETE RESTRICT,
     issuer_kind         TEXT NOT NULL,        -- 'user'|'control_plane'|'worker'|'external_system'
     issuer_ref          TEXT NOT NULL,        -- user id, subsystem name, worker_id, or external_system_id
     blocking_mode       TEXT NOT NULL,        -- 'blocking'|'advisory'
@@ -949,30 +981,108 @@ CREATE TABLE asset_use_leases (
     CHECK (
         (release_reason IS NULL AND released_at IS NULL)
         OR (release_reason IS NOT NULL AND released_at IS NOT NULL)
+    ),
+    CHECK (
+        (CASE WHEN scope_asset_id    IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_bundle_id   IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_version_id  IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_location_id IS NULL THEN 0 ELSE 1 END)
+      = 1
     )
 ) STRICT;
 
-CREATE INDEX use_leases_by_scope
-  ON asset_use_leases (scope_type, scope_id) WHERE release_reason IS NULL;
+CREATE INDEX use_leases_by_asset
+  ON asset_use_leases (scope_asset_id)    WHERE scope_asset_id    IS NOT NULL AND release_reason IS NULL;
+CREATE INDEX use_leases_by_bundle
+  ON asset_use_leases (scope_bundle_id)   WHERE scope_bundle_id   IS NOT NULL AND release_reason IS NULL;
+CREATE INDEX use_leases_by_version
+  ON asset_use_leases (scope_version_id)  WHERE scope_version_id  IS NOT NULL AND release_reason IS NULL;
+CREATE INDEX use_leases_by_location
+  ON asset_use_leases (scope_location_id) WHERE scope_location_id IS NOT NULL AND release_reason IS NULL;
 
 CREATE INDEX use_leases_by_expiry
   ON asset_use_leases (expires_at) WHERE release_reason IS NULL AND ttl_bound = 1;
 ```
 
-The two `CHECK` constraints enforce the two invariants the spec is most
-explicit about: TTL-bound vs. manual locks differ on `expires_at` presence,
-and terminal state requires both `release_reason` and `released_at`
-together.
+The three `CHECK` constraints enforce the three invariants the spec is
+most explicit about: TTL-bound vs. manual locks differ on `expires_at`
+presence; terminal state requires both `release_reason` and `released_at`
+together; and exactly one of the four `scope_*_id` columns is non-NULL
+(the one-of constraint replaces the polymorphic `scope_type / scope_id`
+pair so that FK enforcement is automatic).
+
+At the Rust boundary the scope is a `LeaseScope` enum:
+
+```rust
+pub enum LeaseScope {
+    Asset(FileAssetId),
+    Bundle(BundleId),
+    Version(FileVersionId),
+    Location(FileLocationId),
+}
+```
+
+`UseLeaseRepo::acquire_in_tx` translates the enum to the matching FK
+column. On an FK violation (`SQLITE_CONSTRAINT_FOREIGNKEY`) the repo
+returns `VoomError::NotFound(...)` → `ErrorCode::NotFound`. FK
+enforcement alone does **not** cover liveness: soft-deletes leave the
+parent row in place with `retired_at IS NOT NULL`. The repo therefore
+runs a liveness check (target row exists and `retired_at IS NULL`) in
+the same transaction as the insert, before the insert. If the target is
+retired the repo returns `VoomError::Conflict(...)` →
+`ErrorCode::Conflict` with a message naming the scope.
+
+#### `commit_intents`
+
+M3 also introduces `commit_intents` — a durable journal for the
+two-phase destructive-commit protocol (§9.3.1). One row per attempted
+destructive commit, recording the closure and evidence the operator
+declared at prepare time so that the recovery path can reason about
+intents whose callers crashed between `prepare` and `finalize`:
+
+```sql
+CREATE TABLE commit_intents (
+    id                     INTEGER PRIMARY KEY,
+    target                 TEXT NOT NULL,    -- JSON CommitTarget
+    closure_initial        TEXT NOT NULL,    -- JSON AffectedScopeClosure
+    accepted_evidence_ids  TEXT NOT NULL,    -- JSON array of evidence IDs
+    state                  TEXT NOT NULL,    -- 'pending' | 'completed' | 'aborted' | 'recovery_required'
+    started_at             TEXT NOT NULL,
+    finalized_at           TEXT,
+    aborted_at             TEXT,
+    abort_reason           TEXT,             -- 'mutation_failed' | 'closure_grew' | 'fresh_lease' | 'operator_cancel' | ...
+    epoch                  INTEGER NOT NULL DEFAULT 0,
+    CHECK (
+        (state = 'pending'  AND finalized_at IS NULL AND aborted_at IS NULL)
+        OR (state = 'completed' AND finalized_at IS NOT NULL)
+        OR (state = 'aborted'   AND aborted_at  IS NOT NULL AND abort_reason IS NOT NULL)
+        OR (state = 'recovery_required' AND finalized_at IS NULL AND aborted_at IS NULL)
+    )
+) STRICT;
+
+CREATE INDEX commit_intents_pending
+  ON commit_intents (state, started_at) WHERE state = 'pending';
+```
+
+The override-token audit payload (`actor`, `reason`, `bypass`) is
+captured in the `commit.intent_recorded` event written alongside the
+row at prepare time; the table itself stores only the durable state
+the recovery path needs.
 
 ### 9.2 `UseLeaseRepo` lifecycle
 
 - `acquire(NewUseLease) -> Result<UseLeaseId>` — IMMEDIATE transaction:
   validate `clock_source = "control_plane"`; for TTL-bound leases require
-  a positive TTL; for manual locks require no `expires_at`. The IMMEDIATE
-  tx serializes against in-flight destructive commits on the same scope
-  (see §9.3); if a concurrent commit holds the write lock, this acquire
-  blocks (SQLite WAL behavior) or returns `Conflict` after busy-timeout.
-  Emits `use_lease.acquired`.
+  a positive TTL; for manual locks require no `expires_at`. Translate the
+  caller's `LeaseScope` enum to the matching `scope_*_id` FK column.
+  Before insert, run a liveness check in the same transaction: the
+  referenced parent row must exist (FK violation →
+  `VoomError::NotFound`) and must not be soft-deleted
+  (`retired_at IS NULL`; otherwise → `VoomError::Conflict` with a message
+  naming the scope). The IMMEDIATE tx serializes against in-flight
+  destructive commits on the same scope (see §9.3); if a concurrent
+  commit holds the write lock, this acquire blocks (SQLite WAL behavior)
+  or returns `Conflict` after busy-timeout. Emits `use_lease.acquired`.
 - `heartbeat(lease_id) -> Result<UseLease>` — TTL-bound only. Bumps
   `last_heartbeat_at` and `expires_at = now + ttl`. Manual locks reject
   heartbeat with `ErrorCode::Conflict` (message: "manual locks do not
@@ -996,13 +1106,23 @@ together.
   `use_lease.recovered_stale_issuer` with `{ actor, reason }` payload.
 - `reanchor_on_move(retired_location_id, new_location_id, now) -> Result<ReanchorReport>` —
   invoked by `IdentityRepo::reconcile_rename_in_tx` (M3 extension). Finds
-  all non-terminal leases on `(scope_type='location', scope_id=retired_location_id)`,
-  updates `scope_id = new_location_id`. Other fields preserved: `lease_id`,
-  `issuer_kind`, `issuer_ref`, `acquired_at`, `expires_at`,
-  `last_heartbeat_at`, `blocking_mode`, `ttl_bound`. Emits
-  `use_lease.reanchored_by_move` per affected lease — blocking, advisory,
-  and manual locks all re-anchor (the spec is explicit). Returns the list
-  of re-anchored IDs so the caller can include them in its own event.
+  all non-terminal leases on `scope_location_id = retired_location_id`,
+  updates `scope_location_id = new_location_id` and bumps `epoch`. Because
+  the scope is now a single column, the update is a straightforward SQL
+  statement with no JSON unpacking:
+  ```sql
+  UPDATE asset_use_leases
+     SET scope_location_id = :new_location_id,
+         epoch = epoch + 1
+   WHERE scope_location_id = :retired_location_id
+     AND release_reason IS NULL;
+  ```
+  Other fields preserved: `lease_id`, `issuer_kind`, `issuer_ref`,
+  `acquired_at`, `expires_at`, `last_heartbeat_at`, `blocking_mode`,
+  `ttl_bound`. Emits `use_lease.reanchored_by_move` per affected lease —
+  blocking, advisory, and manual locks all re-anchor (the spec is
+  explicit). Returns the list of re-anchored IDs so the caller can
+  include them in its own event.
 
 ### 9.3 Commit Safety Gate
 
@@ -1013,6 +1133,16 @@ The gate is the single source of truth for the four abort errors the
 architectural spec names.
 
 ### 9.3.1 API
+
+The gate exposes a two-phase prepare / finalize / abort protocol. The
+architectural spec's host-owned-commit invariant requires that "a
+worker crash does not leave the control plane believing a final
+mutation succeeded"; a single transaction wrapped around a
+caller-supplied filesystem mutation cannot honor this, because a DB
+rollback after the filesystem bytes are already changed leaves the
+durable state lagging behind reality. The two-phase API journals a
+durable `commit_intents` row at prepare time so that the recovery path
+(Sprint 5+) can reason about callers that crashed between phases.
 
 ```rust
 pub struct DestructiveCommit {
@@ -1039,6 +1169,23 @@ pub struct AffectedScopeClosure {
     pub resolution_warnings: Vec<ClosureWarning>,
 }
 
+pub struct CommitIntent {
+    pub commit_id: CommitId,
+    pub closure_initial: AffectedScopeClosure,
+    pub evaluated_lease_ids: Vec<UseLeaseId>,
+    pub revalidated_evidence: Vec<EvidenceRevalidationResult>,
+}
+
+pub enum MutationOutcome {
+    /// Caller performed the filesystem mutation and it is durable on
+    /// disk. Optionally carries the observed post-mutation closure if
+    /// the caller's mutation touched aliases the gate could not see.
+    Applied { observed: Option<AffectedScopeClosure> },
+    /// Caller decided not to mutate; `finalize_destructive_commit`
+    /// transitions the intent to `aborted` with reason `operator_cancel`.
+    NotPerformed,
+}
+
 pub struct CommitGateOutcome {
     pub commit_id: CommitId,
     pub closure_initial: AffectedScopeClosure,
@@ -1055,27 +1202,74 @@ pub enum CommitGateResult {
     BlockedByClosureIncomplete  { reason: ClosureFailure, unreachable: Vec<ClosureWarning> },
 }
 
-pub async fn run_destructive_commit<F, Fut, T>(
+pub struct PendingCommitIntent {
+    pub commit_id: CommitId,
+    pub target: CommitTarget,
+    pub closure_initial: AffectedScopeClosure,
+    pub accepted_evidence_ids: Vec<EvidenceId>,
+    pub started_at: OffsetDateTime,
+}
+
+pub enum AbortReason {
+    OperatorCancel,
+    MutationFailed,
+    ClosureGrew,
+    FreshLease,
+    Other(String),
+}
+
+pub async fn prepare_destructive_commit(
     pool: &SqlitePool,
     alias_resolver: &dyn AliasResolver,
     event_repo: &dyn EventRepo,
     input: DestructiveCommit,
-    perform_mutation: F,
-) -> Result<(CommitGateOutcome, Option<T>), VoomError>
-where
-    F: FnOnce(&AffectedScopeClosure) -> Fut,
-    Fut: Future<Output = Result<T, VoomError>>;
+) -> Result<CommitIntent, VoomError>;
+
+pub async fn finalize_destructive_commit(
+    pool: &SqlitePool,
+    alias_resolver: &dyn AliasResolver,
+    event_repo: &dyn EventRepo,
+    identity_repo: &dyn IdentityRepo,
+    commit_id: CommitId,
+    outcome: MutationOutcome,
+) -> Result<CommitGateOutcome, VoomError>;
+
+pub async fn abort_destructive_commit(
+    pool: &SqlitePool,
+    event_repo: &dyn EventRepo,
+    commit_id: CommitId,
+    reason: AbortReason,
+) -> Result<(), VoomError>;
+
+pub async fn list_pending_commit_intents(
+    pool: &SqlitePool,
+    older_than: Option<OffsetDateTime>,
+) -> Result<Vec<PendingCommitIntent>, VoomError>;
 ```
+
+The caller's filesystem mutation runs **between** `prepare` and
+`finalize`, outside any DB transaction. Mutations must be idempotent
+or staged so that crash-and-retry yields the same end state — the
+architectural spec's staged-artifact + rollback-metadata requirements
+apply unchanged. `finalize_destructive_commit` takes
+`&dyn IdentityRepo` because the durable identity mutation that gives
+the closure check its meaning (e.g.,
+`IdentityRepo::retire_file_location_in_tx` for a `DeleteFileLocation`
+target) runs inside the same finalize transaction.
 
 ### 9.3.2 Algorithm
 
-1. Open an `IMMEDIATE` transaction on `pool`. SQLite WAL serializes
-   writers; this is the spec's serialization point. Inside this tx, no
-   other writer can insert a new lease, new `file_location`, or mutate
-   the affected scope. New blocking-lease acquires that race the gate
-   either block on the SQLite write lock or return
-   `Conflict` after busy-timeout.
-2. Compute `closure_initial`:
+The gate runs in three phases. Phase A and Phase C are each one
+IMMEDIATE transaction; Phase B is also one IMMEDIATE transaction and
+is what makes the closure recheck and the durable mutation atomic with
+respect to the intent transition.
+
+#### Phase A — `prepare_destructive_commit`
+
+One IMMEDIATE transaction. SQLite WAL serializes writers; this is the
+spec's serialization point.
+
+1. Compute `closure_initial`:
    - Walk target → `FileVersion`(s) → live `FileLocation`s on those
      versions (SQL).
    - Ask the `AliasResolver` for additional locations representing the
@@ -1084,40 +1278,126 @@ where
    - Add the `AssetBundle`(s) of the affected `FileAsset`(s).
    - If any `AliasResolver` call fails or returns
      `AliasResolutionError::Unreachable`, record a `ClosureWarning` and
-     surface `BlockedByClosureIncomplete` unless `override_token`
-     is present and grants closure-bypass. Emit
-     `commit.aborted_by_closure_incomplete` and ROLLBACK.
-3. Evaluate every blocking `asset_use_lease` whose `(scope_type, scope_id)`
-   falls within `closure_initial`. Terminal leases don't count
-   (`release_reason IS NOT NULL`). TTL-bound leases past `expires_at`
-   don't count, regardless of whether cleanup has run yet. Manual locks
-   always count until terminal. Advisory leases never block. If a fresh
-   blocking lease overlaps → `BlockedByUseLease`; emit
-   `commit.aborted_by_use_lease`; ROLLBACK.
-4. Revalidate every accepted evidence row in `input.accepted_evidence_ids`:
-   compare `pinned_file_version_ids` against current `FileVersion` IDs of
-   the scope, `pinned_hashes` against current `content_hash` values, and
-   `pinned_locations` against current live locations. Any drift →
-   `BlockedByStaleEvidence`; emit `commit.aborted_by_stale_evidence`;
-   ROLLBACK. Accepted-evidence rows are not rewritten — drift forces the
-   caller to re-collect and re-accept. **The force path never bypasses
-   evidence revalidation.**
-5. Call `perform_mutation(&closure_initial)`. Sprint 1 tests pass either
-   a no-op closure or a recorded-call closure; Sprint 5+ passes the real
-   filesystem-mutation closure. If `perform_mutation` errors → emit
-   `commit.aborted_by_mutation`; ROLLBACK; propagate.
-6. Recompute `closure_final` and re-evaluate blocking leases under the
-   same isolation. The spec is explicit: "pick up any FileLocations that
-   have been attached as aliases of in-scope FileVersions since the
-   initial gate check." Because the IMMEDIATE tx holds the write lock,
-   the only way `closure_final` differs from `closure_initial` is if
-   `perform_mutation` itself touched aliases (e.g., a destructive op that
-   traversed hardlinks). If `closure_final` includes a new in-scope
-   location with a blocking lease → `BlockedByUseLease`; emit
-   `commit.aborted_by_use_lease`; ROLLBACK.
-7. Write the `commit.completed` event with payload
-   `{ commit_id, target, closure_initial, closure_final, evaluated_lease_ids, revalidated_evidence }`.
-   COMMIT.
+     surface `BlockedByClosureIncomplete` unless `input.override_token`
+     is present and grants `closure_incomplete` (see §9.3.3). Emit
+     `commit.aborted_by_closure_incomplete` (Phase A abort, see §9.3.5);
+     return `BlockedByClosureIncomplete`.
+2. Evaluate every blocking `asset_use_lease` against `closure_initial`,
+   using the per-FK indexes from §9.1. The query is a UNION over the
+   four `scope_*_id` columns, filtered to the closure's IDs in each
+   column and to `release_reason IS NULL`:
+   ```sql
+   SELECT id FROM asset_use_leases
+    WHERE release_reason IS NULL AND blocking_mode = 'blocking'
+      AND (
+            scope_asset_id    IN (?, ?, ...)        -- closure.file_assets
+         OR scope_bundle_id   IN (?, ?, ...)        -- closure.bundles
+         OR scope_version_id  IN (?, ?, ...)        -- closure.file_versions
+         OR scope_location_id IN (?, ?, ...)        -- closure.file_locations
+          );
+   ```
+   Terminal leases don't count (`release_reason IS NOT NULL`).
+   TTL-bound leases past `expires_at` don't count, regardless of
+   whether cleanup has run yet. Manual locks always count until
+   terminal. Advisory leases never block. If a fresh blocking lease
+   overlaps → `BlockedByUseLease`; emit `commit.aborted_by_use_lease`
+   (Phase A abort); return. This check has **no force bypass**
+   (§9.3.3).
+3. Revalidate every accepted evidence row in `input.accepted_evidence_ids`:
+   compare `pinned_file_version_ids` against current `FileVersion` IDs
+   of the scope, `pinned_hashes` against current `content_hash` values,
+   and `pinned_locations` against current live locations. Any drift →
+   `BlockedByStaleEvidence`; emit `commit.aborted_by_stale_evidence`
+   (Phase A abort); return. Accepted-evidence rows are not rewritten —
+   drift forces the caller to re-collect and re-accept. **The force
+   path never bypasses evidence revalidation.**
+4. Insert a `commit_intents` row with `state = 'pending'`,
+   `target = input.target`, `closure_initial`, `accepted_evidence_ids`,
+   and `started_at = now`. Write `commit.intent_recorded` with payload
+   `{ commit_id, target, closure_initial, evaluated_lease_ids,
+   revalidated_evidence, override_token: { actor, reason, bypass }
+   | null }`. COMMIT.
+5. Return `CommitIntent`. The caller now performs the filesystem
+   mutation outside any DB transaction. The architectural spec's
+   staged-artifact + rollback-metadata requirements apply: mutations
+   must be idempotent or staged so that crash-and-retry yields the
+   same end state.
+
+#### Phase B — `finalize_destructive_commit`
+
+Called once the caller's filesystem mutation is durable on the
+filesystem (or the caller has decided not to mutate; see
+`MutationOutcome::NotPerformed`). One IMMEDIATE transaction.
+
+1. Read the `commit_intents` row for `commit_id`; require
+   `state = 'pending'`. Missing row, terminal state, or `epoch`
+   mismatch → return `Conflict` without writing.
+2. If `outcome == MutationOutcome::NotPerformed`: transition the
+   intent to `state = 'aborted'`, `aborted_at = now`, and
+   `abort_reason = 'operator_cancel'`. Emit
+   `commit.aborted_pre_mutation`. COMMIT. This is the same outcome
+   the caller would get from `abort_destructive_commit` (Phase C);
+   the two entry points exist so callers that take the
+   prepare-then-decide-not-to-mutate path can finalize cleanly
+   without a second API call.
+3. Otherwise (`outcome == MutationOutcome::Applied { observed }`):
+   recompute `closure_final` against the current DB state and the
+   `AliasResolver`. The intent's `closure_initial` is the baseline;
+   the architectural spec's two-pass closure recheck rule is "pick
+   up any FileLocations that have been attached as aliases of
+   in-scope FileVersions since the initial gate check." If the
+   caller passed `observed`, merge it into `closure_final`. Re-evaluate
+   the blocking-lease query from Phase A step 2 against `closure_final`.
+   If a fresh blocking lease has appeared on the (possibly enlarged)
+   closure: emit `commit.aborted_post_mutation` with
+   `abort_reason = 'closure_grew_or_lease_acquired'`, transition the
+   intent to `state = 'recovery_required'` (do **not** apply the
+   durable mutation), COMMIT, return
+   `CommitGateResult::BlockedByUseLease`. The filesystem mutation has
+   already happened, so the durable state lags behind reality; the
+   `recovery_required` state flags this intent for the Sprint 5+
+   recovery worker.
+4. Otherwise (no fresh blocking lease appeared): apply the matching
+   durable mutation via the identity/bundle repos inside this same
+   transaction (e.g., `IdentityRepo::retire_file_location_in_tx` for
+   a `DeleteFileLocation` target, `BundleRepo::archive_in_tx` for an
+   `ArchiveBundle` target). The durable mutation is what makes the
+   closure check meaningful — it must run inside the same tx as the
+   recheck and the intent transition.
+5. Update the `commit_intents` row to `state = 'completed'` and
+   `finalized_at = now` (with epoch bump). Emit `commit.completed`
+   with payload `{ commit_id, target, closure_initial, closure_final,
+   evaluated_lease_ids, revalidated_evidence }`. COMMIT. Return
+   `CommitGateOutcome { result: Allowed, ... }`.
+
+#### Phase C — `abort_destructive_commit`
+
+Called when the caller decides not to perform the filesystem mutation.
+One IMMEDIATE transaction.
+
+1. Read the `commit_intents` row for `commit_id`; require
+   `state = 'pending'`. Missing row, terminal state, or `epoch`
+   mismatch → return `Conflict`.
+2. Update to `state = 'aborted'`, `aborted_at = now`, and
+   `abort_reason = reason`. Emit `commit.aborted_pre_mutation` with
+   the reason in the payload. COMMIT.
+
+#### Recovery contract
+
+`list_pending_commit_intents(older_than)` returns intents in
+`state = 'pending'` optionally older than a threshold. A stuck pending
+intent indicates the caller crashed between Phase A and Phase B
+finalize. Sprint 1 ships:
+
+- the `commit_intents` table,
+- the prepare / finalize / abort / list functions,
+- the `commit.recovery_required` event kind, which the Sprint 5+
+  recovery worker emits as it reconciles a stuck intent against
+  filesystem state.
+
+Sprint 1 does **not** ship the filesystem-aware reconciliation worker
+itself — that lives with the real workers (Sprint 5+), and §15 records
+the deferral.
 
 ### 9.3.3 Force path
 
@@ -1125,23 +1405,46 @@ where
 spec mandates ("Operators who need to commit despite incomplete resolution
 use a separately audited, permissioned force path that records its own
 override event and reason"). The `ForcePathToken` carries `actor`,
-`reason`, and a `bypass` bitset declaring which checks are skipped.
-Allowed bypass kinds:
+`reason`, and a `bypass` bitset declaring which checks are skipped. The
+**only** allowed bypass kind is:
 
-- `closure_incomplete` — skip step 2's `BlockedByClosureIncomplete` abort.
-- `blocked_by_use_lease` — skip step 3's blocking-lease check.
+- `closure_incomplete` — skip the closure-resolution abort the gate
+  raises when `AliasResolver` fails or returns
+  `AliasResolutionError::Unreachable`.
 
-`stale_evidence` is **not** a valid bypass — stale evidence is a correctness
-problem, not a permissions problem. A token requesting that bypass is
-rejected before the gate runs (`VoomError::Config`).
+The architectural spec scopes the force path to incomplete closure
+resolution specifically. Fresh blocking use-leases are **not**
+force-bypassable — they always fail the gate. A token whose `bypass`
+set carries `blocked_by_use_lease` is rejected before the gate runs
+(`VoomError::Config`). Likewise `stale_evidence` is not a valid bypass:
+stale evidence is a correctness problem, not a permissions problem.
 
-A force-path run emits `commit.forced_override` recording the token's
-actor, reason, and the set of bypassed checks, in addition to whatever
-`commit.*` events the underlying path produces. Force-released leases on
-the scope still don't block (they're terminal); the spec's "forced release
-does not bypass the safety gate on any later destructive commit" is already
-covered by the terminal-state rule and does not require special handling
-in the gate.
+**Operator workflow when a blocking lease must be cleared.** An
+operator who needs a destructive commit to proceed while a blocking
+`asset_use_lease` exists must first terminate that lease through the
+audited path:
+
+```
+UseLeaseRepo::release(lease_id, reason = force_released, actor, reason)
+```
+
+That call writes its own `use_lease.force_released` event recording
+`{ actor, reason }`. Once the lease is terminal, the gate's
+blocking-lease check sees no live lease on the scope, and the operator
+reruns `prepare_destructive_commit` / `finalize_destructive_commit`
+without a `blocked_by_use_lease` bypass. The gate itself is unchanged
+between attempts — the audit trail lives on the lease release, not on
+the commit.
+
+A force-path run that bypasses closure resolution emits
+`commit.forced_override` recording the token's `actor`, `reason`, and
+the `bypass` set, in addition to whatever `commit.*` events the
+underlying path produces. The override is also captured in the
+durable `commit_intents` row's audit payload (see §9.3.2). Force-released
+leases on the scope still don't block (they're terminal); the spec's
+"forced release does not bypass the safety gate on any later
+destructive commit" is already covered by the terminal-state rule and
+does not require special handling in the gate.
 
 ### 9.3.4 `AliasResolver`
 
@@ -1164,14 +1467,24 @@ fail-closed semantics are exercised today by a test-only
 `FailingAliasResolver` that returns `Unreachable` for configured
 `FileVersionId`s.
 
-### 9.3.5 Abort-event durability
+### 9.3.5 Pre-mutation abort-event durability
 
-Steps 2–6 that produce a `Blocked*` result emit their `commit.aborted_by_*`
-event before ROLLBACK and survive the abort via a two-transaction
-pattern: the outer `IMMEDIATE` rolls back the mutation attempt; a
-follow-up tiny tx writes the abort event. Abort events have no other
-durable state to atomically commit alongside them, so the two-tx pattern
-is correct.
+The two-transaction pattern applies **only** to Phase A aborts
+(pre-mutation): each `Blocked*` branch in Phase A emits its
+`commit.aborted_by_*` event before ROLLBACK and survives the abort
+via a follow-up tiny transaction that writes the event row. Phase A
+abort events have no other durable state to atomically commit
+alongside them, so the two-tx pattern is correct.
+
+Phase B (finalize) does not use the two-tx pattern: the
+`commit.aborted_post_mutation` event is written inside the finalize
+transaction itself, which always commits the intent-state transition
+to `recovery_required`. What the post-mutation abort skips is the
+durable identity mutation (step 4); the intent row update, the
+`recovery_required` transition, and the event row commit together as
+one atomic record of "the FS mutation happened but the closure check
+fell behind." Phase C aborts similarly write
+`commit.aborted_pre_mutation` inside the abort transaction.
 
 ### 9.4 Rename reconciliation × evidence revalidation
 
@@ -1349,6 +1662,8 @@ voom external-system  list [--limit] [--cursor]
                       get  <id>
 voom use-lease  list [--scope-type] [--scope-id] [--state] [--limit] [--cursor]
                 get  <id>
+voom commit-intent  list [--state pending|completed|aborted|recovery_required] [--older-than] [--limit] [--cursor]
+                    get  <id>
 voom event      list [--since] [--until] [--kind] [--subject-type] [--subject-id] [--limit] [--cursor]
                 tail [--since] [--kind] [--subject-type] [--subject-id]
                 get  <id>
@@ -1372,8 +1687,11 @@ remains structurally absent from the not-yet-implemented API path.
 
 `--limit` defaults to 50, capped at 500. `--cursor` is an opaque
 base64-encoded `(sort_key, id)` pair. Sort key is `occurred_at` for
-events, `updated_at` otherwise. The CLI never paginates lazily — agents
-drive the cursor explicitly so command boundaries are stable.
+events, `started_at` for commit-intents (the start time never changes
+once the intent is recorded, so it gives a stable ordering across
+phase transitions), `updated_at` otherwise. The CLI never paginates
+lazily — agents drive the cursor explicitly so command boundaries are
+stable.
 
 ### 11.3 Snapshot coverage
 
@@ -1387,6 +1705,9 @@ JSON for at least:
 - `voom ticket get <unknown_id>` (`status: "error"`, `error.code: "NOT_FOUND"`)
 - `voom worker get <id>` showing capabilities + grants inline
 - `voom asset get <id>` showing versions + locations + bundle membership
+- `voom commit-intent list --state pending` showing the
+  `PendingCommitIntent` shape (fixture inserts a pending intent via
+  the gate's `prepare` API)
 - The Sprint-1-specific error envelopes for `BLOCKED_BY_USE_LEASE`,
   `STALE_IDENTITY_EVIDENCE`, `CLOSURE_RESOLUTION_INCOMPLETE`,
   `DEPENDENCY_CYCLE`, and `CONFLICT`, shaped via fixture insertion +
@@ -1511,7 +1832,12 @@ Cross-repo flows live as integration tests:
 
 - `ticket_lease_lifecycle.rs` — ticket pending → ready (no deps) → leased
   → heartbeat (multiple) → expired (via `expire_due`) → requeued → leased
-  → succeeded. Asserts every event row.
+  → succeeded. Asserts every event row. Also covers attempt accounting:
+  with `max_attempts = 2`, exercises the §7.5 worked example end-to-end
+  through `fail(retriable = true)` (two dispatched attempts before
+  `ticket.failed_terminal`) and through `expire_due` (same convention);
+  with `max_attempts = 3`, exercises a mixed `fail` + `expire_due`
+  sequence and asserts the final state matches the documented semantics.
 - `lease_expire_and_recover.rs` — bulk `expire_due` with hundreds of
   leases; per-row events; second invocation is a no-op.
 - `ticket_dependency_unlock.rs` — DAG of N tickets with `phase`
@@ -1530,17 +1856,44 @@ Cross-repo flows live as integration tests:
   new on the same `FileVersion`; M3 step re-anchors blocking, advisory,
   and manual leases; pinned evidence is preserved (not rewritten); new
   evidence appended; events emitted.
-- `commit_safety_gate.rs` — covers each abort path: `BlockedByUseLease`
-  (blocking lease scoped to closure member), `BlockedByStaleEvidence`
-  (pinned hash mismatch), `BlockedByClosureIncomplete` (via
-  `FailingAliasResolver`); allowed path with successful mutation;
-  two-pass closure recheck detects new alias mid-mutation; force-path
-  bypasses closure-incomplete and lease-block but is rejected for
-  `stale_evidence`.
-- `commit_safety_gate_after_rename.rs` — end-to-end: ingest →
-  evidence-acceptance → `reconcile_rename` (M3, re-anchors leases) →
-  destructive commit against pinned evidence → `StaleIdentityEvidence`
-  abort; re-collect & re-accept evidence → second commit allowed.
+- `commit_safety_gate.rs` — covers each abort path under the two-phase
+  prepare/finalize/abort API (§9.3.1): `BlockedByUseLease` (blocking
+  lease scoped to closure member, raised in `prepare`), `BlockedByStaleEvidence`
+  (pinned hash mismatch, raised in `prepare`), `BlockedByClosureIncomplete`
+  (via `FailingAliasResolver`, raised in `prepare`); allowed path with
+  successful mutation through `prepare` → caller mutation → `finalize`;
+  `finalize` aborts when a fresh blocking lease appears on the closure
+  between `prepare` and `finalize` (proves the two-pass closure recheck
+  still fires and transitions the intent to `recovery_required`); the
+  `abort_destructive_commit` path when the caller decides not to
+  mutate; pending intent visible via `list_pending_commit_intents`;
+  `recovery_required` state for a stuck intent whose caller never
+  finalized. Force-path coverage: `closure_incomplete` bypass is
+  honored in `prepare`; an `override_token` whose `bypass` set carries
+  `blocked_by_use_lease` is rejected at the gate boundary
+  (`VoomError::Config`); a `stale_evidence` bypass is rejected the same
+  way; a separate test exercises the documented operator workflow
+  ("force-release the blocking lease via `UseLeaseRepo::release(reason
+  = force_released)`, then rerun the gate") and asserts the second
+  attempt is allowed without any bypass token.
+- `commit_safety_gate_after_rename.rs` — end-to-end against the
+  two-phase API: ingest → evidence-acceptance → `reconcile_rename`
+  (M3, re-anchors leases) → `prepare_destructive_commit` against
+  pinned evidence → `StaleIdentityEvidence` abort in Phase A;
+  re-collect & re-accept evidence → second `prepare` → caller mutation
+  → `finalize_destructive_commit` allowed.
+- `use_lease_scope_validation.rs` — covers the four-FK scope contract:
+  - `acquire` with `LeaseScope::Location` referencing a nonexistent
+    `FileLocationId` → `NotFound` (FK violation, translated by the
+    repo).
+  - `acquire` with `LeaseScope::Location` referencing a retired
+    location → `Conflict` (liveness check rejects soft-deleted
+    parents).
+  - `acquire` with `LeaseScope::Asset` referencing a retired
+    `FileAsset` → `Conflict` (same liveness rule applied per scope).
+  - Positive test: the commit-safety-gate closure query in §9.3 picks
+    up the lease through the correct `scope_*_id` FK column for each
+    closure-member type (asset, bundle, version, location).
 - `event_log_append_only.rs` — `UPDATE` and `DELETE` on `events` fail at
   the SQL level via triggers; insert remains allowed.
 - `disk_mode.rs` — replays the lifecycle from `ticket_lease_lifecycle.rs`
@@ -1580,7 +1933,7 @@ snapshot diffs stable.
 |---|---|
 | Tests can create jobs, lease tickets, expire leases, and recover work. | `crates/voom-store/tests/ticket_lease_lifecycle.rs`, `lease_expire_and_recover.rs` |
 | Tests can create a file asset, add versions and locations, and report its event/evidence history. | `crates/voom-store/tests/ingest_identity_invariants.rs`, `rename_reconciliation.rs`; the `voom asset get` CLI snapshot exercises the read-side report |
-| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::blocked_by_use_lease` together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record` |
+| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::prepare_blocked_by_use_lease` (Phase A `BlockedByUseLease` under the two-phase API) together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record` |
 | Events are recorded for all state transitions. | Every repo `_test.rs` asserts the matching `events` row; `event_log_append_only.rs` asserts immutability |
 | In-memory SQLite tests exercise the same repositories as disk mode. | Repos inherit `test_support::test_pool()` for `:memory:`; `tests/disk_mode.rs` runs the same fixture flow against a `tempfile`-backed disk DB; `just ci` runs both |
 
@@ -1611,3 +1964,9 @@ See §1 for the full list. The most likely-to-be-asked exclusions:
   opaque key.
 - No CLI write commands. Sprint 1's CLI is read-only inspection;
   durable writes go through `ControlPlane` use cases exercised by tests.
+- No filesystem-aware recovery of stuck `commit_intents` rows. Sprint 1
+  ships the durable intent table, the prepare / finalize / abort /
+  list API, and the `commit.recovery_required` event kind; the
+  reconciliation worker that inspects filesystem state and decides
+  whether to roll forward or roll back lives with the real workers
+  (Sprint 5+).
