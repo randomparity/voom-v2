@@ -70,10 +70,28 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     };
     let already_initialized = matches!(before, SchemaState::Current { .. });
 
-    MIGRATOR
-        .run(pool)
-        .await
-        .map_err(|e| VoomError::Migration(format!("running migrations failed: {e}")))?;
+    let migrate_result = MIGRATOR.run(pool).await;
+
+    if let Err(e) = migrate_result {
+        // Race recovery. Between our pre-init probe and the migration run,
+        // another process may have applied the same migrations against the
+        // same on-disk database (sqlx's per-DB migration lock is best-effort
+        // on SQLite). The loser then sees a sqlx error like "table already
+        // exists" or "version already applied". Re-probe: if the post-error
+        // state is Current, treat this as an idempotent success — the work
+        // is done, just not by us.
+        let after = probe_schema(pool).await?;
+        if let SchemaState::Current { schema_init_at, .. } = after {
+            return Ok(InitReport {
+                migrations_applied: 0,
+                schema_init_at,
+                already_initialized: true,
+            });
+        }
+        return Err(VoomError::Migration(format!(
+            "running migrations failed: {e}"
+        )));
+    }
 
     let after = probe_schema(pool).await?;
     let SchemaState::Current {
