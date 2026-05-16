@@ -8,6 +8,7 @@ use tempfile::NamedTempFile;
 use voom_cli::commands::health::{self, HealthData, HealthDb, HealthRuntime};
 use voom_cli::envelope::Local;
 use voom_control_plane::ControlPlane;
+use voom_store::test_support::sqlite_url_for;
 
 #[test]
 fn health_payload_current_state_shape() {
@@ -32,7 +33,7 @@ fn local_for(url: &str) -> Local {
 #[tokio::test]
 async fn health_against_uninitialized_db_returns_exit_code_2() {
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
     voom_store::connect_or_create(&url).await.unwrap();
 
     let cp = ControlPlane::open(&url).await.unwrap();
@@ -46,7 +47,7 @@ async fn health_against_uninitialized_db_returns_exit_code_2() {
 #[tokio::test]
 async fn health_against_initialized_db_returns_exit_code_0() {
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
 
     let cp = ControlPlane::open(&url).await.unwrap();
@@ -66,7 +67,7 @@ async fn health_against_corrupted_schema_meta_points_to_restore_not_init() {
     use serde_json::Value;
 
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     {
         let pool = voom_store::connect(&url).await.unwrap();

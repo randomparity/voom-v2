@@ -7,21 +7,23 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::Value;
+use tempfile::NamedTempFile;
 use tower::ServiceExt;
 use voom_api::router;
 use voom_control_plane::ControlPlane;
+use voom_store::test_support::{insert_synthetic_migration, sqlite_url_for};
 
-async fn fixture_uninit() -> (tempfile::NamedTempFile, axum::Router) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+async fn fixture_uninit() -> (NamedTempFile, axum::Router) {
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
     voom_store::connect_or_create(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
     (tmp, router(cp))
 }
 
-async fn fixture_initialized() -> (tempfile::NamedTempFile, axum::Router) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+async fn fixture_initialized() -> (NamedTempFile, axum::Router) {
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
     (tmp, router(cp))
@@ -68,20 +70,15 @@ async fn health_on_initialized_returns_200_current() {
 
 #[tokio::test]
 async fn health_on_too_new_db_returns_503_db_schema_too_new() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
 
     voom_store::init(&url).await.unwrap();
     {
         let pool = voom_store::connect(&url).await.unwrap();
-        sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-             (version, description, installed_on, success, checksum, execution_time) \
-             VALUES (99999, 'synthetic-future', strftime('%s','now'), 1, X'00', 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        insert_synthetic_migration(&pool, 99999, true)
+            .await
+            .unwrap();
     }
 
     let cp = ControlPlane::open(&url).await.unwrap();
@@ -107,8 +104,8 @@ async fn health_with_dirty_migration_row_returns_503_db_dirty_migration() {
     // refuse to migrate further, so this is a manual-recovery scenario, not
     // a rerun-init scenario. The API must surface it as a distinct error
     // code with manual-cleanup guidance.
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
 
     voom_store::init(&url).await.unwrap();
     {
@@ -147,8 +144,8 @@ async fn health_with_corrupted_schema_meta_returns_503_db_partial_schema() {
     // probe_schema surfaces a Migration error (DB_PARTIAL_SCHEMA). The router
     // must classify this as a 503 dependency failure with a recovery hint,
     // not a 500 (handler bug).
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
 
     voom_store::init(&url).await.unwrap();
     {

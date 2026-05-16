@@ -5,6 +5,7 @@
 )]
 
 use tempfile::NamedTempFile;
+use voom_store::test_support::sqlite_url_for;
 use voom_store::{SchemaState, connect, init, probe_schema};
 
 // Integration tests use the disk-backed public `init(url)` exclusively.
@@ -14,7 +15,7 @@ use voom_store::{SchemaState, connect, init, probe_schema};
 #[tokio::test]
 async fn init_on_disk_creates_schema_meta() {
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
 
     let report = init(&url).await.unwrap();
     assert!(!report.already_initialized);
@@ -33,7 +34,7 @@ async fn init_on_disk_creates_schema_meta() {
 #[tokio::test]
 async fn second_init_against_same_disk_db_is_noop() {
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
 
     let first = init(&url).await.unwrap();
     let second = init(&url).await.unwrap();
@@ -64,7 +65,7 @@ async fn second_init_against_same_disk_db_is_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_init_on_same_disk_db_is_safe() {
     let tmp = NamedTempFile::new().unwrap();
-    let url = format!("sqlite://{}", tmp.path().display());
+    let url = sqlite_url_for(tmp.path());
 
     // Pre-create the file so both spawned tasks race on migration application,
     // not on file creation.

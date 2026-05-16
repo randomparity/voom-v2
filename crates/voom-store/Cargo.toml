@@ -19,9 +19,14 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
 voom-core = { workspace = true }
 
 [features]
-# Test-only public surface: enables init_on(pool) and similar
-# pool-injection helpers needed by tests that want to seed pre-init state.
-# Production crates MUST NOT enable this.
+# Test-only public surface: enables init_on(pool), the test_support module
+# (sqlite_url_for, fresh_initialized_pool_at, insert_synthetic_migration),
+# and any other pool-injection helpers needed by tests that want to seed
+# pre-init state. Production crates MUST NOT enable this.
+#
+# The test_support module deliberately does NOT depend on tempfile — callers
+# pass &Path in so that enabling this feature doesn't propagate tempfile's
+# transitive graph into production builds.
 test-support = []
 
 [dev-dependencies]
