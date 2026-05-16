@@ -7,6 +7,10 @@ docs/superpowers/plans/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Coverage artifacts (cargo-llvm-cov)
+/lcov.info
+/target/llvm-cov/
+
 # macOS
 .DS_Store
 

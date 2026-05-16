@@ -9,7 +9,7 @@ setup:
     rustup show active-toolchain || rustup toolchain install stable
     rustup component add clippy rustfmt
     @echo "==> Installing cargo tools (idempotent)"
-    cargo install --locked cargo-audit cargo-deny prek
+    cargo install --locked cargo-audit cargo-deny prek cargo-llvm-cov ast-grep
     @echo "==> Verifying uv + Python 3.13"
     @command -v uv >/dev/null || { echo "Install uv: https://docs.astral.sh/uv/"; exit 1; }
     uv python install 3.13
@@ -21,7 +21,7 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint test doc deny audit
+ci: fmt-check lint check-test-layout test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -45,6 +45,18 @@ audit:
 
 deny:
     cargo deny check
+
+# Generate workspace coverage in lcov format (consumed by SonarCloud and other readers)
+coverage:
+    cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+# Generate workspace coverage as a browsable HTML report
+coverage-html:
+    cargo llvm-cov --workspace --all-features --html
+
+# Enforce the sibling-test layout: no inline tests in src/, every *_test.rs is linked
+check-test-layout:
+    ./scripts/check-test-layout.sh
 
 # Run the CLI binary
 run *ARGS:
