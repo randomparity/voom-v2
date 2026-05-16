@@ -102,3 +102,61 @@ async fn concurrent_init_on_same_disk_db_is_safe() {
         other => panic!("post-race state must be Current, got {other:?}"),
     }
 }
+
+/// Stress version of `concurrent_init_on_same_disk_db_is_safe`. Runs the
+/// concurrent-init scenario 20 iterations × 6 peers so any future TOCTOU
+/// regression in `probe_schema`'s identity guard surfaces deterministically
+/// rather than depending on CI runner timing. Each iteration uses a fresh
+/// tempfile so iterations are independent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_init_stress() {
+    for iteration in 0..20 {
+        let tmp = NamedTempFile::new().unwrap();
+        let url = sqlite_url_for(tmp.path());
+
+        // Pre-create the file so peers race on migration application, not
+        // on file creation. Mirrors the single-shot test's setup.
+        voom_store::connect_or_create(&url).await.unwrap();
+
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let u = url.clone();
+                tokio::spawn(async move { init(&u).await })
+            })
+            .collect();
+
+        let mut reports = Vec::with_capacity(handles.len());
+        for h in handles {
+            let report = h.await.unwrap().unwrap_or_else(|e| {
+                panic!("iteration {iteration}: concurrent init must succeed: {e}");
+            });
+            reports.push(report);
+        }
+
+        // All peers must agree on the durable schema_init_at — only one row
+        // was ever inserted into schema_meta, so all peers must read the
+        // same value back.
+        let first = reports[0].schema_init_at;
+        assert!(
+            reports.iter().all(|r| r.schema_init_at == first),
+            "iteration {iteration}: peers disagreed on schema_init_at: {reports:?}"
+        );
+
+        // Final state: exactly one migration row.
+        let pool = voom_store::connect(&url).await.unwrap();
+        let state = voom_store::probe_schema(&pool).await.unwrap();
+        match state {
+            voom_store::SchemaState::Current {
+                migration_count, ..
+            } => {
+                assert_eq!(
+                    migration_count, 1,
+                    "iteration {iteration}: exactly one migration row must exist"
+                );
+            }
+            other => {
+                panic!("iteration {iteration}: post-race state must be Current, got {other:?}")
+            }
+        }
+    }
+}

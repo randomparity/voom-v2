@@ -58,32 +58,36 @@ static EMBEDDED_VERSIONS: LazyLock<HashMap<i64, Vec<u8>>> = LazyLock::new(|| {
 
 /// Inspect the schema without modifying it.
 pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
-    let migrations_table_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    // Identity guard + presence check in one statement-atomic scan.
+    //
+    // An empty SQLite file with no tables is a fresh DB we own. An existing
+    // DB that already has user tables but lacks `_sqlx_migrations` belongs
+    // to some other application — running `voom init` against it would
+    // silently add VOOM schema and permanently entangle the two. A mistyped
+    // --database-url is the common way to reach this; refuse loudly rather
+    // than mutate.
+    //
+    // The presence check and the foreign-table check MUST observe one
+    // snapshot. Splitting them across two queries opens a TOCTOU: a
+    // concurrent `voom init` peer can create `_sqlx_migrations` and the
+    // first user table between the two queries, leaving the guard tripping
+    // on the user table even though `_sqlx_migrations` now exists.
+    // SQLite guarantees a single SELECT sees one consistent snapshot for
+    // its full execution, so collapsing both checks into one statement
+    // closes the race. (#13)
+    let (migrations_table_exists, sample_foreign_table): (i64, Option<String>) = sqlx::query_as(
+        "SELECT \
+               COUNT(CASE WHEN name = '_sqlx_migrations' THEN 1 END), \
+               MAX(CASE WHEN name != '_sqlx_migrations' THEN name END) \
+             FROM sqlite_master \
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| VoomError::Database(format!("probing for _sqlx_migrations failed: {e}")))?;
+    .map_err(|e| VoomError::Database(format!("probing sqlite_master failed: {e}")))?;
 
     if migrations_table_exists == 0 {
-        // Identity guard. An empty SQLite file with no tables is a fresh DB
-        // we own. An existing DB that already has user tables but lacks
-        // `_sqlx_migrations` belongs to some other application — running
-        // `voom init` against it would silently add VOOM schema and
-        // permanently entangle the two. A mistyped --database-url is the
-        // common way to reach this; refuse loudly rather than mutate.
-        let foreign_table: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type='table' \
-             AND name NOT LIKE 'sqlite_%' LIMIT 1",
-        )
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| {
-            VoomError::Database(format!(
-                "scanning sqlite_master for foreign tables failed: {e}"
-            ))
-        })?;
-        if let Some(name) = foreign_table {
+        if let Some(name) = sample_foreign_table {
             return Err(VoomError::Config(format!(
                 "database appears to belong to another application: contains \
                  table {name:?} but no _sqlx_migrations table. Refusing to \
