@@ -1,0 +1,92 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Install cross-compile target
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+      - name: Install cross-compile deps (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Compute dirty flag from tag commit
+        # Release builds come from clean tag pushes, but record the actual
+        # state authoritatively so build.rs doesn't have to depend on cargo's
+        # cache invalidation heuristics. This value is passed to build.rs via
+        # the VOOM_GIT_DIRTY env var.
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "VOOM_GIT_DIRTY=false" >> "$GITHUB_ENV"
+          else
+            echo "VOOM_GIT_DIRTY=true" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        env:
+          # Set linker via env so the checkout stays clean — build.rs probes
+          # `git status --porcelain`, and any untracked file would taint the
+          # release binary's `dirty` flag.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        # `--locked` refuses to rewrite Cargo.lock during dependency
+        # resolution. A tag whose lockfile is stale should fail the release
+        # rather than silently producing artifacts built from a freshly
+        # resolved (but unrecorded) dependency graph.
+        run: cargo build --release --locked --package voom-cli --target ${{ matrix.target }}
+      - name: Verify clean tree after build
+        # build.rs trusts `git status --porcelain` at build time. If anything
+        # in the build step wrote to the checkout (sysroot install, sccache
+        # artifacts dropped in-tree, etc.), the release binary would have
+        # captured a dirty flag — or, worse, a clean flag from cached
+        # build-script output that no longer reflects reality. Fail loudly.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Working tree dirty after build:"
+            git status --short
+            exit 1
+          fi
+      - name: Verify release binary provenance (native targets only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
+        run: |
+          out=$(./target/${{ matrix.target }}/release/voom version)
+          echo "$out"
+          # Tag pushes must produce release-flagged, clean binaries whose
+          # semver matches the tag (less the leading `v`).
+          expected_semver="${GITHUB_REF_NAME#v}"
+          echo "$out" | jq -e '.data.dirty == false' >/dev/null
+          echo "$out" | jq -e '.data.build_profile == "release"' >/dev/null
+          echo "$out" | jq -e '.data.release == true' >/dev/null
+          echo "$out" | jq -e --arg expected "$expected_semver" \
+            '.data.semver == $expected' >/dev/null
+      - name: Package
+        run: |
+          name="voom-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/voom dist/$name
+          (cd dist && tar -czf $name.tar.gz $name)
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
+        with:
+          files: dist/*.tar.gz
+          draft: true

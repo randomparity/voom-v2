@@ -9,3 +9,22 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "time"] }
+time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
+voom-core = { workspace = true }
+
+[features]
+# Test-only public surface: enables init_on(pool) and similar
+# pool-injection helpers needed by tests that want to seed pre-init state.
+# Production crates MUST NOT enable this.
+test-support = []
+
+[dev-dependencies]
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }

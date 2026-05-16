@@ -17,7 +17,7 @@ members = [
 [workspace.package]
 version = "0.1.0-dev"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["VOOM contributors"]
 repository = "https://github.com/randomparity/voom-v2"
@@ -25,6 +25,9 @@ repository = "https://github.com/randomparity/voom-v2"
 [workspace.dependencies]
 # Pinned at the workspace level; member crates use `{ workspace = true }`.
 # All versions resolved by `cargo add` at implementation time.
+voom-core = { version = "0.1.0-dev", path = "crates/voom-core" }
+voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
+voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -56,5 +59,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
 unsafe_code = "forbid"
-missing_debug_implementations = "warn"
+missing_debug_implementations = "deny"

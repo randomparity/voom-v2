@@ -9,3 +9,12 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+directories = "6.0.0"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+time = { version = "0.3.45", features = ["serde", "formatting"] }
+
+[dev-dependencies]
+serde_json = "1.0.149"

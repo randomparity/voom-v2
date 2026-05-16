@@ -1,0 +1,10 @@
+---
+source: crates/voom-cli/tests/init_envelope.rs
+assertion_line: 16
+expression: "&data"
+---
+{
+  "migrations_applied": 1,
+  "schema_init_at": "2026-05-15T18:23:00.000Z",
+  "already_initialized": false
+}

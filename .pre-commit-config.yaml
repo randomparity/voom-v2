@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: cargo-test
+        name: cargo test --quiet
+        entry: cargo test --workspace --quiet
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: cargo-audit
+        name: cargo audit
+        entry: cargo audit --deny warnings
+        language: system
+        pass_filenames: false
+        files: '^Cargo\.lock$'
