@@ -7,8 +7,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Serialize;
-use voom_control_plane::{ControlPlane, DbStatus};
-use voom_core::format_iso8601;
+use voom_control_plane::{ControlPlane, HealthSnapshot};
+use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 pub const SCHEMA_VERSION: &str = "0";
 
@@ -70,103 +70,94 @@ struct HealthRuntime {
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     match state.control_plane.health().await {
-        Ok(snap) => match snap.db_status {
-            DbStatus::Uninitialized => err_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "DB_UNINITIALIZED",
-                "database has no migrations applied".into(),
-                Some("Run `voom init` on the host that owns this database".into()),
-            ),
-            DbStatus::Partial => err_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "DB_PARTIAL_SCHEMA",
-                format!(
-                    "database partially migrated (applied={:?}, expected={:?})",
-                    snap.migration_count, snap.expected_migrations
-                ),
-                Some("Run `voom init` against the current binary".into()),
-            ),
-            DbStatus::TooNew => err_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "DB_SCHEMA_TOO_NEW",
-                format!(
-                    "database has migrations this binary does not know about \
-                     (applied={:?}, expected={:?})",
-                    snap.migration_count, snap.expected_migrations
-                ),
-                Some("Upgrade the server binary or roll the database back".into()),
-            ),
-            DbStatus::Dirty => err_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "DB_DIRTY_MIGRATION",
-                format!(
-                    "a previous migration left the schema in a dirty (failed) state \
-                     (failed_version={:?}, applied={:?}, expected={:?}); sqlx will \
-                     not run further migrations until the dirty row is resolved",
-                    snap.failed_version, snap.migration_count, snap.expected_migrations
-                ),
-                Some(
-                    "Manual recovery required: remove the failed row from \
-                     _sqlx_migrations or restore from backup. Do NOT just re-run \
-                     voom init."
-                        .into(),
-                ),
-            ),
-            DbStatus::Current => {
-                let env = Envelope {
-                    schema_version: SCHEMA_VERSION,
-                    command: "health",
-                    status: "ok",
-                    data: Some(HealthData {
-                        db: HealthDb {
-                            status: "current",
-                            schema_init_at: snap.schema_init_at.map(format_iso8601),
-                            migration_count: snap.migration_count,
-                        },
-                        runtime: HealthRuntime {
-                            tokio_workers: state.tokio_workers,
-                        },
-                    }),
-                    warnings: Vec::new(),
-                    error: None,
-                };
-                (StatusCode::OK, Json(env)).into_response()
-            }
-        },
-        Err(err) => {
-            // Known database/schema failures are dependency problems, not
-            // handler bugs — return 503 with a recovery hint so operators see
-            // the same actionable status as Partial/TooNew. Reserve 500 for
-            // genuinely unexpected internal errors.
-            let (status, hint) = match err.code() {
-                "DB_UNREACHABLE" => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Some(
-                        "Database file is missing or unreachable from this host \
-                         — verify the configured path and filesystem permissions"
-                            .to_owned(),
-                    ),
-                ),
-                "DB_PARTIAL_SCHEMA" => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Some(
-                        "Schema metadata is missing or corrupted (e.g. \
-                         schema_meta dropped or malformed). `voom init` will \
-                         re-probe and fail with the same error — it cannot \
-                         repair this state. Restore from backup or manually \
-                         repair the schema_meta table."
-                            .to_owned(),
-                    ),
-                ),
-                "DB_SCHEMA_TOO_NEW" => (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Some("Upgrade the server binary or roll the database back".to_owned()),
-                ),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        Ok(HealthSnapshot::Current {
+            migration_count,
+            schema_init_at,
+        }) => {
+            let env = Envelope {
+                schema_version: SCHEMA_VERSION,
+                command: "health",
+                status: "ok",
+                data: Some(HealthData {
+                    db: HealthDb {
+                        status: "current",
+                        schema_init_at: Some(format_iso8601(schema_init_at)),
+                        migration_count: Some(migration_count),
+                    },
+                    runtime: HealthRuntime {
+                        tokio_workers: state.tokio_workers,
+                    },
+                }),
+                warnings: Vec::new(),
+                error: None,
             };
-            err_response(status, err.code(), err.to_string(), hint)
+            (StatusCode::OK, Json(env)).into_response()
         }
+        Ok(snap) => {
+            // `diagnostic()` returns Some for every non-Current variant —
+            // we just matched Current above, so this is infallible.
+            let diag = snap
+                .diagnostic()
+                .unwrap_or_else(|| unreachable!("non-Current snapshot has a diagnostic"));
+            err_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                diag.code.as_str(),
+                diag.message,
+                diag.hint,
+            )
+        }
+        Err(err) => voom_error_response(&err),
     }
+}
+
+/// Classify a `VoomError` returned from `connect`/`probe_schema` into an HTTP
+/// response. Exhaustive over [`ErrorCode`] so a new variant fails compilation
+/// here rather than silently falling through to a 500.
+fn voom_error_response(err: &VoomError) -> axum::response::Response {
+    let (status, hint) = match err.error_code() {
+        ErrorCode::DbUnreachable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(
+                "Database file is missing or unreachable from this host \
+                 — verify the configured path and filesystem permissions"
+                    .to_owned(),
+            ),
+        ),
+        ErrorCode::DbPartialSchema => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(
+                "Schema metadata is missing or corrupted (e.g. schema_meta \
+                 dropped or malformed). `voom init` will re-probe and fail \
+                 with the same error — it cannot repair this state. Restore \
+                 from backup or manually repair the schema_meta table."
+                    .to_owned(),
+            ),
+        ),
+        ErrorCode::DbSchemaTooNew => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("Upgrade the server binary or roll the database back".to_owned()),
+        ),
+        ErrorCode::DbDirtyMigration => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(
+                "Manual recovery required: remove the failed row from \
+                 _sqlx_migrations or restore from backup. Do NOT just re-run \
+                 voom init."
+                    .to_owned(),
+            ),
+        ),
+        // `ConfigInvalid` from `probe_schema` is the foreign-database guard
+        // (someone else's DB at this path); 503 with the underlying message
+        // is more useful to operators than 500.
+        ErrorCode::ConfigInvalid => (StatusCode::SERVICE_UNAVAILABLE, None),
+        // Codes that `connect`/`probe_schema` cannot produce today; classify
+        // as internal so they're visible if they ever do appear.
+        ErrorCode::DbUninitialized
+        | ErrorCode::NotFound
+        | ErrorCode::Internal
+        | ErrorCode::BadArgs => (StatusCode::INTERNAL_SERVER_ERROR, None),
+    };
+    err_response(status, err.code(), err.to_string(), hint)
 }
 
 fn err_response(

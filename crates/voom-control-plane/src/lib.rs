@@ -2,15 +2,15 @@
     test,
     expect(
         clippy::unwrap_used,
-        reason = "tests favor unwrap over plumbing Result<()> through every assertion"
+        clippy::panic,
+        reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
     )
 )]
 //! App-services layer: wraps voom-store and exposes commands consumed by API/CLI.
 
-use serde::Serialize;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::VoomError;
+use voom_core::{ErrorCode, VoomError};
 use voom_store::{SchemaState, connect, probe_schema};
 
 #[derive(Debug, Clone)]
@@ -31,75 +31,123 @@ impl ControlPlane {
     /// Read-only health snapshot.
     pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
         let schema = probe_schema(&self.pool).await?;
-        let mut snap = HealthSnapshot {
-            db_status: DbStatus::Uninitialized,
-            schema_init_at: None,
-            migration_count: None,
-            expected_migrations: None,
-            failed_version: None,
-        };
-        match schema {
-            SchemaState::Uninitialized => {}
+        Ok(match schema {
+            SchemaState::Uninitialized => HealthSnapshot::Uninitialized,
             SchemaState::Partial { applied, expected } => {
-                snap.db_status = DbStatus::Partial;
-                snap.migration_count = Some(applied);
-                snap.expected_migrations = Some(expected);
+                HealthSnapshot::Partial { applied, expected }
             }
             SchemaState::Current {
                 migration_count,
                 schema_init_at,
-            } => {
-                snap.db_status = DbStatus::Current;
-                snap.migration_count = Some(migration_count);
-                snap.schema_init_at = Some(schema_init_at);
-            }
+            } => HealthSnapshot::Current {
+                migration_count,
+                schema_init_at,
+            },
             SchemaState::TooNew { applied, expected } => {
-                snap.db_status = DbStatus::TooNew;
-                snap.migration_count = Some(applied);
-                snap.expected_migrations = Some(expected);
+                HealthSnapshot::TooNew { applied, expected }
             }
             SchemaState::Dirty {
                 failed_version,
                 applied,
                 expected,
-            } => {
-                snap.db_status = DbStatus::Dirty;
-                snap.migration_count = Some(applied);
-                snap.expected_migrations = Some(expected);
-                snap.failed_version = Some(failed_version);
-            }
-        }
-        Ok(snap)
+            } => HealthSnapshot::Dirty {
+                failed_version,
+                applied,
+                expected,
+            },
+        })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DbStatus {
+/// State-tagged health snapshot. The ADT shape replaces the previous
+/// flat-struct-with-Options so the type system enforces which fields are
+/// available in each state — no more `Option<u32>` debug-printed in
+/// operator-facing error messages as `Some(0)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthSnapshot {
+    /// `_sqlx_migrations` table absent.
     Uninitialized,
-    Partial,
-    Current,
-    TooNew,
-    /// One or more migration rows recorded as `success=0` — requires manual
-    /// recovery before further migrations can run.
-    Dirty,
+    /// Fewer migrations applied than this binary ships. Safe to rerun
+    /// `voom init`.
+    Partial { applied: u32, expected: u32 },
+    /// Exactly as many migrations applied as this binary ships AND every
+    /// applied version is known to the embedded MIGRATOR.
+    Current {
+        migration_count: u32,
+        schema_init_at: OffsetDateTime,
+    },
+    /// At least one applied migration version is not in the embedded MIGRATOR.
+    TooNew { applied: u32, expected: u32 },
+    /// One or more migration rows are recorded as `success=0`; manual recovery
+    /// required before further migrations can run.
+    Dirty {
+        failed_version: i64,
+        applied: u32,
+        expected: u32,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct HealthSnapshot {
-    pub db_status: DbStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub schema_init_at: Option<OffsetDateTime>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub migration_count: Option<u32>,
-    /// Present whenever `db_status` is `Partial`, `TooNew`, or `Dirty`;
-    /// otherwise `None`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_migrations: Option<u32>,
-    /// Present only when `db_status` is `Dirty`; identifies the migration row
-    /// recorded as `success=0`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failed_version: Option<i64>,
+/// Operator-facing diagnostic triple for a non-Current health snapshot.
+/// Surfaces (API, CLI) wrap this into their own envelope format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthDiagnostic {
+    pub code: ErrorCode,
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+impl HealthSnapshot {
+    /// Map a non-Current snapshot to its diagnostic triple. Returns `None`
+    /// for `Current` — that state has no error to surface.
+    ///
+    /// This is the single source of truth for the error code, message, and
+    /// hint for every non-healthy state. Both `voom-api` and `voom-cli` call
+    /// it so their prose cannot drift apart.
+    #[must_use]
+    pub fn diagnostic(&self) -> Option<HealthDiagnostic> {
+        match self {
+            Self::Current { .. } => None,
+            Self::Uninitialized => Some(HealthDiagnostic {
+                code: ErrorCode::DbUninitialized,
+                message: "database has no migrations applied".to_owned(),
+                hint: Some("Run `voom init` on the host that owns this database".to_owned()),
+            }),
+            Self::Partial { applied, expected } => Some(HealthDiagnostic {
+                code: ErrorCode::DbPartialSchema,
+                message: format!(
+                    "database partially migrated (applied={applied}, expected={expected})"
+                ),
+                hint: Some("Run `voom init` against the current binary".to_owned()),
+            }),
+            Self::TooNew { applied, expected } => Some(HealthDiagnostic {
+                code: ErrorCode::DbSchemaTooNew,
+                message: format!(
+                    "database has migrations this binary does not know about \
+                     (applied={applied}, expected={expected})"
+                ),
+                hint: Some("Upgrade the server binary or roll the database back".to_owned()),
+            }),
+            Self::Dirty {
+                failed_version,
+                applied,
+                expected,
+            } => Some(HealthDiagnostic {
+                code: ErrorCode::DbDirtyMigration,
+                message: format!(
+                    "a previous migration left the schema in a dirty (failed) state \
+                     (failed_version={failed_version}, applied={applied}, expected={expected}); \
+                     sqlx will not run further migrations until the dirty row is resolved"
+                ),
+                hint: Some(
+                    "Manual recovery required: remove the failed row from \
+                     _sqlx_migrations (e.g. DELETE FROM _sqlx_migrations WHERE \
+                     version = <failed_version>) or restore from backup. Do NOT \
+                     just re-run voom init."
+                        .to_owned(),
+                ),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -117,21 +165,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let url = format!("sqlite://{}", tmp.path().join("nope.db").display());
         let err = ControlPlane::open(&url).await.unwrap_err();
-        assert_eq!(err.code(), "DB_UNREACHABLE");
+        assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
     }
 
     #[tokio::test]
     async fn health_on_existing_but_uninitialized_db_is_uninitialized() {
         let (_keep, url) = fresh_url();
-        // Create the DB (empty schema) via connect_or_create, then open via the
-        // read-side path so the no-create rule isn't violated.
         voom_store::connect_or_create(&url).await.unwrap();
 
         let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
-        assert_eq!(snap.db_status, DbStatus::Uninitialized);
-        assert!(snap.schema_init_at.is_none());
-        assert!(snap.migration_count.is_none());
+        assert_eq!(snap, HealthSnapshot::Uninitialized);
     }
 
     #[tokio::test]
@@ -142,9 +186,13 @@ mod tests {
 
         let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
-        assert_eq!(snap.db_status, DbStatus::Current);
-        assert_eq!(snap.migration_count, Some(1));
-        assert!(snap.schema_init_at.is_some());
+        match snap {
+            HealthSnapshot::Current {
+                migration_count,
+                schema_init_at: _,
+            } => assert_eq!(migration_count, 1),
+            other => panic!("expected Current, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -161,7 +209,6 @@ mod tests {
         let (_keep, url) = fresh_url();
         voom_store::init(&url).await.unwrap();
 
-        // Synthesize a dirty migration: known version, success=0.
         {
             let pool = voom_store::connect(&url).await.unwrap();
             sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 1")
@@ -172,9 +219,14 @@ mod tests {
 
         let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
-        assert_eq!(snap.db_status, DbStatus::Dirty);
-        assert_eq!(snap.failed_version, Some(1));
-        assert!(snap.expected_migrations.is_some());
+        match snap {
+            HealthSnapshot::Dirty {
+                failed_version,
+                applied: _,
+                expected: _,
+            } => assert_eq!(failed_version, 1),
+            other => panic!("expected Dirty, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -182,8 +234,6 @@ mod tests {
         let (_keep, url) = fresh_url();
         voom_store::init(&url).await.unwrap();
 
-        // Inject a synthetic future migration row via a sibling no-create pool
-        // — the on-disk DB already exists, so connect() suffices.
         {
             let pool = voom_store::connect(&url).await.unwrap();
             sqlx::query(
@@ -198,8 +248,82 @@ mod tests {
 
         let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
-        assert_eq!(snap.db_status, DbStatus::TooNew);
-        assert!(snap.migration_count.unwrap() > snap.expected_migrations.unwrap());
-        assert!(snap.schema_init_at.is_none());
+        match snap {
+            HealthSnapshot::TooNew { applied, expected } => {
+                assert!(applied > expected);
+            }
+            other => panic!("expected TooNew, got {other:?}"),
+        }
+    }
+
+    /// Exhaustive coverage check: every non-Current variant must produce a
+    /// diagnostic with a non-empty message. Adding a `HealthSnapshot` variant
+    /// without updating `diagnostic()` fails to compile (the match in
+    /// `diagnostic()` is exhaustive); this test then catches any new variant
+    /// that returns an empty or placeholder message.
+    #[test]
+    fn diagnostic_covers_every_non_current_variant() {
+        let now = OffsetDateTime::UNIX_EPOCH;
+        let cases = [
+            HealthSnapshot::Uninitialized,
+            HealthSnapshot::Partial {
+                applied: 0,
+                expected: 1,
+            },
+            HealthSnapshot::TooNew {
+                applied: 2,
+                expected: 1,
+            },
+            HealthSnapshot::Dirty {
+                failed_version: 1,
+                applied: 1,
+                expected: 1,
+            },
+        ];
+        for snap in &cases {
+            let diag = snap.diagnostic().unwrap_or_else(|| {
+                panic!("non-Current variant {snap:?} returned None from diagnostic()")
+            });
+            assert!(!diag.message.is_empty(), "{snap:?} has empty message");
+            assert!(diag.hint.is_some(), "{snap:?} has no hint");
+        }
+
+        // Current returns None.
+        let current = HealthSnapshot::Current {
+            migration_count: 1,
+            schema_init_at: now,
+        };
+        assert!(current.diagnostic().is_none());
+    }
+
+    /// Regression guard for the issue #1 ugliness: `Option<u32>` Debug
+    /// produced `applied=Some(0)` in operator-facing strings. The ADT
+    /// fields are plain integers, so the formatted string must not contain
+    /// `Some(`.
+    #[test]
+    fn diagnostic_messages_have_no_debug_options() {
+        let snaps = [
+            HealthSnapshot::Partial {
+                applied: 0,
+                expected: 1,
+            },
+            HealthSnapshot::TooNew {
+                applied: 2,
+                expected: 1,
+            },
+            HealthSnapshot::Dirty {
+                failed_version: 1,
+                applied: 1,
+                expected: 1,
+            },
+        ];
+        for snap in &snaps {
+            let diag = snap.diagnostic().unwrap();
+            assert!(
+                !diag.message.contains("Some("),
+                "diagnostic message for {snap:?} leaks Option Debug: {msg}",
+                msg = diag.message,
+            );
+        }
     }
 }
