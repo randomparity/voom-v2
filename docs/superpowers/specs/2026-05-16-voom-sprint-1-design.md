@@ -358,7 +358,7 @@ pub enum EventKind {
     CommitAbortedByStaleEvidence,       // 'commit.aborted_by_stale_evidence' — Phase A
     CommitAbortedByClosureIncomplete,   // 'commit.aborted_by_closure_incomplete' — Phase A
     CommitAbortedPreMutation,           // 'commit.aborted_pre_mutation' — Phase C / Phase B NotPerformed
-    CommitAbortedPostMutation,          // 'commit.aborted_post_mutation' — Phase B trip-wire (reason: 'closure_grew' | 'fresh_lease')
+    CommitAbortedPostMutation,          // 'commit.aborted_post_mutation' — Phase B trip-wire (reason: 'closure_grew' | 'fresh_lease' | 'closure_grew_and_fresh_lease')
     CommitRecoveryRequired,             // 'commit.recovery_required' — emitted by the Sprint 5+ recovery worker
     CommitForcedOverride,               // 'commit.forced_override' — Phase A closure-bypass audit
     ExternalSystemRegistered,           // 'external_system.registered'
@@ -1556,19 +1556,39 @@ filesystem (or the caller has decided not to mutate; see
      discovers an alias by Phase B (e.g., a remote mount came online
      between phases, an object-store probe succeeded on retry).
 
-   The two subchecks map to two distinct results, both representable
-   in `CommitGateResult`:
+   The two subchecks may fire independently or together. The
+   `commit.aborted_post_mutation` event payload is uniform across all
+   trip-wire firings — it always carries both the closure delta and
+   the fresh-lease list, with empty arrays for the dimension that
+   didn't escape — so the durable audit record preserves every escape
+   the gate observed, regardless of which `CommitGateResult` variant
+   the caller receives:
 
-   - **Closure grew** (delta non-empty): the gate's understanding of
-     which files the commit would affect was wrong; closure members
-     that grew the closure (e.g., a newly-discovered alias `FileLocation`)
-     were never covered by evidence revalidation or the Phase A lease
-     check, so the mutation's safety properties no longer hold even
-     if no lease references those new members. Emit
-     `commit.aborted_post_mutation` with payload
-     `{ commit_id, reason: 'closure_grew', escape: <which trip-wire path>,
-     closure_initial, closure_final, delta_assets, delta_bundles,
-     delta_versions, delta_locations }`, transition the intent to
+   ```text
+   payload = {
+       commit_id,
+       reason,                            -- 'closure_grew' | 'fresh_lease' | 'closure_grew_and_fresh_lease'
+       escape,                            -- which trip-wire path the gate suspects
+       closure_initial,
+       closure_final,
+       delta_assets,                      -- possibly empty
+       delta_bundles,                     -- possibly empty
+       delta_versions,                    -- possibly empty
+       delta_locations,                   -- possibly empty
+       fresh_lease_ids,                   -- possibly empty
+   }
+   ```
+
+   The two subcheck results map to `CommitGateResult` as follows:
+
+   - **Closure grew** (delta non-empty, no fresh lease): the gate's
+     understanding of which files the commit would affect was wrong;
+     closure members that grew the closure (e.g., a newly-discovered
+     alias `FileLocation`) were never covered by evidence revalidation
+     or the Phase A lease check, so the mutation's safety properties
+     no longer hold even if no lease references those new members.
+     Emit `commit.aborted_post_mutation` with `reason='closure_grew'`
+     and `fresh_lease_ids=[]`, transition the intent to
      `state = 'recovery_required'` (leaving `finalized_at`,
      `aborted_at`, and `abort_reason` all NULL per the §9.1 CHECK), do
      **not** apply the durable mutation, COMMIT, return
@@ -1577,20 +1597,24 @@ filesystem (or the caller has decided not to mutate; see
    - **Fresh blocking lease** (delta empty, but a blocking lease now
      covers `closure_final` whose ID is not in
      `evaluated_lease_ids`): a lease appeared inside the FS-mutation
-     window. Emit `commit.aborted_post_mutation` with payload
-     `{ commit_id, reason: 'fresh_lease', escape: <which trip-wire path>,
-     closure_initial, closure_final, fresh_lease_ids }`, transition
-     the intent to `state = 'recovery_required'` (same NULL-shape as
-     above), do **not** apply the durable mutation, COMMIT, return
+     window. Emit `commit.aborted_post_mutation` with
+     `reason='fresh_lease'` and empty `delta_*`, transition the intent
+     to `state = 'recovery_required'` (same NULL-shape as above), do
+     **not** apply the durable mutation, COMMIT, return
      `CommitGateResult::BlockedByUseLease { lease_id, lease_scope }`
      naming the first such lease (deterministic by `lease_id`).
-
-   If both conditions fire (the closure grew **and** a fresh lease
-   now covers the enlarged closure), closure growth wins: it is the
-   more fundamental escape and its delta payload carries the
-   information the recovery worker needs to reconcile both. The fresh
-   lease will reappear on the next reconciliation attempt against the
-   correct closure.
+   - **Both fire** (delta non-empty **and** a fresh lease covers the
+     enlarged closure): emit one `commit.aborted_post_mutation` event
+     with `reason='closure_grew_and_fresh_lease'`, **both** populated
+     `delta_*` arrays **and** populated `fresh_lease_ids` — so the
+     recovery worker and audit see every escape, not just one. The
+     intent transition is the same as the other branches. Return
+     `CommitGateResult::BlockedByClosureGrew { added_* }` (closure
+     growth is the more fundamental escape — the fresh-lease check
+     would have been re-evaluated against the wrong baseline anyway).
+     The returned variant is a compact summary of the most actionable
+     escape; the event payload is the full durable evidence and is
+     what Sprint 5+ recovery and Sprint 9 audit consult.
 
    In every trip-wire branch the filesystem mutation has already
    happened, so the durable state lags behind reality; the
@@ -2165,12 +2189,24 @@ Cross-repo flows live as integration tests:
     alias newly discovered between phases, e.g., a remote mount
     coming online). Phase B's recheck observes the non-empty delta,
     transitions the intent to `recovery_required`, emits
-    `commit.aborted_post_mutation` with `reason='closure_grew'` and
-    a payload carrying the delta members, returns
+    `commit.aborted_post_mutation` with `reason='closure_grew'`,
+    populated `delta_*`, and `fresh_lease_ids=[]`, returns
     `CommitGateResult::BlockedByClosureGrew { added_* }`, and asserts
-    the durable identity mutation did **not** run. Both trip-wire
-    tests exist to prove the trip-wire fires when something escapes
-    the lock; under normal operation the trip-wire never fires.
+    the durable identity mutation did **not** run.
+  - Defensive trip-wire — tie branch (Phase B step 3 of §9.3.2):
+    combines the previous two fixtures so the closure grows **and** a
+    fresh blocking lease lands on a member of the enlarged closure
+    between Phase A and Phase B. Asserts a single
+    `commit.aborted_post_mutation` event with
+    `reason='closure_grew_and_fresh_lease'` and both populated
+    `delta_*` arrays **and** populated `fresh_lease_ids` (no escape
+    evidence dropped), the intent in `recovery_required`, and the
+    returned `CommitGateResult` is `BlockedByClosureGrew`. The
+    fresh-lease evidence on the event payload is what guarantees the
+    Sprint 5+ recovery worker can see both escapes from a single
+    durable record. All three trip-wire tests exist to prove the
+    trip-wire fires when something escapes the lock; under normal
+    operation the trip-wire never fires.
 - `commit_safety_gate_after_rename.rs` — end-to-end against the
   two-phase API: ingest → evidence-acceptance → `reconcile_rename`
   (M3, re-anchors leases) → `prepare_destructive_commit` against
