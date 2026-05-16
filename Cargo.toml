@@ -25,9 +25,21 @@ repository = "https://github.com/randomparity/voom-v2"
 [workspace.dependencies]
 # Pinned at the workspace level; member crates use `{ workspace = true }`.
 # All versions resolved by `cargo add` at implementation time.
+
+# Internal crates.
 voom-core = { version = "0.1.0-dev", path = "crates/voom-core" }
 voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
+
+# Shared third-party crates. Workspace declarations carry the union of
+# features common to every consumer; member crates add crate-specific
+# features via `{ workspace = true, features = ["..."] }`.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3.27.0"
+time = { version = "0.3.45", features = ["formatting"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

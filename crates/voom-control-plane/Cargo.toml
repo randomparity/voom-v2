@@ -11,12 +11,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
-time = { version = "0.3.45", features = ["formatting"] }
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync"] }
+sqlx = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
 voom-core = { workspace = true }
 voom-store = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.27.0"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+tokio = { workspace = true }
