@@ -100,3 +100,46 @@ async fn health_on_too_new_db_returns_503_db_schema_too_new() {
         "API must NEVER include local block"
     );
 }
+
+#[tokio::test]
+async fn health_with_corrupted_schema_meta_returns_503_db_partial_schema() {
+    // Migrations applied successfully but schema_meta is missing/corrupted —
+    // probe_schema surfaces a Migration error (DB_PARTIAL_SCHEMA). The router
+    // must classify this as a 503 dependency failure with a recovery hint,
+    // not a 500 (handler bug).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+
+    voom_store::init(&url).await.unwrap();
+    {
+        let pool = voom_store::connect(&url).await.unwrap();
+        sqlx::query("DROP TABLE schema_meta")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let cp = ControlPlane::open(url).await.unwrap();
+    let app = router(cp);
+    let res = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "corrupted schema_meta is a dependency failure, not an internal server error"
+    );
+
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "DB_PARTIAL_SCHEMA");
+    assert!(
+        json["error"]["hint"].is_string(),
+        "503 from known DB error codes must include a recovery hint"
+    );
+    assert!(
+        json.get("local").is_none(),
+        "API must NEVER include local block"
+    );
+}

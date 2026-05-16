@@ -8,7 +8,7 @@ use voom_cli::commands::{health, init, version};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
 use voom_control_plane::ControlPlane;
-use voom_core::Config;
+use voom_core::{Config, VoomError};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
@@ -46,17 +46,34 @@ async fn main() -> ExitCode {
     let code = match dispatch(cli).await {
         Ok(code) => code,
         Err(err) => {
-            let _ = emit_err(
-                "internal",
-                "INTERNAL",
-                err.to_string(),
-                Some("Re-run with --log-level=debug and file a bug".into()),
-                None,
-            );
+            // Preserve VoomError codes through anyhow so a user-correctable
+            // CONFIG_INVALID isn't collapsed into a generic INTERNAL envelope.
+            let code = err
+                .downcast_ref::<VoomError>()
+                .map_or("INTERNAL", VoomError::code);
+            let hint = if code == "INTERNAL" {
+                Some("Re-run with --log-level=debug and file a bug".to_owned())
+            } else {
+                None
+            };
+            let _ = emit_err("internal", code, err.to_string(), hint, None);
             2
         }
     };
     ExitCode::from(u8::try_from(code).unwrap_or(2))
+}
+
+/// Resolve `Config` using the values clap already parsed, so we never re-read
+/// `VOOM_LOG_LEVEL` or `VOOM_LOG_FORMAT` from the process environment after a
+/// CLI override has won. Otherwise a stale invalid env value (e.g.
+/// `VOOM_LOG_FORMAT=xml`) shadowed by `--log-format json` would still fail
+/// here as `CONFIG_INVALID` even though the user supplied a valid value.
+fn resolve_cfg(cli: &Cli) -> Result<Config, VoomError> {
+    Config::resolve(
+        cli.database_url.clone(),
+        Some(cli.log_level.clone()),
+        Some(cli.log_format.as_str().to_owned()),
+    )
 }
 
 async fn dispatch(cli: Cli) -> Result<i32> {
@@ -66,9 +83,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Health => {
+            let cfg = match resolve_cfg(&cli) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    voom_cli::envelope::emit_err(
+                        "health",
+                        err.code(),
+                        err.to_string(),
+                        None,
+                        None,
+                    )?;
+                    return Ok(2);
+                }
+            };
             // Build `Local` as soon as config resolves so any subsequent failure
             // (open, probe) emits a properly-attributed `health` envelope.
-            let cfg = Config::resolve(cli.database_url, None, None)?;
             let local = Local {
                 db_url: cfg.database_url.clone(),
                 config_path: cfg.config_path.display().to_string(),
@@ -90,7 +119,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
         }
         Command::Init => {
-            let cfg = Config::resolve(cli.database_url, None, None)?;
+            let cfg = match resolve_cfg(&cli) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
+                    return Ok(2);
+                }
+            };
             let local = Local {
                 db_url: cfg.database_url.clone(),
                 config_path: cfg.config_path.display().to_string(),

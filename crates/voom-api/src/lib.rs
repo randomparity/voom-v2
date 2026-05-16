@@ -113,12 +113,36 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 (StatusCode::OK, Json(env)).into_response()
             }
         },
-        Err(err) => err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            err.code(),
-            err.to_string(),
-            None,
-        ),
+        Err(err) => {
+            // Known database/schema failures are dependency problems, not
+            // handler bugs — return 503 with a recovery hint so operators see
+            // the same actionable status as Partial/TooNew. Reserve 500 for
+            // genuinely unexpected internal errors.
+            let (status, hint) = match err.code() {
+                "DB_UNREACHABLE" => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(
+                        "Database file is missing or unreachable from this host \
+                         — verify the configured path and filesystem permissions"
+                            .to_owned(),
+                    ),
+                ),
+                "DB_PARTIAL_SCHEMA" => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(
+                        "Schema metadata is missing or corrupted; run `voom init` \
+                         against the current binary or restore from backup"
+                            .to_owned(),
+                    ),
+                ),
+                "DB_SCHEMA_TOO_NEW" => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some("Upgrade the server binary or roll the database back".to_owned()),
+                ),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, None),
+            };
+            err_response(status, err.code(), err.to_string(), hint)
+        }
     }
 }
 
