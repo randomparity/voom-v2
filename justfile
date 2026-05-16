@@ -46,6 +46,14 @@ audit:
 deny:
     cargo deny check
 
+# Generate workspace coverage in lcov format (consumed by SonarCloud and other readers)
+coverage:
+    cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+# Generate workspace coverage as a browsable HTML report
+coverage-html:
+    cargo llvm-cov --workspace --all-features --html
+
 # Run the CLI binary
 run *ARGS:
     cargo run -p voom-cli -- {{ARGS}}
