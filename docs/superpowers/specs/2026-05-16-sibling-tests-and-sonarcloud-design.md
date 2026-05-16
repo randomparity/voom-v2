@@ -34,8 +34,12 @@ analysis job in CI.
 
 - Touching integration tests in `crates/*/tests/`. Those are already
   separate files and follow Rust's standard layout.
-- Touching `crates/voom-store/src/test_support.rs`. That is a feature-gated
-  helper module compiled into the library, not a test file.
+- Touching `crates/voom-store/src/test_support.rs`. That is a
+  feature-gated helper module compiled into the library, not a test
+  file. Its source layout stays as-is; section 5 classifies it as test
+  code in SonarCloud (`sonar.test.inclusions` plus belt-and-braces
+  `sonar.coverage.exclusions` and `sonar.cpd.exclusions`) so it does
+  not skew production duplication or coverage gates.
 - Replacing any test framework. `cargo test` remains the runner; `insta`
   snapshots stay where they are.
 - Coverage thresholds or quality gates beyond what SonarCloud applies by
@@ -113,18 +117,36 @@ breakage is bisected to a single crate.
 A `just check-test-layout` recipe fails CI on two failure modes:
 
 1. **Inline tests in `src/`.** Any file under `crates/*/src/` containing
-   an inline `mod tests {` block or any other `#[cfg(test)]`-gated
-   inline module body.
+   an active `#[cfg(test)] mod <name> { ... }` inline module item.
 2. **Orphaned `*_test.rs` files.** Any `crates/*/src/**/*_test.rs`
-   without a matching `#[path = "<x>_test.rs"]` declaration in its
+   without an active sibling declaration of the form
+   `#[cfg(test)] #[path = "<basename>_test.rs"] mod tests;` in its
    sibling source file. This catches the silent-skip failure mode where
    a test file exists but is never compiled because its `mod tests;`
    declaration was never added.
 
-The check is implemented as a ripgrep invocation — purely structural,
-no Rust parsing required. A custom clippy lint would be the
-heaviest-weight alternative and is rejected as premature: a small
-script captures the same intent.
+**Implementation: `ast-grep`, not ripgrep.** A text-pattern check (e.g.,
+ripgrep against `mod tests {`) can be fooled by comments, string
+literals, or items behind disabled `cfg`s — exactly the situations
+where the silent-skip risk is highest. The check uses `ast-grep` with
+Rust patterns so it operates on real syntax tree items:
+
+- Failure 1 is caught by an `ast-grep` pattern that matches
+  `#[cfg(test)] mod $NAME { $$$ }` inside any file under
+  `crates/*/src/`.
+- Failure 2 is caught by enumerating `crates/*/src/**/*_test.rs` and,
+  for each, running `ast-grep` against the sibling source file with a
+  pattern like
+  `#[cfg(test)] #[path = "<basename>_test.rs"] mod tests;`.
+
+A custom clippy-driver lint would be the heaviest-weight alternative
+and is rejected as premature; `ast-grep` gives the same structural
+fidelity in roughly a screen of YAML/shell. The project's global
+tooling guidance already endorses `ast-grep` for code-structure
+searches.
+
+`ast-grep` is added to `just setup` (Homebrew or `cargo install` —
+chosen at implementation time).
 
 The recipe is added to the `ci:` dependency list in the `justfile` and
 runs in the GitHub Actions `ci` workflow alongside `fmt-check`, `lint`,
@@ -174,11 +196,18 @@ sonar.projectKey=<project-key>
 sonar.sources=crates
 sonar.tests=crates
 sonar.inclusions=crates/**/src/**/*.rs
-sonar.test.inclusions=crates/**/src/**/*_test.rs,crates/**/tests/**/*.rs
+# `*_test.rs` are the new sibling unit tests; `tests/**` are integration
+# tests; `test_support*.rs` and `test_support/**` are the feature-gated
+# helper module that exists in `src/` but is test-only by purpose.
+sonar.test.inclusions=crates/**/src/**/*_test.rs,crates/**/tests/**/*.rs,crates/**/src/**/test_support.rs,crates/**/src/**/test_support/**/*.rs
 
 sonar.rust.lcov.reportPaths=lcov.info
 
 sonar.exclusions=target/**,**/target/**
+# Belt-and-braces: even if a future test_support file slips outside the
+# inclusion globs above, exclude it from coverage and duplication gates.
+sonar.coverage.exclusions=crates/**/src/**/test_support.rs,crates/**/src/**/test_support/**/*.rs
+sonar.cpd.exclusions=crates/**/src/**/test_support.rs,crates/**/src/**/test_support/**/*.rs
 ```
 
 The `org-slug` and `project-key` are placeholders filled in during
@@ -303,8 +332,13 @@ leaves the workspace green:
   each crate's surface area than necessary.
 - **`cargo-tarpaulin` for coverage.** Rejected: Linux-only, in
   maintenance mode, slower instrumentation than llvm-cov.
+- **Ripgrep-based enforcement check.** Initially considered, then
+  rejected: text-pattern matching can be fooled by comments, string
+  literals, and items behind disabled `cfg`s, which is exactly the
+  silent-skip failure mode the enforcement is meant to prevent.
+  Replaced with `ast-grep` for structural matching.
 - **Custom clippy lint for enforcement.** Rejected: orders of magnitude
-  more code than the 5-line ripgrep check for the same outcome.
+  more code than the `ast-grep` check for the same outcome.
 - **Self-hosted SonarQube.** Rejected per user direction: SonarCloud
   SaaS chosen.
 
@@ -312,8 +346,13 @@ leaves the workspace green:
 
 - Naming: `_test` (singular), matching user example.
 - SonarQube target: SonarCloud (SaaS).
-- Enforcement: CI check (ripgrep-based `just check-test-layout`).
+- Enforcement: CI check (`ast-grep`-based `just check-test-layout`,
+  tightened from an initial ripgrep proposal after adversarial
+  review).
 - CI shape: separate `coverage` job in existing `ci.yml`.
+- `test_support.rs` classification: treated as test code in SonarCloud
+  (`sonar.test.inclusions`), with belt-and-braces coverage/duplication
+  exclusions; source layout unchanged.
 
 ## Next step
 
