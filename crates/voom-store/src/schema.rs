@@ -68,11 +68,22 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
     // Read ALL rows (not just success=1). A failed-but-recorded migration
     // attempt leaves a success=0 row that must NOT be ignored — otherwise
     // health can mis-report a half-applied DB as Current.
+    //
+    // The table EXISTS at this point (we just checked sqlite_master), so a
+    // read failure means the table's columns don't match what sqlx expects:
+    // corrupted/incompatible migration metadata, not a connection problem.
+    // Classify as Migration (DB_PARTIAL_SCHEMA) so operators see schema-repair
+    // guidance instead of "database unreachable / check the path."
     let all_rows: Vec<(i64, Vec<u8>, bool)> =
         sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations")
             .fetch_all(pool)
             .await
-            .map_err(|e| VoomError::Database(format!("reading _sqlx_migrations failed: {e}")))?;
+            .map_err(|e| {
+                VoomError::Migration(format!(
+                    "_sqlx_migrations table exists but its rows could not be read \
+             (schema may be corrupted or incompatible with this binary): {e}"
+                ))
+            })?;
 
     let expected = expected_migrations();
     let known = embedded_versions();
@@ -156,9 +167,18 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
     }
 
     // successful_count == expected AND every (version, checksum) matches.
-    // Read the schema_meta marker; failures here mean the migration table
-    // applied but metadata is missing → Migration error (DB_PARTIAL_SCHEMA),
-    // not Database (DB_UNREACHABLE). The DB is reachable; its content is wrong.
+    let schema_init_at = read_schema_init_at(pool).await?;
+    Ok(SchemaState::Current {
+        migration_count: successful_count,
+        schema_init_at,
+    })
+}
+
+/// Read `schema_meta.schema_init_at` and parse it as ISO-8601. Failures here
+/// mean the migration table applied but metadata is missing or malformed →
+/// Migration error (`DB_PARTIAL_SCHEMA`), not Database (`DB_UNREACHABLE`).
+/// The DB is reachable; its content is wrong.
+async fn read_schema_init_at(pool: &SqlitePool) -> Result<OffsetDateTime, VoomError> {
     let init_at: String =
         sqlx::query_scalar("SELECT value FROM schema_meta WHERE key = 'schema_init_at'")
             .fetch_one(pool)
@@ -169,8 +189,7 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
                      but schema is corrupted): {e}"
                 ))
             })?;
-
-    let schema_init_at = OffsetDateTime::parse(
+    OffsetDateTime::parse(
         &init_at,
         &time::format_description::well_known::Iso8601::DEFAULT,
     )
@@ -178,11 +197,6 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
         VoomError::Migration(format!(
             "schema_meta.schema_init_at is malformed ({init_at:?}): {e}"
         ))
-    })?;
-
-    Ok(SchemaState::Current {
-        migration_count: successful_count,
-        schema_init_at,
     })
 }
 
@@ -216,6 +230,27 @@ mod tests {
     #[tokio::test]
     async fn expected_migrations_matches_embedded_count() {
         assert_eq!(expected_migrations(), 1);
+    }
+
+    #[tokio::test]
+    async fn probe_returns_migration_error_on_malformed_sqlx_migrations_table() {
+        // The _sqlx_migrations table exists but its shape doesn't match what
+        // sqlx (and probe_schema) expect. This is corrupted/incompatible
+        // metadata — not a connection failure — so the error must surface as
+        // Migration (DB_PARTIAL_SCHEMA) rather than Database (DB_UNREACHABLE).
+        let pool = connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE _sqlx_migrations (wrong_column TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = probe_schema(&pool).await.unwrap_err();
+        assert_eq!(err.code(), "DB_PARTIAL_SCHEMA");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("_sqlx_migrations"),
+            "error message must reference the offending table: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -52,15 +52,36 @@ jobs:
           # `git status --porcelain`, and any untracked file would taint the
           # release binary's `dirty` flag.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --package voom-cli --target ${{ matrix.target }}
+        # `--locked` refuses to rewrite Cargo.lock during dependency
+        # resolution. A tag whose lockfile is stale should fail the release
+        # rather than silently producing artifacts built from a freshly
+        # resolved (but unrecorded) dependency graph.
+        run: cargo build --release --locked --package voom-cli --target ${{ matrix.target }}
+      - name: Verify clean tree after build
+        # build.rs trusts `git status --porcelain` at build time. If anything
+        # in the build step wrote to the checkout (sysroot install, sccache
+        # artifacts dropped in-tree, etc.), the release binary would have
+        # captured a dirty flag — or, worse, a clean flag from cached
+        # build-script output that no longer reflects reality. Fail loudly.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Working tree dirty after build:"
+            git status --short
+            exit 1
+          fi
       - name: Verify release binary provenance (native targets only)
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-apple-darwin'
         run: |
           out=$(./target/${{ matrix.target }}/release/voom version)
           echo "$out"
-          # Tag pushes must produce non-dirty release binaries.
+          # Tag pushes must produce release-flagged, clean binaries whose
+          # semver matches the tag (less the leading `v`).
+          expected_semver="${GITHUB_REF_NAME#v}"
           echo "$out" | jq -e '.data.dirty == false' >/dev/null
           echo "$out" | jq -e '.data.build_profile == "release"' >/dev/null
+          echo "$out" | jq -e '.data.release == true' >/dev/null
+          echo "$out" | jq -e --arg expected "$expected_semver" \
+            '.data.semver == $expected' >/dev/null
       - name: Package
         run: |
           name="voom-${{ github.ref_name }}-${{ matrix.target }}"
