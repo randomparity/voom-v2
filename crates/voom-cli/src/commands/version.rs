@@ -5,16 +5,6 @@ use voom_core::VersionInfo;
 
 use crate::envelope::emit_ok;
 
-#[must_use]
-pub fn build_version_info(
-    semver: &str,
-    git_sha: &str,
-    dirty: bool,
-    build_profile: &str,
-) -> VersionInfo {
-    VersionInfo::new(semver, git_sha, dirty, build_profile)
-}
-
 /// Probe `git status --porcelain` at runtime and return the current dirty
 /// state. Returns `None` when git is unavailable, the cwd isn't a checkout,
 /// or the command fails — callers fall back to the compile-time flag in that
@@ -50,6 +40,6 @@ pub fn run() -> io::Result<()> {
         compile_time_dirty
     };
 
-    let info = build_version_info(semver, sha, dirty, profile);
+    let info = VersionInfo::new(semver, sha, dirty, profile);
     emit_ok("version", info, None, Vec::new())
 }

@@ -13,7 +13,7 @@ pub mod error;
 pub mod ids;
 pub mod version;
 
-pub use clock::{Clock, SystemClock};
+pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use error::VoomError;
 pub use ids::{EventId, JobId, LeaseId, MediaId, TicketId, WorkerId};

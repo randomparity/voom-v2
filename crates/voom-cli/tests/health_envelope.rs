@@ -35,7 +35,7 @@ async fn health_against_uninitialized_db_returns_exit_code_2() {
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::connect_or_create(&url).await.unwrap();
 
-    let cp = ControlPlane::open(url.clone()).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     let code = health::run(&cp, local_for(&url)).await.unwrap();
     assert_eq!(
         code, 2,
@@ -49,7 +49,7 @@ async fn health_against_initialized_db_returns_exit_code_0() {
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
 
-    let cp = ControlPlane::open(url.clone()).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     let code = health::run(&cp, local_for(&url)).await.unwrap();
     assert_eq!(code, 0);
 }

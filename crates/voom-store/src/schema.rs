@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
@@ -45,12 +46,15 @@ pub fn expected_migrations() -> u32 {
 /// Map of `version → checksum` for every migration this build ships. Both the
 /// version *and* the checksum are validated against `_sqlx_migrations` rows
 /// so a row with a known version but mutated SQL is still surfaced as drift.
-fn embedded_versions() -> HashMap<i64, Vec<u8>> {
+///
+/// Built once on first access — checksums are static, so `probe_schema`
+/// doesn't need to rebuild the map on every health request.
+static EMBEDDED_VERSIONS: LazyLock<HashMap<i64, Vec<u8>>> = LazyLock::new(|| {
     MIGRATOR
         .iter()
         .map(|m| (m.version, m.checksum.to_vec()))
         .collect()
-}
+});
 
 /// Inspect the schema without modifying it.
 pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
@@ -110,7 +114,7 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
             })?;
 
     let expected = expected_migrations();
-    let known = embedded_versions();
+    let known: &HashMap<i64, Vec<u8>> = &EMBEDDED_VERSIONS;
 
     let unknown_version_present = all_rows.iter().any(|(v, _, _)| !known.contains_key(v));
     let any_failed = all_rows.iter().any(|(_, _, success)| !success);

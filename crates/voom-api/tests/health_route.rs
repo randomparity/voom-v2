@@ -15,7 +15,7 @@ async fn fixture_uninit() -> (tempfile::NamedTempFile, axum::Router) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::connect_or_create(&url).await.unwrap();
-    let cp = ControlPlane::open(url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     (tmp, router(cp))
 }
 
@@ -23,7 +23,7 @@ async fn fixture_initialized() -> (tempfile::NamedTempFile, axum::Router) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
-    let cp = ControlPlane::open(url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     (tmp, router(cp))
 }
 
@@ -84,7 +84,7 @@ async fn health_on_too_new_db_returns_503_db_schema_too_new() {
         .unwrap();
     }
 
-    let cp = ControlPlane::open(url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     let app = router(cp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -119,7 +119,7 @@ async fn health_with_dirty_migration_row_returns_503_db_dirty_migration() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     let app = router(cp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -159,7 +159,7 @@ async fn health_with_corrupted_schema_meta_returns_503_db_partial_schema() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
     let app = router(cp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())

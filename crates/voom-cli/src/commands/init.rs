@@ -1,6 +1,7 @@
 use std::io;
 
 use serde::Serialize;
+use voom_core::format_iso8601;
 
 use crate::envelope::{Local, emit_err, emit_ok};
 
@@ -16,10 +17,7 @@ pub async fn run(database_url: &str, local: Local) -> io::Result<i32> {
         Ok(report) => {
             let data = InitData {
                 migrations_applied: report.migrations_applied,
-                schema_init_at: report
-                    .schema_init_at
-                    .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                    .unwrap_or_else(|_| report.schema_init_at.unix_timestamp().to_string()),
+                schema_init_at: format_iso8601(report.schema_init_at),
                 already_initialized: report.already_initialized,
             };
             emit_ok("init", data, Some(local), Vec::new()).map(|()| 0)

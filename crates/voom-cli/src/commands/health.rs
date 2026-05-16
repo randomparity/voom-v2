@@ -3,6 +3,7 @@ use std::io;
 use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::{ControlPlane, DbStatus, HealthSnapshot};
+use voom_core::format_iso8601;
 
 use crate::envelope::{Local, emit_err, emit_ok};
 
@@ -127,10 +128,7 @@ fn emit_snapshot(snap: &HealthSnapshot, local: Local) -> io::Result<i32> {
     let data = HealthData {
         db: HealthDb {
             status: status_str,
-            schema_init_at: snap.schema_init_at.map(|t| {
-                t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-                    .unwrap_or_else(|_| t.unix_timestamp().to_string())
-            }),
+            schema_init_at: snap.schema_init_at.map(format_iso8601),
             migration_count: snap.migration_count,
         },
         runtime: HealthRuntime {

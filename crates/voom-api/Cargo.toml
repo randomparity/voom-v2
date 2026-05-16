@@ -14,7 +14,6 @@ workspace = true
 axum = "0.8.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-time = { version = "0.3.45", features = ["serde", "formatting"] }
 tower = "0.5.3"
 voom-control-plane = { version = "0.1.0-dev", path = "../voom-control-plane" }
 voom-core = { version = "0.1.0-dev", path = "../voom-core" }

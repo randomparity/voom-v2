@@ -16,7 +16,6 @@ use voom_store::{SchemaState, connect, probe_schema};
 #[derive(Debug, Clone)]
 pub struct ControlPlane {
     pool: SqlitePool,
-    database_url: String,
 }
 
 impl ControlPlane {
@@ -24,14 +23,9 @@ impl ControlPlane {
     /// the DB doesn't exist, returns `DB_UNREACHABLE`. The CLI's `init` command
     /// is the only path that creates databases, and it calls
     /// `voom_store::init(url)` directly without going through `ControlPlane`.
-    pub async fn open(database_url: String) -> Result<Self, VoomError> {
-        let pool = connect(&database_url).await?;
-        Ok(Self { pool, database_url })
-    }
-
-    #[must_use]
-    pub fn database_url(&self) -> &str {
-        &self.database_url
+    pub async fn open(database_url: &str) -> Result<Self, VoomError> {
+        let pool = connect(database_url).await?;
+        Ok(Self { pool })
     }
 
     /// Read-only health snapshot.
@@ -122,7 +116,7 @@ mod tests {
     async fn open_refuses_missing_database() {
         let tmp = tempfile::tempdir().unwrap();
         let url = format!("sqlite://{}", tmp.path().join("nope.db").display());
-        let err = ControlPlane::open(url).await.unwrap_err();
+        let err = ControlPlane::open(&url).await.unwrap_err();
         assert_eq!(err.code(), "DB_UNREACHABLE");
     }
 
@@ -133,7 +127,7 @@ mod tests {
         // read-side path so the no-create rule isn't violated.
         voom_store::connect_or_create(&url).await.unwrap();
 
-        let cp = ControlPlane::open(url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
         assert_eq!(snap.db_status, DbStatus::Uninitialized);
         assert!(snap.schema_init_at.is_none());
@@ -146,7 +140,7 @@ mod tests {
         let report = voom_store::init(&url).await.unwrap();
         assert!(!report.already_initialized);
 
-        let cp = ControlPlane::open(url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
         assert_eq!(snap.db_status, DbStatus::Current);
         assert_eq!(snap.migration_count, Some(1));
@@ -176,7 +170,7 @@ mod tests {
                 .unwrap();
         }
 
-        let cp = ControlPlane::open(url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
         assert_eq!(snap.db_status, DbStatus::Dirty);
         assert_eq!(snap.failed_version, Some(1));
@@ -202,7 +196,7 @@ mod tests {
             .unwrap();
         }
 
-        let cp = ControlPlane::open(url).await.unwrap();
+        let cp = ControlPlane::open(&url).await.unwrap();
         let snap = cp.health().await.unwrap();
         assert_eq!(snap.db_status, DbStatus::TooNew);
         assert!(snap.migration_count.unwrap() > snap.expected_migrations.unwrap());

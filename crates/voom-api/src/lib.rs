@@ -8,18 +8,26 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Serialize;
 use voom_control_plane::{ControlPlane, DbStatus};
+use voom_core::format_iso8601;
 
 pub const SCHEMA_VERSION: &str = "0";
 
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub control_plane: ControlPlane,
+    /// Number of tokio worker threads, snapshotted at router construction
+    /// so `/health` doesn't re-syscall `available_parallelism()` per request.
+    tokio_workers: usize,
 }
 
 pub fn router(control_plane: ControlPlane) -> axum::Router {
+    let tokio_workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     axum::Router::new()
         .route("/health", get(health))
-        .with_state(AppState { control_plane })
+        .with_state(AppState {
+            control_plane,
+            tokio_workers,
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -112,15 +120,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                     data: Some(HealthData {
                         db: HealthDb {
                             status: "current",
-                            schema_init_at: snap.schema_init_at.map(|t| {
-                                t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-                                    .unwrap_or_default()
-                            }),
+                            schema_init_at: snap.schema_init_at.map(format_iso8601),
                             migration_count: snap.migration_count,
                         },
                         runtime: HealthRuntime {
-                            tokio_workers: std::thread::available_parallelism()
-                                .map_or(1, std::num::NonZero::get),
+                            tokio_workers: state.tokio_workers,
                         },
                     }),
                     warnings: Vec::new(),

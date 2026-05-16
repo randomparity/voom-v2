@@ -4,11 +4,11 @@
 )]
 
 use serde_json::Value;
-use voom_cli::commands::version::build_version_info;
+use voom_core::VersionInfo;
 
 #[test]
 fn version_envelope_shape() {
-    let info = build_version_info("0.1.0-dev", "abc1234", false, "debug");
+    let info = VersionInfo::new("0.1.0-dev", "abc1234", false, "debug");
 
     insta::with_settings!({ sort_maps => true }, {
         insta::assert_json_snapshot!("version_dev", &info);
@@ -17,9 +17,9 @@ fn version_envelope_shape() {
 
 #[test]
 fn release_flag_is_true_only_when_no_prerelease() {
-    let dev = build_version_info("0.1.0-dev", "abc1234", false, "debug");
-    let rel = build_version_info("0.1.0", "def5678", false, "release");
-    let dirty = build_version_info("0.1.0-dev", "abc1234", true, "debug");
+    let dev = VersionInfo::new("0.1.0-dev", "abc1234", false, "debug");
+    let rel = VersionInfo::new("0.1.0", "def5678", false, "release");
+    let dirty = VersionInfo::new("0.1.0-dev", "abc1234", true, "debug");
 
     assert!(!dev.release);
     assert!(rel.release);
@@ -28,7 +28,7 @@ fn release_flag_is_true_only_when_no_prerelease() {
 
 #[test]
 fn version_envelope_serializes_as_expected_keys() {
-    let info = build_version_info("0.1.0-dev", "abc1234", false, "debug");
+    let info = VersionInfo::new("0.1.0-dev", "abc1234", false, "debug");
     let json: Value = serde_json::to_value(&info).unwrap();
     let obj = json.as_object().unwrap();
     let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();

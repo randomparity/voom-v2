@@ -106,7 +106,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 db_url: cfg.database_url.clone(),
                 config_path: cfg.config_path.display().to_string(),
             };
-            match ControlPlane::open(cfg.database_url).await {
+            match ControlPlane::open(&cfg.database_url).await {
                 Ok(cp) => Ok(health::run(&cp, local).await?),
                 Err(err) => {
                     let hint =
