@@ -54,6 +54,10 @@ coverage:
 coverage-html:
     cargo llvm-cov --workspace --all-features --html
 
+# Enforce the sibling-test layout: no inline tests in src/, every *_test.rs is linked
+check-test-layout:
+    ./scripts/check-test-layout.sh
+
 # Run the CLI binary
 run *ARGS:
     cargo run -p voom-cli -- {{ARGS}}
