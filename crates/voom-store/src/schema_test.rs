@@ -1,0 +1,109 @@
+use super::*;
+use crate::pool::connect;
+
+/// SQL that creates an empty `_sqlx_migrations` table matching sqlx's
+/// schema. Tests use this to simulate post-init states without depending
+/// on Task 11's `init_on` (which doesn't exist yet at this checkpoint).
+const CREATE_MIGRATIONS_TABLE: &str = "\
+    CREATE TABLE _sqlx_migrations ( \
+        version BIGINT PRIMARY KEY, \
+        description TEXT NOT NULL, \
+        installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+        success BOOLEAN NOT NULL, \
+        checksum BLOB NOT NULL, \
+        execution_time BIGINT NOT NULL \
+    )";
+
+#[tokio::test]
+async fn probe_returns_uninitialized_on_fresh_db() {
+    let pool = connect("sqlite::memory:").await.unwrap();
+    assert_eq!(
+        probe_schema(&pool).await.unwrap(),
+        SchemaState::Uninitialized
+    );
+}
+
+#[tokio::test]
+async fn expected_migrations_matches_embedded_count() {
+    assert_eq!(expected_migrations(), 1);
+}
+
+#[tokio::test]
+async fn probe_refuses_foreign_database_with_no_sqlx_migrations() {
+    // An existing SQLite DB that has unrelated user tables but lacks
+    // `_sqlx_migrations` belongs to someone else. probe_schema must
+    // refuse rather than report Uninitialized — otherwise voom init
+    // would happily add VOOM tables to a foreign DB after a typo'd
+    // --database-url.
+    let pool = connect("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE someone_elses_data (id INTEGER PRIMARY KEY, payload TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = probe_schema(&pool).await.unwrap_err();
+    assert_eq!(err.code(), "CONFIG_INVALID");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("someone_elses_data") || msg.contains("another application"),
+        "error must identify the foreign table or surface the wrong-DB diagnosis: {msg}"
+    );
+
+    // And: the DB was NOT mutated — the foreign table is still alone.
+    let table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(table_count, 1, "probe must not have created any tables");
+}
+
+#[tokio::test]
+async fn probe_returns_migration_error_on_malformed_sqlx_migrations_table() {
+    // The _sqlx_migrations table exists but its shape doesn't match what
+    // sqlx (and probe_schema) expect. This is corrupted/incompatible
+    // metadata — not a connection failure — so the error must surface as
+    // Migration (DB_PARTIAL_SCHEMA) rather than Database (DB_UNREACHABLE).
+    let pool = connect("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE _sqlx_migrations (wrong_column TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = probe_schema(&pool).await.unwrap_err();
+    assert_eq!(err.code(), "DB_PARTIAL_SCHEMA");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("_sqlx_migrations"),
+        "error message must reference the offending table: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn probe_returns_too_new_on_renumbered_migration_at_same_count() {
+    // Pathological case: count matches expectation but the *version* is
+    // not in the embedded MIGRATOR. Seed migrations table by hand — no
+    // dependency on init_on (which lands in Task 11).
+    let pool = connect("sqlite::memory:").await.unwrap();
+    sqlx::query(CREATE_MIGRATIONS_TABLE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations \
+         (version, description, installed_on, success, checksum, execution_time) \
+         VALUES (42, 'renumbered', strftime('%s','now'), 1, X'00', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let state = probe_schema(&pool).await.unwrap();
+    match state {
+        SchemaState::TooNew { applied, expected } => {
+            assert_eq!(applied, expected, "count matches but version is unknown");
+        }
+        other => panic!("expected TooNew (version not in MIGRATOR), got {other:?}"),
+    }
+}
