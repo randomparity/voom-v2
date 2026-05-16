@@ -16,7 +16,7 @@ libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "time"] }
 time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
-voom-core = { version = "0.1.0-dev", path = "../voom-core" }
+voom-core = { workspace = true }
 
 [features]
 # Test-only public surface: enables init_on(pool) and similar
