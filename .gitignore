@@ -1,0 +1,16 @@
+# Superpowers Plugin
+# Plans are transient, specs are permanent
+docs/superpowers/plans/
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# macOS
+.DS_Store
+
+# Editor scratch
+*.swp
+.idea/
+.vscode/

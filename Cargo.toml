@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/voom-core",
+    "crates/voom-store",
+    "crates/voom-events",
+    "crates/voom-policy",
+    "crates/voom-plan",
+    "crates/voom-scheduler",
+    "crates/voom-artifact",
+    "crates/voom-worker-protocol",
+    "crates/voom-control-plane",
+    "crates/voom-api",
+    "crates/voom-cli",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["VOOM contributors"]
+repository = "https://github.com/randomparity/voom-v2"
+
+[workspace.dependencies]
+# Pinned at the workspace level; member crates use `{ workspace = true }`.
+# All versions resolved by `cargo add` at implementation time.
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Panic prevention
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+# No cheating
+allow_attributes = "deny"
+# Code hygiene
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# Safety
+await_holding_lock = "deny"
+large_futures = "deny"
+exit = "deny"
+mem_forget = "deny"
+# Pedantic relaxations (too noisy)
+module_name_repetitions = "allow"
+similar_names = "allow"
+# Doc-completeness pedantic lints — Sprint 0 prioritizes shipping working
+# code over exhaustive # Errors / # Panics docs on every fallible function.
+# Re-enable in a documentation-hardening sprint.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
