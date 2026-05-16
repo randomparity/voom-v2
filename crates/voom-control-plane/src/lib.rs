@@ -142,7 +142,7 @@ impl HealthSnapshot {
                     "Manual recovery required: remove the failed row from \
                      _sqlx_migrations (e.g. DELETE FROM _sqlx_migrations WHERE \
                      version = <failed_version>) or restore from backup. Do NOT \
-                     just re-run voom init."
+                     just re-run voom init — it will fail the same way."
                         .to_owned(),
                 ),
             }),

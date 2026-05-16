@@ -109,19 +109,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             match ControlPlane::open(&cfg.database_url).await {
                 Ok(cp) => Ok(health::run(&cp, local).await?),
                 Err(err) => {
-                    let hint = match err.error_code() {
-                        ErrorCode::DbUnreachable => Some(
-                            "Database file is missing — run `voom init` to create it".to_owned(),
-                        ),
-                        ErrorCode::DbUninitialized
-                        | ErrorCode::DbPartialSchema
-                        | ErrorCode::DbDirtyMigration
-                        | ErrorCode::DbSchemaTooNew
-                        | ErrorCode::ConfigInvalid
-                        | ErrorCode::NotFound
-                        | ErrorCode::Internal
-                        | ErrorCode::BadArgs => None,
-                    };
+                    // Share the hint mapper with `health::run` so the two
+                    // open-failure paths cannot give different operator
+                    // guidance for the same error code.
+                    let hint = health::voom_error_hint(&err);
                     voom_cli::envelope::emit_err(
                         "health",
                         err.code(),

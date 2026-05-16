@@ -45,7 +45,11 @@ pub async fn run(cp: &ControlPlane, local: Local) -> io::Result<i32> {
 /// Per-`ErrorCode` remediation hint for failures bubbling out of
 /// `ControlPlane::open` / `health`. Exhaustive so a new variant fails to
 /// compile here rather than silently shipping no hint.
-fn voom_error_hint(err: &VoomError) -> Option<String> {
+///
+/// Shared by both `health::run` and the open-path in `main::dispatch` so the
+/// two CLI sites cannot drift apart.
+#[must_use]
+pub fn voom_error_hint(err: &VoomError) -> Option<String> {
     match err.error_code() {
         ErrorCode::DbUnreachable => Some(
             "Database file is missing or unreachable — run `voom init` to \
