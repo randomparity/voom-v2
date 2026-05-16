@@ -10,6 +10,35 @@ use voom_cli::logging;
 use voom_control_plane::ControlPlane;
 use voom_core::{Config, ErrorCode, VoomError};
 
+/// Process exit codes used by the `voom` binary. The numeric values are
+/// public contract: agents key on these.
+///
+/// Replaces the previous `Result<i32>` signature on `dispatch`, where
+/// `u8::try_from(code).unwrap_or(2)` would silently clamp any future
+/// out-of-range code to 2 — hiding the real exit.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+enum Exit {
+    Ok = 0,
+    BadArgs = 1,
+    Failure = 2,
+}
+
+impl Exit {
+    /// Map an integer code returned by `health::run` / `init::run` (which
+    /// keep `i32` for test ergonomics) into the typed exit set. Anything
+    /// outside `{0, 1}` becomes `Failure` rather than being silently
+    /// clamped to 2 — this is the explicit decision the old `unwrap_or(2)`
+    /// hid.
+    fn from_run_code(code: i32) -> Self {
+        match code {
+            0 => Self::Ok,
+            1 => Self::BadArgs,
+            _ => Self::Failure,
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     // Use try_parse so clap errors flow through the JSON envelope writer
@@ -32,7 +61,7 @@ async fn main() -> ExitCode {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) {
                 e.print().ok();
-                return ExitCode::from(0);
+                return ExitCode::from(Exit::Ok as u8);
             }
             // Everything else is a user error — emit BAD_ARGS envelope.
             let _ = voom_cli::envelope::emit_err(
@@ -42,13 +71,13 @@ async fn main() -> ExitCode {
                 Some("Run `voom --help` for usage".into()),
                 None,
             );
-            return ExitCode::from(1);
+            return ExitCode::from(Exit::BadArgs as u8);
         }
     };
     logging::init(&cli.log_level, cli.log_format.to_core());
 
-    let code = match dispatch(cli).await {
-        Ok(code) => code,
+    let exit = match dispatch(cli).await {
+        Ok(exit) => exit,
         Err(err) => {
             // Preserve VoomError codes through anyhow so a user-correctable
             // CONFIG_INVALID isn't collapsed into a generic INTERNAL envelope.
@@ -61,10 +90,10 @@ async fn main() -> ExitCode {
                 None
             };
             let _ = emit_err("internal", error_code.as_str(), err.to_string(), hint, None);
-            2
+            Exit::Failure
         }
     };
-    ExitCode::from(u8::try_from(code).unwrap_or(2))
+    ExitCode::from(exit as u8)
 }
 
 /// Resolve `Config` using the values clap already parsed, so we never re-read
@@ -80,11 +109,11 @@ fn resolve_cfg(cli: &Cli) -> Result<Config, VoomError> {
     )
 }
 
-async fn dispatch(cli: Cli) -> Result<i32> {
+async fn dispatch(cli: Cli) -> Result<Exit> {
     match cli.command {
         Command::Version => {
             version::run()?;
-            Ok(0)
+            Ok(Exit::Ok)
         }
         Command::Health => {
             let cfg = match resolve_cfg(&cli) {
@@ -97,7 +126,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         None,
                         None,
                     )?;
-                    return Ok(2);
+                    return Ok(Exit::Failure);
                 }
             };
             // Build `Local` as soon as config resolves so any subsequent failure
@@ -107,7 +136,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 config_path: cfg.config_path.display().to_string(),
             };
             match ControlPlane::open(&cfg.database_url).await {
-                Ok(cp) => Ok(health::run(&cp, local).await?),
+                Ok(cp) => Ok(Exit::from_run_code(health::run(&cp, local).await?)),
                 Err(err) => {
                     // Share the hint mapper with `health::run` so the two
                     // open-failure paths cannot give different operator
@@ -120,7 +149,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         hint,
                         Some(local),
                     )?;
-                    Ok(2)
+                    Ok(Exit::Failure)
                 }
             }
         }
@@ -129,14 +158,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Ok(cfg) => cfg,
                 Err(err) => {
                     voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
-                    return Ok(2);
+                    return Ok(Exit::Failure);
                 }
             };
             let local = Local {
                 db_url: cfg.database_url.clone(),
                 config_path: cfg.config_path.display().to_string(),
             };
-            Ok(init::run(&cfg.database_url, local).await?)
+            Ok(Exit::from_run_code(
+                init::run(&cfg.database_url, local).await?,
+            ))
         }
     }
 }
