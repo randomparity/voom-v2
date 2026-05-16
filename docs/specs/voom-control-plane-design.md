@@ -343,10 +343,11 @@ Use lease examples:
 - worker-owned operation
 - CLI or web UI maintenance lock
 
-Playback leases block delete, archive, replace, or move commits by default.
-They can also reduce scheduling score for heavy reads from the same location.
-Manual blocking locks override automation. Expired leases are cleaned up by the
-control plane.
+Playback leases block delete, archive, replace, or move commits by default;
+the authoritative behavior lives in the `Commit Safety Gate` under
+`## Runtime Use Lease Model`. They can also reduce scheduling score for heavy
+reads from the same location. Manual blocking locks override automation.
+Expired leases are cleaned up by the control plane.
 
 ### Scheduler
 
@@ -621,9 +622,15 @@ object-store key, backup location, remote cache, or historical path.
 ### Ingest Behavior
 
 On first ingest, the system computes a content hash after file-stability rules
-pass. It uses the hash, path rules, external metadata, and existing evidence to
-decide whether the file is already known. If it is not known, the control plane
-creates:
+pass. Every newly discovered filesystem object gets a new `FileAsset` by
+default, unless it resolves to the same physical-object identity as an
+existing tracked `FileLocation` (in which case it is recorded as an
+additional `FileLocation` on the existing `FileVersion` — see
+`Ingest Identity Invariants`). For an object that is not an alias, the
+hash, path rules, external metadata, and existing evidence produce
+`IdentityEvidence` describing how the new asset relates to what is already
+known, not a decision to merge identity. For each newly discovered
+independent object, the control plane creates:
 
 - a `FileAsset` UID
 - an initial `FileVersion`
@@ -634,6 +641,122 @@ creates:
 The hash helps match known content and detect exact duplicates, but it does not
 become the durable identity. Policy actions can change bytes while preserving
 the file asset UID.
+
+### Ingest Identity Invariants
+
+- Each newly discovered filesystem object is treated as an independent
+  copy by default and receives its own `FileAsset` UID. Ingest never
+  merges two distinct independent copies into one `FileAsset`.
+- A newly discovered path is recorded as an additional `FileLocation` on
+  an existing `FileVersion` only when ingest can prove immutable
+  physical-object identity, not merely a matching reusable name. For
+  local filesystems, that proof requires a stable file identity that
+  survives delete/recreate (a generation-stamped file ID or the
+  equivalent for the filesystem in use), current liveness of the
+  previously tracked location, and hash and size validation against the
+  recorded `FileVersion`; a matching `(device, inode)` alone is not
+  sufficient because inode numbers are reused after delete/recreate. For
+  object stores, that proof requires the bucket and key plus an
+  immutable provider generation or version ID (for example an S3 version
+  ID or a GCS generation number) that names the specific object
+  generation rather than its current contents. A matching key without
+  immutable-generation proof becomes a new `FileAsset`; the key match is
+  recorded as `IdentityEvidence` (`path_rule_match` or
+  `external_id_match` as appropriate) but does not attach a new
+  `FileVersion` to an existing `FileAsset`, because object-store keys
+  are reusable after overwrite or delete/recreate and a key match alone
+  cannot prove the bytes belong to the existing lineage. A
+  content-addressed ETag or hash match proves byte equality, not object
+  identity — delete/recreate with identical bytes can produce the same
+  value across distinct objects — and is recorded as `IdentityEvidence`
+  (`hash_match`) rather than alias proof. The only path that adds a new
+  `FileVersion` to an existing `FileAsset` is a host-committed lineage
+  operation that produces new bytes from a prior `FileVersion` of the
+  same asset — for example transcode, remux, or a restore that yields
+  content-different output. Operations that preserve bytes (rename,
+  move, archive, storage-provider migration, immutable-generation
+  alias attachment, and external rename/move reconciliation) operate
+  at the `FileLocation` level on an existing `FileVersion` and do not
+  create a new `FileVersion`: alias attachment adds a new
+  `FileLocation` to the existing `FileVersion`, rename/move
+  reconciliation retires one `FileLocation` and records another on the
+  same `FileVersion`, and storage-provider migration records the same
+  bytes at a new `FileLocation` while keeping the `FileVersion`
+  unchanged. A discovered object that cannot prove
+  immutable identity against any existing tracked location follows the
+  default rule and becomes a new `FileAsset`. Whenever a `FileLocation`
+  is recorded as an alias of an existing `FileVersion`, the commit
+  safety gate's affected-scope closure must include every `FileLocation`
+  of that `FileVersion`, including aliased paths, so destructive work on
+  one location cannot bypass a blocking lease held against another
+  location of the same bytes.
+- Lineage continuity across a `FileAsset` (rename, move, remux, transcode,
+  archive, restore, storage-provider migration) is only established through
+  a host-committed operation that produced the new path or bytes from a
+  prior `FileVersion` of the same asset.
+- External rename and move reconciliation is one such host-committed
+  operation, but it is a reconciliation of durable state to observed
+  reality, not a destructive commit the host is choosing to initiate.
+  When a watcher or rescan discovers a path that proves the same
+  immutable physical-object identity as a specific `FileLocation` on an
+  existing `FileVersion`, and that `FileLocation` is no longer live at
+  its recorded path, the host commits a rename/move event that retires
+  the missing `FileLocation` and records the new one on the same
+  `FileAsset` and `FileVersion`. Other `FileLocation`s of the same
+  `FileVersion` are unaffected. The `Commit Safety Gate` does not block
+  reconciliation: the physical move has already happened outside the
+  host's authority, and refusing to record it would only leave durable
+  state stale. Inside the same commit transaction, blocking leases
+  scoped to the retired `FileLocation` are re-anchored to the new
+  `FileLocation` — preserving `lease_id`, `issuer`, `acquired_at`,
+  `expires_at`, `last_heartbeat_at`, and `blocking_mode` — so the
+  protection invariant continues to hold on the moved bytes; an
+  `external move re-anchored lease` event is recorded for each, and the
+  issuer is notified through the same channel used for other lease
+  lifecycle transitions but does not need to re-acquire. An issuer that
+  wants to release after the move uses the normal release path; a
+  permissioned force-release remains available as an audited override
+  that terminates the lease with `force_released` and writes its own
+  override event, and forced release does not bypass the safety gate on
+  any later destructive commit. Advisory leases scoped to the retired
+  location are re-anchored in the same way, as are other per-location
+  durable records that logically follow the physical bytes (path-based
+  metrics, transfer history, and similar). Accepted `IdentityEvidence`
+  records are immutable: pinned `FileVersion` IDs, hashes, and observed
+  locations are not rewritten by the reconciliation. The reconciliation
+  appends a new evidence record linked to the move event that observes
+  the new `FileLocation`, but the original accepted-evidence pin is
+  preserved as written. The `Commit Safety Gate`'s evidence
+  revalidation continues to evaluate the original pinned facts, so any
+  later destructive action that depended on evidence accepted against
+  the retired location fails with `stale identity evidence` until the
+  evidence is re-collected against the current state and re-accepted by
+  policy or user. Append-only event records keep their original
+  references, since they are historical facts rather than durable
+  per-location state. If immutable identity cannot be proven, ingest
+  falls back to the default rule and creates a new `FileAsset`.
+- Hash matches, path-rule matches, and external-metadata matches between a
+  newly discovered object and an existing asset are recorded as
+  `IdentityEvidence` (`hash_match`, `path_rule_match`, `external_id_match`,
+  `duplicate_of_asset`, `same_as_asset`). They never collapse identity at
+  ingest. Duplicate and same-as evidence is pinned to the specific
+  `FileVersion` IDs, observed hashes, and observed locations that produced
+  it; evidence does not auto-carry forward to new `FileVersion`s of either
+  asset.
+- Acting on duplicate or same-as evidence (archive, delete, replace)
+  requires an accepted retention policy or explicit user confirmation, and
+  produces a host-committed event referencing the evidence used. The host
+  commit transaction revalidates that the pinned `FileVersion` IDs,
+  hashes, and locations the evidence was accepted against still describe
+  the current state; if any pinned attribute has changed, the action
+  aborts with a stale-identity-evidence error and the evidence must be
+  re-collected and re-accepted before retry.
+- This spec deliberately does not define a `merge` operation that
+  collapses two `FileAsset` lineages into one; introducing merge requires
+  a follow-on specification covering its transaction semantics,
+  original-history preservation, lease and event-link handling, conflict
+  resolution, and rollback behavior. Until then, no policy or user action
+  may collapse distinct `FileAsset` UIDs.
 
 ### Variant Retention
 
@@ -842,6 +965,115 @@ External systems can create use leases from playback or scan activity. For
 example, Plex or Jellyfin activity can protect an asset from replacement while a
 user is watching it.
 
+### Lease Fields
+
+- `lease_id`, `kind` (playback, scan, copy, manual lock, external lock,
+  worker operation)
+- `scope`: target type and target ID (asset, bundle, version, or location)
+- `issuer`: user, control plane subsystem, worker, or named external system
+- `blocking_mode`: advisory or blocking
+- `acquired_at`, `expires_at`, `last_heartbeat_at`
+- `clock_source`: the monotonic-plus-wall clock the control plane uses to
+  evaluate freshness (named explicitly so external issuers cannot supply a
+  drifting clock)
+- `release_reason` when terminated (released, expired, issuer_lost,
+  superseded, force_released)
+
+### Lease Lifecycle
+
+- Automated, external, and worker-issued leases have a finite TTL. A
+  lease without renewal is treated as expired at `expires_at` evaluated
+  against the control-plane clock.
+- Long-running issuers (playback, worker operations) renew with a heartbeat
+  on a cadence shorter than the TTL. A missed heartbeat past `expires_at`
+  is lease expiry, regardless of what the issuer believes.
+- A lease transitions to `issuer_lost` only after heartbeat timeout past
+  `expires_at` confirms the issuer is gone. A transient process disconnect,
+  dropped network, or paused client is not by itself issuer loss; the lease
+  continues to block until its TTL elapses without renewal. An issuer that
+  wants to release early sends an authenticated explicit release, which
+  terminates the lease with `release_reason = released`. Stale external
+  locks are bounded by the same TTL as internal leases; external systems
+  that want a longer hold must keep renewing.
+- Manual maintenance locks (CLI or web UI) are explicit-release. They do
+  not expire on TTL alone, because they encode a user's deliberate intent
+  to hold the scope. They release only by explicit user release,
+  permissioned force-release with a recorded reason, or stale-owner
+  recovery that confirms the issuing user or process is gone; an
+  external rename or move re-anchors the lock to the new `FileLocation`
+  rather than releasing it (see `Ingest Identity Invariants`).
+  Long-lived manual locks stay visible in the lease inventory until
+  released, with age surfaced so operators can spot forgotten holds.
+- A lease in any terminal state — regardless of its `release_reason`
+  (`released`, `expired`, `issuer_lost`, `superseded`, or
+  `force_released`) — stops blocking work immediately. Cleanup is
+  bookkeeping; it never grants safety on its own.
+
+### Commit Safety Gate
+
+- Delete, archive, replace, and move commits perform their lease check
+  inside the host-side transaction that records the commit. The check
+  evaluates lease freshness against the control-plane clock immediately
+  before any irreversible filesystem mutation.
+- The affected scope for a destructive commit is the full closure of
+  identifiers it touches: the target `FileAsset`, the affected
+  `FileVersion`(s), every `FileLocation` of those `FileVersion`(s) —
+  including hardlinks, bind-mount paths, shared-mount paths, object-store
+  aliases, and any other path the host can resolve to the same physical
+  object — the `AssetBundle` the asset belongs to, and any other
+  locations being written, moved, or removed. The gate checks every
+  blocking lease attached to any scope in that closure (asset, bundle,
+  version, or location), not just the commit target, so a playback lease
+  taken on one location or `FileVersion` cannot be bypassed by
+  destructive work on an aliased location or sibling scope of the same
+  bytes.
+- When a destructive commit is acting on identity evidence (for example,
+  archive, delete, or replace based on accepted `duplicate_of_asset` or
+  `same_as_asset` evidence), the gate also revalidates the pinned
+  `FileVersion` IDs, observed hashes, and observed locations from the
+  accepted evidence inside the same transaction. If any pinned attribute
+  has changed since acceptance, the gate aborts the commit with a
+  stale-identity-evidence error and the evidence must be re-collected
+  and re-accepted before retry.
+- The host serializes destructive commits against both blocking-lease
+  acquisition and `FileLocation`/`FileVersion` mutations on the affected
+  scope. While a commit is in progress, new blocking leases on the scope
+  are rejected or held until the commit resolves, and new `FileLocation`s
+  that alias discovery would attach to an in-scope `FileVersion` are
+  likewise blocked or held; while a fresh blocking lease exists on the
+  scope, destructive commits on that scope wait or fail. Immediately
+  before the irreversible filesystem mutation, the host recomputes the
+  affected-scope closure under the same isolation — picking up any
+  `FileLocation`s that have been attached as aliases of in-scope
+  `FileVersion`s since the initial gate check — and re-evaluates blocking
+  leases against the recomputed closure. The commit aborts if a fresh
+  blocking lease has appeared on any member of the recomputed closure or
+  if the closure itself has grown to include a location with an existing
+  blocking lease.
+- Closure resolution is fail-closed. If the host cannot fully resolve
+  the affected scope — an alias provider is unreachable, a shared or
+  remote mount is unavailable, a path-mapping translation fails, an
+  object-store identity probe times out, or any other in-scope identity
+  check is incomplete — the commit aborts with a `closure resolution
+  incomplete` safety-gate error rather than proceeding on a partial
+  view. Operators who need to commit despite incomplete resolution use a
+  separately audited, permissioned force path that records its own
+  override event and reason.
+- A lease in any terminal state (any non-null `release_reason`) does
+  not block the commit, even if cleanup has not yet run. A TTL-bound
+  lease whose `expires_at` has passed without a renewing heartbeat is
+  treated as expired and does not block. Manual maintenance locks are
+  not TTL-bound; they continue to block until they reach a terminal
+  state through one of the release paths defined under
+  `Lease Lifecycle`.
+- A blocking lease that is still fresh at the gate fails the commit with
+  the existing "blocked by active use lease" error. Advisory leases never
+  fail the gate.
+- The gate result, the affected scope closure, and the lease IDs the gate
+  considered are written as part of the commit's event record, so audit
+  can later prove which leases were evaluated against which clock value
+  and across which scopes.
+
 ## Primary Workflow
 
 A library change follows one common lifecycle:
@@ -976,6 +1208,8 @@ Errors should be classified at the boundary where they occur:
 - artifact unavailable
 - artifact checksum mismatch
 - blocked by active use lease
+- stale identity evidence
+- closure resolution incomplete
 - external system unavailable
 - external system rate limited
 - worker timeout
@@ -1040,6 +1274,7 @@ V1 security focuses on clear local and home-network boundaries:
 - external-system writes require policy permission
 - approval gates are available for risky operations
 - active blocking use leases prevent risky commit/delete/archive operations
+  (see `Commit Safety Gate` under `## Runtime Use Lease Model`)
 - every mutation is audited
 
 Future plugin distribution can add package signing, marketplace trust metadata,
