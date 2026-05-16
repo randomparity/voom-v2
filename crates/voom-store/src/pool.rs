@@ -18,7 +18,7 @@ pub async fn connect_or_create(url: &str) -> Result<SqlitePool, VoomError> {
 }
 
 async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError> {
-    let is_memory = url.contains(":memory:");
+    let is_memory = url_is_memory(url);
 
     if create && !is_memory {
         ensure_parent_dir(url)?;
@@ -62,6 +62,27 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
 /// Extract the filesystem path from a `sqlite:` URL and create any missing
 /// parent directories. Accepts `sqlite:///abs/path`, `sqlite://relative/path`,
 /// `sqlite:/abs/path`, and bare `path` forms.
+/// Recognize `SQLite` memory-DB URLs exactly as sqlx does — never via substring
+/// match. A legitimate on-disk path like `/tmp/foo:memory:bar.db` is NOT a
+/// memory URL, and the read-side `connect()` must keep its no-create
+/// invariant for such paths.
+///
+/// sqlx accepts memory DBs in these forms:
+///   * `:memory:`
+///   * `sqlite::memory:`
+///   * Either of the above with a `?cache=…` query string
+///   * Any URL whose query string contains `mode=memory`
+fn url_is_memory(url: &str) -> bool {
+    let stripped = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))
+        .unwrap_or(url);
+    let (path, query) = stripped.split_once('?').unwrap_or((stripped, ""));
+    let bare_memory = matches!(path, ":memory:" | "/:memory:");
+    let mode_memory = query.split('&').any(|pair| pair == "mode=memory");
+    bare_memory || mode_memory
+}
+
 fn ensure_parent_dir(url: &str) -> Result<(), VoomError> {
     let path_str = url
         .strip_prefix("sqlite://")
@@ -175,6 +196,46 @@ mod tests {
             "connect_or_create() must mkdir -p the parent"
         );
         assert!(nested.exists(), "sqlite must have created the db file");
+    }
+
+    #[test]
+    fn url_is_memory_recognizes_canonical_forms() {
+        assert!(url_is_memory(":memory:"));
+        assert!(url_is_memory("sqlite::memory:"));
+        assert!(url_is_memory("sqlite::memory:?cache=shared"));
+        assert!(url_is_memory("sqlite:///some.db?mode=memory"));
+        assert!(url_is_memory("sqlite:///some.db?cache=shared&mode=memory"));
+    }
+
+    #[test]
+    fn url_is_memory_rejects_adversarial_filenames() {
+        // Substring matching used to misclassify these as memory DBs, which
+        // would have flipped `create_if_missing` on for read-side `connect()`
+        // and let it create files. The exact-match guard must reject them.
+        assert!(!url_is_memory("sqlite:///tmp/foo:memory:bar.db"));
+        assert!(!url_is_memory("sqlite:///srv/data/:memory:.sqlite"));
+        assert!(!url_is_memory("sqlite:///:memory:trap.db"));
+        assert!(!url_is_memory("sqlite:///some.db"));
+        assert!(!url_is_memory("sqlite:///some.db?cache=shared"));
+    }
+
+    #[tokio::test]
+    async fn connect_refuses_adversarial_memory_lookalike_path() {
+        // Regression for the previous substring-based is_memory check:
+        // a path that contains ":memory:" as a literal filename fragment
+        // is still on-disk, and read-side connect() must refuse to create
+        // it.
+        let tmp = tempfile::tempdir().unwrap();
+        let trap = tmp.path().join("foo:memory:bar.db");
+        let url = format!("sqlite://{}", trap.display());
+        assert!(!trap.exists());
+
+        let err = connect(&url).await.unwrap_err();
+        assert_eq!(err.code(), "DB_UNREACHABLE");
+        assert!(
+            !trap.exists(),
+            "connect() must NOT create files for paths containing ':memory:'"
+        );
     }
 
     #[tokio::test]

@@ -1,10 +1,18 @@
 [advisories]
-# RUSTSEC-2023-0071 — Marvin Attack in `rsa` crate (no upstream fix). Pulled
-# transitively via sqlx-macros-core, which hard-depends on sqlx-mysql,
-# sqlx-postgres, and sqlx-sqlite regardless of which backend features we
-# enable. We only use SQLite, so the vulnerable MySQL code path is never
-# exercised at runtime. Re-evaluate when sqlx ships a fix that decouples
-# backends or when `rsa` releases a constant-time implementation.
+# RUSTSEC-2023-0071 — Marvin Attack in `rsa`.
+#
+# `cargo audit` reads Cargo.lock and flags every crate listed there,
+# including optional/feature-disabled transitive deps that aren't actually
+# linked into the binary. `cargo tree -i rsa` and `cargo deny check
+# advisories` both confirm `rsa` is NOT in the resolved feature graph:
+# voom-store enables only sqlx's `runtime-tokio`, `sqlite`, `migrate`, and
+# `time` features, so the `sqlx-macros` / `sqlx-macros-core` /
+# `sqlx-mysql` chain that pulls `rsa` is dead at the link layer.
+#
+# We don't currently have a way to prune lockfile-only entries that cargo
+# never compiles. Until cargo-audit grows feature-resolved scanning or sqlx
+# decouples its backend crates, keep this ignore narrow and document that
+# `cargo deny` is the authoritative advisory check in CI.
 ignore = ["RUSTSEC-2023-0071"]
 informational_warnings = ["unmaintained", "notice"]
 severity_threshold = "low"
