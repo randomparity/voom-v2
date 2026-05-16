@@ -35,12 +35,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat <<EOF >> .cargo/config.toml
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
       - name: Build
+        env:
+          # Set linker via env so the checkout stays clean — build.rs probes
+          # `git status --porcelain`, and any untracked file would taint the
+          # release binary's `dirty` flag.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --package voom-cli --target ${{ matrix.target }}
       - name: Package
         run: |
