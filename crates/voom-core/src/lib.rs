@@ -9,5 +9,7 @@
 //! Core domain types shared by every voom-* crate.
 
 pub mod error;
+pub mod version;
 
 pub use error::VoomError;
+pub use version::VersionInfo;
