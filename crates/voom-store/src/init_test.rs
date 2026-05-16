@@ -175,12 +175,10 @@ async fn probe_after_init_then_corrupt_schema_init_at_value_returns_migration_er
     let pool = connect("sqlite::memory:").await.unwrap();
     init_on(&pool).await.unwrap();
 
-    sqlx::query(
-        "UPDATE schema_meta SET value = 'not-a-timestamp' WHERE key = 'schema_init_at'",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE schema_meta SET value = 'not-a-timestamp' WHERE key = 'schema_init_at'")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let err = probe_schema(&pool).await.unwrap_err();
     assert_eq!(err.code(), "DB_PARTIAL_SCHEMA");
