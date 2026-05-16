@@ -96,10 +96,10 @@ versions and locations, and report its event/evidence history"* passes.
 
 ### M3 — Use leases, commit safety gate, ancillary registries, inspection CLI
 
-Tables: `asset_use_leases`, `commit_intents`, `external_systems`,
-`external_system_links`, `external_path_mappings`, `issues`,
-`issue_links`, `quality_scoring_profiles`, `quality_scores`. Migration:
-`0004_use_leases_ancillary.sql`.
+Tables: `asset_use_leases`, `commit_intents`, `commit_intent_scope_members`,
+`external_systems`, `external_system_links`, `external_path_mappings`,
+`issues`, `issue_links`, `quality_scoring_profiles`, `quality_scores`.
+Migration: `0004_use_leases_ancillary.sql`.
 
 Implements:
 
@@ -108,7 +108,10 @@ Implements:
 - the Commit Safety Gate (affected-scope closure across alias
   `FileLocation`s, fail-closed when alias resolution is incomplete,
   evidence revalidation, lease re-anchoring on rename/move, force-path
-  semantics that never bypass evidence revalidation)
+  semantics that never bypass evidence revalidation), including the
+  pending-commit lock that serializes new use-lease acquires and
+  alias-attaching `IdentityRepo` mutations against an in-flight
+  destructive commit (§9.1, §9.2, §8.7, §9.3)
 - `IdentityRepo::reconcile_rename` extended to re-anchor any non-terminal
   blocking and advisory leases scoped to the retired `FileLocation` to the
   new `FileLocation` inside the same transaction (preserving `lease_id`,
@@ -153,7 +156,7 @@ target on review.
 |---|---|---|
 | `0002_durable_execution.sql` | M1 | `jobs`, `tickets`, `ticket_dependencies`, `leases`, `workers`, `worker_capabilities`, `worker_grants`, `artifact_handles`, `artifact_locations`, `artifact_lineage`, `events` |
 | `0003_identity.sql` | M2 | `media_works`, `media_variants`, `asset_bundles`, `asset_bundle_members`, `file_assets`, `file_versions`, `file_locations`, `identity_evidence`, `media_snapshots` |
-| `0004_use_leases_ancillary.sql` | M3 | `asset_use_leases`, `commit_intents`, `external_systems`, `external_system_links`, `external_path_mappings`, `issues`, `issue_links`, `quality_scoring_profiles`, `quality_scores` |
+| `0004_use_leases_ancillary.sql` | M3 | `asset_use_leases`, `commit_intents`, `commit_intent_scope_members`, `external_systems`, `external_system_links`, `external_path_mappings`, `issues`, `issue_links`, `quality_scoring_profiles`, `quality_scores` |
 
 All tables are `STRICT` with explicit `NOT NULL` and `CHECK` constraints.
 Primary keys are `INTEGER PRIMARY KEY` (SQLite rowid, mapped to `u64`
@@ -249,7 +252,10 @@ always operate on both:
   protocol `prepare_destructive_commit(...)`,
   `finalize_destructive_commit(...)`, `abort_destructive_commit(...)`,
   and `list_pending_commit_intents(...)` against the `commit_intents`
-  table
+  table. Also owns `commit_intent_scope_members` — the per-closure-
+  member rows that back the pending-commit lock consulted by
+  `UseLeaseRepo::acquire_in_tx` and `IdentityRepo`'s alias-attaching
+  paths (§9.1, §9.2, §8.7)
 - `ExternalSystemRepo` → `external_systems` + `external_system_links` + `external_path_mappings`
 - `IssueRepo` → `issues` + `issue_links`
 - `QualityScoreRepo` → `quality_scoring_profiles` + `quality_scores`
@@ -925,9 +931,45 @@ The repo never produces `RenameReconciled` from `record_discovered_file`;
 that outcome is reserved for `reconcile_rename`. Identity collapse via a
 `merge` operation does not exist in Sprint 1.
 
+**Pending-commit lock consultation (alias-attach branch only).**
+The `AliasAttached` branch is the one outcome that enlarges an existing
+closure — it attaches a new `FileLocation` to a `FileVersion` that
+might already be inside the closure of an in-flight destructive
+commit. Before inserting the new `file_location` row, the repo
+consults `commit_intent_scope_members` against the resolved
+`file_version_id` (and, transitively, the parent `file_asset_id` and
+any bundle membership the version inherits — the lock query is the
+same UNION-of-FK-columns shape as §9.2):
+
+```sql
+SELECT csm.commit_intent_id
+  FROM commit_intent_scope_members csm
+  JOIN commit_intents ci ON ci.id = csm.commit_intent_id
+ WHERE ci.state = 'pending'
+   AND csm.scope_version_id = :file_version_id
+ LIMIT 1;
+```
+
+If any row returns → `VoomError::BlockedByPendingCommit(...)` →
+`ErrorCode::BlockedByPendingCommit` (§12.1). The `NewFileAsset`
+outcome does **not** consult the lock — a newly-discovered file asset
+is by definition not in any pre-existing closure. Only `AliasAttached`
+enlarges an existing closure and so only `AliasAttached` needs the
+guard.
+
 Behavior of `reconcile_rename_in_tx` (M2 form):
 
 - Look up `prior_location_id`; assert it's live; bind its `FileVersion`.
+- Consult the pending-commit lock against the bound `FileVersion`
+  (same query shape as the alias-attach guard above, filtered on
+  `csm.scope_version_id = :file_version_id`). If any pending intent
+  covers the version → return
+  `VoomError::BlockedByPendingCommit(...)` →
+  `ErrorCode::BlockedByPendingCommit` (§12.1). A rename that retires
+  the prior `FileLocation` and records a new one mutates the closure
+  of any in-flight destructive commit on that version; the lock
+  serializes the rename against the commit so the closure cannot
+  shift mid-prepare.
 - Retire the prior location (`retired_at = observed_at`).
 - Insert a new `FileLocation` on the same `FileVersion` with the new
   `kind` and `value`.
@@ -1053,10 +1095,10 @@ CREATE TABLE commit_intents (
     abort_reason           TEXT,             -- 'mutation_failed' | 'closure_grew' | 'fresh_lease' | 'operator_cancel' | ...
     epoch                  INTEGER NOT NULL DEFAULT 0,
     CHECK (
-        (state = 'pending'  AND finalized_at IS NULL AND aborted_at IS NULL)
-        OR (state = 'completed' AND finalized_at IS NOT NULL)
-        OR (state = 'aborted'   AND aborted_at  IS NOT NULL AND abort_reason IS NOT NULL)
-        OR (state = 'recovery_required' AND finalized_at IS NULL AND aborted_at IS NULL)
+           (state = 'pending'           AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
+        OR (state = 'completed'         AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL)
+        OR (state = 'aborted'           AND finalized_at IS NULL     AND aborted_at IS NOT NULL AND abort_reason IS NOT NULL)
+        OR (state = 'recovery_required' AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
     )
 ) STRICT;
 
@@ -1064,10 +1106,78 @@ CREATE INDEX commit_intents_pending
   ON commit_intents (state, started_at) WHERE state = 'pending';
 ```
 
+The CHECK uses an exclusive-shape encoding: each `state` value owns the
+full column shape, so contradictory rows (e.g., both `finalized_at` and
+`aborted_at` non-null, or a stale `abort_reason` left over on a
+`recovery_required` row) are unrepresentable. `recovery_required` keeps
+`abort_reason IS NULL` deliberately: the *reason* the post-mutation
+trip-wire fired (closure grew vs. fresh lease vs. lock bypass) is
+recorded in the corresponding `commit.aborted_post_mutation` event
+payload (§9.3.2 Phase B), not on the intent row, so the reason has a
+single source of truth.
+
 The override-token audit payload (`actor`, `reason`, `bypass`) is
 captured in the `commit.intent_recorded` event written alongside the
 row at prepare time; the table itself stores only the durable state
 the recovery path needs.
+
+#### `commit_intent_scope_members`
+
+A `commit_intents` row in `state = 'pending'` acts as an
+application-level reservation: while the row lives, no new blocking
+or advisory `asset_use_lease` may be acquired and no new
+`FileLocation` may be attached on its closure. The closure is recorded
+in `commit_intents.closure_initial` as JSON for audit, but JSON is
+opaque to SQL and to the lease-acquire fast path. `commit_intent_scope_members`
+expands the same closure across the four granularities the
+architectural spec serializes against, giving the lock-consultation
+query a direct equality match by FK column:
+
+```sql
+CREATE TABLE commit_intent_scope_members (
+    id                INTEGER PRIMARY KEY,
+    commit_intent_id  INTEGER NOT NULL REFERENCES commit_intents(id) ON DELETE CASCADE,
+    scope_asset_id    INTEGER NULL REFERENCES file_assets(id)    ON DELETE RESTRICT,
+    scope_bundle_id   INTEGER NULL REFERENCES asset_bundles(id)  ON DELETE RESTRICT,
+    scope_version_id  INTEGER NULL REFERENCES file_versions(id)  ON DELETE RESTRICT,
+    scope_location_id INTEGER NULL REFERENCES file_locations(id) ON DELETE RESTRICT,
+    CHECK (
+        (CASE WHEN scope_asset_id    IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_bundle_id   IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_version_id  IS NULL THEN 0 ELSE 1 END)
+      + (CASE WHEN scope_location_id IS NULL THEN 0 ELSE 1 END)
+      = 1
+    )
+) STRICT;
+
+CREATE INDEX commit_intent_scope_members_by_asset
+  ON commit_intent_scope_members (scope_asset_id)    WHERE scope_asset_id    IS NOT NULL;
+CREATE INDEX commit_intent_scope_members_by_bundle
+  ON commit_intent_scope_members (scope_bundle_id)   WHERE scope_bundle_id   IS NOT NULL;
+CREATE INDEX commit_intent_scope_members_by_version
+  ON commit_intent_scope_members (scope_version_id)  WHERE scope_version_id  IS NOT NULL;
+CREATE INDEX commit_intent_scope_members_by_location
+  ON commit_intent_scope_members (scope_location_id) WHERE scope_location_id IS NOT NULL;
+```
+
+The four `scope_*_id` columns mirror `asset_use_leases` so the
+lock-consultation query against a `LeaseScope` is a direct equality
+match by column. `ON DELETE CASCADE FROM commit_intents` keeps the FK
+relationship clean (Sprint 1 never deletes intent rows; Sprint 5+ may).
+The table has no `epoch` column — it is append-only-by-pending-intent
+and its rows live and die with the parent `commit_intents` row.
+
+`commit_intent_scope_members` is populated by `prepare_destructive_commit`
+inside the Phase A IMMEDIATE transaction (§9.3.2). The
+lock-consultation query in `UseLeaseRepo::acquire_in_tx` (§9.2) and in
+`IdentityRepo::record_discovered_file_in_tx` /
+`IdentityRepo::reconcile_rename_in_tx` (§8.7) is the same shape: any
+match against a row whose parent intent is in `state = 'pending'`
+returns `VoomError::BlockedByPendingCommit(...)` (§12.1) and the
+caller's mutation is rejected before it lands. Because both phases run
+under IMMEDIATE transactions, the SQLite write-lock serializes them:
+whichever transaction commits first wins, the other observes the
+committed row and rejects with no race window.
 
 ### 9.2 `UseLeaseRepo` lifecycle
 
@@ -1082,7 +1192,34 @@ the recovery path needs.
   naming the scope). The IMMEDIATE tx serializes against in-flight
   destructive commits on the same scope (see §9.3); if a concurrent
   commit holds the write lock, this acquire blocks (SQLite WAL behavior)
-  or returns `Conflict` after busy-timeout. Emits `use_lease.acquired`.
+  or returns `Conflict` after busy-timeout. After the liveness check
+  and before insert, consult the pending-commit lock against
+  `commit_intent_scope_members` (§9.1):
+
+  ```sql
+  SELECT csm.commit_intent_id
+    FROM commit_intent_scope_members csm
+    JOIN commit_intents ci ON ci.id = csm.commit_intent_id
+   WHERE ci.state = 'pending'
+     AND (
+          (:scope_asset_id    IS NOT NULL AND csm.scope_asset_id    = :scope_asset_id)
+       OR (:scope_bundle_id   IS NOT NULL AND csm.scope_bundle_id   = :scope_bundle_id)
+       OR (:scope_version_id  IS NOT NULL AND csm.scope_version_id  = :scope_version_id)
+       OR (:scope_location_id IS NOT NULL AND csm.scope_location_id = :scope_location_id)
+     )
+   LIMIT 1;
+  ```
+
+  If a row returns, the acquire is rejected with
+  `VoomError::BlockedByPendingCommit(...)` →
+  `ErrorCode::BlockedByPendingCommit`; the message names the blocking
+  `commit_id` and the matched scope. The check applies to both
+  blocking and advisory leases — the architectural spec does not carve
+  out advisory, and a destructive commit serializes against every
+  in-scope use-lease acquire. Because `prepare_destructive_commit` and
+  `acquire` both run under IMMEDIATE transactions, the SQLite write-
+  lock serializes them: whichever commits first wins, the other
+  observes the committed row and rejects. Emits `use_lease.acquired`.
 - `heartbeat(lease_id) -> Result<UseLease>` — TTL-bound only. Bumps
   `last_heartbeat_at` and `expires_at = now + ttl`. Manual locks reject
   heartbeat with `ErrorCode::Conflict` (message: "manual locks do not
@@ -1257,6 +1394,27 @@ the closure check its meaning (e.g.,
 `IdentityRepo::retire_file_location_in_tx` for a `DeleteFileLocation`
 target) runs inside the same finalize transaction.
 
+`prepare_destructive_commit` is also the sole writer of
+`commit_intent_scope_members` (§9.1): inside its Phase A IMMEDIATE
+transaction it inserts one `commit_intents` row plus one
+`commit_intent_scope_members` row per element of `closure_initial`,
+expanded across all four granularities. Those rows are the durable
+backing-store for the pending-commit lock that `UseLeaseRepo::acquire`
+(§9.2) and `IdentityRepo`'s alias-attaching paths (§8.7) consult
+before mutating. The lock is an implementation detail behind the
+gate — no API signature changes, no new field on `CommitIntent`. The
+`commit.intent_recorded` event payload already carries
+`closure_initial`, which is the source of truth for the
+`scope_members` rows, so audit can reconstruct the lock from events
+without a separate field. The new error `BlockedByPendingCommit`
+(§12.1) shows up on the existing `Result<_, VoomError>` returns of
+the methods that consult the lock; no new struct in the gate API.
+Structured detail (which `commit_intent_scope_members` row matched)
+lives on a `BlockedByPendingCommitDetail` struct in
+`voom-store::repo::commit_safety_gate`, parallel to the existing
+`CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`
+types, for Sprint 9 report consumers.
+
 ### 9.3.2 Algorithm
 
 The gate runs in three phases. Phase A and Phase C are each one
@@ -1313,10 +1471,26 @@ spec's serialization point.
    path never bypasses evidence revalidation.**
 4. Insert a `commit_intents` row with `state = 'pending'`,
    `target = input.target`, `closure_initial`, `accepted_evidence_ids`,
-   and `started_at = now`. Write `commit.intent_recorded` with payload
+   and `started_at = now`. Inside the same IMMEDIATE transaction, expand
+   `closure_initial` into `commit_intent_scope_members` rows so the
+   pending-commit lock (§9.1) is durable before the transaction commits:
+   ```text
+   For each asset_id    in closure_initial.file_assets:    insert (commit_intent_id, scope_asset_id    = asset_id)
+   For each bundle_id   in closure_initial.bundles:        insert (commit_intent_id, scope_bundle_id   = bundle_id)
+   For each version_id  in closure_initial.file_versions:  insert (commit_intent_id, scope_version_id  = version_id)
+   For each location_id in closure_initial.file_locations: insert (commit_intent_id, scope_location_id = location_id)
+   ```
+   The expansion across all four granularities is what gives the
+   lock-consultation query its precision: an acquire at any
+   granularity (asset, bundle, version, or location) matches a row of
+   the same type if Phase A walked that granularity. Write
+   `commit.intent_recorded` with payload
    `{ commit_id, target, closure_initial, evaluated_lease_ids,
    revalidated_evidence, override_token: { actor, reason, bypass }
-   | null }`. COMMIT.
+   | null }`. COMMIT. Once the transaction commits, the pending-commit
+   lock is live: from this point until the intent transitions out of
+   `pending`, no new use-lease acquire and no new alias-attaching
+   `IdentityRepo` mutation can touch the closure (§9.2, §8.7).
 5. Return `CommitIntent`. The caller now performs the filesystem
    mutation outside any DB transaction. The architectural spec's
    staged-artifact + rollback-metadata requirements apply: mutations
@@ -1348,11 +1522,33 @@ filesystem (or the caller has decided not to mutate; see
    in-scope FileVersions since the initial gate check." If the
    caller passed `observed`, merge it into `closure_final`. Re-evaluate
    the blocking-lease query from Phase A step 2 against `closure_final`.
-   If a fresh blocking lease has appeared on the (possibly enlarged)
-   closure: emit `commit.aborted_post_mutation` with
-   `abort_reason = 'closure_grew_or_lease_acquired'`, transition the
-   intent to `state = 'recovery_required'` (do **not** apply the
-   durable mutation), COMMIT, return
+
+   With the pending-commit lock in place (§9.1, §9.2, §8.7), this
+   recheck is a **defensive trip-wire**, not the primary protection.
+   Under normal operation the lock makes it impossible for a new
+   use-lease or a new alias `FileLocation` to appear on the closure
+   between Phase A commit and Phase B start, so `closure_final` should
+   equal `closure_initial` and the lease query should return no rows.
+   Firing the trip-wire indicates a lock-bypass or closure-completeness
+   escape that needs investigation. Three known escape paths:
+
+   - A bug in the lock-consultation logic in `UseLeaseRepo::acquire_in_tx`
+     or `IdentityRepo`'s alias-attaching paths.
+   - An external SQL writer that bypassed the repos (e.g., a manual
+     `INSERT INTO asset_use_leases` run against the DB file).
+   - An `AliasResolver` that returned `Complete` for Phase A but newly
+     discovers an alias by Phase B (e.g., a remote mount came online
+     between phases, an object-store probe succeeded on retry).
+
+   If the trip-wire fires: emit `commit.aborted_post_mutation` with
+   payload `{ commit_id, reason: 'closure_grew_or_lease_acquired',
+   escape: <which trip-wire path>, closure_initial, closure_final,
+   fresh_lease_ids }`, transition the intent to
+   `state = 'recovery_required'` (leaving `finalized_at`, `aborted_at`,
+   and `abort_reason` all NULL — the new §9.1 CHECK requires that
+   shape; the trip-wire reason has a single source of truth on the
+   event payload, not the intent row), do **not** apply the durable
+   mutation, COMMIT, and return
    `CommitGateResult::BlockedByUseLease`. The filesystem mutation has
    already happened, so the durable state lags behind reality; the
    `recovery_required` state flags this intent for the Sprint 5+
@@ -1663,7 +1859,7 @@ voom external-system  list [--limit] [--cursor]
 voom use-lease  list [--scope-type] [--scope-id] [--state] [--limit] [--cursor]
                 get  <id>
 voom commit-intent  list [--state pending|completed|aborted|recovery_required] [--older-than] [--limit] [--cursor]
-                    get  <id>
+                    get  <id>                       (returns scope_members inline)
 voom event      list [--since] [--until] [--kind] [--subject-type] [--subject-id] [--limit] [--cursor]
                 tail [--since] [--kind] [--subject-type] [--subject-id]
                 get  <id>
@@ -1708,10 +1904,15 @@ JSON for at least:
 - `voom commit-intent list --state pending` showing the
   `PendingCommitIntent` shape (fixture inserts a pending intent via
   the gate's `prepare` API)
+- `voom commit-intent get <id>` for a pending intent, asserting the
+  `scope_members` array is rendered inline so operators can see what
+  the intent is currently blocking (asset / bundle / version /
+  location members)
 - The Sprint-1-specific error envelopes for `BLOCKED_BY_USE_LEASE`,
-  `STALE_IDENTITY_EVIDENCE`, `CLOSURE_RESOLUTION_INCOMPLETE`,
-  `DEPENDENCY_CYCLE`, and `CONFLICT`, shaped via fixture insertion +
-  forced invocation of the relevant control-plane use case.
+  `BLOCKED_BY_PENDING_COMMIT`, `STALE_IDENTITY_EVIDENCE`,
+  `CLOSURE_RESOLUTION_INCOMPLETE`, `DEPENDENCY_CYCLE`, and `CONFLICT`,
+  shaped via fixture insertion + forced invocation of the relevant
+  control-plane use case.
 
 ## 12. Cross-cutting Concerns
 
@@ -1720,6 +1921,7 @@ JSON for at least:
 `voom-core::error::ErrorCode` gains:
 
 - `BlockedByUseLease` → `"BLOCKED_BY_USE_LEASE"`
+- `BlockedByPendingCommit` → `"BLOCKED_BY_PENDING_COMMIT"`
 - `StaleIdentityEvidence` → `"STALE_IDENTITY_EVIDENCE"`
 - `ClosureResolutionIncomplete` → `"CLOSURE_RESOLUTION_INCOMPLETE"`
 - `DependencyCycle` → `"DEPENDENCY_CYCLE"`
@@ -1727,15 +1929,19 @@ JSON for at least:
 
 `VoomError` gains matching `(String)`-tuple variants — matching Sprint 0's
 pattern. The message text carries the human-readable context (lease ID,
-evidence drift summary, etc.); structured detail for Sprint 9's reports
+evidence drift summary, blocking `commit_id` plus scope type and id for
+`BlockedByPendingCommit`, etc.); structured detail for Sprint 9's reports
 lives on the gate-result types in `voom-store::repo::commit_safety_gate`
-(`CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`),
-which the control-plane use cases consult before mapping to `VoomError`.
+(`CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`,
+and `BlockedByPendingCommitDetail` for the pending-commit-lock matches
+described in §9.1, §9.2, §8.7), which the control-plane use cases
+consult before mapping to `VoomError`.
 
 ```rust
 pub enum VoomError {
     /* ... Sprint 0 variants ... */
     BlockedByUseLease(String),
+    BlockedByPendingCommit(String),
     StaleIdentityEvidence(String),
     ClosureResolutionIncomplete(String),
     DependencyCycle(String),
@@ -1862,10 +2068,7 @@ Cross-repo flows live as integration tests:
   (pinned hash mismatch, raised in `prepare`), `BlockedByClosureIncomplete`
   (via `FailingAliasResolver`, raised in `prepare`); allowed path with
   successful mutation through `prepare` → caller mutation → `finalize`;
-  `finalize` aborts when a fresh blocking lease appears on the closure
-  between `prepare` and `finalize` (proves the two-pass closure recheck
-  still fires and transitions the intent to `recovery_required`); the
-  `abort_destructive_commit` path when the caller decides not to
+  the `abort_destructive_commit` path when the caller decides not to
   mutate; pending intent visible via `list_pending_commit_intents`;
   `recovery_required` state for a stuck intent whose caller never
   finalized. Force-path coverage: `closure_incomplete` bypass is
@@ -1876,6 +2079,41 @@ Cross-repo flows live as integration tests:
   ("force-release the blocking lease via `UseLeaseRepo::release(reason
   = force_released)`, then rerun the gate") and asserts the second
   attempt is allowed without any bypass token.
+
+  Pending-commit-lock coverage (the primary protection introduced by
+  §9.1, §9.2, §8.7):
+  - A pending intent over `FileLocation` Y blocks a subsequent
+    `UseLeaseRepo::acquire(LeaseScope::Location(Y))` with
+    `BlockedByPendingCommit`.
+  - The same intent blocks
+    `UseLeaseRepo::acquire(LeaseScope::Asset(X))` when Y's parent
+    asset is X (the asset-granularity `scope_members` row matches,
+    because Phase A walks closure across all four granularities).
+    Analogous cases for `LeaseScope::Bundle` and
+    `LeaseScope::Version` exercise the other two granularities.
+  - The same intent blocks
+    `IdentityRepo::record_discovered_file_in_tx` (alias-attach
+    branch) for an alias whose `alias_proof` resolves to an
+    in-closure `FileVersion`. A negative test asserts the
+    `NewFileAsset` branch is **not** blocked: a freshly-discovered
+    file with no alias proof succeeds even while the intent is
+    pending.
+  - The same intent blocks
+    `IdentityRepo::reconcile_rename_in_tx` for a `FileVersion` in
+    the closure.
+  - After `finalize_destructive_commit` (completed) or
+    `abort_destructive_commit` (aborted) clears the intent's
+    `pending` state, the same acquire / alias-attach / rename calls
+    succeed without surprises.
+  - Defensive trip-wire (Phase B step 3 of §9.3.2): a low-level
+    test inserts an `asset_use_lease` row directly via SQL between
+    Phase A commit and Phase B start (bypassing `UseLeaseRepo` and
+    therefore the lock). Phase B's recheck observes the fresh
+    lease, transitions the intent to `recovery_required`, emits
+    `commit.aborted_post_mutation`, and asserts the durable
+    identity mutation did **not** run. This test exists to prove
+    the trip-wire fires when something escapes the lock; under
+    normal operation the trip-wire never fires.
 - `commit_safety_gate_after_rename.rs` — end-to-end against the
   two-phase API: ingest → evidence-acceptance → `reconcile_rename`
   (M3, re-anchors leases) → `prepare_destructive_commit` against
