@@ -146,8 +146,11 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 "DB_PARTIAL_SCHEMA" => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Some(
-                        "Schema metadata is missing or corrupted; run `voom init` \
-                         against the current binary or restore from backup"
+                        "Schema metadata is missing or corrupted (e.g. \
+                         schema_meta dropped or malformed). `voom init` will \
+                         re-probe and fail with the same error — it cannot \
+                         repair this state. Restore from backup or manually \
+                         repair the schema_meta table."
                             .to_owned(),
                     ),
                 ),

@@ -30,7 +30,22 @@ pub async fn run(cp: &ControlPlane, local: Local) -> io::Result<i32> {
     match cp.health().await {
         Ok(snap) => emit_snapshot(&snap, local),
         Err(err) => {
-            emit_err("health", err.code(), err.to_string(), None, Some(local))?;
+            // Provide actionable remediation per error code. The default
+            // `voom init` advice is wrong for DB_PARTIAL_SCHEMA from a probe
+            // failure: init re-runs probe_schema and would loop on the same
+            // corruption error.
+            let hint = match err.code() {
+                "DB_PARTIAL_SCHEMA" => Some(
+                    "Schema metadata is corrupted (e.g. schema_meta dropped \
+                     or malformed). `voom init` cannot repair this state — \
+                     restore from backup or manually repair the schema_meta \
+                     table."
+                        .to_owned(),
+                ),
+                "DB_UNREACHABLE" => Some("Run: voom init".to_owned()),
+                _ => None,
+            };
+            emit_err("health", err.code(), err.to_string(), hint, Some(local))?;
             Ok(2)
         }
     }

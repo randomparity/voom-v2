@@ -67,7 +67,12 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
 /// memory URL, and the read-side `connect()` must keep its no-create
 /// invariant for such paths.
 ///
-/// sqlx accepts memory DBs in these forms:
+/// sqlx 0.8.6 only special-cases the raw database name `:memory:`. The
+/// slash-prefixed `/:memory:` is an absolute path to a file named
+/// `:memory:` and must remain on-disk; classifying it as memory would let
+/// `create_if_missing` create that file from a read-side path.
+///
+/// Accepted memory forms:
 ///   * `:memory:`
 ///   * `sqlite::memory:`
 ///   * Either of the above with a `?cache=…` query string
@@ -78,7 +83,7 @@ fn url_is_memory(url: &str) -> bool {
         .or_else(|| url.strip_prefix("sqlite:"))
         .unwrap_or(url);
     let (path, query) = stripped.split_once('?').unwrap_or((stripped, ""));
-    let bare_memory = matches!(path, ":memory:" | "/:memory:");
+    let bare_memory = path == ":memory:";
     let mode_memory = query.split('&').any(|pair| pair == "mode=memory");
     bare_memory || mode_memory
 }
@@ -217,6 +222,12 @@ mod tests {
         assert!(!url_is_memory("sqlite:///:memory:trap.db"));
         assert!(!url_is_memory("sqlite:///some.db"));
         assert!(!url_is_memory("sqlite:///some.db?cache=shared"));
+        // sqlx 0.8.6 treats `/:memory:` as an absolute file path; only the
+        // bare `:memory:` form is in-memory. Misclassifying this would let
+        // read-side connect() create a `/:memory:` file at the filesystem
+        // root.
+        assert!(!url_is_memory("sqlite:///:memory:"));
+        assert!(!url_is_memory("/:memory:"));
     }
 
     #[tokio::test]

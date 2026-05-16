@@ -2128,6 +2128,7 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "time",
  "tokio",
