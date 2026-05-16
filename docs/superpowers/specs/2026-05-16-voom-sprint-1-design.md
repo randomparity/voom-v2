@@ -105,13 +105,16 @@ Implements:
 
 - the full `asset_use_leases` lifecycle (TTL-bound + manual locks, terminal
   release reasons, force-release audit path)
-- the Commit Safety Gate (affected-scope closure across alias
+- the Commit Safety Gate (three-phase `prepare` / `authorize` /
+  `finalize` protocol, affected-scope closure across alias
   `FileLocation`s, fail-closed when alias resolution is incomplete,
-  evidence revalidation, lease re-anchoring on rename/move, force-path
-  semantics that never bypass evidence revalidation), including the
-  pending-commit lock that serializes new use-lease acquires and
-  alias-attaching `IdentityRepo` mutations against an in-flight
-  destructive commit (§9.1, §9.2, §8.7, §9.3)
+  evidence revalidation, lease re-anchoring on rename/move,
+  force-path semantics that never bypass evidence revalidation or
+  the closure-shift check), including the architectural
+  "immediately before the irreversible filesystem mutation" recheck
+  that runs in `authorize_destructive_commit` and the pending-commit
+  lock that serializes new use-lease acquires against in-flight
+  destructive commits (`pending` + `authorized`) (§9.1, §9.2, §9.3)
 - `IdentityRepo::reconcile_rename` extended to re-anchor any non-terminal
   blocking and advisory leases scoped to the retired `FileLocation` to the
   new `FileLocation` inside the same transaction (preserving `lease_id`,
@@ -223,16 +226,17 @@ whenever they read a use case.
 
 The one named exception is the commit safety gate (§9.3), which is a
 host-side multi-table helper rather than a domain repo. Each of its
-three entry points — `prepare_destructive_commit`,
-`finalize_destructive_commit`, and `abort_destructive_commit` — owns
-its own IMMEDIATE transaction internally and accepts `&dyn EventRepo`
-(and `finalize` additionally `&dyn IdentityRepo`) so it can interleave
-closure reads, evidence revalidation, the durable identity mutation,
-and event writes in the precise order the architectural spec mandates.
-The filesystem mutation supplied by the caller runs **between**
-`prepare` and `finalize`, outside any DB transaction; the
-`commit_intents` journal is what makes the two-phase split safe across
-caller crashes.
+four entry points — `prepare_destructive_commit`,
+`authorize_destructive_commit`, `finalize_destructive_commit`, and
+`abort_destructive_commit` — owns its own IMMEDIATE transaction
+internally and accepts `&dyn EventRepo` (and `finalize` additionally
+`&dyn IdentityRepo`; `authorize` and `prepare` additionally
+`&dyn AliasResolver`) so it can interleave closure reads, evidence
+revalidation, the durable identity mutation, and event writes in the
+precise order the architectural spec mandates. The filesystem
+mutation supplied by the caller runs **between** `authorize` and
+`finalize`, outside any DB transaction; the `commit_intents` journal
+is what makes the three-phase split safe across caller crashes.
 
 ### 5.3 Repository ownership
 
@@ -248,14 +252,14 @@ always operate on both:
 - `IdentityRepo` → `media_works` + `media_variants` + `file_assets` + `file_versions` + `file_locations` + `identity_evidence` + `media_snapshots`
 - `BundleRepo` → `asset_bundles` + `asset_bundle_members`
 - `UseLeaseRepo` → `asset_use_leases`
-- `commit_safety_gate` module → no repo trait; exposes the two-phase
+- `commit_safety_gate` module → no repo trait; exposes the three-phase
   protocol `prepare_destructive_commit(...)`,
+  `authorize_destructive_commit(...)`,
   `finalize_destructive_commit(...)`, `abort_destructive_commit(...)`,
   and `list_pending_commit_intents(...)` against the `commit_intents`
   table. Also owns `commit_intent_scope_members` — the per-closure-
   member rows that back the pending-commit lock consulted by
-  `UseLeaseRepo::acquire_in_tx` and `IdentityRepo`'s alias-attaching
-  paths (§9.1, §9.2, §8.7)
+  `UseLeaseRepo::acquire_in_tx` (§9.1, §9.2)
 - `ExternalSystemRepo` → `external_systems` + `external_system_links` + `external_path_mappings`
 - `IssueRepo` → `issues` + `issue_links`
 - `QualityScoreRepo` → `quality_scoring_profiles` + `quality_scores`
@@ -353,14 +357,16 @@ pub enum EventKind {
     UseLeaseRecoveredStaleIssuer,       // 'use_lease.recovered_stale_issuer'
     UseLeaseReanchoredByMove,           // 'use_lease.reanchored_by_move'
     CommitIntentRecorded,               // 'commit.intent_recorded' — Phase A success
-    CommitCompleted,                    // 'commit.completed' — Phase B success
-    CommitAbortedByUseLease,            // 'commit.aborted_by_use_lease' — Phase A
-    CommitAbortedByStaleEvidence,       // 'commit.aborted_by_stale_evidence' — Phase A
-    CommitAbortedByClosureIncomplete,   // 'commit.aborted_by_closure_incomplete' — Phase A
-    CommitAbortedPreMutation,           // 'commit.aborted_pre_mutation' — Phase C / Phase B NotPerformed
-    CommitAbortedPostMutation,          // 'commit.aborted_post_mutation' — Phase B trip-wire (reason: 'closure_grew' | 'fresh_lease' | 'closure_grew_and_fresh_lease')
+    CommitAuthorized,                   // 'commit.authorized' — Phase B success
+    CommitCompleted,                    // 'commit.completed' — Phase C success
+    CommitAbortedByUseLease,            // 'commit.aborted_by_use_lease' — Phase A or Phase B (payload.phase distinguishes)
+    CommitAbortedByStaleEvidence,       // 'commit.aborted_by_stale_evidence' — Phase A or Phase B (payload.phase distinguishes)
+    CommitAbortedByClosureIncomplete,   // 'commit.aborted_by_closure_incomplete' — Phase A or Phase B (payload.phase distinguishes)
+    CommitAbortedByClosureGrew,         // 'commit.aborted_by_closure_grew' — Phase B (closure shift detected by authorize recheck)
+    CommitAbortedPreMutation,           // 'commit.aborted_pre_mutation' — abort_destructive_commit / finalize NotPerformed (payload.prior_state distinguishes)
+    CommitAbortedPostMutation,          // 'commit.aborted_post_mutation' — Phase C trip-wire (reason: 'closure_grew' | 'fresh_lease' | 'closure_grew_and_fresh_lease')
     CommitRecoveryRequired,             // 'commit.recovery_required' — emitted by the Sprint 5+ recovery worker
-    CommitForcedOverride,               // 'commit.forced_override' — Phase A closure-bypass audit
+    CommitForcedOverride,               // 'commit.forced_override' — closure-incomplete bypass audit (Phase A or Phase B)
     ExternalSystemRegistered,           // 'external_system.registered'
     ExternalSystemHealthChanged,        // 'external_system.health_changed'
     ExternalSystemLinked,               // 'external_system.linked'
@@ -931,45 +937,26 @@ The repo never produces `RenameReconciled` from `record_discovered_file`;
 that outcome is reserved for `reconcile_rename`. Identity collapse via a
 `merge` operation does not exist in Sprint 1.
 
-**Pending-commit lock consultation (alias-attach branch only).**
-The `AliasAttached` branch is the one outcome that enlarges an existing
-closure — it attaches a new `FileLocation` to a `FileVersion` that
-might already be inside the closure of an in-flight destructive
-commit. Before inserting the new `file_location` row, the repo
-consults `commit_intent_scope_members` against the resolved
-`file_version_id` (and, transitively, the parent `file_asset_id` and
-any bundle membership the version inherits — the lock query is the
-same UNION-of-FK-columns shape as §9.2):
-
-```sql
-SELECT csm.commit_intent_id
-  FROM commit_intent_scope_members csm
-  JOIN commit_intents ci ON ci.id = csm.commit_intent_id
- WHERE ci.state = 'pending'
-   AND csm.scope_version_id = :file_version_id
- LIMIT 1;
-```
-
-If any row returns → `VoomError::BlockedByPendingCommit(...)` →
-`ErrorCode::BlockedByPendingCommit` (§12.1). The `NewFileAsset`
-outcome does **not** consult the lock — a newly-discovered file asset
-is by definition not in any pre-existing closure. Only `AliasAttached`
-enlarges an existing closure and so only `AliasAttached` needs the
-guard.
+**No pending-commit lock on observation paths.** Neither the
+`AliasAttached` branch of `record_discovered_file_in_tx` nor
+`reconcile_rename_in_tx` consults the pending-commit lock. The
+architectural spec is explicit (`docs/specs/voom-control-plane-design.md`
+lines 678 and 697–708): byte-preserving operations that record
+durable state to match physical reality always proceed, even during
+in-flight destructive commits. The physical bytes have already moved
+or been hardlinked on disk; refusing to record them would only leave
+durable state stale exactly when closure accuracy matters most. The
+safety property the architectural spec requires — that no destructive
+commit acts on an out-of-date closure — is enforced by the Phase B
+authorize recheck in the Commit Safety Gate (§9.3.2): immediately
+before the irreversible filesystem mutation, the gate recomputes the
+closure and aborts the commit if it has shifted or grown. The
+`NewFileAsset` outcome similarly proceeds — a newly-discovered file
+asset is by definition not in any pre-existing closure.
 
 Behavior of `reconcile_rename_in_tx` (M2 form):
 
 - Look up `prior_location_id`; assert it's live; bind its `FileVersion`.
-- Consult the pending-commit lock against the bound `FileVersion`
-  (same query shape as the alias-attach guard above, filtered on
-  `csm.scope_version_id = :file_version_id`). If any pending intent
-  covers the version → return
-  `VoomError::BlockedByPendingCommit(...)` →
-  `ErrorCode::BlockedByPendingCommit` (§12.1). A rename that retires
-  the prior `FileLocation` and records a new one mutates the closure
-  of any in-flight destructive commit on that version; the lock
-  serializes the rename against the commit so the closure cannot
-  shift mid-prepare.
 - Retire the prior location (`retired_at = observed_at`).
 - Insert a new `FileLocation` on the same `FileVersion` with the new
   `kind` and `value`.
@@ -1077,44 +1064,57 @@ retired the repo returns `VoomError::Conflict(...)` →
 #### `commit_intents`
 
 M3 also introduces `commit_intents` — a durable journal for the
-two-phase destructive-commit protocol (§9.3.1). One row per attempted
+three-phase destructive-commit protocol (§9.3.1). One row per attempted
 destructive commit, recording the closure and evidence the operator
 declared at prepare time so that the recovery path can reason about
-intents whose callers crashed between `prepare` and `finalize`:
+intents whose callers crashed between `prepare`, `authorize`, and
+`finalize`:
 
 ```sql
 CREATE TABLE commit_intents (
     id                     INTEGER PRIMARY KEY,
     target                 TEXT NOT NULL,    -- JSON CommitTarget
     closure_initial        TEXT NOT NULL,    -- JSON AffectedScopeClosure
+    closure_authorized     TEXT,             -- JSON AffectedScopeClosure; set at Phase B success
     accepted_evidence_ids  TEXT NOT NULL,    -- JSON array of evidence IDs
-    state                  TEXT NOT NULL,    -- 'pending' | 'completed' | 'aborted' | 'recovery_required'
+    state                  TEXT NOT NULL,    -- 'pending' | 'authorized' | 'completed' | 'aborted' | 'recovery_required'
     started_at             TEXT NOT NULL,
+    authorized_at          TEXT,
     finalized_at           TEXT,
     aborted_at             TEXT,
-    abort_reason           TEXT,             -- 'mutation_failed' | 'closure_grew' | 'fresh_lease' | 'operator_cancel' | ...
+    abort_reason           TEXT,             -- 'mutation_failed' | 'closure_grew' | 'fresh_lease' | 'closure_incomplete' | 'stale_evidence' | 'operator_cancel' | ...
     epoch                  INTEGER NOT NULL DEFAULT 0,
     CHECK (
-           (state = 'pending'           AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
-        OR (state = 'completed'         AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL)
-        OR (state = 'aborted'           AND finalized_at IS NULL     AND aborted_at IS NOT NULL AND abort_reason IS NOT NULL)
-        OR (state = 'recovery_required' AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
+           (state = 'pending'           AND authorized_at IS NULL     AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
+        OR (state = 'authorized'        AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
+        OR (state = 'completed'         AND authorized_at IS NOT NULL AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL)
+        OR (state = 'aborted'           AND finalized_at IS NULL      AND aborted_at IS NOT NULL   AND abort_reason IS NOT NULL)
+        OR (state = 'recovery_required' AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
     )
 ) STRICT;
 
-CREATE INDEX commit_intents_pending
-  ON commit_intents (state, started_at) WHERE state = 'pending';
+CREATE INDEX commit_intents_in_flight
+  ON commit_intents (state, started_at) WHERE state IN ('pending', 'authorized');
 ```
 
-The CHECK uses an exclusive-shape encoding: each `state` value owns the
-full column shape, so contradictory rows (e.g., both `finalized_at` and
-`aborted_at` non-null, or a stale `abort_reason` left over on a
-`recovery_required` row) are unrepresentable. `recovery_required` keeps
-`abort_reason IS NULL` deliberately: the *reason* the post-mutation
-trip-wire fired (closure grew vs. fresh lease vs. lock bypass) is
-recorded in the corresponding `commit.aborted_post_mutation` event
-payload (§9.3.2 Phase B), not on the intent row, so the reason has a
-single source of truth.
+The CHECK uses an exclusive-shape encoding: each non-`aborted` `state`
+value owns the full column shape, so contradictory rows (e.g., both
+`finalized_at` and `aborted_at` non-null, or a stale `abort_reason`
+left over on a `recovery_required` row) are unrepresentable.
+`recovery_required` keeps `abort_reason IS NULL` deliberately: the
+*reason* the post-mutation trip-wire fired (closure grew vs. fresh
+lease vs. lock bypass) is recorded in the corresponding
+`commit.aborted_post_mutation` event payload (§9.3.2 Phase C), not on
+the intent row, so the reason has a single source of truth. The
+`aborted` shape leaves `authorized_at` unconstrained: it is NULL if
+Phase A or `abort_destructive_commit` aborted before authorize, and
+NOT NULL if the Phase B authorize recheck aborted the intent or the
+Phase C finalize was called with `MutationOutcome::NotPerformed`. The
+`closure_authorized` column is NULL while the intent is `pending` and
+populated once Phase B authorize succeeds; it captures the
+"immediately before the irreversible filesystem mutation" closure
+that the architectural spec requires (lines 1044–1052 of
+`docs/specs/voom-control-plane-design.md`).
 
 The override-token audit payload (`actor`, `reason`, `bypass`) is
 captured in the `commit.intent_recorded` event written alongside the
@@ -1123,12 +1123,17 @@ the recovery path needs.
 
 #### `commit_intent_scope_members`
 
-A `commit_intents` row in `state = 'pending'` acts as an
-application-level reservation: while the row lives, no new blocking
-or advisory `asset_use_lease` may be acquired and no new
-`FileLocation` may be attached on its closure. The closure is recorded
-in `commit_intents.closure_initial` as JSON for audit, but JSON is
-opaque to SQL and to the lease-acquire fast path. `commit_intent_scope_members`
+A `commit_intents` row in `state IN ('pending', 'authorized')` acts as
+an application-level reservation: while the row is in the in-flight
+window, no new blocking or advisory `asset_use_lease` may be acquired
+on its closure (the pending-commit lock; §9.2). The lock does **not**
+apply to byte-preserving observation-of-reality operations
+(`IdentityRepo::record_discovered_file_in_tx` alias-attach branch and
+`IdentityRepo::reconcile_rename_in_tx`) — those record reality as it
+already exists on disk and are caught by the Phase B authorize
+recheck instead (§8.7, §9.3.2). The closure is recorded in
+`commit_intents.closure_initial` as JSON for audit, but JSON is opaque
+to SQL and to the lease-acquire fast path. `commit_intent_scope_members`
 expands the same closure across the four granularities the
 architectural spec serializes against, giving the lock-consultation
 query a direct equality match by FK column:
@@ -1168,16 +1173,24 @@ The table has no `epoch` column — it is append-only-by-pending-intent
 and its rows live and die with the parent `commit_intents` row.
 
 `commit_intent_scope_members` is populated by `prepare_destructive_commit`
-inside the Phase A IMMEDIATE transaction (§9.3.2). The
-lock-consultation query in `UseLeaseRepo::acquire_in_tx` (§9.2) and in
-`IdentityRepo::record_discovered_file_in_tx` /
-`IdentityRepo::reconcile_rename_in_tx` (§8.7) is the same shape: any
-match against a row whose parent intent is in `state = 'pending'`
-returns `VoomError::BlockedByPendingCommit(...)` (§12.1) and the
-caller's mutation is rejected before it lands. Because both phases run
-under IMMEDIATE transactions, the SQLite write-lock serializes them:
-whichever transaction commits first wins, the other observes the
-committed row and rejects with no race window.
+inside the Phase A IMMEDIATE transaction (§9.3.2) and is updated by
+`authorize_destructive_commit` in the Phase B IMMEDIATE transaction
+when the recomputed closure differs from `closure_initial` (rows are
+deleted for removed members and inserted for added members, so the
+pending-commit lock continues to cover the recomputed closure). The
+lock-consultation query in `UseLeaseRepo::acquire_in_tx` (§9.2) is the
+same shape: any match against a row whose parent intent is in
+`state IN ('pending', 'authorized')` returns
+`VoomError::BlockedByPendingCommit(...)` (§12.1) and the caller's
+acquire is rejected before it lands. The lock is **not** consulted
+by `IdentityRepo` paths — observation-of-physical-reality operations
+always record reality, even during in-flight destructive commits, and
+the Phase B authorize recheck (§9.3.2) is the architectural safety
+gate that catches closures shifting underneath an in-flight commit.
+Because all the relevant entry points run under IMMEDIATE transactions,
+the SQLite write-lock serializes them: whichever transaction commits
+first wins, the other observes the committed row and rejects with no
+race window.
 
 ### 9.2 `UseLeaseRepo` lifecycle
 
@@ -1200,7 +1213,7 @@ committed row and rejects with no race window.
   SELECT csm.commit_intent_id
     FROM commit_intent_scope_members csm
     JOIN commit_intents ci ON ci.id = csm.commit_intent_id
-   WHERE ci.state = 'pending'
+   WHERE ci.state IN ('pending', 'authorized')
      AND (
           (:scope_asset_id    IS NOT NULL AND csm.scope_asset_id    = :scope_asset_id)
        OR (:scope_bundle_id   IS NOT NULL AND csm.scope_bundle_id   = :scope_bundle_id)
@@ -1213,11 +1226,16 @@ committed row and rejects with no race window.
   If a row returns, the acquire is rejected with
   `VoomError::BlockedByPendingCommit(...)` →
   `ErrorCode::BlockedByPendingCommit`; the message names the blocking
-  `commit_id` and the matched scope. The check applies to both
-  blocking and advisory leases — the architectural spec does not carve
-  out advisory, and a destructive commit serializes against every
-  in-scope use-lease acquire. Because `prepare_destructive_commit` and
-  `acquire` both run under IMMEDIATE transactions, the SQLite write-
+  `commit_id` and the matched scope. The lock covers the full
+  in-flight window — both `pending` (between `prepare` and `authorize`)
+  and `authorized` (between `authorize` and `finalize`) — so a fresh
+  lease cannot slip in either before the architectural recheck has
+  run or after it has run but before the caller's filesystem
+  mutation. The check applies to both blocking and advisory leases —
+  the architectural spec does not carve out advisory, and a destructive
+  commit serializes against every in-scope use-lease acquire. Because
+  `prepare_destructive_commit`, `authorize_destructive_commit`, and
+  `acquire` all run under IMMEDIATE transactions, the SQLite write-
   lock serializes them: whichever commits first wins, the other
   observes the committed row and rejects. Emits `use_lease.acquired`.
 - `heartbeat(lease_id) -> Result<UseLease>` — TTL-bound only. Bumps
@@ -1271,15 +1289,27 @@ architectural spec names.
 
 ### 9.3.1 API
 
-The gate exposes a two-phase prepare / finalize / abort protocol. The
-architectural spec's host-owned-commit invariant requires that "a
-worker crash does not leave the control plane believing a final
-mutation succeeded"; a single transaction wrapped around a
+The gate exposes a three-phase prepare / authorize / finalize / abort
+protocol. The architectural spec's host-owned-commit invariant requires
+that "a worker crash does not leave the control plane believing a
+final mutation succeeded"; a single transaction wrapped around a
 caller-supplied filesystem mutation cannot honor this, because a DB
 rollback after the filesystem bytes are already changed leaves the
-durable state lagging behind reality. The two-phase API journals a
-durable `commit_intents` row at prepare time so that the recovery path
-(Sprint 5+) can reason about callers that crashed between phases.
+durable state lagging behind reality. The architectural spec at lines
+1044–1052 of `docs/specs/voom-control-plane-design.md` adds a second,
+stricter requirement: "Immediately before the irreversible filesystem
+mutation, the host recomputes the affected-scope closure under the
+same isolation … and re-evaluates blocking leases against the
+recomputed closure." `authorize_destructive_commit` is that explicit
+"immediately before" recheck: the caller's filesystem mutation runs
+**between** `authorize` and `finalize`, so the recheck observes
+exactly the state the destructive mutation is about to act on. The
+three-phase API journals a durable `commit_intents` row at prepare
+time, transitions it to `authorized` once the recheck passes, and
+transitions it to `completed` after the caller's mutation lands and
+finalize commits the durable identity change — so the recovery path
+(Sprint 5+) can reason about callers that crashed in any of the
+three phase windows.
 
 ```rust
 pub struct DestructiveCommit {
@@ -1311,6 +1341,25 @@ pub struct CommitIntent {
     pub closure_initial: AffectedScopeClosure,
     pub evaluated_lease_ids: Vec<UseLeaseId>,
     pub revalidated_evidence: Vec<EvidenceRevalidationResult>,
+    pub epoch: u64,
+}
+
+/// Returned by `authorize_destructive_commit` on success. Carries the
+/// recomputed closure, the lease IDs evaluated against it, and the
+/// evidence revalidation results — all snapshotted at the moment the
+/// architectural "immediately before the irreversible filesystem
+/// mutation" recheck passed. The caller must pass this permit to
+/// `finalize_destructive_commit`; the permit's `epoch` is checked
+/// against the durable `commit_intents` row so a stale permit
+/// (e.g., from a previously-aborted attempt) cannot drive a later
+/// finalize.
+pub struct CommitPermit {
+    pub commit_id: CommitId,
+    pub authorized_at: OffsetDateTime,
+    pub closure_authorized: AffectedScopeClosure,
+    pub evaluated_lease_ids: Vec<UseLeaseId>,
+    pub revalidated_evidence: Vec<EvidenceRevalidationResult>,
+    pub epoch: u64,
 }
 
 pub enum MutationOutcome {
@@ -1318,15 +1367,19 @@ pub enum MutationOutcome {
     /// disk. Optionally carries the observed post-mutation closure if
     /// the caller's mutation touched aliases the gate could not see.
     Applied { observed: Option<AffectedScopeClosure> },
-    /// Caller decided not to mutate; `finalize_destructive_commit`
-    /// transitions the intent to `aborted` with reason `operator_cancel`.
+    /// Caller obtained a permit but decided not to mutate;
+    /// `finalize_destructive_commit` transitions the intent to
+    /// `aborted` with reason `operator_cancel`. The
+    /// `abort_destructive_commit` entry point produces the same
+    /// outcome and exists for callers that haven't authorized yet.
     NotPerformed,
 }
 
 pub struct CommitGateOutcome {
     pub commit_id: CommitId,
-    pub closure_initial: AffectedScopeClosure,
-    pub closure_final:   AffectedScopeClosure,
+    pub closure_initial:    AffectedScopeClosure,
+    pub closure_authorized: AffectedScopeClosure,
+    pub closure_final:      AffectedScopeClosure,
     pub evaluated_lease_ids: Vec<UseLeaseId>,
     pub revalidated_evidence: Vec<EvidenceRevalidationResult>,
     pub result: CommitGateResult,
@@ -1337,35 +1390,76 @@ pub enum CommitGateResult {
     BlockedByUseLease           { lease_id: UseLeaseId, lease_scope: LeaseScope },
     BlockedByStaleEvidence      { evidence_id: EvidenceId, drift: EvidenceDrift },
     BlockedByClosureIncomplete  { reason: ClosureFailure, unreachable: Vec<ClosureWarning> },
-    /// Phase B trip-wire: between `prepare` and `finalize` the
-    /// `AliasResolver` discovered closure members that were not
-    /// present in `closure_initial` (and so were never covered by
-    /// evidence revalidation or the lease check). Carries the delta
-    /// across the four granularities so the caller and Sprint 5+
-    /// recovery worker can see what grew. Only ever returned from
-    /// `finalize_destructive_commit`; Phase A's incomplete-closure
-    /// abort uses `BlockedByClosureIncomplete` instead.
+    /// Closure delta detected against `closure_initial`. Returned in
+    /// two places:
+    /// 1. `authorize_destructive_commit` (the architectural
+    ///    "immediately before" recheck): the recomputed closure
+    ///    differs from `closure_initial` — either because an alias
+    ///    resolver discovered new locations, because external rename
+    ///    reconciliation retired one location and recorded another,
+    ///    or both. This is the primary detection path.
+    /// 2. `finalize_destructive_commit` defensive trip-wire: under
+    ///    normal flow the pending-commit lock and the authorize
+    ///    recheck make this branch unreachable; firing it indicates
+    ///    a lock-bypass or a resolver escape between authorize and
+    ///    finalize.
+    ///
+    /// Carries the delta across all four granularities. Sets are
+    /// disjoint by construction: an ID appears in `added_*` if it
+    /// is in `closure_authorized`/`closure_final` but not in
+    /// `closure_initial`, and in `removed_*` if it is in
+    /// `closure_initial` but not in `closure_authorized`/`closure_final`.
+    /// External rename reconciliation typically produces a non-empty
+    /// `removed_locations` (the retired prior location) and a
+    /// non-empty `added_locations` (the new location); alias
+    /// discovery typically produces only non-empty `added_*` sets.
     BlockedByClosureGrew {
-        added_assets:    Vec<FileAssetId>,
-        added_bundles:   Vec<BundleId>,
-        added_versions:  Vec<FileVersionId>,
-        added_locations: Vec<FileLocationId>,
+        added_assets:      Vec<FileAssetId>,
+        added_bundles:     Vec<BundleId>,
+        added_versions:    Vec<FileVersionId>,
+        added_locations:   Vec<FileLocationId>,
+        removed_assets:    Vec<FileAssetId>,
+        removed_bundles:   Vec<BundleId>,
+        removed_versions:  Vec<FileVersionId>,
+        removed_locations: Vec<FileLocationId>,
     },
 }
 
+pub enum CommitIntentState {
+    Pending,
+    Authorized,
+    Completed,
+    Aborted,
+    RecoveryRequired,
+}
+
+/// Inspection record for an in-flight destructive commit. Covers
+/// both `pending` and `authorized` states — the lifecycle name stays
+/// `PendingCommitIntent` for continuity with the CLI surface
+/// (`voom commit-intent list`), but the `state` field on the record
+/// distinguishes the two phase windows for callers that need it.
+/// `list_pending_commit_intents` returns only `pending` and
+/// `authorized` records; terminal states (`completed`, `aborted`,
+/// `recovery_required`) are read via the `voom commit-intent list
+/// --state <terminal>` CLI path against the same row store.
 pub struct PendingCommitIntent {
     pub commit_id: CommitId,
     pub target: CommitTarget,
+    pub state: CommitIntentState,           // 'pending' | 'authorized'
     pub closure_initial: AffectedScopeClosure,
+    pub closure_authorized: Option<AffectedScopeClosure>,  // Some when state == 'authorized'
     pub accepted_evidence_ids: Vec<EvidenceId>,
     pub started_at: OffsetDateTime,
+    pub authorized_at: Option<OffsetDateTime>,
 }
 
 pub enum AbortReason {
     OperatorCancel,
     MutationFailed,
     ClosureGrew,
+    ClosureIncomplete,
     FreshLease,
+    StaleEvidence,
     Other(String),
 }
 
@@ -1376,15 +1470,43 @@ pub async fn prepare_destructive_commit(
     input: DestructiveCommit,
 ) -> Result<CommitIntent, VoomError>;
 
-pub async fn finalize_destructive_commit(
+/// Architectural "immediately before the irreversible filesystem
+/// mutation" recheck. One IMMEDIATE transaction. Recomputes the
+/// closure against current DB + `AliasResolver`, re-evaluates blocking
+/// leases against the recomputed closure, and re-validates accepted
+/// evidence. On success transitions the intent to `authorized` and
+/// returns a `CommitPermit` the caller must hand back to
+/// `finalize_destructive_commit`. On any check failure transitions
+/// the intent to `aborted` with the matching `abort_reason` and
+/// returns the corresponding `Blocked*` error — the caller must not
+/// proceed with the filesystem mutation.
+pub async fn authorize_destructive_commit(
     pool: &SqlitePool,
     alias_resolver: &dyn AliasResolver,
     event_repo: &dyn EventRepo,
-    identity_repo: &dyn IdentityRepo,
     commit_id: CommitId,
+) -> Result<CommitPermit, VoomError>;
+
+/// Called after the caller's filesystem mutation is durable on disk
+/// (or after the caller decided not to mutate; see
+/// `MutationOutcome::NotPerformed`). The permit is consumed by value
+/// to discourage stale-permit reuse; the durable `commit_intents`
+/// row's `epoch` is still checked inside the transaction so a
+/// concurrent abort racing the finalize is caught.
+pub async fn finalize_destructive_commit(
+    pool: &SqlitePool,
+    event_repo: &dyn EventRepo,
+    identity_repo: &dyn IdentityRepo,
+    permit: CommitPermit,
     outcome: MutationOutcome,
 ) -> Result<CommitGateOutcome, VoomError>;
 
+/// Aborts an intent in `state IN ('pending', 'authorized')` before
+/// any caller mutation has happened. Equivalent to a
+/// `finalize_destructive_commit(_, _, _, permit, NotPerformed)` call
+/// when the caller already holds a permit; this entry point exists
+/// for callers that haven't authorized yet (they hold a
+/// `CommitIntent`, not a `CommitPermit`).
 pub async fn abort_destructive_commit(
     pool: &SqlitePool,
     event_repo: &dyn EventRepo,
@@ -1392,13 +1514,17 @@ pub async fn abort_destructive_commit(
     reason: AbortReason,
 ) -> Result<(), VoomError>;
 
+/// Lists in-flight intents (`state IN ('pending', 'authorized')`).
+/// The name stays `pending` for CLI continuity; callers that need to
+/// distinguish phase windows inspect the `state` field on each
+/// returned record.
 pub async fn list_pending_commit_intents(
     pool: &SqlitePool,
     older_than: Option<OffsetDateTime>,
 ) -> Result<Vec<PendingCommitIntent>, VoomError>;
 ```
 
-The caller's filesystem mutation runs **between** `prepare` and
+The caller's filesystem mutation runs **between** `authorize` and
 `finalize`, outside any DB transaction. Mutations must be idempotent
 or staged so that crash-and-retry yields the same end state — the
 architectural spec's staged-artifact + rollback-metadata requirements
@@ -1406,35 +1532,50 @@ apply unchanged. `finalize_destructive_commit` takes
 `&dyn IdentityRepo` because the durable identity mutation that gives
 the closure check its meaning (e.g.,
 `IdentityRepo::retire_file_location_in_tx` for a `DeleteFileLocation`
-target) runs inside the same finalize transaction.
+target) runs inside the same finalize transaction. The window between
+`prepare` and `authorize` is short and host-local — typically a single
+async tick while the caller marshals the call — and exists so the
+architectural "immediately before" recheck has a well-defined recheck
+point distinct from the initial gate evaluation.
 
-`prepare_destructive_commit` is also the sole writer of
+`prepare_destructive_commit` is the initial writer of
 `commit_intent_scope_members` (§9.1): inside its Phase A IMMEDIATE
 transaction it inserts one `commit_intents` row plus one
 `commit_intent_scope_members` row per element of `closure_initial`,
-expanded across all four granularities. Those rows are the durable
-backing-store for the pending-commit lock that `UseLeaseRepo::acquire`
-(§9.2) and `IdentityRepo`'s alias-attaching paths (§8.7) consult
-before mutating. The lock is an implementation detail behind the
-gate — no API signature changes, no new field on `CommitIntent`. The
-`commit.intent_recorded` event payload already carries
-`closure_initial`, which is the source of truth for the
-`scope_members` rows, so audit can reconstruct the lock from events
-without a separate field. The new error `BlockedByPendingCommit`
-(§12.1) shows up on the existing `Result<_, VoomError>` returns of
-the methods that consult the lock; no new struct in the gate API.
-Structured detail (which `commit_intent_scope_members` row matched)
-lives on a `BlockedByPendingCommitDetail` struct in
+expanded across all four granularities. `authorize_destructive_commit`
+is the second writer: if the Phase B recheck succeeds with a closure
+that differs from `closure_initial`, it deletes
+`commit_intent_scope_members` rows for removed members and inserts
+rows for added members, so the lock keeps covering the recomputed
+closure until the intent transitions out of the in-flight window.
+Those rows are the durable backing-store for the pending-commit lock
+that `UseLeaseRepo::acquire` (§9.2) consults before issuing a new
+lease. The lock is an implementation detail behind the gate — no API
+signature changes for `UseLeaseRepo`, no new field on `CommitIntent`
+beyond the `epoch` echoed onto `CommitPermit`. The
+`commit.intent_recorded` and `commit.authorized` event payloads carry
+`closure_initial` and `closure_authorized` respectively, which are the
+source of truth for the `scope_members` rows, so audit can reconstruct
+the lock from events without a separate field. The error
+`BlockedByPendingCommit` (§12.1) shows up on the existing
+`Result<_, VoomError>` returns of `UseLeaseRepo::acquire`; structured
+detail (which `commit_intent_scope_members` row matched) lives on a
+`BlockedByPendingCommitDetail` struct in
 `voom-store::repo::commit_safety_gate`, parallel to the existing
 `CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`
 types, for Sprint 9 report consumers.
 
 ### 9.3.2 Algorithm
 
-The gate runs in three phases. Phase A and Phase C are each one
-IMMEDIATE transaction; Phase B is also one IMMEDIATE transaction and
-is what makes the closure recheck and the durable mutation atomic with
-respect to the intent transition.
+The gate runs in three phases — `prepare` (Phase A), `authorize`
+(Phase B), and `finalize` (Phase C) — plus a separate
+`abort_destructive_commit` entry point that aborts an in-flight intent
+without finalizing. Each phase is one IMMEDIATE transaction. Phase B
+is the architectural "immediately before the irreversible filesystem
+mutation" recheck (`docs/specs/voom-control-plane-design.md` lines
+1044–1052) and is the primary safety gate; Phase C's recheck is a
+defensive trip-wire that catches lock-bypass and resolver-escape paths
+the lock could not.
 
 #### Phase A — `prepare_destructive_commit`
 
@@ -1452,7 +1593,8 @@ spec's serialization point.
      `AliasResolutionError::Unreachable`, record a `ClosureWarning` and
      surface `BlockedByClosureIncomplete` unless `input.override_token`
      is present and grants `closure_incomplete` (see §9.3.3). Emit
-     `commit.aborted_by_closure_incomplete` (Phase A abort, see §9.3.5);
+     `commit.aborted_by_closure_incomplete` with
+     `payload.phase = 'prepare'` (Phase A abort, see §9.3.5);
      return `BlockedByClosureIncomplete`.
 2. Evaluate every blocking `asset_use_lease` against `closure_initial`,
    using the per-FK indexes from §9.1. The query is a UNION over the
@@ -1473,16 +1615,17 @@ spec's serialization point.
    whether cleanup has run yet. Manual locks always count until
    terminal. Advisory leases never block. If a fresh blocking lease
    overlaps → `BlockedByUseLease`; emit `commit.aborted_by_use_lease`
-   (Phase A abort); return. This check has **no force bypass**
-   (§9.3.3).
+   with `payload.phase = 'prepare'` (Phase A abort); return. This
+   check has **no force bypass** (§9.3.3).
 3. Revalidate every accepted evidence row in `input.accepted_evidence_ids`:
    compare `pinned_file_version_ids` against current `FileVersion` IDs
    of the scope, `pinned_hashes` against current `content_hash` values,
    and `pinned_locations` against current live locations. Any drift →
    `BlockedByStaleEvidence`; emit `commit.aborted_by_stale_evidence`
-   (Phase A abort); return. Accepted-evidence rows are not rewritten —
-   drift forces the caller to re-collect and re-accept. **The force
-   path never bypasses evidence revalidation.**
+   with `payload.phase = 'prepare'` (Phase A abort); return.
+   Accepted-evidence rows are not rewritten — drift forces the caller
+   to re-collect and re-accept. **The force path never bypasses
+   evidence revalidation.**
 4. Insert a `commit_intents` row with `state = 'pending'`,
    `target = input.target`, `closure_initial`, `accepted_evidence_ids`,
    and `started_at = now`. Inside the same IMMEDIATE transaction, expand
@@ -1503,66 +1646,161 @@ spec's serialization point.
    revalidated_evidence, override_token: { actor, reason, bypass }
    | null }`. COMMIT. Once the transaction commits, the pending-commit
    lock is live: from this point until the intent transitions out of
-   `pending`, no new use-lease acquire and no new alias-attaching
-   `IdentityRepo` mutation can touch the closure (§9.2, §8.7).
-5. Return `CommitIntent`. The caller now performs the filesystem
-   mutation outside any DB transaction. The architectural spec's
-   staged-artifact + rollback-metadata requirements apply: mutations
-   must be idempotent or staged so that crash-and-retry yields the
-   same end state.
+   the in-flight window (`pending` or `authorized`), no new use-lease
+   acquire on the closure can succeed (§9.2). The lock does **not**
+   apply to byte-preserving observation-of-reality operations
+   (`IdentityRepo::record_discovered_file_in_tx` alias-attach branch
+   and `IdentityRepo::reconcile_rename_in_tx`) — those record reality
+   that has already happened on disk and are caught by the Phase B
+   authorize recheck (§8.7, §9.3.2 Phase B).
+5. Return `CommitIntent`. The caller's next step is to call
+   `authorize_destructive_commit` to obtain a `CommitPermit` before
+   performing any filesystem mutation. No filesystem mutation is
+   permitted between Phase A and Phase B.
 
-#### Phase B — `finalize_destructive_commit`
+#### Phase B — `authorize_destructive_commit`
+
+Called immediately before the caller intends to perform the filesystem
+mutation. This is the architectural "immediately before the
+irreversible filesystem mutation" recheck
+(`docs/specs/voom-control-plane-design.md` lines 1044–1052) — the
+single point at which the gate observes the state the destructive
+mutation is about to act on. One IMMEDIATE transaction.
+
+1. Read the `commit_intents` row for `commit_id`; require
+   `state = 'pending'`. Missing row, terminal state, or `epoch`
+   mismatch → return `Conflict` without writing.
+2. Recompute `closure_authorized` against the current DB state and
+   the `AliasResolver`, following the same walk as Phase A step 1. If
+   any `AliasResolver` call fails or returns
+   `AliasResolutionError::Unreachable`, surface
+   `BlockedByClosureIncomplete` unless the original
+   `commit_intents.target`-recorded `override_token` granted
+   `closure_incomplete` (the bypass is honored through to authorize
+   so the operator does not have to re-prepare; see §9.3.3). On
+   abort: emit `commit.aborted_by_closure_incomplete` with
+   `payload.phase = 'authorize'`, transition the intent to
+   `state = 'aborted'`, `authorized_at = NULL`, `aborted_at = now`,
+   `abort_reason = 'closure_incomplete'`. COMMIT. Return
+   `BlockedByClosureIncomplete`.
+3. Compute the delta between `closure_authorized` and
+   `closure_initial` across all four granularities. **Any non-empty
+   delta** — members added (e.g., a newly-discovered alias), members
+   removed (e.g., an external rename retired the prior location and
+   recorded a new one), or both — aborts the commit: the safety
+   properties of `closure_initial` no longer cover what is actually
+   on disk. Emit `commit.aborted_by_closure_grew` with payload
+   `{ commit_id, phase: 'authorize', closure_initial,
+   closure_authorized, added_*, removed_* }`. Transition the intent
+   to `state = 'aborted'`, `authorized_at = NULL`, `aborted_at = now`,
+   `abort_reason = 'closure_grew'`. COMMIT. Return
+   `CommitGateResult::BlockedByClosureGrew { added_*, removed_* }`.
+   The variant name keeps the architectural-spec terminology
+   ("grown") but represents any closure delta — additions, removals,
+   or both.
+4. Re-evaluate the blocking-lease query from Phase A step 2 against
+   `closure_authorized`. With the pending-commit lock covering
+   `state IN ('pending', 'authorized')` (§9.2), fresh leases on the
+   closure cannot be acquired through `UseLeaseRepo`; firing this
+   check therefore indicates either a lease that landed via a
+   lock-bypass path or a closure shift that pulled in a member that
+   already had a blocking lease before prepare. On match: emit
+   `commit.aborted_by_use_lease` with `payload.phase = 'authorize'`,
+   transition the intent to `state = 'aborted'`, `authorized_at = NULL`,
+   `aborted_at = now`, `abort_reason = 'fresh_lease'`. COMMIT. Return
+   `BlockedByUseLease`. This check has **no force bypass** (§9.3.3).
+5. Re-validate every accepted evidence row in
+   `commit_intents.accepted_evidence_ids` against current state, the
+   same way Phase A step 3 does. Any drift: emit
+   `commit.aborted_by_stale_evidence` with `payload.phase = 'authorize'`,
+   transition the intent to `state = 'aborted'`,
+   `authorized_at = NULL`, `aborted_at = now`,
+   `abort_reason = 'stale_evidence'`. COMMIT. Return
+   `BlockedByStaleEvidence`. **The force path never bypasses evidence
+   revalidation**, here or in Phase A.
+6. All checks pass. Reconcile `commit_intent_scope_members` with
+   `closure_authorized`: delete rows whose member is in
+   `closure_initial` but not in `closure_authorized`, and insert rows
+   for members in `closure_authorized` but not in `closure_initial`,
+   across all four granularities. Update the `commit_intents` row:
+   set `state = 'authorized'`, `closure_authorized = <recomputed>`,
+   `authorized_at = now`, bump `epoch`. Emit `commit.authorized` with
+   payload `{ commit_id, closure_initial, closure_authorized,
+   evaluated_lease_ids, revalidated_evidence }`. COMMIT. Return
+   `CommitPermit { commit_id, authorized_at, closure_authorized,
+   evaluated_lease_ids, revalidated_evidence, epoch }`. The pending-
+   commit lock continues to cover the closure through the
+   `authorized` state until Phase C resolves the intent.
+
+The caller now performs the filesystem mutation outside any DB
+transaction. Mutations must be idempotent or staged so that
+crash-and-retry yields the same end state — the architectural spec's
+staged-artifact + rollback-metadata requirements apply unchanged.
+
+#### Phase C — `finalize_destructive_commit`
 
 Called once the caller's filesystem mutation is durable on the
 filesystem (or the caller has decided not to mutate; see
 `MutationOutcome::NotPerformed`). One IMMEDIATE transaction.
 
-1. Read the `commit_intents` row for `commit_id`; require
-   `state = 'pending'`. Missing row, terminal state, or `epoch`
-   mismatch → return `Conflict` without writing.
+1. Read the `commit_intents` row for `permit.commit_id`; require
+   `state = 'authorized'` **and** `epoch == permit.epoch`. Missing
+   row, wrong state, or epoch mismatch → return `Conflict` without
+   writing. The epoch check rejects stale permits (e.g., a permit
+   left over from a previously-aborted authorize attempt against the
+   same `commit_id`, or a concurrent `abort_destructive_commit` that
+   bumped the row underneath the permit holder).
 2. If `outcome == MutationOutcome::NotPerformed`: transition the
    intent to `state = 'aborted'`, `aborted_at = now`, and
-   `abort_reason = 'operator_cancel'`. Emit
-   `commit.aborted_pre_mutation`. COMMIT. This is the same outcome
-   the caller would get from `abort_destructive_commit` (Phase C);
-   the two entry points exist so callers that take the
-   prepare-then-decide-not-to-mutate path can finalize cleanly
-   without a second API call.
+   `abort_reason = 'operator_cancel'` (the `authorized_at` value is
+   preserved per the §9.1 CHECK, which leaves `authorized_at`
+   unconstrained on `aborted`). Emit `commit.aborted_pre_mutation`
+   with `payload.prior_state = 'authorized'` so audit can distinguish
+   "aborted before authorize" (handled by `abort_destructive_commit`,
+   `prior_state = 'pending'`) from "authorized but caller chose not
+   to mutate" (handled here, `prior_state = 'authorized'`). COMMIT.
+   Return `CommitGateOutcome { commit_id, closure_initial,
+   closure_authorized, closure_final: closure_authorized,
+   evaluated_lease_ids: permit.evaluated_lease_ids,
+   revalidated_evidence: permit.revalidated_evidence, result:
+   CommitGateResult::Allowed }` is **not** correct (the commit did
+   not happen); instead Sprint 1's contract: `finalize` returns
+   `Err(VoomError::Conflict("operator cancelled after authorize"))`
+   on the `NotPerformed` branch. Callers that obtained a permit and
+   then decided not to mutate are expected to call
+   `abort_destructive_commit` directly; the `NotPerformed` branch
+   exists as the in-finalize escape hatch for callers whose
+   filesystem-mutation step failed between authorize and finalize
+   without producing partial on-disk state. The durable state
+   transition (intent → `aborted` with `abort_reason =
+   'operator_cancel'`) and the `commit.aborted_pre_mutation` event
+   are the audit record either way.
 3. Otherwise (`outcome == MutationOutcome::Applied { observed }`):
-   recompute `closure_final` against the current DB state and the
-   `AliasResolver`. The intent's `closure_initial` is the baseline;
-   the architectural spec's two-pass closure recheck rule is "pick
-   up any FileLocations that have been attached as aliases of
-   in-scope FileVersions since the initial gate check." If the
-   caller passed `observed`, merge it into `closure_final`. Compute
-   the delta between `closure_final` and `closure_initial` across all
-   four granularities, then re-evaluate the blocking-lease query from
-   Phase A step 2 against `closure_final`.
+   defensive trip-wire — recompute `closure_final` against the
+   current DB state and the `AliasResolver`, and re-evaluate the
+   blocking-lease query against `closure_final`. With the pending-
+   commit lock covering both `pending` and `authorized` states
+   (§9.1, §9.2), and with Phase B's recheck having just observed
+   the closure, both subchecks should be empty under normal
+   operation. Firing the trip-wire indicates a lock-bypass or
+   resolver escape between Phase B commit and Phase C start. Known
+   escape paths:
 
-   With the pending-commit lock in place (§9.1, §9.2, §8.7), both
-   subchecks are a **defensive trip-wire**, not the primary protection.
-   Under normal operation the lock makes it impossible for a new
-   use-lease or a new alias `FileLocation` to appear on the closure
-   between Phase A commit and Phase B start, so the delta should be
-   empty and the lease query should return no rows. Firing the
-   trip-wire indicates a lock-bypass or closure-completeness escape
-   that needs investigation. Three known escape paths:
-
-   - A bug in the lock-consultation logic in `UseLeaseRepo::acquire_in_tx`
-     or `IdentityRepo`'s alias-attaching paths.
+   - A bug in `UseLeaseRepo::acquire_in_tx`'s lock-consultation
+     logic.
    - An external SQL writer that bypassed the repos (e.g., a manual
      `INSERT INTO asset_use_leases` run against the DB file).
-   - An `AliasResolver` that returned `Complete` for Phase A but newly
-     discovers an alias by Phase B (e.g., a remote mount came online
-     between phases, an object-store probe succeeded on retry).
+   - An `AliasResolver` that returned a smaller closure for Phase B
+     but newly discovers an alias by Phase C (e.g., a remote mount
+     came online between phases, an object-store probe succeeded on
+     retry).
 
    The two subchecks may fire independently or together. The
-   `commit.aborted_post_mutation` event payload is uniform across all
-   trip-wire firings — it always carries both the closure delta and
-   the fresh-lease list, with empty arrays for the dimension that
-   didn't escape — so the durable audit record preserves every escape
-   the gate observed, regardless of which `CommitGateResult` variant
-   the caller receives:
+   `commit.aborted_post_mutation` event payload is uniform across
+   all trip-wire firings — it always carries both the closure delta
+   (vs. `closure_authorized`) and the fresh-lease list, with empty
+   arrays for the dimension that didn't escape — so the durable
+   audit record preserves every escape the gate observed:
 
    ```text
    payload = {
@@ -1570,98 +1808,108 @@ filesystem (or the caller has decided not to mutate; see
        reason,                            -- 'closure_grew' | 'fresh_lease' | 'closure_grew_and_fresh_lease'
        escape,                            -- which trip-wire path the gate suspects
        closure_initial,
+       closure_authorized,
        closure_final,
-       delta_assets,                      -- possibly empty
-       delta_bundles,                     -- possibly empty
-       delta_versions,                    -- possibly empty
-       delta_locations,                   -- possibly empty
-       fresh_lease_ids,                   -- possibly empty
+       added_assets,      removed_assets,      -- possibly empty
+       added_bundles,     removed_bundles,     -- possibly empty
+       added_versions,    removed_versions,    -- possibly empty
+       added_locations,   removed_locations,   -- possibly empty
+       fresh_lease_ids,                        -- possibly empty
    }
    ```
 
    The two subcheck results map to `CommitGateResult` as follows:
 
-   - **Closure grew** (delta non-empty, no fresh lease): the gate's
-     understanding of which files the commit would affect was wrong;
-     closure members that grew the closure (e.g., a newly-discovered
-     alias `FileLocation`) were never covered by evidence revalidation
-     or the Phase A lease check, so the mutation's safety properties
-     no longer hold even if no lease references those new members.
-     Emit `commit.aborted_post_mutation` with `reason='closure_grew'`
-     and `fresh_lease_ids=[]`, transition the intent to
-     `state = 'recovery_required'` (leaving `finalized_at`,
-     `aborted_at`, and `abort_reason` all NULL per the §9.1 CHECK), do
-     **not** apply the durable mutation, COMMIT, return
-     `CommitGateResult::BlockedByClosureGrew { added_assets,
-     added_bundles, added_versions, added_locations }`.
+   - **Closure grew or shifted** (delta non-empty vs.
+     `closure_authorized`, no fresh lease): emit
+     `commit.aborted_post_mutation` with `reason='closure_grew'`,
+     transition the intent to `state = 'recovery_required'` (leaving
+     `finalized_at`, `aborted_at`, and `abort_reason` all NULL per
+     the §9.1 CHECK), do **not** apply the durable mutation, COMMIT,
+     return `CommitGateResult::BlockedByClosureGrew { added_*,
+     removed_* }`.
    - **Fresh blocking lease** (delta empty, but a blocking lease now
      covers `closure_final` whose ID is not in
-     `evaluated_lease_ids`): a lease appeared inside the FS-mutation
-     window. Emit `commit.aborted_post_mutation` with
-     `reason='fresh_lease'` and empty `delta_*`, transition the intent
-     to `state = 'recovery_required'` (same NULL-shape as above), do
+     `permit.evaluated_lease_ids`): emit
+     `commit.aborted_post_mutation` with `reason='fresh_lease'`,
+     transition the intent to `state = 'recovery_required'`, do
      **not** apply the durable mutation, COMMIT, return
      `CommitGateResult::BlockedByUseLease { lease_id, lease_scope }`
      naming the first such lease (deterministic by `lease_id`).
-   - **Both fire** (delta non-empty **and** a fresh lease covers the
-     enlarged closure): emit one `commit.aborted_post_mutation` event
+   - **Both fire**: emit one `commit.aborted_post_mutation` event
      with `reason='closure_grew_and_fresh_lease'`, **both** populated
-     `delta_*` arrays **and** populated `fresh_lease_ids` — so the
-     recovery worker and audit see every escape, not just one. The
-     intent transition is the same as the other branches. Return
-     `CommitGateResult::BlockedByClosureGrew { added_* }` (closure
-     growth is the more fundamental escape — the fresh-lease check
-     would have been re-evaluated against the wrong baseline anyway).
-     The returned variant is a compact summary of the most actionable
-     escape; the event payload is the full durable evidence and is
-     what Sprint 5+ recovery and Sprint 9 audit consult.
+     `added_*`/`removed_*` arrays **and** populated
+     `fresh_lease_ids` — so the recovery worker and audit see every
+     escape, not just one. The intent transition is the same. Return
+     `CommitGateResult::BlockedByClosureGrew { added_*, removed_* }`
+     (closure shift is the more fundamental escape — the fresh-lease
+     check would have been re-evaluated against the wrong baseline
+     anyway).
 
    In every trip-wire branch the filesystem mutation has already
    happened, so the durable state lags behind reality; the
    `recovery_required` state flags this intent for the Sprint 5+
-   recovery worker. The trip-wire reason has a single source of truth
-   on the event payload, not the intent row.
-4. Otherwise (no fresh blocking lease appeared): apply the matching
-   durable mutation via the identity/bundle repos inside this same
-   transaction (e.g., `IdentityRepo::retire_file_location_in_tx` for
-   a `DeleteFileLocation` target, `BundleRepo::archive_in_tx` for an
-   `ArchiveBundle` target). The durable mutation is what makes the
-   closure check meaningful — it must run inside the same tx as the
-   recheck and the intent transition.
-5. Update the `commit_intents` row to `state = 'completed'` and
-   `finalized_at = now` (with epoch bump). Emit `commit.completed`
-   with payload `{ commit_id, target, closure_initial, closure_final,
-   evaluated_lease_ids, revalidated_evidence }`. COMMIT. Return
+   recovery worker. The trip-wire reason has a single source of
+   truth on the event payload, not the intent row. Under the
+   three-phase API these branches are expected to be rare: the
+   authorize recheck (Phase B) catches the closure-shift escape
+   before the FS mutation, so the trip-wire fires only on a
+   genuine lock-bypass or a resolver that changes its mind between
+   authorize and finalize.
+4. Otherwise (trip-wire silent): apply the matching durable
+   mutation via the identity/bundle repos inside this same
+   transaction (e.g., `IdentityRepo::retire_file_location_in_tx`
+   for a `DeleteFileLocation` target, `BundleRepo::archive_in_tx`
+   for an `ArchiveBundle` target). The durable mutation is what
+   makes the closure check meaningful — it must run inside the same
+   tx as the recheck and the intent transition.
+5. Update the `commit_intents` row to `state = 'completed'`,
+   `finalized_at = now`, bump `epoch`. Emit `commit.completed` with
+   payload `{ commit_id, target, closure_initial,
+   closure_authorized, closure_final, evaluated_lease_ids,
+   revalidated_evidence }`. COMMIT. Return
    `CommitGateOutcome { result: Allowed, ... }`.
 
-#### Phase C — `abort_destructive_commit`
+#### `abort_destructive_commit`
 
-Called when the caller decides not to perform the filesystem mutation.
-One IMMEDIATE transaction.
+Called when the caller decides not to proceed, either before
+authorize (holding a `CommitIntent`) or after authorize (holding a
+`CommitPermit`, when the caller would rather route through this
+explicit entry point than through `finalize(NotPerformed)`). One
+IMMEDIATE transaction.
 
 1. Read the `commit_intents` row for `commit_id`; require
-   `state = 'pending'`. Missing row, terminal state, or `epoch`
-   mismatch → return `Conflict`.
-2. Update to `state = 'aborted'`, `aborted_at = now`, and
-   `abort_reason = reason`. Emit `commit.aborted_pre_mutation` with
-   the reason in the payload. COMMIT.
+   `state IN ('pending', 'authorized')`. Missing row or terminal
+   state → return `Conflict`.
+2. Record the prior state (`'pending'` or `'authorized'`) so the
+   audit event can distinguish "aborted before authorize" from
+   "aborted after authorize, caller chose not to mutate". Update
+   the row to `state = 'aborted'`, `aborted_at = now`,
+   `abort_reason = reason` (and preserve `authorized_at` as-is —
+   NULL if was `pending`, non-NULL if was `authorized`).
+3. Emit `commit.aborted_pre_mutation` with payload
+   `{ commit_id, prior_state, reason }`. COMMIT.
 
 #### Recovery contract
 
 `list_pending_commit_intents(older_than)` returns intents in
-`state = 'pending'` optionally older than a threshold. A stuck pending
-intent indicates the caller crashed between Phase A and Phase B
-finalize. Sprint 1 ships:
+`state IN ('pending', 'authorized')`, optionally older than a
+threshold. A stuck pending intent indicates the caller crashed
+between Phase A and Phase B; a stuck authorized intent indicates
+the caller crashed between Phase B and Phase C (most concerning,
+since the FS mutation may have happened). Sprint 1 ships:
 
 - the `commit_intents` table,
-- the prepare / finalize / abort / list functions,
+- the prepare / authorize / finalize / abort / list functions,
 - the `commit.recovery_required` event kind, which the Sprint 5+
   recovery worker emits as it reconciles a stuck intent against
   filesystem state.
 
 Sprint 1 does **not** ship the filesystem-aware reconciliation worker
 itself — that lives with the real workers (Sprint 5+), and §15 records
-the deferral.
+the deferral. The three-phase API makes the worker's job easier
+(`pending` vs. `authorized` tells it whether to expect any FS state
+change), but does not change what the worker must do.
 
 ### 9.3.3 Force path
 
@@ -1674,14 +1922,28 @@ override event and reason"). The `ForcePathToken` carries `actor`,
 
 - `closure_incomplete` — skip the closure-resolution abort the gate
   raises when `AliasResolver` fails or returns
-  `AliasResolutionError::Unreachable`.
+  `AliasResolutionError::Unreachable`. The bypass applies in both
+  Phase A (`prepare`) and Phase B (`authorize`) — once granted at
+  prepare time, the token's `closure_incomplete` bit is honored
+  through to authorize, since otherwise the authorize-phase recheck
+  could trap a commit the operator already chose to force.
+  Implementation: the `override_token` is recorded in the
+  `commit.intent_recorded` event payload at prepare time;
+  `authorize_destructive_commit` re-reads the token from the
+  `commit_intents` row (or from the journaled event payload via the
+  intent ID) and applies the same bypass logic to the authorize-phase
+  unreachable-closure abort.
 
 The architectural spec scopes the force path to incomplete closure
 resolution specifically. Fresh blocking use-leases are **not**
-force-bypassable — they always fail the gate. A token whose `bypass`
-set carries `blocked_by_use_lease` is rejected before the gate runs
-(`VoomError::Config`). Likewise `stale_evidence` is not a valid bypass:
-stale evidence is a correctness problem, not a permissions problem.
+force-bypassable — they always fail the gate, in either Phase A or
+Phase B. A token whose `bypass` set carries `blocked_by_use_lease` is
+rejected before the gate runs (`VoomError::Config`). Likewise
+`stale_evidence` is not a valid bypass: stale evidence is a
+correctness problem, not a permissions problem. And `closure_grew` is
+not a valid bypass either: a closure shift means the safety properties
+the operator authorized no longer cover what is actually on disk, and
+the force path is not a tool for ignoring that.
 
 **Operator workflow when a blocking lease must be cleared.** An
 operator who needs a destructive commit to proceed while a blocking
@@ -1695,10 +1957,10 @@ UseLeaseRepo::release(lease_id, reason = force_released, actor, reason)
 That call writes its own `use_lease.force_released` event recording
 `{ actor, reason }`. Once the lease is terminal, the gate's
 blocking-lease check sees no live lease on the scope, and the operator
-reruns `prepare_destructive_commit` / `finalize_destructive_commit`
-without a `blocked_by_use_lease` bypass. The gate itself is unchanged
-between attempts — the audit trail lives on the lease release, not on
-the commit.
+reruns `prepare_destructive_commit` / `authorize_destructive_commit`
+/ `finalize_destructive_commit` without a `blocked_by_use_lease`
+bypass. The gate itself is unchanged between attempts — the audit
+trail lives on the lease release, not on the commit.
 
 A force-path run that bypasses closure resolution emits
 `commit.forced_override` recording the token's `actor`, `reason`, and
@@ -1734,32 +1996,72 @@ fail-closed semantics are exercised today by a test-only
 ### 9.3.5 Pre-mutation abort-event durability
 
 The two-transaction pattern applies **only** to Phase A aborts
-(pre-mutation): each `Blocked*` branch in Phase A emits its
-`commit.aborted_by_*` event before ROLLBACK and survives the abort
-via a follow-up tiny transaction that writes the event row. Phase A
-abort events have no other durable state to atomically commit
-alongside them, so the two-tx pattern is correct.
+(pre-mutation, before a `commit_intents` row exists): each `Blocked*`
+branch in Phase A emits its `commit.aborted_by_*` event before
+ROLLBACK and survives the abort via a follow-up tiny transaction that
+writes the event row. Phase A abort events have no durable
+`commit_intents` state to atomically commit alongside them (the
+intent row is the thing being rolled back), so the two-tx pattern is
+correct.
 
-Phase B (finalize) does not use the two-tx pattern: the
-`commit.aborted_post_mutation` event is written inside the finalize
+Phase B aborts (authorize-phase recheck failures —
+`closure_incomplete`, `closure_grew`, `fresh_lease`,
+`stale_evidence`) do **not** use the two-tx pattern: the
+`commit_intents` row already exists by the time `authorize` runs, so
+the abort transitions the intent to `aborted` with the matching
+`abort_reason` **inside the same IMMEDIATE transaction** as the
+event row. The intent state transition and the audit event commit
+atomically; no follow-up transaction is needed and no race window
+exists.
+
+Phase C trip-wire aborts (post-mutation closure_grew/fresh_lease)
+likewise write `commit.aborted_post_mutation` inside the finalize
 transaction itself, which always commits the intent-state transition
 to `recovery_required`. What the post-mutation abort skips is the
 durable identity mutation (step 4); the intent row update, the
 `recovery_required` transition, and the event row commit together as
 one atomic record of "the FS mutation happened but the closure check
-fell behind." Phase C aborts similarly write
-`commit.aborted_pre_mutation` inside the abort transaction.
+fell behind." The `abort_destructive_commit` entry point similarly
+writes `commit.aborted_pre_mutation` inside the abort transaction.
 
-### 9.4 Rename reconciliation × evidence revalidation
+### 9.4 Rename reconciliation × evidence revalidation × authorize recheck
 
-The spec's most subtle interaction: `reconcile_rename_in_tx` re-anchors
-**leases** to the new location, but does **not** rewrite accepted
-**evidence** (whose `pinned_locations` array still names the retired
-location). A later destructive commit acting on that pinned evidence
-will hit `BlockedByStaleEvidence` because `pinned_locations` no longer
-matches the current state, and must re-collect & re-accept. The
-integration test `commit_safety_gate_after_rename.rs` covers this
-sequence end-to-end.
+Three interactions sit on top of the same fact — external rename
+reconciliation is a byte-preserving observation of physical reality
+that always records, and it shifts the closure of any in-flight
+destructive commit on the affected `FileVersion`:
+
+1. **Rename always proceeds.** `reconcile_rename_in_tx` does **not**
+   consult the pending-commit lock (§8.7). A watcher or rescan that
+   observes a real external move records it immediately, retiring
+   the prior `FileLocation` and recording the new one on the same
+   `FileVersion`. Refusing to record the move would leave durable
+   identity stale exactly when closure accuracy matters most.
+2. **Authorize observes the shift.** A rename that lands while a
+   destructive commit on the same `FileVersion` is in
+   `state = 'pending'` will cause the Phase B `authorize` recheck
+   (§9.3.2) to compute a `closure_authorized` whose `file_locations`
+   set differs from `closure_initial`: the prior `FileLocation` is
+   absent (it has been retired), and the new `FileLocation` is
+   present. This produces a non-empty `removed_locations` and
+   `added_locations` and aborts the intent with
+   `BlockedByClosureGrew { added_*, removed_* }`. The operator
+   re-prepares against the new closure, re-authorizes, and proceeds.
+3. **Pinned evidence still drifts on rename.**
+   `reconcile_rename_in_tx` re-anchors **leases** to the new location
+   but does **not** rewrite accepted **evidence** (whose
+   `pinned_locations` array still names the retired location). A
+   later destructive commit acting on that pinned evidence will hit
+   `BlockedByStaleEvidence` because `pinned_locations` no longer
+   matches the current state, and must re-collect & re-accept. This
+   is independent of the closure-shift abort above: a rename produces
+   *both* `BlockedByClosureGrew` (in the authorize recheck of the
+   current commit) and `BlockedByStaleEvidence` (on the next attempt
+   with the now-stale evidence) — the operator re-collects evidence
+   first, then re-prepares.
+
+The integration test `commit_safety_gate_after_rename.rs` covers the
+end-to-end sequence under the three-phase API.
 
 ## 10. Ancillary Registries (M3)
 
@@ -1926,8 +2228,8 @@ voom external-system  list [--limit] [--cursor]
                       get  <id>
 voom use-lease  list [--scope-type] [--scope-id] [--state] [--limit] [--cursor]
                 get  <id>
-voom commit-intent  list [--state pending|completed|aborted|recovery_required] [--older-than] [--limit] [--cursor]
-                    get  <id>                       (returns scope_members inline)
+voom commit-intent  list [--state pending|authorized|completed|aborted|recovery_required] [--older-than] [--limit] [--cursor]
+                    get  <id>                       (returns scope_members + closure_authorized inline when applicable)
 voom event      list [--since] [--until] [--kind] [--subject-type] [--subject-id] [--limit] [--cursor]
                 tail [--since] [--kind] [--subject-type] [--subject-id]
                 get  <id>
@@ -1970,17 +2272,29 @@ JSON for at least:
 - `voom worker get <id>` showing capabilities + grants inline
 - `voom asset get <id>` showing versions + locations + bundle membership
 - `voom commit-intent list --state pending` showing the
-  `PendingCommitIntent` shape (fixture inserts a pending intent via
+  `PendingCommitIntent` shape with `state = "pending"`,
+  `closure_authorized = null` (fixture inserts a pending intent via
   the gate's `prepare` API)
+- `voom commit-intent list --state authorized` showing the
+  `PendingCommitIntent` shape with `state = "authorized"`,
+  `closure_authorized` populated, `authorized_at` non-null (fixture
+  inserts a pending intent via `prepare` and then transitions it via
+  `authorize_destructive_commit`)
 - `voom commit-intent get <id>` for a pending intent, asserting the
   `scope_members` array is rendered inline so operators can see what
   the intent is currently blocking (asset / bundle / version /
   location members)
+- `voom commit-intent get <id>` for an authorized intent, asserting
+  `closure_authorized` and `authorized_at` are rendered inline and
+  the `scope_members` array reflects the recomputed closure
 - The Sprint-1-specific error envelopes for `BLOCKED_BY_USE_LEASE`,
-  `BLOCKED_BY_PENDING_COMMIT`, `STALE_IDENTITY_EVIDENCE`,
-  `CLOSURE_RESOLUTION_INCOMPLETE`, `DEPENDENCY_CYCLE`, and `CONFLICT`,
-  shaped via fixture insertion + forced invocation of the relevant
-  control-plane use case.
+  `BLOCKED_BY_PENDING_COMMIT`, `BLOCKED_BY_CLOSURE_GREW`,
+  `STALE_IDENTITY_EVIDENCE`, `CLOSURE_RESOLUTION_INCOMPLETE`,
+  `DEPENDENCY_CYCLE`, and `CONFLICT`, shaped via fixture insertion +
+  forced invocation of the relevant control-plane use case. The
+  `BLOCKED_BY_CLOSURE_GREW` envelope is shaped by triggering the
+  Phase B authorize-recheck closure-shift abort against a fixture
+  that records an alias attach between `prepare` and `authorize`.
 
 ## 12. Cross-cutting Concerns
 
@@ -1990,6 +2304,7 @@ JSON for at least:
 
 - `BlockedByUseLease` → `"BLOCKED_BY_USE_LEASE"`
 - `BlockedByPendingCommit` → `"BLOCKED_BY_PENDING_COMMIT"`
+- `BlockedByClosureGrew` → `"BLOCKED_BY_CLOSURE_GREW"`
 - `StaleIdentityEvidence` → `"STALE_IDENTITY_EVIDENCE"`
 - `ClosureResolutionIncomplete` → `"CLOSURE_RESOLUTION_INCOMPLETE"`
 - `DependencyCycle` → `"DEPENDENCY_CYCLE"`
@@ -1998,18 +2313,22 @@ JSON for at least:
 `VoomError` gains matching `(String)`-tuple variants — matching Sprint 0's
 pattern. The message text carries the human-readable context (lease ID,
 evidence drift summary, blocking `commit_id` plus scope type and id for
-`BlockedByPendingCommit`, etc.); structured detail for Sprint 9's reports
+`BlockedByPendingCommit`, closure-delta summary for
+`BlockedByClosureGrew`, etc.); structured detail for Sprint 9's reports
 lives on the gate-result types in `voom-store::repo::commit_safety_gate`
 (`CommitGateResult`, `LeaseScope`, `EvidenceDrift`, `ClosureWarning`,
-and `BlockedByPendingCommitDetail` for the pending-commit-lock matches
-described in §9.1, §9.2, §8.7), which the control-plane use cases
-consult before mapping to `VoomError`.
+`BlockedByPendingCommitDetail` for the pending-commit-lock matches
+described in §9.1, §9.2, and `BlockedByClosureGrewDetail` for the
+authorize-recheck and finalize-tripwire closure-delta payloads
+described in §9.3.2), which the control-plane use cases consult
+before mapping to `VoomError`.
 
 ```rust
 pub enum VoomError {
     /* ... Sprint 0 variants ... */
     BlockedByUseLease(String),
     BlockedByPendingCommit(String),
+    BlockedByClosureGrew(String),
     StaleIdentityEvidence(String),
     ClosureResolutionIncomplete(String),
     DependencyCycle(String),
@@ -2129,90 +2448,217 @@ Cross-repo flows live as integration tests:
 - `rename_reconciliation.rs` — `reconcile_rename` retires old + records
   new on the same `FileVersion`; M3 step re-anchors blocking, advisory,
   and manual leases; pinned evidence is preserved (not rewritten); new
-  evidence appended; events emitted.
-- `commit_safety_gate.rs` — covers each abort path under the two-phase
-  prepare/finalize/abort API (§9.3.1): `BlockedByUseLease` (blocking
-  lease scoped to closure member, raised in `prepare`), `BlockedByStaleEvidence`
-  (pinned hash mismatch, raised in `prepare`), `BlockedByClosureIncomplete`
-  (via `FailingAliasResolver`, raised in `prepare`); allowed path with
-  successful mutation through `prepare` → caller mutation → `finalize`;
-  the `abort_destructive_commit` path when the caller decides not to
-  mutate; pending intent visible via `list_pending_commit_intents`;
-  `recovery_required` state for a stuck intent whose caller never
-  finalized. Force-path coverage: `closure_incomplete` bypass is
-  honored in `prepare`; an `override_token` whose `bypass` set carries
-  `blocked_by_use_lease` is rejected at the gate boundary
-  (`VoomError::Config`); a `stale_evidence` bypass is rejected the same
-  way; a separate test exercises the documented operator workflow
-  ("force-release the blocking lease via `UseLeaseRepo::release(reason
-  = force_released)`, then rerun the gate") and asserts the second
-  attempt is allowed without any bypass token.
+  evidence appended; events emitted. A dedicated sub-test confirms that
+  `reconcile_rename_in_tx` proceeds even when a pending or authorized
+  `commit_intents` row covers the affected `FileVersion` — the
+  pending-commit lock does not apply to observation-of-reality paths
+  (§8.7).
+- `commit_safety_gate.rs` — covers each abort path under the
+  three-phase prepare/authorize/finalize/abort API (§9.3.1).
 
-  Pending-commit-lock coverage (the primary protection introduced by
-  §9.1, §9.2, §8.7):
+  **Phase A (`prepare`) abort coverage:**
+  - `prepare_blocked_by_use_lease`: a blocking lease scoped to a
+    closure member is detected at prepare time, returns
+    `BlockedByUseLease`, emits `commit.aborted_by_use_lease` with
+    `payload.phase = 'prepare'`, does **not** insert a
+    `commit_intents` row.
+  - `prepare_blocked_by_stale_evidence`: pinned hash mismatch at
+    prepare time, returns `BlockedByStaleEvidence`, emits
+    `commit.aborted_by_stale_evidence` with `payload.phase = 'prepare'`.
+  - `prepare_blocked_by_closure_incomplete`: `FailingAliasResolver`
+    causes the closure walk to fail, returns
+    `BlockedByClosureIncomplete`, emits
+    `commit.aborted_by_closure_incomplete` with
+    `payload.phase = 'prepare'`.
+
+  **Phase B (`authorize`) recheck coverage — the architectural
+  "immediately before" gate, which is now the primary detection
+  surface for closure shifts, fresh leases, and stale evidence that
+  appear between prepare and authorize:**
+  - `authorize_blocked_by_closure_grew_alias_discovery`: prepare with
+    closure C₁; between prepare and authorize, attach a new
+    `FileLocation` to an in-closure `FileVersion` via
+    `IdentityRepo::record_discovered_file_in_tx`'s alias-attach
+    branch (which is **not** blocked by the pending intent — see the
+    reconciliation-exempt tests below). Authorize observes the
+    enlarged closure, transitions the intent to `aborted` with
+    `abort_reason = 'closure_grew'`, emits
+    `commit.aborted_by_closure_grew` with `payload.phase = 'authorize'`,
+    returns `BlockedByClosureGrew { added_locations: [L_new],
+    removed_locations: [], ... }`. Asserts no durable identity
+    mutation ran.
+  - `authorize_blocked_by_closure_grew_rename`: prepare with closure
+    C₁ including `FileLocation` L_old; between prepare and authorize,
+    call `IdentityRepo::reconcile_rename_in_tx` to retire L_old and
+    record L_new. Authorize observes the shift, transitions the
+    intent to `aborted` with `abort_reason = 'closure_grew'`, emits
+    `commit.aborted_by_closure_grew` with the same `payload.phase`,
+    returns `BlockedByClosureGrew { added_locations: [L_new],
+    removed_locations: [L_old], ... }`.
+  - `authorize_blocked_by_use_lease`: a blocking lease that landed
+    via a lock-bypass path (test inserts via direct SQL between
+    prepare and authorize) is detected, transitions the intent to
+    `aborted` with `abort_reason = 'fresh_lease'`, emits
+    `commit.aborted_by_use_lease` with `payload.phase = 'authorize'`,
+    returns `BlockedByUseLease`.
+  - `authorize_blocked_by_stale_evidence`: pinned evidence drifts
+    between prepare and authorize (the fixture mutates a
+    `FileVersion`'s `content_hash`), authorize detects the drift,
+    transitions the intent to `aborted` with `abort_reason =
+    'stale_evidence'`, emits `commit.aborted_by_stale_evidence` with
+    `payload.phase = 'authorize'`, returns `BlockedByStaleEvidence`.
+  - `authorize_blocked_by_closure_incomplete`: the `AliasResolver`
+    starts returning `Unreachable` between prepare and authorize.
+    Authorize transitions the intent to `aborted` with `abort_reason
+    = 'closure_incomplete'`, emits
+    `commit.aborted_by_closure_incomplete` with
+    `payload.phase = 'authorize'`, returns
+    `BlockedByClosureIncomplete`. A companion test verifies the
+    force-path `closure_incomplete` bypass token from the original
+    `prepare` is honored through to `authorize` — the second run
+    succeeds even when the resolver is still failing.
+  - `authorize_scope_members_unchanged_on_success`: prepare with
+    closure C₁; no closure-mutating activity occurs between prepare
+    and authorize. Authorize succeeds with `closure_authorized ==
+    closure_initial` and `commit_intent_scope_members` rows are
+    unchanged (step 6 of Phase B is a no-op when there is no
+    delta). This is the common success-path shape under Sprint 1's
+    strict abort-on-any-delta rule.
+  - `authorize_aborted_scope_members_persist_for_audit`: under the
+    closure_grew abort fixture, the intent transitions to
+    `state = 'aborted'`. The `commit_intent_scope_members` rows
+    inserted at prepare time persist (Sprint 1 does not delete
+    intent rows; Sprint 5+ cleanup may remove them) so the audit
+    record of the original `closure_initial` is preserved.
+  - `authorize_then_lease_acquire_still_blocked`: after authorize
+    succeeds and the intent is in `state = 'authorized'`, a
+    `UseLeaseRepo::acquire` on a closure member is still rejected
+    with `BlockedByPendingCommit` — the pending-commit lock covers
+    the full in-flight window (§9.1, §9.2).
+
+  **Phase C (`finalize`) coverage:**
+  - `finalize_happy_path`: prepare → authorize → caller mutation
+    (test helper applies the FS change) → `finalize(permit)` →
+    durable mutation applied, intent in `state = 'completed'`,
+    `commit.completed` event emitted. The lock is released
+    (transition out of `authorized`) and a subsequent
+    `UseLeaseRepo::acquire` on the scope succeeds.
+  - `finalize_not_performed`: prepare → authorize → caller decides
+    not to mutate → `finalize(permit, MutationOutcome::NotPerformed)`
+    transitions the intent to `aborted` with `abort_reason =
+    'operator_cancel'`, emits `commit.aborted_pre_mutation` with
+    `payload.prior_state = 'authorized'`.
+  - `finalize_stale_permit`: prepare → authorize → concurrent
+    `abort_destructive_commit` bumps the epoch (or finalize is called
+    with a permit whose `epoch` no longer matches the durable
+    `commit_intents` row) → `finalize` returns `Conflict` and does
+    **not** apply the durable mutation.
+  - `finalize_tripwire_fresh_lease`: prepare → authorize (succeeds)
+    → between authorize and finalize, a direct-SQL insert into
+    `asset_use_leases` (bypassing the repo and the lock) creates a
+    blocking lease on a closure member → caller mutation → finalize
+    detects the lease, transitions the intent to
+    `recovery_required`, emits `commit.aborted_post_mutation` with
+    `reason='fresh_lease'`, returns
+    `CommitGateResult::BlockedByUseLease`, and asserts no durable
+    identity mutation ran.
+  - `finalize_tripwire_closure_grew`: prepare → authorize (succeeds
+    against a stateful `AliasResolver` that returns C₁) →
+    between authorize and finalize, the resolver starts returning
+    C₂ ⊋ C₁ (e.g., a remote mount comes online) → caller mutation
+    → finalize detects the delta, transitions the intent to
+    `recovery_required`, emits `commit.aborted_post_mutation` with
+    `reason='closure_grew'`, returns
+    `CommitGateResult::BlockedByClosureGrew { added_*, removed_* }`,
+    no durable identity mutation ran. These trip-wire tests exist
+    to prove the trip-wire fires when something escapes the lock
+    *and* the authorize recheck; under normal operation the
+    trip-wire never fires (it is defensive code, not the primary
+    detection point).
+  - `finalize_tripwire_tie`: combines the previous two fixtures so
+    closure grows **and** a fresh blocking lease lands between
+    authorize and finalize. Asserts a single
+    `commit.aborted_post_mutation` event with
+    `reason='closure_grew_and_fresh_lease'` and both populated
+    delta arrays **and** populated `fresh_lease_ids`, the intent in
+    `recovery_required`, and the returned `CommitGateResult` is
+    `BlockedByClosureGrew`.
+
+  **Reconciliation-exempt observation paths (the second Codex
+  finding):**
+  - `alias_attach_during_pending_intent_proceeds`: a pending
+    `commit_intents` row covers `FileVersion` V; a subsequent call
+    to `IdentityRepo::record_discovered_file_in_tx` (alias-attach
+    branch, with an `alias_proof` resolving to V) **succeeds** and
+    records the new `FileLocation`. The architectural spec at lines
+    678 and 697–708 mandates that byte-preserving operations record
+    reality even during in-flight commits. The companion
+    `authorize_blocked_by_closure_grew_alias_discovery` test above
+    is what catches the safety property: the commit aborts at the
+    next authorize.
+  - `rename_during_pending_intent_proceeds`: a pending
+    `commit_intents` row covers `FileVersion` V; a subsequent call
+    to `IdentityRepo::reconcile_rename_in_tx` against a live
+    `FileLocation` on V **succeeds** (retires the prior location,
+    records the new one, emits the move events). The companion
+    `authorize_blocked_by_closure_grew_rename` test is what catches
+    the safety property.
+  - `alias_attach_during_authorized_intent_proceeds`: same as
+    `alias_attach_during_pending_intent_proceeds` but the intent is
+    in `state = 'authorized'`. Confirms the in-flight window of the
+    lock (pending + authorized) does **not** cover IdentityRepo
+    observation paths.
+  - `rename_during_authorized_intent_proceeds`: as above for rename
+    reconciliation.
+
+  **Pending-commit-lock coverage on `UseLeaseRepo::acquire` (the
+  one path that still consults the lock — §9.1, §9.2):**
   - A pending intent over `FileLocation` Y blocks a subsequent
     `UseLeaseRepo::acquire(LeaseScope::Location(Y))` with
     `BlockedByPendingCommit`.
   - The same intent blocks
     `UseLeaseRepo::acquire(LeaseScope::Asset(X))` when Y's parent
-    asset is X (the asset-granularity `scope_members` row matches,
-    because Phase A walks closure across all four granularities).
+    asset is X (the asset-granularity `scope_members` row matches).
     Analogous cases for `LeaseScope::Bundle` and
     `LeaseScope::Version` exercise the other two granularities.
-  - The same intent blocks
-    `IdentityRepo::record_discovered_file_in_tx` (alias-attach
-    branch) for an alias whose `alias_proof` resolves to an
-    in-closure `FileVersion`. A negative test asserts the
-    `NewFileAsset` branch is **not** blocked: a freshly-discovered
-    file with no alias proof succeeds even while the intent is
-    pending.
-  - The same intent blocks
-    `IdentityRepo::reconcile_rename_in_tx` for a `FileVersion` in
-    the closure.
+  - An **authorized** intent (state = `'authorized'`) blocks the
+    same acquires — the lock covers the full in-flight window.
   - After `finalize_destructive_commit` (completed) or
     `abort_destructive_commit` (aborted) clears the intent's
-    `pending` state, the same acquire / alias-attach / rename calls
-    succeed without surprises.
-  - Defensive trip-wire — fresh-lease branch (Phase B step 3 of
-    §9.3.2): a low-level test inserts an `asset_use_lease` row
-    directly via SQL between Phase A commit and Phase B start
-    (bypassing `UseLeaseRepo` and therefore the lock). Phase B's
-    recheck observes the fresh lease, transitions the intent to
-    `recovery_required`, emits `commit.aborted_post_mutation` with
-    `reason='fresh_lease'`, returns
-    `CommitGateResult::BlockedByUseLease`, and asserts the durable
-    identity mutation did **not** run.
-  - Defensive trip-wire — closure-grew branch (Phase B step 3 of
-    §9.3.2): a test wires a stateful `AliasResolver` that returns
-    `Complete` with closure C₁ during Phase A and returns
-    `Complete` with closure C₂ ⊋ C₁ during Phase B (simulating an
-    alias newly discovered between phases, e.g., a remote mount
-    coming online). Phase B's recheck observes the non-empty delta,
-    transitions the intent to `recovery_required`, emits
-    `commit.aborted_post_mutation` with `reason='closure_grew'`,
-    populated `delta_*`, and `fresh_lease_ids=[]`, returns
-    `CommitGateResult::BlockedByClosureGrew { added_* }`, and asserts
-    the durable identity mutation did **not** run.
-  - Defensive trip-wire — tie branch (Phase B step 3 of §9.3.2):
-    combines the previous two fixtures so the closure grows **and** a
-    fresh blocking lease lands on a member of the enlarged closure
-    between Phase A and Phase B. Asserts a single
-    `commit.aborted_post_mutation` event with
-    `reason='closure_grew_and_fresh_lease'` and both populated
-    `delta_*` arrays **and** populated `fresh_lease_ids` (no escape
-    evidence dropped), the intent in `recovery_required`, and the
-    returned `CommitGateResult` is `BlockedByClosureGrew`. The
-    fresh-lease evidence on the event payload is what guarantees the
-    Sprint 5+ recovery worker can see both escapes from a single
-    durable record. All three trip-wire tests exist to prove the
-    trip-wire fires when something escapes the lock; under normal
-    operation the trip-wire never fires.
+    in-flight state, the same acquire calls succeed.
+
+  **Force-path coverage:**
+  - `closure_incomplete` bypass is honored in both `prepare` and
+    `authorize` (one test per phase).
+  - An `override_token` whose `bypass` set carries
+    `blocked_by_use_lease` is rejected at the gate boundary
+    (`VoomError::Config`); same for `stale_evidence` and
+    `closure_grew`.
+  - A separate test exercises the documented operator workflow
+    ("force-release the blocking lease via
+    `UseLeaseRepo::release(reason = force_released)`, then rerun
+    the gate") and asserts the second attempt is allowed without
+    any bypass token.
+
+  **Inspection:**
+  - Pending intents and authorized intents are visible via
+    `list_pending_commit_intents`; the `state` field on each
+    record distinguishes phase.
+  - `recovery_required` state for a stuck intent whose caller never
+    finalized is set by the trip-wire tests above; a dedicated
+    inspection test reads the row back via the same list API.
 - `commit_safety_gate_after_rename.rs` — end-to-end against the
-  two-phase API: ingest → evidence-acceptance → `reconcile_rename`
-  (M3, re-anchors leases) → `prepare_destructive_commit` against
-  pinned evidence → `StaleIdentityEvidence` abort in Phase A;
-  re-collect & re-accept evidence → second `prepare` → caller mutation
-  → `finalize_destructive_commit` allowed.
+  three-phase API: ingest → evidence-acceptance →
+  `reconcile_rename` (M3, re-anchors leases) →
+  `prepare_destructive_commit` against pinned evidence →
+  `StaleIdentityEvidence` abort in Phase A; re-collect & re-accept
+  evidence → second `prepare` → `authorize_destructive_commit` →
+  caller mutation → `finalize_destructive_commit` allowed. A second
+  scenario exercises rename happening *between* prepare and
+  authorize: prepare succeeds, rename reconciliation lands,
+  authorize aborts with `BlockedByClosureGrew { added_locations,
+  removed_locations }`, operator re-prepares, evidence is re-collected,
+  and the second three-phase attempt succeeds.
 - `use_lease_scope_validation.rs` — covers the four-FK scope contract:
   - `acquire` with `LeaseScope::Location` referencing a nonexistent
     `FileLocationId` → `NotFound` (FK violation, translated by the
@@ -2264,7 +2710,7 @@ snapshot diffs stable.
 |---|---|
 | Tests can create jobs, lease tickets, expire leases, and recover work. | `crates/voom-store/tests/ticket_lease_lifecycle.rs`, `lease_expire_and_recover.rs` |
 | Tests can create a file asset, add versions and locations, and report its event/evidence history. | `crates/voom-store/tests/ingest_identity_invariants.rs`, `rename_reconciliation.rs`; the `voom asset get` CLI snapshot exercises the read-side report |
-| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::prepare_blocked_by_use_lease` (Phase A `BlockedByUseLease` under the two-phase API) together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record` |
+| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::prepare_blocked_by_use_lease` (Phase A `BlockedByUseLease` under the three-phase API; the matching `authorize_blocked_by_use_lease` test exercises the architectural pre-mutation recheck path) together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record` |
 | Events are recorded for all state transitions. | Every repo `_test.rs` asserts the matching `events` row; `event_log_append_only.rs` asserts immutability |
 | In-memory SQLite tests exercise the same repositories as disk mode. | Repos inherit `test_support::test_pool()` for `:memory:`; `tests/disk_mode.rs` runs the same fixture flow against a `tempfile`-backed disk DB; `just ci` runs both |
 
