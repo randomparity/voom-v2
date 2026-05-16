@@ -21,7 +21,7 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint test deny audit
+ci: fmt-check lint test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -36,6 +36,9 @@ lint:
 
 test:
     cargo test --workspace --all-features
+
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
 audit:
     cargo audit --deny warnings

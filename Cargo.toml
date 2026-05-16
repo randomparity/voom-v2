@@ -59,5 +59,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
 unsafe_code = "forbid"
-missing_debug_implementations = "warn"
+missing_debug_implementations = "deny"

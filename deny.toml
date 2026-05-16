@@ -9,6 +9,7 @@ ignore = []
 [licenses]
 version = 2
 confidence-threshold = 0.93
+unused-allowed-license = "deny"
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -20,7 +21,7 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 deny = []
 skip = [
