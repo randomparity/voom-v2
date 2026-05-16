@@ -36,5 +36,10 @@ jobs:
       - name: Install cargo-deny + cargo-audit
         run: cargo install --locked cargo-deny cargo-audit
 
+      - name: Install ast-grep
+        uses: taiki-e/install-action@3771e22aa892e03fd35585fae288baad1755695c  # v2.78.2
+        with:
+          tool: ast-grep
+
       - name: just ci
         run: just ci
