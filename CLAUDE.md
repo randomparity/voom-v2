@@ -9,7 +9,7 @@ All routine actions go through `just` (see `justfile`):
 | Command | Purpose |
 |---|---|
 | `just setup` | One-shot bootstrap: toolchain, cargo tools, git hooks via `prek`. |
-| `just ci` | Run the exact CI suite locally: `fmt-check`, `lint`, `test`, `deny`, `audit`. |
+| `just ci` | Run the exact CI suite locally: `fmt-check`, `lint`, `check-test-layout`, `test`, `doc`, `deny`, `audit`. |
 | `just fmt` / `just fmt-check` | `cargo fmt --all` (write / check). |
 | `just lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings`. |
 | `just test` | `cargo test --workspace --all-features`. |
