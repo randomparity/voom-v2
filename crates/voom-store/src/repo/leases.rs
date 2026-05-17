@@ -162,7 +162,7 @@ pub trait LeaseRepo: Repository {
     async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteLeaseRepo {
     pool: SqlitePool,
 }

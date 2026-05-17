@@ -96,7 +96,7 @@ pub trait JobRepo: Repository {
     async fn cancel(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteJobRepo {
     pool: SqlitePool,
 }

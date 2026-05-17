@@ -119,7 +119,7 @@ pub trait TicketRepo: Repository {
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteTicketRepo {
     pool: SqlitePool,
 }

@@ -166,7 +166,7 @@ pub trait WorkerRepo: Repository {
     ) -> Result<Vec<Worker>, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteWorkerRepo {
     pool: SqlitePool,
 }

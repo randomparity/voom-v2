@@ -106,7 +106,7 @@ pub trait ArtifactRepo: Repository {
     ) -> Result<Vec<ArtifactLocation>, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteArtifactRepo {
     pool: SqlitePool,
 }

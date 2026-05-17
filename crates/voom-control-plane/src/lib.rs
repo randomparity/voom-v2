@@ -7,15 +7,53 @@
     )
 )]
 //! App-services layer: wraps voom-store and exposes commands consumed by API/CLI.
+//!
+//! The `cases` submodule hosts the M1 use-case methods. Every method that
+//! mutates durable state composes the matching repo `_in_tx` call with
+//! `EventRepo::append_in_tx` inside one `pool.begin()` so the row write
+//! and its event row share a transaction.
+
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, VoomError};
+use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
+use voom_store::repo::{
+    artifacts::SqliteArtifactRepo, events::SqliteEventRepo, jobs::SqliteJobRepo,
+    leases::SqliteLeaseRepo, tickets::SqliteTicketRepo, workers::SqliteWorkerRepo,
+};
 use voom_store::{SchemaState, connect, probe_schema};
 
-#[derive(Debug, Clone)]
+pub mod cases;
+
+#[derive(Clone)]
 pub struct ControlPlane {
     pool: SqlitePool,
+    clock: Arc<dyn Clock>,
+    pub(crate) events: SqliteEventRepo,
+    pub(crate) jobs: SqliteJobRepo,
+    pub(crate) tickets: SqliteTicketRepo,
+    pub(crate) workers: SqliteWorkerRepo,
+    pub(crate) leases: SqliteLeaseRepo,
+    pub(crate) artifacts: SqliteArtifactRepo,
+}
+
+impl std::fmt::Debug for ControlPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn Clock` does not require Debug; surface a sentinel rather
+        // than widening the trait bound (which would force every concrete
+        // Clock implementor — including test fakes — to derive Debug).
+        f.debug_struct("ControlPlane")
+            .field("pool", &self.pool)
+            .field("clock", &"<dyn Clock>")
+            .field("events", &self.events)
+            .field("jobs", &self.jobs)
+            .field("tickets", &self.tickets)
+            .field("workers", &self.workers)
+            .field("leases", &self.leases)
+            .field("artifacts", &self.artifacts)
+            .finish()
+    }
 }
 
 impl ControlPlane {
@@ -23,9 +61,51 @@ impl ControlPlane {
     /// the DB doesn't exist, returns `DB_UNREACHABLE`. The CLI's `init` command
     /// is the only path that creates databases, and it calls
     /// `voom_store::init(url)` directly without going through `ControlPlane`.
+    ///
+    /// This Sprint 0 surface intentionally does NOT gate on `SchemaState::Current`
+    /// so the diagnostic flow (`health()` on a non-Current DB) continues to
+    /// work. Callers that intend to invoke use-case writes must use
+    /// `open_with_pool`, which enforces the Current invariant.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Database` if the pool cannot be opened.
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
-        Ok(Self { pool })
+        Ok(Self::new_unchecked(pool, Arc::new(SystemClock)))
+    }
+
+    /// Wrap an already-connected pool with the supplied clock. The DB MUST
+    /// already be at the current schema (use `voom_store::init` on first boot);
+    /// any other state is rejected with `VoomError::Migration`. Use-case
+    /// methods on `ControlPlane` assume the full M1 schema is present.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
+    /// or whatever error `probe_schema` itself produces.
+    pub async fn open_with_pool(
+        pool: SqlitePool,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, VoomError> {
+        let probe = probe_schema(&pool).await?;
+        if !matches!(probe, SchemaState::Current { .. }) {
+            return Err(VoomError::Migration(format!(
+                "ControlPlane requires a Current schema; got {probe:?}"
+            )));
+        }
+        Ok(Self::new_unchecked(pool, clock))
+    }
+
+    fn new_unchecked(pool: SqlitePool, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            events: SqliteEventRepo::new(pool.clone()),
+            jobs: SqliteJobRepo::new(pool.clone()),
+            tickets: SqliteTicketRepo::new(pool.clone()),
+            workers: SqliteWorkerRepo::new(pool.clone()),
+            leases: SqliteLeaseRepo::new(pool.clone()),
+            artifacts: SqliteArtifactRepo::new(pool.clone()),
+            pool,
+            clock,
+        }
     }
 
     /// Read-only health snapshot.
@@ -56,6 +136,39 @@ impl ControlPlane {
                 expected,
             },
         })
+    }
+
+    #[must_use]
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+    #[must_use]
+    pub fn clock(&self) -> &dyn Clock {
+        &*self.clock
+    }
+    #[must_use]
+    pub fn events(&self) -> &SqliteEventRepo {
+        &self.events
+    }
+    #[must_use]
+    pub fn jobs(&self) -> &SqliteJobRepo {
+        &self.jobs
+    }
+    #[must_use]
+    pub fn tickets(&self) -> &SqliteTicketRepo {
+        &self.tickets
+    }
+    #[must_use]
+    pub fn workers(&self) -> &SqliteWorkerRepo {
+        &self.workers
+    }
+    #[must_use]
+    pub fn leases(&self) -> &SqliteLeaseRepo {
+        &self.leases
+    }
+    #[must_use]
+    pub fn artifacts(&self) -> &SqliteArtifactRepo {
+        &self.artifacts
     }
 }
 

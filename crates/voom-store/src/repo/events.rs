@@ -50,7 +50,7 @@ pub trait EventRepo: Repository {
     async fn get(&self, event_id: EventId) -> Result<Option<EventRow>, VoomError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteEventRepo {
     pool: SqlitePool,
 }
