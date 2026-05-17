@@ -25,6 +25,10 @@ pub enum ErrorCode {
     Internal,
     /// CLI argument parsing failed (clap surface).
     BadArgs,
+    /// A ticket dependency edge would create a cycle.
+    DependencyCycle,
+    /// Optimistic-locking conflict; caller should re-read and retry.
+    Conflict,
 }
 
 impl ErrorCode {
@@ -41,6 +45,8 @@ impl ErrorCode {
             Self::NotFound => "NOT_FOUND",
             Self::Internal => "INTERNAL",
             Self::BadArgs => "BAD_ARGS",
+            Self::DependencyCycle => "DEPENDENCY_CYCLE",
+            Self::Conflict => "CONFLICT",
         }
     }
 }
@@ -61,6 +67,10 @@ pub enum VoomError {
     NotFound(String),
     #[error("internal error: {0}")]
     Internal(String),
+    #[error("dependency cycle: {0}")]
+    DependencyCycle(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
 }
 
 impl VoomError {
@@ -76,6 +86,8 @@ impl VoomError {
             Self::Config(_) => ErrorCode::ConfigInvalid,
             Self::NotFound(_) => ErrorCode::NotFound,
             Self::Internal(_) => ErrorCode::Internal,
+            Self::DependencyCycle(_) => ErrorCode::DependencyCycle,
+            Self::Conflict(_) => ErrorCode::Conflict,
         }
     }
 
