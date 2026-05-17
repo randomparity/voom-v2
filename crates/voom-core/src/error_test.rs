@@ -67,6 +67,23 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::BadArgs,
         ErrorCode::DependencyCycle,
         ErrorCode::Conflict,
+        ErrorCode::WorkerTimeout,
+        ErrorCode::WorkerCrash,
+        ErrorCode::NoEligibleWorker,
+        ErrorCode::ArtifactUnavailable,
+        ErrorCode::ArtifactChecksumMismatch,
+        ErrorCode::ExternalSystemUnavailable,
+        ErrorCode::ExternalSystemRateLimited,
+        ErrorCode::VerificationFailure,
+        ErrorCode::BackupFailure,
+        ErrorCode::CommitFailure,
+        ErrorCode::PolicyParseError,
+        ErrorCode::PolicyValidationError,
+        ErrorCode::MissingCapability,
+        ErrorCode::MalformedWorkerResult,
+        ErrorCode::UserCancellation,
+        ErrorCode::ApprovalRequired,
+        ErrorCode::PriorityPolicyConflict,
     ] {
         // Confirm the exhaustive match in `as_str()` produces a
         // SCREAMING_SNAKE_CASE token; format isn't load-bearing beyond

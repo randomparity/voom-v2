@@ -39,6 +39,12 @@ define_id!(FileLocationId);
 define_id!(EvidenceId);
 define_id!(MediaSnapshotId);
 
+// Issue layer (M3 issues table; the `IssueId` newtype lands in M1 so
+// `TicketFailedTerminal` event payloads can already carry the optional
+// auto-opened issue id — it serializes as `null` in M1 because no
+// `issues` table exists yet).
+define_id!(IssueId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;
