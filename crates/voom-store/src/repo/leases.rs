@@ -221,6 +221,24 @@ impl LeaseRepo for SqliteLeaseRepo {
                 "ttl must be positive, got {ttl_secs}s"
             )));
         }
+        // Worker must exist and not be retired. Retired workers must never
+        // acquire — checked here so the worker lifecycle is an effective
+        // trust boundary. CHECK constraint on workers.status guarantees the
+        // returned string is one of the four-value vocab.
+        let worker_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM workers WHERE id = ?")
+                .bind(i64_from_u64(input.worker_id.0))
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| VoomError::Database(format!("workers status read: {e}")))?;
+        let status = worker_status
+            .ok_or_else(|| VoomError::NotFound(format!("worker {}", input.worker_id)))?;
+        if status == "retired" {
+            return Err(VoomError::Conflict(format!(
+                "acquire rejected: worker {} retired",
+                input.worker_id
+            )));
+        }
         let now_str = iso8601(input.now)?;
         // Promote ticket: assert ready + eligible + retries remain; bump attempt.
         let res = sqlx::query(
