@@ -16,5 +16,7 @@ pub mod version;
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use error::{ErrorCode, VoomError};
-pub use ids::{EventId, JobId, LeaseId, MediaId, TicketId, WorkerId};
+pub use ids::{
+    ArtifactHandleId, ArtifactLocationId, EventId, JobId, LeaseId, MediaId, TicketId, WorkerId,
+};
 pub use version::VersionInfo;

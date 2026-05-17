@@ -20,6 +20,8 @@ define_id!(LeaseId);
 define_id!(WorkerId);
 define_id!(JobId);
 define_id!(EventId);
+define_id!(ArtifactHandleId);
+define_id!(ArtifactLocationId);
 
 #[cfg(test)]
 #[path = "ids_test.rs"]
