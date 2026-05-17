@@ -2196,6 +2196,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "voom-control-plane",
  "voom-core",
  "voom-events",
 ]

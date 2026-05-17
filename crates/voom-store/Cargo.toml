@@ -36,3 +36,7 @@ test-support = []
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# Cargo permits dev-dep cycles (voom-control-plane normal-deps voom-store):
+# this dependency is only resolved for test/example builds, not for the
+# library itself, so it does not introduce a real circular build edge.
+voom-control-plane = { workspace = true }
