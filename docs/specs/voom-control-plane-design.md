@@ -1400,8 +1400,11 @@ Deliverables:
 - append-only event log
 - repository interfaces
 - migration tests
-- JSON CLI for inspecting jobs, leases, nodes, artifacts, identity records, and
-  events
+- JSON CLI for inspecting jobs, leases, workers, artifacts, identity records,
+  and events (a `voom node` inspection command is deferred to Sprint 4
+  alongside the `nodes` table; Sprint 1 ships `voom worker` against
+  the `workers` table, whose `kind` column distinguishes local /
+  remote / synthetic)
 
 Exit criteria:
 
