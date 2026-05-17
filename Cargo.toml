@@ -41,6 +41,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 tempfile = "3.27.0"
 time = { version = "0.3.45", features = ["formatting"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+tracing = "0.1.44"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

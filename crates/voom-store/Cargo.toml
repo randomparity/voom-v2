@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "time"] }
 time = { workspace = true, features = ["serde", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 

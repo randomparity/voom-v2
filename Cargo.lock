@@ -2193,6 +2193,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tracing",
  "voom-core",
  "voom-events",
 ]
