@@ -91,12 +91,60 @@ async fn retire_artifact_location_emits_artifact_location_retired() {
         .unwrap();
     cp.retire_artifact_location(
         loc.id,
-        h.id,
         OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
     )
     .await
     .unwrap();
     assert_eq!(count(&cp, EventKind::ArtifactLocationRetired).await, 1);
+}
+
+#[tokio::test]
+async fn retire_artifact_location_payload_handle_matches_recorded_location() {
+    // Regression guard: the event payload's artifact_handle_id must always
+    // be the location's recorded handle. With the caller-supplied parameter
+    // removed (Fix 4), this is invariant by construction — re-introducing a
+    // caller-supplied handle would have to break this test.
+    let (cp, _tmp) = cp().await;
+    let handle_a = cp.create_artifact_handle(handle_input()).await.unwrap();
+    let loc = cp
+        .record_artifact_location(NewArtifactLocation {
+            artifact_handle_id: handle_a.id,
+            kind: "local_path".to_owned(),
+            value: "/tmp/a".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    cp.retire_artifact_location(
+        loc.id,
+        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::ArtifactLocationRetired),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    let voom_events::Event::ArtifactLocationRetired(payload) = &page.items[0].envelope.payload
+    else {
+        panic!("expected ArtifactLocationRetired payload");
+    };
+    assert_eq!(payload.artifact_location_id, loc.id.0);
+    assert_eq!(
+        payload.artifact_handle_id, handle_a.id.0,
+        "event payload's handle id must match the location's recorded handle"
+    );
 }
 
 #[tokio::test]

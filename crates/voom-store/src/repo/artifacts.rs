@@ -82,17 +82,21 @@ pub trait ArtifactRepo: Repository {
         input: NewArtifactLocation,
     ) -> Result<ArtifactLocation, VoomError>;
 
+    /// Retire the given location. Returns the `ArtifactHandleId` the
+    /// location belongs to, resolved from the row itself so the caller
+    /// (and any event payload it builds) cannot disagree with the
+    /// recorded relationship.
     async fn retire_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         location_id: ArtifactLocationId,
         now: OffsetDateTime,
-    ) -> Result<(), VoomError>;
+    ) -> Result<ArtifactHandleId, VoomError>;
     async fn retire_location(
         &self,
         location_id: ArtifactLocationId,
         now: OffsetDateTime,
-    ) -> Result<(), VoomError>;
+    ) -> Result<ArtifactHandleId, VoomError>;
 
     async fn record_lineage_in_tx<'tx>(
         &self,
@@ -224,7 +228,7 @@ impl ArtifactRepo for SqliteArtifactRepo {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         location_id: ArtifactLocationId,
         now: OffsetDateTime,
-    ) -> Result<(), VoomError> {
+    ) -> Result<ArtifactHandleId, VoomError> {
         let ts = iso8601(now)?;
         let res = sqlx::query(
             "UPDATE artifact_locations SET retired_at = ? \
@@ -240,25 +244,37 @@ impl ArtifactRepo for SqliteArtifactRepo {
                 "retire rejected for location {location_id}: not live"
             )));
         }
-        Ok(())
+        // Resolve the handle id from the row itself so the event payload's
+        // artifact_handle_id is the location's true handle, not a caller
+        // assertion ([[project_in_tx_reread_uses_tx_handle]]).
+        let handle_id: i64 =
+            sqlx::query_scalar("SELECT artifact_handle_id FROM artifact_locations WHERE id = ?")
+                .bind(i64_from_u64(location_id.0))
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| {
+                    VoomError::Database(format!("artifact_locations handle lookup: {e}"))
+                })?;
+        Ok(ArtifactHandleId(u64_from_i64(handle_id)))
     }
 
     async fn retire_location(
         &self,
         location_id: ArtifactLocationId,
         now: OffsetDateTime,
-    ) -> Result<(), VoomError> {
+    ) -> Result<ArtifactHandleId, VoomError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
-        self.retire_location_in_tx(&mut tx, location_id, now)
+        let out = self
+            .retire_location_in_tx(&mut tx, location_id, now)
             .await?;
         tx.commit()
             .await
             .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
-        Ok(())
+        Ok(out)
     }
 
     async fn record_lineage_in_tx<'tx>(

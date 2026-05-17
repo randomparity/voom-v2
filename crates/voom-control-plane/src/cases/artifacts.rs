@@ -3,12 +3,12 @@
 //! `EventRepo::append_in_tx` inside one transaction.
 
 use time::OffsetDateTime;
-use voom_core::{ArtifactHandleId, ArtifactLocationId, VoomError};
+use voom_core::{ArtifactLocationId, VoomError};
 use voom_events::payload::{
     ArtifactHandleCreatedPayload, ArtifactLineageRecordedPayload, ArtifactLocationRecordedPayload,
     ArtifactLocationRetiredPayload,
 };
-use voom_events::{Event, EventKind, SubjectType};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, ArtifactRepo, NewArtifactHandle,
     NewArtifactLineage, NewArtifactLocation,
@@ -33,7 +33,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::ArtifactHandleCreated,
             SubjectType::ArtifactHandle,
             Some(handle.id.0),
             occurred,
@@ -63,7 +62,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::ArtifactLocationRecorded,
             SubjectType::ArtifactLocation,
             Some(location.id.0),
             occurred,
@@ -80,23 +78,25 @@ impl ControlPlane {
     }
 
     /// Retire an artifact location and emit `artifact_location.retired`.
+    /// The event payload's `artifact_handle_id` is resolved from the location
+    /// row itself so it is always the location's recorded handle, never a
+    /// caller assertion.
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
     pub async fn retire_artifact_location(
         &self,
         id: ArtifactLocationId,
-        handle_id: ArtifactHandleId,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        self.artifacts
+        let handle_id = self
+            .artifacts
             .retire_location_in_tx(&mut tx, id, now)
             .await?;
         append_event(
             &self.events,
             &mut tx,
-            EventKind::ArtifactLocationRetired,
             SubjectType::ArtifactLocation,
             Some(id.0),
             now,
@@ -127,7 +127,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::ArtifactLineageRecorded,
             SubjectType::ArtifactHandle,
             Some(child),
             occurred,
