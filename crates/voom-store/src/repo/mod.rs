@@ -16,7 +16,8 @@ pub use artifacts::{
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
-    ExpireReport, Lease, LeaseRepo, LeaseState, NewLease, ReleaseReason, SqliteLeaseRepo, backoff,
+    ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, LeaseState, NewLease, ReleaseReason,
+    SqliteLeaseRepo,
 };
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};

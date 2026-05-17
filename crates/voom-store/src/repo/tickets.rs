@@ -1,15 +1,24 @@
 //! `TicketRepo` — owns tickets + `ticket_dependencies`.
 
 use async_trait::async_trait;
+use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
-use time::OffsetDateTime;
-use voom_core::{JobId, TicketId, VoomError};
+use time::{Duration, OffsetDateTime};
+use voom_core::{Clock, JobId, TicketId, VoomError};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+
+/// Sprint 1 default backoff window — capped exponential with full
+/// jitter, matching the architectural spec's Error Handling And
+/// Recovery → Retry policy. Sprint 4+'s scheduling policy will replace
+/// these constants with policy-driven values; the seam stays in
+/// `TicketRepo::default_backoff` so the call sites don't change.
+const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
+const DEFAULT_BACKOFF_CAP_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketState {
@@ -129,6 +138,44 @@ pub trait TicketRepo: Repository {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         depends_on: TicketId,
     ) -> Result<Vec<Ticket>, VoomError>;
+
+    /// Default backoff window after a retriable failure: capped
+    /// exponential with full jitter, per the architectural spec's
+    /// Error Handling And Recovery → Retry policy.
+    ///
+    /// The current value is `random_between(0, min(cap, base * 2^attempt))`
+    /// with `base = 5s` and `cap = 300s`. Sprint 4+ replaces the
+    /// constants with scheduling-policy values; the signature stays
+    /// stable so call sites don't move.
+    ///
+    /// `clock` is currently unused — it stays in the signature so
+    /// Sprint 4 can introduce time-of-day-aware backoff windows
+    /// without forcing every caller to change.
+    #[expect(
+        unused_variables,
+        reason = "clock reserved for Sprint 4 time-of-day-aware backoff windows"
+    )]
+    fn default_backoff(
+        attempt: u32,
+        clock: &dyn Clock,
+        rng: &mut (dyn RngCore + Send),
+    ) -> Duration {
+        let exp_secs =
+            DEFAULT_BACKOFF_BASE_SECS.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
+        let cap_secs = exp_secs.min(DEFAULT_BACKOFF_CAP_SECS);
+        // Full jitter: uniform pick in [0, cap_secs]. Scale the u32 RNG
+        // value across the (cap_secs + 1) buckets via 96-bit multiply
+        // so `FrozenRng::new(0)` lands at 0 (floor) and
+        // `FrozenRng::new(u32::MAX)` lands at `cap_secs` (ceiling).
+        // The post-shift value fits in 64 bits whenever cap_secs does
+        // (`(u32::MAX as u128 * (cap_secs as u128 + 1)) >> 32 < 2 * cap_secs`),
+        // so `try_from` only fails for absurdly large caps — fall back
+        // to the cap itself in that case rather than panicking.
+        let buckets = u128::from(cap_secs).saturating_add(1);
+        let raw = u128::from(rng.next_u32()).saturating_mul(buckets);
+        let jitter_secs = u64::try_from(raw >> 32).unwrap_or(cap_secs);
+        Duration::seconds(i64::try_from(jitter_secs).unwrap_or(i64::MAX))
+    }
 }
 
 #[derive(Debug, Clone)]

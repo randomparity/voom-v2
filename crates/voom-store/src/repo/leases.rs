@@ -1,15 +1,17 @@
 //! `LeaseRepo` — worker-execution lease lifecycle.
 
 use async_trait::async_trait;
+use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{LeaseId, TicketId, VoomError, WorkerId};
+use voom_core::{Clock, FailureClass, LeaseId, TicketId, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
+use super::tickets::{SqliteTicketRepo, TicketRepo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -175,14 +177,18 @@ pub trait LeaseRepo: Repository {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        retriable: bool,
+        class: FailureClass,
         now: OffsetDateTime,
+        clock: &dyn Clock,
+        rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError>;
     async fn fail(
         &self,
         lease_id: LeaseId,
-        retriable: bool,
+        class: FailureClass,
         now: OffsetDateTime,
+        clock: &dyn Clock,
+        rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError>;
 
     async fn expire_due_in_tx<'tx>(
@@ -449,8 +455,10 @@ impl LeaseRepo for SqliteLeaseRepo {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        retriable: bool,
+        class: FailureClass,
         now: OffsetDateTime,
+        clock: &dyn Clock,
+        rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         let lease = get_lease_in_tx(tx, lease_id)
             .await?
@@ -468,6 +476,7 @@ impl LeaseRepo for SqliteLeaseRepo {
                 .await
                 .map_err(|e| VoomError::Database(format!("tickets read: {e}")))?;
         let attempts_remain = attempt < max_attempts;
+        let retriable = class.is_retriable();
         let now_str = iso8601(now)?;
         let release_reason = if retriable && attempts_remain {
             ReleaseReason::FailedRetriable
@@ -501,7 +510,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             // attempt is already incremented to reflect "this dispatch"; backoff
             // factor is the current attempt number per §7.5.
             let attempt_u32 = u32_from_i64(attempt)?;
-            let next_eligible = now + backoff(attempt_u32);
+            let next_eligible = now + SqliteTicketRepo::default_backoff(attempt_u32, clock, rng);
             let ticket_res = sqlx::query(
                 "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
                  next_eligible_at = ?, epoch = epoch + 1 \
@@ -554,15 +563,19 @@ impl LeaseRepo for SqliteLeaseRepo {
     async fn fail(
         &self,
         lease_id: LeaseId,
-        retriable: bool,
+        class: FailureClass,
         now: OffsetDateTime,
+        clock: &dyn Clock,
+        rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
-        let out = self.fail_in_tx(&mut tx, lease_id, retriable, now).await?;
+        let out = self
+            .fail_in_tx(&mut tx, lease_id, class, now, clock, rng)
+            .await?;
         tx.commit()
             .await
             .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
@@ -704,12 +717,6 @@ impl LeaseRepo for SqliteLeaseRepo {
                 "force_release rejected: lease {lease_id} not held"
             )));
         }
-        // Mirror fail_in_tx / expire_due_in_tx: a requeue request can only
-        // promote the ticket back to ready while attempts remain. If
-        // `acquire` already consumed the last attempt and the operator
-        // asks for requeue, parking the ticket in `ready` would lock it
-        // forever — acquire refuses it (out of attempts) and no held lease
-        // remains to expire. Fall back to terminal failure in that case.
         let (attempt, max_attempts): (i64, i64) =
             sqlx::query_as("SELECT attempt, max_attempts FROM tickets WHERE id = ?")
                 .bind(i64_from_u64(lease.ticket_id.0))
@@ -722,9 +729,23 @@ impl LeaseRepo for SqliteLeaseRepo {
                         lease.ticket_id
                     ))
                 })?;
-        let attempts_remain = attempt < max_attempts;
-        let ticket_requeued = also_requeue && attempts_remain;
-        let next_ticket_state = if ticket_requeued { "ready" } else { "failed" };
+        // Operator asked for requeue but the ticket is already out of
+        // attempts: refuse the call entirely. Promoting back to `ready`
+        // would strand the ticket — `acquire` refuses it (out of
+        // attempts) and no held lease remains to expire — and
+        // demote-to-terminal would mask the operator's request. The
+        // caller must explicitly pass `also_requeue = false` if they
+        // intend a terminal force-release.
+        if also_requeue && attempt >= max_attempts {
+            return Err(VoomError::Conflict(format!(
+                "force_release requeue rejected: ticket {tid} attempt {a} >= \
+                 max_attempts {m}; use also_requeue = false",
+                tid = lease.ticket_id,
+                a = attempt,
+                m = max_attempts,
+            )));
+        }
+        let ticket_requeued = also_requeue;
         let now_str = iso8601(now)?;
         let lease_res = sqlx::query(
             "UPDATE leases \
@@ -747,16 +768,31 @@ impl LeaseRepo for SqliteLeaseRepo {
                 "force_release rejected: lease {lease_id} no longer held"
             )));
         }
-        let ticket_res = sqlx::query(
-            "UPDATE tickets SET state = ?, state_changed_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND state = 'leased'",
-        )
-        .bind(next_ticket_state)
-        .bind(&now_str)
-        .bind(i64_from_u64(lease.ticket_id.0))
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?;
+        // On requeue, set next_eligible_at = now (operator-driven, no
+        // backoff). On terminal, the column is irrelevant.
+        let ticket_res = if ticket_requeued {
+            sqlx::query(
+                "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
+                 next_eligible_at = ?, epoch = epoch + 1 \
+                 WHERE id = ? AND state = 'leased'",
+            )
+            .bind(&now_str)
+            .bind(&now_str)
+            .bind(i64_from_u64(lease.ticket_id.0))
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?
+        } else {
+            sqlx::query(
+                "UPDATE tickets SET state = 'failed', state_changed_at = ?, \
+                 epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
+            )
+            .bind(&now_str)
+            .bind(i64_from_u64(lease.ticket_id.0))
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?
+        };
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
                 lease_id = i64_from_u64(lease_id.0),
@@ -807,13 +843,6 @@ impl LeaseRepo for SqliteLeaseRepo {
             .map_err(|e| VoomError::Database(format!("leases get: {e}")))?;
         row.as_ref().map(row_to_lease).transpose()
     }
-}
-
-/// Fixed Sprint 1 backoff: 5s × attempt. Sprint 3+ scheduler may swap this
-/// for a policy-driven backoff.
-#[must_use]
-pub fn backoff(attempt: u32) -> Duration {
-    Duration::seconds(5 * i64::from(attempt))
 }
 
 const SELECT_LEASE_COLS: &str = "SELECT id, ticket_id, worker_id, state, acquired_at, expires_at, \

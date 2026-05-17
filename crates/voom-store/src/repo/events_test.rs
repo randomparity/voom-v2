@@ -188,6 +188,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
                 attempt: 1,
                 max_attempts: 3,
                 reason: "r".to_owned(),
+                class: voom_core::FailureClass::WorkerTimeout,
                 next_eligible_at: OffsetDateTime::UNIX_EPOCH,
             }),
         ),
@@ -198,6 +199,8 @@ async fn append_then_get_round_trips_every_m1_kind() {
                 attempt: 3,
                 max_attempts: 3,
                 reason: "r".to_owned(),
+                class: voom_core::FailureClass::MalformedWorkerResult,
+                issue_id: None,
             }),
         ),
         (
