@@ -37,6 +37,22 @@ pub enum EventKind {
     ArtifactLocationRecorded,
     ArtifactLocationRetired,
     ArtifactLineageRecorded,
+    // M2 — identity layer.
+    MediaWorkCreated,
+    MediaVariantCreated,
+    AssetBundleCreated,
+    AssetBundleMemberAdded,
+    AssetBundleMemberRemoved,
+    FileAssetCreated,
+    FileVersionCreated,
+    FileLocationRecorded,
+    FileLocationAliased,
+    FileLocationRetiredByMove,
+    FileLocationRecordedByMove,
+    IdentityEvidenceRecorded,
+    IdentityEvidenceAccepted,
+    IdentityEvidenceSuperseded,
+    MediaSnapshotRecorded,
 }
 
 impl EventKind {
@@ -67,6 +83,21 @@ impl EventKind {
             Self::ArtifactLocationRecorded => "artifact_location.recorded",
             Self::ArtifactLocationRetired => "artifact_location.retired",
             Self::ArtifactLineageRecorded => "artifact_lineage.recorded",
+            Self::MediaWorkCreated => "media_work.created",
+            Self::MediaVariantCreated => "media_variant.created",
+            Self::AssetBundleCreated => "asset_bundle.created",
+            Self::AssetBundleMemberAdded => "asset_bundle.member_added",
+            Self::AssetBundleMemberRemoved => "asset_bundle.member_removed",
+            Self::FileAssetCreated => "file_asset.created",
+            Self::FileVersionCreated => "file_version.created",
+            Self::FileLocationRecorded => "file_location.recorded",
+            Self::FileLocationAliased => "file_location.aliased",
+            Self::FileLocationRetiredByMove => "file_location.retired_by_move",
+            Self::FileLocationRecordedByMove => "file_location.recorded_by_move",
+            Self::IdentityEvidenceRecorded => "identity_evidence.recorded",
+            Self::IdentityEvidenceAccepted => "identity_evidence.accepted",
+            Self::IdentityEvidenceSuperseded => "identity_evidence.superseded",
+            Self::MediaSnapshotRecorded => "media_snapshot.recorded",
         }
     }
 
@@ -107,6 +138,21 @@ impl EventKind {
             "artifact_location.recorded" => Self::ArtifactLocationRecorded,
             "artifact_location.retired" => Self::ArtifactLocationRetired,
             "artifact_lineage.recorded" => Self::ArtifactLineageRecorded,
+            "media_work.created" => Self::MediaWorkCreated,
+            "media_variant.created" => Self::MediaVariantCreated,
+            "asset_bundle.created" => Self::AssetBundleCreated,
+            "asset_bundle.member_added" => Self::AssetBundleMemberAdded,
+            "asset_bundle.member_removed" => Self::AssetBundleMemberRemoved,
+            "file_asset.created" => Self::FileAssetCreated,
+            "file_version.created" => Self::FileVersionCreated,
+            "file_location.recorded" => Self::FileLocationRecorded,
+            "file_location.aliased" => Self::FileLocationAliased,
+            "file_location.retired_by_move" => Self::FileLocationRetiredByMove,
+            "file_location.recorded_by_move" => Self::FileLocationRecordedByMove,
+            "identity_evidence.recorded" => Self::IdentityEvidenceRecorded,
+            "identity_evidence.accepted" => Self::IdentityEvidenceAccepted,
+            "identity_evidence.superseded" => Self::IdentityEvidenceSuperseded,
+            "media_snapshot.recorded" => Self::MediaSnapshotRecorded,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"

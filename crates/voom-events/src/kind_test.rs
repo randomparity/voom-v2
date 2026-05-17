@@ -94,3 +94,86 @@ fn from_str_rejects_unknown_kind() {
     );
     EventKind::from_str("schema.initialized").unwrap();
 }
+
+#[test]
+fn identity_layer_event_kinds_round_trip() {
+    for k in [
+        EventKind::MediaWorkCreated,
+        EventKind::MediaVariantCreated,
+        EventKind::AssetBundleCreated,
+        EventKind::AssetBundleMemberAdded,
+        EventKind::AssetBundleMemberRemoved,
+        EventKind::FileAssetCreated,
+        EventKind::FileVersionCreated,
+        EventKind::FileLocationRecorded,
+        EventKind::FileLocationAliased,
+        EventKind::FileLocationRetiredByMove,
+        EventKind::FileLocationRecordedByMove,
+        EventKind::IdentityEvidenceRecorded,
+        EventKind::IdentityEvidenceAccepted,
+        EventKind::IdentityEvidenceSuperseded,
+        EventKind::MediaSnapshotRecorded,
+    ] {
+        let wire = k.as_str();
+        let back = EventKind::from_str(wire).unwrap();
+        assert_eq!(k, back, "round-trip failed for {wire}");
+    }
+}
+
+#[test]
+fn identity_layer_event_kinds_use_dotted_wire_format() {
+    assert_eq!(EventKind::MediaWorkCreated.as_str(), "media_work.created");
+    assert_eq!(
+        EventKind::MediaVariantCreated.as_str(),
+        "media_variant.created"
+    );
+    assert_eq!(
+        EventKind::AssetBundleCreated.as_str(),
+        "asset_bundle.created"
+    );
+    assert_eq!(
+        EventKind::AssetBundleMemberAdded.as_str(),
+        "asset_bundle.member_added"
+    );
+    assert_eq!(
+        EventKind::AssetBundleMemberRemoved.as_str(),
+        "asset_bundle.member_removed"
+    );
+    assert_eq!(EventKind::FileAssetCreated.as_str(), "file_asset.created");
+    assert_eq!(
+        EventKind::FileVersionCreated.as_str(),
+        "file_version.created"
+    );
+    assert_eq!(
+        EventKind::FileLocationRecorded.as_str(),
+        "file_location.recorded"
+    );
+    assert_eq!(
+        EventKind::FileLocationAliased.as_str(),
+        "file_location.aliased"
+    );
+    assert_eq!(
+        EventKind::FileLocationRetiredByMove.as_str(),
+        "file_location.retired_by_move"
+    );
+    assert_eq!(
+        EventKind::FileLocationRecordedByMove.as_str(),
+        "file_location.recorded_by_move"
+    );
+    assert_eq!(
+        EventKind::IdentityEvidenceRecorded.as_str(),
+        "identity_evidence.recorded"
+    );
+    assert_eq!(
+        EventKind::IdentityEvidenceAccepted.as_str(),
+        "identity_evidence.accepted"
+    );
+    assert_eq!(
+        EventKind::IdentityEvidenceSuperseded.as_str(),
+        "identity_evidence.superseded"
+    );
+    assert_eq!(
+        EventKind::MediaSnapshotRecorded.as_str(),
+        "media_snapshot.recorded"
+    );
+}
