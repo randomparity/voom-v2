@@ -1,6 +1,8 @@
 use super::*;
 use crate::pool::connect;
+use crate::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::schema::{expected_migrations, probe_schema};
+use voom_events::EventKind;
 
 #[tokio::test]
 async fn init_in_memory_applies_every_embedded_migration() {
@@ -8,6 +10,63 @@ async fn init_in_memory_applies_every_embedded_migration() {
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
     assert_eq!(report.migrations_applied, expected_migrations());
+}
+
+#[tokio::test]
+async fn init_emits_schema_initialized_on_fresh_db() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    let report = init(&url).await.unwrap();
+    assert!(!report.already_initialized);
+    assert!(report.migrations_applied > 0);
+
+    // Read the events table — there should be exactly one schema.initialized row.
+    let pool = connect(&url).await.unwrap();
+    let repo = SqliteEventRepo::new(pool);
+    let page = repo
+        .list(
+            EventFilter {
+                kind: Some(EventKind::SchemaInitialized),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items.len(),
+        1,
+        "exactly one schema.initialized row on fresh init"
+    );
+}
+
+#[tokio::test]
+async fn init_does_not_emit_when_already_initialized() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    let _ = init(&url).await.unwrap();
+    let report = init(&url).await.unwrap();
+    assert!(report.already_initialized);
+
+    let pool = connect(&url).await.unwrap();
+    let repo = SqliteEventRepo::new(pool);
+    let page = repo
+        .list(
+            EventFilter {
+                kind: Some(EventKind::SchemaInitialized),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "second init must not double-write");
 }
 
 #[tokio::test]

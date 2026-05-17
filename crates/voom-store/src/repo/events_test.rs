@@ -70,7 +70,10 @@ async fn list_filters_by_kind() {
         )
         .await
         .unwrap();
-    assert_eq!(page.items.len(), 1);
+    // Two rows: one seeded by init() (the schema.initialized contract from
+    // Task 12) plus the one appended above. Both share the same kind, so
+    // the kind-filter must return both.
+    assert_eq!(page.items.len(), 2);
 }
 
 #[tokio::test]

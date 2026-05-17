@@ -135,11 +135,44 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
 
     let migrations_applied = migration_count.saturating_sub(before_count);
 
+    if before_count == 0 && migrations_applied > 0 {
+        emit_schema_initialized(pool, migrations_applied, schema_init_at).await?;
+    }
+
     Ok(InitReport {
         migrations_applied,
         schema_init_at,
         already_initialized,
     })
+}
+
+/// Write the single `schema.initialized` row that records a fresh migration
+/// run. Raw SQL because routing through `EventRepo` would create a module-init
+/// cycle (`events` module depends on `voom-store` transitively).
+async fn emit_schema_initialized(
+    pool: &SqlitePool,
+    migrations_applied: u32,
+    schema_init_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let iso = &time::format_description::well_known::Iso8601::DEFAULT;
+    let formatted = schema_init_at
+        .format(iso)
+        .map_err(|e| VoomError::Internal(format!("format schema_init_at: {e}")))?;
+    let payload = serde_json::json!({
+        "migrations_applied": migrations_applied,
+        "schema_init_at": formatted,
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO events (occurred_at, kind, subject_type, subject_id, payload) \
+         VALUES (?, 'schema.initialized', 'system', NULL, ?)",
+    )
+    .bind(formatted)
+    .bind(payload)
+    .execute(pool)
+    .await
+    .map_err(|e| VoomError::Database(format!("emit schema.initialized: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]
