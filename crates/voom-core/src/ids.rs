@@ -14,7 +14,7 @@ macro_rules! define_id {
     };
 }
 
-define_id!(MediaId);
+// Execution layer (Sprint 0 + M1).
 define_id!(TicketId);
 define_id!(LeaseId);
 define_id!(WorkerId);
@@ -22,6 +22,22 @@ define_id!(JobId);
 define_id!(EventId);
 define_id!(ArtifactHandleId);
 define_id!(ArtifactLocationId);
+
+// Identity layer (M2).
+//
+// Sprint 0's placeholder `MediaId` (a single u64 newtype standing in for
+// the yet-to-be-split identity layers) is removed in M2 because every
+// Sprint 1 caller wants the specific layer: `MediaWorkId` for the
+// logical title, `MediaVariantId` for a retained version,
+// `FileAssetId` for managed file lineage, etc.
+define_id!(MediaWorkId);
+define_id!(MediaVariantId);
+define_id!(BundleId);
+define_id!(FileAssetId);
+define_id!(FileVersionId);
+define_id!(FileLocationId);
+define_id!(EvidenceId);
+define_id!(MediaSnapshotId);
 
 #[cfg(test)]
 #[path = "ids_test.rs"]

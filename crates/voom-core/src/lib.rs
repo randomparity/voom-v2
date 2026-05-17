@@ -19,6 +19,8 @@ pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use error::{ErrorCode, VoomError};
 pub use ids::{
-    ArtifactHandleId, ArtifactLocationId, EventId, JobId, LeaseId, MediaId, TicketId, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, BundleId, EventId, EvidenceId, FileAssetId,
+    FileLocationId, FileVersionId, JobId, LeaseId, MediaSnapshotId, MediaVariantId, MediaWorkId,
+    TicketId, WorkerId,
 };
 pub use version::VersionInfo;
