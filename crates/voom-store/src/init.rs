@@ -1,9 +1,13 @@
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::VoomError;
+use voom_events::{
+    Event, EventEnvelope, EventKind, SubjectType, payload::SchemaInitializedPayload,
+};
 
 use crate::migrator::MIGRATOR;
 use crate::pool::connect_or_create;
+use crate::repo::events::{EventRepo, SqliteEventRepo};
 use crate::schema::{SchemaState, probe_schema};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,32 +150,31 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     })
 }
 
-/// Write the single `schema.initialized` row that records a fresh migration
-/// run. Raw SQL because routing through `EventRepo` would create a module-init
-/// cycle (`events` module depends on `voom-store` transitively).
 async fn emit_schema_initialized(
     pool: &SqlitePool,
     migrations_applied: u32,
     schema_init_at: OffsetDateTime,
 ) -> Result<(), VoomError> {
-    let iso = &time::format_description::well_known::Iso8601::DEFAULT;
-    let formatted = schema_init_at
-        .format(iso)
-        .map_err(|e| VoomError::Internal(format!("format schema_init_at: {e}")))?;
-    let payload = serde_json::json!({
-        "migrations_applied": migrations_applied,
-        "schema_init_at": formatted,
-    })
-    .to_string();
-    sqlx::query(
-        "INSERT INTO events (occurred_at, kind, subject_type, subject_id, payload) \
-         VALUES (?, 'schema.initialized', 'system', NULL, ?)",
-    )
-    .bind(formatted)
-    .bind(payload)
-    .execute(pool)
-    .await
-    .map_err(|e| VoomError::Database(format!("emit schema.initialized: {e}")))?;
+    let envelope = EventEnvelope {
+        kind: EventKind::SchemaInitialized,
+        occurred_at: schema_init_at,
+        subject_type: SubjectType::System,
+        subject_id: None,
+        trace_id: None,
+        payload: Event::SchemaInitialized(SchemaInitializedPayload {
+            migrations_applied,
+            schema_init_at,
+        }),
+    };
+    let repo = SqliteEventRepo::new(pool.clone());
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+    repo.append_in_tx(&mut tx, envelope).await?;
+    tx.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
     Ok(())
 }
 
