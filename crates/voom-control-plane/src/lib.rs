@@ -13,8 +13,10 @@
 //! `EventRepo::append_in_tx` inside one `pool.begin()` so the row write
 //! and its event row share a transaction.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
@@ -26,10 +28,18 @@ use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod cases;
 
+/// Type alias for the boxed, shared, interior-mutable RNG passed to
+/// `LeaseRepo::fail` (and any future caller that needs full-jitter
+/// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
+/// a `Mutex` to keep the `ControlPlane` itself `Clone`-able and
+/// thread-safe.
+pub type SharedRng = Arc<Mutex<dyn RngCore + Send>>;
+
 #[derive(Clone)]
 pub struct ControlPlane {
     pool: SqlitePool,
     clock: Arc<dyn Clock>,
+    rng: SharedRng,
     pub(crate) events: SqliteEventRepo,
     pub(crate) jobs: SqliteJobRepo,
     pub(crate) tickets: SqliteTicketRepo,
@@ -40,12 +50,14 @@ pub struct ControlPlane {
 
 impl std::fmt::Debug for ControlPlane {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `dyn Clock` does not require Debug; surface a sentinel rather
-        // than widening the trait bound (which would force every concrete
-        // Clock implementor — including test fakes — to derive Debug).
+        // `dyn Clock` / `dyn RngCore` do not require Debug; surface a
+        // sentinel rather than widening the trait bound (which would
+        // force every concrete implementor — including test fakes —
+        // to derive Debug).
         f.debug_struct("ControlPlane")
             .field("pool", &self.pool)
             .field("clock", &"<dyn Clock>")
+            .field("rng", &"<dyn RngCore>")
             .field("events", &self.events)
             .field("jobs", &self.jobs)
             .field("tickets", &self.tickets)
@@ -71,7 +83,11 @@ impl ControlPlane {
     /// Returns `VoomError::Database` if the pool cannot be opened.
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
-        Ok(Self::new_unchecked(pool, Arc::new(SystemClock)))
+        Ok(Self::new_unchecked(
+            pool,
+            Arc::new(SystemClock),
+            production_rng(),
+        ))
     }
 
     /// Wrap an already-connected pool with the supplied clock. The DB MUST
@@ -86,16 +102,32 @@ impl ControlPlane {
         pool: SqlitePool,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, VoomError> {
+        Self::open_with_pool_and_rng(pool, clock, production_rng()).await
+    }
+
+    /// Wrap an already-connected pool with the supplied clock AND RNG.
+    /// Tests inject `FrozenRng` / `SeededRng` from
+    /// `voom_core::rng_test_support`; production callers prefer
+    /// `open_with_pool` which seeds a `StdRng` from OS randomness.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
+    /// or whatever error `probe_schema` itself produces.
+    pub async fn open_with_pool_and_rng(
+        pool: SqlitePool,
+        clock: Arc<dyn Clock>,
+        rng: SharedRng,
+    ) -> Result<Self, VoomError> {
         let probe = probe_schema(&pool).await?;
         if !matches!(probe, SchemaState::Current { .. }) {
             return Err(VoomError::Migration(format!(
                 "ControlPlane requires a Current schema; got {probe:?}"
             )));
         }
-        Ok(Self::new_unchecked(pool, clock))
+        Ok(Self::new_unchecked(pool, clock, rng))
     }
 
-    fn new_unchecked(pool: SqlitePool, clock: Arc<dyn Clock>) -> Self {
+    fn new_unchecked(pool: SqlitePool, clock: Arc<dyn Clock>, rng: SharedRng) -> Self {
         Self {
             events: SqliteEventRepo::new(pool.clone()),
             jobs: SqliteJobRepo::new(pool.clone()),
@@ -105,6 +137,7 @@ impl ControlPlane {
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             pool,
             clock,
+            rng,
         }
     }
 
@@ -141,6 +174,23 @@ impl ControlPlane {
     #[must_use]
     pub fn clock(&self) -> &dyn Clock {
         &*self.clock
+    }
+
+    /// Pull a single `u32` from the shared RNG and wrap it in a
+    /// fixed-value RNG. The case handlers use this to thread a
+    /// `&mut (dyn RngCore + Send)` into repo calls without holding the
+    /// std Mutex across the awaits inside the repo (the workspace lint
+    /// `await_holding_lock` forbids that). Each `LeaseRepo::fail` call
+    /// consumes exactly one jitter value via `default_backoff`, so a
+    /// single-shot snapshot is sufficient.
+    pub(crate) fn snapshot_rng(&self) -> SnapshotRng {
+        let mut guard = self
+            .rng
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SnapshotRng {
+            value: guard.next_u32(),
+        }
     }
 
     // Writable repo accessors: production builds hide them behind
@@ -319,6 +369,42 @@ impl HealthSnapshot {
                         .to_owned(),
                 ),
             }),
+        }
+    }
+}
+
+/// Seed a `SharedRng` from OS randomness. Used by `ControlPlane::open`
+/// and `ControlPlane::open_with_pool`; tests inject `FrozenRng` /
+/// `SeededRng` via `open_with_pool_and_rng`.
+fn production_rng() -> SharedRng {
+    Arc::new(Mutex::new(StdRng::from_os_rng()))
+}
+
+/// Single-shot RNG that returns one fixed `u32` from every call. The
+/// shape lets `ControlPlane::snapshot_rng` lift one jitter value out
+/// of the shared RNG while keeping the std Mutex off the await
+/// boundary — the consumer (`LeaseRepo::fail` → `default_backoff`)
+/// only needs one value per call.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnapshotRng {
+    value: u32,
+}
+
+impl RngCore for SnapshotRng {
+    fn next_u32(&mut self) -> u32 {
+        self.value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        u64::from(self.value) << 32 | u64::from(self.value)
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        for chunk in dst.chunks_mut(4) {
+            let bytes = self.value.to_le_bytes();
+            for (slot, byte) in chunk.iter_mut().zip(bytes.iter()) {
+                *slot = *byte;
+            }
         }
     }
 }

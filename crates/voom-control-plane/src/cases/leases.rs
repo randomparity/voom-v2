@@ -4,11 +4,13 @@
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
-use voom_core::{LeaseId, TicketId, VoomError};
+use voom_core::{FailureClass, LeaseId, TicketId, VoomError};
+use voom_events::payload::TicketReadyPayload;
 use voom_events::payload::{
     LeaseAcquiredPayload, LeaseExpiredPayload, LeaseForceReleasedPayload, LeaseReleasedPayload,
     TicketFailedRetriablePayload, TicketFailedTerminalPayload, TicketLeasedPayload,
-    TicketReadyPayload, TicketRequeuedAfterLeaseExpiryPayload, TicketSucceededPayload,
+    TicketRequeuedAfterForceReleasePayload, TicketRequeuedAfterLeaseExpiryPayload,
+    TicketSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, NewLease};
@@ -164,13 +166,19 @@ impl ControlPlane {
         &self,
         lease_id: LeaseId,
         reason: String,
-        retriable: bool,
+        class: FailureClass,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
+        // Snapshot one u32 from the shared RNG up front. Holding the
+        // std Mutex across the awaits that follow would trip the
+        // workspace-level `await_holding_lock` lint and the
+        // `clippy::await_holding_lock` deny; `fail_in_tx` only consumes
+        // a single jitter value per call so the snapshot is safe.
+        let mut shot = self.snapshot_rng();
         let lease = self
             .leases
-            .fail_in_tx(&mut tx, lease_id, retriable, now)
+            .fail_in_tx(&mut tx, lease_id, class, now, &*self.clock, &mut shot)
             .await?;
         append_event(
             &self.events,
@@ -206,6 +214,7 @@ impl ControlPlane {
                         attempt: ticket.attempt,
                         max_attempts: ticket.max_attempts,
                         reason,
+                        class,
                         next_eligible_at: ticket.next_eligible_at,
                     }),
                 )
@@ -223,6 +232,8 @@ impl ControlPlane {
                         attempt: ticket.attempt,
                         max_attempts: ticket.max_attempts,
                         reason,
+                        class,
+                        issue_id: None,
                     }),
                 )
                 .await?;
@@ -308,6 +319,10 @@ impl ControlPlane {
                     attempt: ticket.attempt,
                     max_attempts: ticket.max_attempts,
                     reason: "lease expired with no retries remaining".to_owned(),
+                    // Per spec §10.2: lease-expiry terminal failures
+                    // implicitly classify as WorkerCrash.
+                    class: FailureClass::WorkerCrash,
+                    issue_id: None,
                 }),
             )
             .await?;
@@ -315,14 +330,17 @@ impl ControlPlane {
         Ok(())
     }
 
-    /// Force-release a held lease. Emits `lease.force_released` +
-    /// (`ticket.ready` | `ticket.failed_terminal`) based on the post-update
-    /// ticket fate (`ForceReleaseOutcome::ticket_requeued`), not the
-    /// caller's `also_requeue` flag — when attempts are already exhausted
-    /// the repo demotes a requeue request to terminal failure to keep the
-    /// ticket from getting stuck in `ready` with no attempts remaining.
-    /// The `LeaseForceReleased` event still records the operator's original
-    /// `also_requeue` request for audit fidelity.
+    /// Force-release a held lease. Emits `lease.force_released` plus
+    /// either `ticket.requeued_after_force_release` (when
+    /// `also_requeue = true` succeeded — gated by the repo on
+    /// `attempt < max_attempts`) or `ticket.failed_terminal` (when
+    /// `also_requeue = false`).
+    ///
+    /// A retries-exhausted requeue request returns `VoomError::Conflict`
+    /// from the repo with no side effects — the lease, ticket, and
+    /// event log are all unchanged on rejection. The caller must
+    /// retry with `also_requeue = false` if they intend a terminal
+    /// force-release.
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
@@ -348,8 +366,8 @@ impl ControlPlane {
             Event::LeaseForceReleased(LeaseForceReleasedPayload {
                 lease_id: outcome.lease.id.0,
                 ticket_id: outcome.lease.ticket_id.0,
-                actor,
-                reason,
+                actor: actor.clone(),
+                reason: reason.clone(),
                 also_requeue,
             }),
         )
@@ -361,21 +379,15 @@ impl ControlPlane {
                 SubjectType::Ticket,
                 Some(outcome.lease.ticket_id.0),
                 now,
-                Event::TicketReady(TicketReadyPayload {
+                Event::TicketRequeuedAfterForceRelease(TicketRequeuedAfterForceReleasePayload {
                     ticket_id: outcome.lease.ticket_id.0,
+                    lease_id: outcome.lease.id.0,
+                    actor,
+                    reason,
                 }),
             )
             .await?;
         } else {
-            // Either `also_requeue == false`, or the operator asked for
-            // requeue but the ticket is out of attempts. Both land here so
-            // the emitted event matches the actual ticket fate; the reason
-            // string distinguishes the two so audit logs stay legible.
-            let reason = if also_requeue {
-                "force-released with requeue requested, but no attempts remain".to_owned()
-            } else {
-                "force-released without requeue".to_owned()
-            };
             append_event(
                 &self.events,
                 &mut tx,
@@ -386,7 +398,12 @@ impl ControlPlane {
                     ticket_id: outcome.lease.ticket_id.0,
                     attempt: outcome.attempt,
                     max_attempts: outcome.max_attempts,
-                    reason,
+                    reason: "force-released without requeue".to_owned(),
+                    // Per spec §10.2: operator-initiated terminal
+                    // force-release implicitly classifies as
+                    // UserCancellation.
+                    class: FailureClass::UserCancellation,
+                    issue_id: None,
                 }),
             )
             .await?;

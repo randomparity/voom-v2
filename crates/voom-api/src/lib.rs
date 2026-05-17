@@ -157,7 +157,28 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::Internal
         | ErrorCode::BadArgs
         | ErrorCode::DependencyCycle
-        | ErrorCode::Conflict => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::Conflict
+        // FailureClass-derived codes don't surface from `connect` /
+        // `probe_schema` — they belong to lease/ticket use cases that
+        // are not on this response path yet. Classify as internal if
+        // one ever appears here; the visibility is the point.
+        | ErrorCode::WorkerTimeout
+        | ErrorCode::WorkerCrash
+        | ErrorCode::NoEligibleWorker
+        | ErrorCode::ArtifactUnavailable
+        | ErrorCode::ArtifactChecksumMismatch
+        | ErrorCode::ExternalSystemUnavailable
+        | ErrorCode::ExternalSystemRateLimited
+        | ErrorCode::VerificationFailure
+        | ErrorCode::BackupFailure
+        | ErrorCode::CommitFailure
+        | ErrorCode::PolicyParseError
+        | ErrorCode::PolicyValidationError
+        | ErrorCode::MissingCapability
+        | ErrorCode::MalformedWorkerResult
+        | ErrorCode::UserCancellation
+        | ErrorCode::ApprovalRequired
+        | ErrorCode::PriorityPolicyConflict => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, err.code(), err.to_string(), hint)
 }

@@ -72,7 +72,26 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::Internal
         | ErrorCode::BadArgs
         | ErrorCode::DependencyCycle
-        | ErrorCode::Conflict => None,
+        | ErrorCode::Conflict
+        // FailureClass-derived codes belong to lease/ticket flows the
+        // health command never reaches.
+        | ErrorCode::WorkerTimeout
+        | ErrorCode::WorkerCrash
+        | ErrorCode::NoEligibleWorker
+        | ErrorCode::ArtifactUnavailable
+        | ErrorCode::ArtifactChecksumMismatch
+        | ErrorCode::ExternalSystemUnavailable
+        | ErrorCode::ExternalSystemRateLimited
+        | ErrorCode::VerificationFailure
+        | ErrorCode::BackupFailure
+        | ErrorCode::CommitFailure
+        | ErrorCode::PolicyParseError
+        | ErrorCode::PolicyValidationError
+        | ErrorCode::MissingCapability
+        | ErrorCode::MalformedWorkerResult
+        | ErrorCode::UserCancellation
+        | ErrorCode::ApprovalRequired
+        | ErrorCode::PriorityPolicyConflict => None,
     }
 }
 

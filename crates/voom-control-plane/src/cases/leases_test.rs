@@ -1,7 +1,7 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::TicketId;
+use voom_core::{FailureClass, TicketId, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
@@ -126,7 +126,7 @@ async fn fail_lease_retriable_emits_lease_released_and_ticket_failed_retriable()
     cp.fail_lease(
         lease.id,
         "transient".to_owned(),
-        true,
+        FailureClass::WorkerTimeout,
         T0 + TDuration::seconds(5),
     )
     .await
@@ -151,10 +151,14 @@ async fn fail_lease_terminal_emits_lease_released_and_ticket_failed_terminal() {
         })
         .await
         .unwrap();
+    // max_attempts=1: a single retriable failure exhausts the budget,
+    // so the case handler emits TicketFailedTerminal even though the
+    // class is retriable. Reuses the same call shape as the retriable
+    // happy path.
     cp.fail_lease(
         lease.id,
         "fatal".to_owned(),
-        true,
+        FailureClass::WorkerTimeout,
         T0 + TDuration::seconds(5),
     )
     .await
@@ -233,11 +237,13 @@ async fn expire_due_emits_paired_events_terminal() {
 }
 
 #[tokio::test]
-async fn force_release_with_requeue_emits_ticket_ready_when_attempts_remain() {
-    // Renamed from the original force_release_with_requeue_emits_lease_
-    // force_released_and_ticket_ready: max_attempts=2, so after acquire
-    // attempts remain (1 < 2). also_requeue=true → ticket back to ready
-    // and one ticket.ready event emitted.
+async fn force_release_with_requeue_emits_ticket_requeued_after_force_release_when_attempts_remain()
+{
+    // max_attempts=2: after acquire, attempts remain (1 < 2).
+    // also_requeue=true → ticket back to ready, and the case handler
+    // emits TicketRequeuedAfterForceRelease (not TicketReady — the
+    // distinct kind lets audit tell operator-driven requeue apart from
+    // dependency-driven readiness).
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
@@ -264,18 +270,25 @@ async fn force_release_with_requeue_emits_ticket_ready_when_attempts_remain() {
         .unwrap();
     assert!(outcome.ticket_requeued);
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
-    assert_eq!(count(&cp, EventKind::TicketReady).await, ready_before + 1);
+    assert_eq!(
+        count(&cp, EventKind::TicketRequeuedAfterForceRelease).await,
+        1
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketReady).await,
+        ready_before,
+        "force-release uses the dedicated event kind, not TicketReady"
+    );
     assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 0);
 }
 
 #[tokio::test]
-async fn force_release_with_requeue_emits_ticket_failed_terminal_when_exhausted() {
-    // max_attempts=1: acquire consumes the only attempt. Operator asks for
-    // requeue, but no attempts remain → ticket parks in failed and the
-    // emitted event MUST be TicketFailedTerminal (not TicketReady), with
-    // the correct attempt/max_attempts. Before Fix 3 the case handler
-    // emitted TicketReady based on the input flag, misreporting the
-    // outcome to anything reading the event log.
+async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
+    // §13 stranding regression. max_attempts=1: acquire consumes the
+    // only attempt. Operator asks for requeue, but no attempts remain.
+    // The repo now returns VoomError::Conflict with NO side effects on
+    // the lease, ticket, or event log — the caller must retry with
+    // also_requeue=false if they intend a terminal force-release.
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
@@ -289,8 +302,10 @@ async fn force_release_with_requeue_emits_ticket_failed_terminal_when_exhausted(
         })
         .await
         .unwrap();
-    let ready_before = count(&cp, EventKind::TicketReady).await;
-    let outcome = cp
+    let force_released_before = count(&cp, EventKind::LeaseForceReleased).await;
+    let requeued_before = count(&cp, EventKind::TicketRequeuedAfterForceRelease).await;
+    let terminal_before = count(&cp, EventKind::TicketFailedTerminal).await;
+    let err = cp
         .force_release_lease(
             lease.id,
             "operator".to_owned(),
@@ -299,44 +314,54 @@ async fn force_release_with_requeue_emits_ticket_failed_terminal_when_exhausted(
             T0 + TDuration::seconds(5),
         )
         .await
-        .unwrap();
-    assert!(
-        !outcome.ticket_requeued,
-        "attempts exhausted → outcome must not claim requeue"
-    );
-    assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+    // No side effects: lease still held, ticket still leased, no events.
+    let lease_after = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(
-        count(&cp, EventKind::TicketReady).await,
-        ready_before,
-        "no ticket.ready emitted when ticket is actually parked in failed"
+        lease_after.state,
+        voom_store::repo::leases::LeaseState::Held,
+        "rejected force_release must leave the lease held"
     );
-    assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
-    // Verify the payload reports the correct attempt counts so consumers
-    // can tell why the ticket failed.
-    let page = cp
-        .events()
-        .list(
-            EventFilter {
-                kind: Some(EventKind::TicketFailedTerminal),
-                subject_id: Some(t.id.0),
-                ..EventFilter::default()
-            },
-            Page {
-                limit: 10,
-                cursor: None,
-            },
+    let ticket_after = cp.tickets().get(t.id).await.unwrap().unwrap();
+    assert_eq!(
+        ticket_after.state,
+        TicketState::Leased,
+        "rejected force_release must leave the ticket leased"
+    );
+    assert_eq!(
+        count(&cp, EventKind::LeaseForceReleased).await,
+        force_released_before
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketRequeuedAfterForceRelease).await,
+        requeued_before
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketFailedTerminal).await,
+        terminal_before
+    );
+    // The same fixture with also_requeue=false succeeds: lease force-released,
+    // ticket parked in failed, single LeaseForceReleased + single
+    // TicketFailedTerminal event.
+    let outcome = cp
+        .force_release_lease(
+            lease.id,
+            "operator".to_owned(),
+            "manual cleanup".to_owned(),
+            false,
+            T0 + TDuration::seconds(6),
         )
         .await
         .unwrap();
-    let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
-        panic!("expected TicketFailedTerminal payload");
-    };
-    assert_eq!(payload.attempt, 1);
-    assert_eq!(payload.max_attempts, 1);
-    assert!(
-        payload.reason.contains("no attempts remain"),
-        "reason must distinguish this case from a plain force-release without requeue, got: {}",
-        payload.reason,
+    assert!(!outcome.ticket_requeued);
+    assert_eq!(
+        count(&cp, EventKind::LeaseForceReleased).await,
+        force_released_before + 1
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketFailedTerminal).await,
+        terminal_before + 1
     );
     let _: TicketId = t.id;
 }
