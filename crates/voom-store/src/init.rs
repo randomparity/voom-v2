@@ -94,7 +94,14 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         // * otherwise  — propagate the original sqlx error as a generic
         //                Migration (DB_PARTIAL_SCHEMA) so the message
         //                surfaces verbatim.
-        let after = probe_schema(pool).await?;
+        //
+        // Under concurrent inits, the post-error probe can transiently
+        // observe `Partial` because the peer that beat us to migration N
+        // committed N's data tables but its `_sqlx_migrations` row for N
+        // is still in flight (separate tx in sqlx Migrator).
+        // `probe_after_failure` waits briefly for that to settle so a
+        // genuine race recovery isn't misclassified as a hard failure.
+        let after = probe_after_failure(pool).await?;
         return match after {
             SchemaState::Current {
                 schema_init_at,
@@ -172,6 +179,41 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         schema_init_at,
         already_initialized,
     })
+}
+
+/// Probe `pool` repeatedly until it reports a terminal `SchemaState`
+/// (`Current`, `Dirty`, or `TooNew`) or the retry budget is exhausted.
+///
+/// sqlx's `Migrator::run` applies each migration in its own transaction —
+/// data DDL first, then an `_sqlx_migrations` row insert as a separate
+/// statement. Under concurrent inits, the peer that "loses" the race
+/// receives a hard error (e.g. `table … already exists`) while the
+/// winning peer's `_sqlx_migrations` v$N row hasn't fully committed yet.
+/// A single post-error probe in that window reports `Partial` even
+/// though the schema will be `Current` once the winning peer finishes.
+///
+/// The retry loop's first re-probe runs after 25 ms; subsequent attempts
+/// double the wait up to a cumulative budget of ~775 ms (25 + 50 + 100 +
+/// 200 + 400). The winning peer's per-migration tx is sub-millisecond on
+/// the SQL we ship, so any racing peer should observe the terminal state
+/// well within budget. If the probe never reaches a terminal state, the
+/// last observed `SchemaState` is returned and the caller classifies it
+/// the same way as a single-shot probe would.
+async fn probe_after_failure(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
+    let mut state = probe_schema(pool).await?;
+    let mut delay = std::time::Duration::from_millis(25);
+    for _ in 0..5 {
+        if matches!(
+            state,
+            SchemaState::Current { .. } | SchemaState::Dirty { .. } | SchemaState::TooNew { .. }
+        ) {
+            return Ok(state);
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay.saturating_mul(2);
+        state = probe_schema(pool).await?;
+    }
+    Ok(state)
 }
 
 async fn emit_schema_initialized_if_missing(

@@ -25,7 +25,7 @@ fn sample_new_handle() -> NewArtifactHandle {
 }
 
 #[tokio::test]
-async fn artifact_handles_has_no_identity_link_columns() {
+async fn artifact_handles_carries_identity_link_columns() {
     let (pool, _tmp) = pool().await;
     let cols: Vec<(String,)> =
         sqlx::query_as("SELECT name FROM pragma_table_info('artifact_handles') ORDER BY cid")
@@ -33,7 +33,7 @@ async fn artifact_handles_has_no_identity_link_columns() {
             .await
             .unwrap();
     let names: Vec<&str> = cols.iter().map(|c| c.0.as_str()).collect();
-    for forbidden in [
+    for required in [
         "media_work_id",
         "media_variant_id",
         "asset_bundle_id",
@@ -41,8 +41,8 @@ async fn artifact_handles_has_no_identity_link_columns() {
         "file_version_id",
     ] {
         assert!(
-            !names.contains(&forbidden),
-            "M1 artifact_handles must NOT carry identity-layer columns; M2 adds them with FKs"
+            names.contains(&required),
+            "M2 artifact_handles must carry the {required} identity-link column with an FK"
         );
     }
 }
