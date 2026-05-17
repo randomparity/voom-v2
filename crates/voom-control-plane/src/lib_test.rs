@@ -36,7 +36,7 @@ async fn init_then_health_reports_current() {
         HealthSnapshot::Current {
             migration_count,
             schema_init_at: _,
-        } => assert_eq!(migration_count, 1),
+        } => assert_eq!(migration_count, voom_store::expected_migrations()),
         other => panic!("expected Current, got {other:?}"),
     }
 }

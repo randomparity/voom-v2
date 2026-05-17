@@ -3,11 +3,11 @@ use crate::pool::connect;
 use crate::schema::{expected_migrations, probe_schema};
 
 #[tokio::test]
-async fn init_in_memory_applies_one_migration() {
+async fn init_in_memory_applies_every_embedded_migration() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(report.migrations_applied, 1);
+    assert_eq!(report.migrations_applied, expected_migrations());
 }
 
 #[tokio::test]
@@ -103,7 +103,11 @@ async fn probe_returns_dirty_when_known_version_row_marked_failed() {
                 failed_version, 1,
                 "failed_version must point at the dirty row"
             );
-            assert_eq!(applied, 0, "no successful migrations remain");
+            assert_eq!(
+                applied,
+                expected_migrations() - 1,
+                "only the marked-failed row should be missing from the success count"
+            );
             assert_eq!(expected, expected_migrations());
         }
         other => panic!("expected Dirty, got {other:?}"),
@@ -207,5 +211,5 @@ async fn init_from_partial_state_reports_delta_not_total() {
 
     let report = init_on(&pool).await.unwrap();
     assert!(!report.already_initialized);
-    assert_eq!(report.migrations_applied, 1);
+    assert_eq!(report.migrations_applied, expected_migrations());
 }

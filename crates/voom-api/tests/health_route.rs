@@ -61,7 +61,10 @@ async fn health_on_initialized_returns_200_current() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["db"]["status"], "current");
-    assert_eq!(json["data"]["db"]["migration_count"], 1);
+    assert_eq!(
+        json["data"]["db"]["migration_count"],
+        voom_store::expected_migrations()
+    );
     assert!(
         json.get("local").is_none(),
         "API must NEVER include local block"
