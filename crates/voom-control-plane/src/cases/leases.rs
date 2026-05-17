@@ -10,12 +10,13 @@ use voom_events::payload::{
     TicketFailedRetriablePayload, TicketFailedTerminalPayload, TicketLeasedPayload,
     TicketReadyPayload, TicketRequeuedAfterLeaseExpiryPayload, TicketSucceededPayload,
 };
-use voom_events::{Event, EventEnvelope, EventKind, SubjectType};
-use voom_store::repo::events::EventRepo;
+use voom_events::{Event, EventKind, SubjectType};
 use voom_store::repo::leases::{ExpireReport, Lease, LeaseRepo, NewLease};
 use voom_store::repo::tickets::{TicketRepo, TicketState};
 
 use crate::ControlPlane;
+
+use super::{append_event, begin_tx, commit_tx};
 
 impl ControlPlane {
     /// Acquire a worker lease. Emits `lease.acquired` + `ticket.leased` in
@@ -25,10 +26,11 @@ impl ControlPlane {
     /// # Errors
     /// Propagates repo and event-append errors.
     pub async fn acquire_lease(&self, input: NewLease) -> Result<Lease, VoomError> {
-        let mut tx = self.begin_tx().await?;
+        let mut tx = begin_tx(&self.pool).await?;
         let now = input.now;
         let lease = self.leases.acquire_in_tx(&mut tx, input).await?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::LeaseAcquired,
             SubjectType::Lease,
@@ -50,7 +52,8 @@ impl ControlPlane {
             .ok_or_else(|| {
                 VoomError::Internal("acquire_lease: ticket vanished mid-tx".to_owned())
             })?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::TicketLeased,
             SubjectType::Ticket,
@@ -93,12 +96,13 @@ impl ControlPlane {
         result: JsonValue,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self.begin_tx().await?;
+        let mut tx = begin_tx(&self.pool).await?;
         let lease = self
             .leases
             .release_in_tx(&mut tx, lease_id, result, now)
             .await?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::LeaseReleased,
             SubjectType::Lease,
@@ -114,7 +118,8 @@ impl ControlPlane {
             }),
         )
         .await?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::TicketSucceeded,
             SubjectType::Ticket,
@@ -142,12 +147,13 @@ impl ControlPlane {
         retriable: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self.begin_tx().await?;
+        let mut tx = begin_tx(&self.pool).await?;
         let lease = self
             .leases
             .fail_in_tx(&mut tx, lease_id, retriable, now)
             .await?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::LeaseReleased,
             SubjectType::Lease,
@@ -170,7 +176,8 @@ impl ControlPlane {
             .ok_or_else(|| VoomError::Internal("fail_lease: ticket vanished mid-tx".to_owned()))?;
         match ticket.state {
             TicketState::Ready => {
-                self.append_event(
+                append_event(
+                    &self.events,
                     &mut tx,
                     EventKind::TicketFailedRetriable,
                     SubjectType::Ticket,
@@ -187,7 +194,8 @@ impl ControlPlane {
                 .await?;
             }
             TicketState::Failed => {
-                self.append_event(
+                append_event(
+                    &self.events,
                     &mut tx,
                     EventKind::TicketFailedTerminal,
                     SubjectType::Ticket,
@@ -221,7 +229,7 @@ impl ControlPlane {
     /// Propagates repo and event-append errors. The transaction aborts on
     /// any error and no events are persisted.
     pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        let mut tx = self.begin_tx().await?;
+        let mut tx = begin_tx(&self.pool).await?;
         let report = self.leases.expire_due_in_tx(&mut tx, now).await?;
         for &(lease_id, ticket_id) in &report.pairs {
             self.emit_expire_pair(&mut tx, lease_id, ticket_id, &report, now)
@@ -239,7 +247,8 @@ impl ControlPlane {
         report: &ExpireReport,
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
-        self.append_event(
+        append_event(
+            &self.events,
             tx,
             EventKind::LeaseExpired,
             SubjectType::Lease,
@@ -252,7 +261,8 @@ impl ControlPlane {
         )
         .await?;
         if report.requeued_tickets.contains(&ticket_id) {
-            self.append_event(
+            append_event(
+                &self.events,
                 tx,
                 EventKind::TicketRequeuedAfterLeaseExpiry,
                 SubjectType::Ticket,
@@ -272,7 +282,8 @@ impl ControlPlane {
                 .ok_or_else(|| {
                     VoomError::Internal("expire_due: ticket vanished mid-tx".to_owned())
                 })?;
-            self.append_event(
+            append_event(
+                &self.events,
                 tx,
                 EventKind::TicketFailedTerminal,
                 SubjectType::Ticket,
@@ -303,12 +314,13 @@ impl ControlPlane {
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let mut tx = self.begin_tx().await?;
+        let mut tx = begin_tx(&self.pool).await?;
         let lease = self
             .leases
             .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
             .await?;
-        self.append_event(
+        append_event(
+            &self.events,
             &mut tx,
             EventKind::LeaseForceReleased,
             SubjectType::Lease,
@@ -324,7 +336,8 @@ impl ControlPlane {
         )
         .await?;
         if also_requeue {
-            self.append_event(
+            append_event(
+                &self.events,
                 &mut tx,
                 EventKind::TicketReady,
                 SubjectType::Ticket,
@@ -343,7 +356,8 @@ impl ControlPlane {
                 .ok_or_else(|| {
                     VoomError::Internal("force_release_lease: ticket vanished mid-tx".to_owned())
                 })?;
-            self.append_event(
+            append_event(
+                &self.events,
                 &mut tx,
                 EventKind::TicketFailedTerminal,
                 SubjectType::Ticket,
@@ -361,44 +375,6 @@ impl ControlPlane {
         commit_tx(tx).await?;
         Ok(lease)
     }
-
-    async fn begin_tx(&self) -> Result<Transaction<'_, Sqlite>, VoomError> {
-        self.pool()
-            .begin()
-            .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))
-    }
-
-    async fn append_event(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        kind: EventKind,
-        subject_type: SubjectType,
-        subject_id: Option<u64>,
-        occurred_at: OffsetDateTime,
-        payload: Event,
-    ) -> Result<(), VoomError> {
-        self.events
-            .append_in_tx(
-                tx,
-                EventEnvelope {
-                    kind,
-                    occurred_at,
-                    subject_type,
-                    subject_id,
-                    trace_id: None,
-                    payload,
-                },
-            )
-            .await?;
-        Ok(())
-    }
-}
-
-async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
-    tx.commit()
-        .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))
 }
 
 #[cfg(test)]
