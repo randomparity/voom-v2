@@ -37,3 +37,33 @@ fn from_str_rejects_unknown_subject() {
         "got: {err:?}"
     );
 }
+
+#[test]
+fn identity_layer_subjects_round_trip() {
+    for s in [
+        SubjectType::MediaWork,
+        SubjectType::MediaVariant,
+        SubjectType::AssetBundle,
+        SubjectType::FileAsset,
+        SubjectType::FileVersion,
+        SubjectType::FileLocation,
+        SubjectType::IdentityEvidence,
+        SubjectType::MediaSnapshot,
+    ] {
+        let wire = s.as_str();
+        let back = SubjectType::from_str(wire).unwrap();
+        assert_eq!(s, back, "round-trip failed for {wire}");
+    }
+}
+
+#[test]
+fn identity_layer_subjects_use_expected_wire_format() {
+    assert_eq!(SubjectType::MediaWork.as_str(), "media_work");
+    assert_eq!(SubjectType::MediaVariant.as_str(), "media_variant");
+    assert_eq!(SubjectType::AssetBundle.as_str(), "asset_bundle");
+    assert_eq!(SubjectType::FileAsset.as_str(), "file_asset");
+    assert_eq!(SubjectType::FileVersion.as_str(), "file_version");
+    assert_eq!(SubjectType::FileLocation.as_str(), "file_location");
+    assert_eq!(SubjectType::IdentityEvidence.as_str(), "identity_evidence");
+    assert_eq!(SubjectType::MediaSnapshot.as_str(), "media_snapshot");
+}

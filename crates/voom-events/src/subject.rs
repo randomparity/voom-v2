@@ -1,5 +1,5 @@
 //! `SubjectType` — wire-format enum tagging which entity an event row
-//! refers to. Sprint 1 M1 subset; M2/M3 add identity-layer variants.
+//! refers to. Sprint 1 M1 + M2 subset; M3 adds the remaining variants.
 //!
 //! Like `EventKind`, this enum does NOT derive `Serialize`/`Deserialize`:
 //! the wire format is the string returned by `as_str()`, and we keep
@@ -18,6 +18,15 @@ pub enum SubjectType {
     Worker,
     ArtifactHandle,
     ArtifactLocation,
+    // M2 — identity layer.
+    MediaWork,
+    MediaVariant,
+    AssetBundle,
+    FileAsset,
+    FileVersion,
+    FileLocation,
+    IdentityEvidence,
+    MediaSnapshot,
 }
 
 impl SubjectType {
@@ -31,6 +40,14 @@ impl SubjectType {
             Self::Worker => "worker",
             Self::ArtifactHandle => "artifact_handle",
             Self::ArtifactLocation => "artifact_location",
+            Self::MediaWork => "media_work",
+            Self::MediaVariant => "media_variant",
+            Self::AssetBundle => "asset_bundle",
+            Self::FileAsset => "file_asset",
+            Self::FileVersion => "file_version",
+            Self::FileLocation => "file_location",
+            Self::IdentityEvidence => "identity_evidence",
+            Self::MediaSnapshot => "media_snapshot",
         }
     }
 
@@ -54,6 +71,14 @@ impl SubjectType {
             "worker" => Self::Worker,
             "artifact_handle" => Self::ArtifactHandle,
             "artifact_location" => Self::ArtifactLocation,
+            "media_work" => Self::MediaWork,
+            "media_variant" => Self::MediaVariant,
+            "asset_bundle" => Self::AssetBundle,
+            "file_asset" => Self::FileAsset,
+            "file_version" => Self::FileVersion,
+            "file_location" => Self::FileLocation,
+            "identity_evidence" => Self::IdentityEvidence,
+            "media_snapshot" => Self::MediaSnapshot,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.subject_type {other:?} not in SubjectType vocab"
