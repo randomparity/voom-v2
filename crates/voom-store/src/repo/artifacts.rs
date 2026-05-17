@@ -7,6 +7,9 @@ use time::OffsetDateTime;
 use voom_core::{ArtifactHandleId, ArtifactLocationId, VoomError};
 
 use super::Repository;
+use super::common::{
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
+};
 
 #[derive(Debug, Clone)]
 pub struct NewArtifactHandle {
@@ -327,13 +330,21 @@ impl ArtifactRepo for SqliteArtifactRepo {
 }
 
 fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
-    let privacy_class: String = row.try_get("privacy_class").map_err(|e| map_row_err(&e))?;
+    let id: i64 = row
+        .try_get("id")
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let privacy_class: String = row
+        .try_get("privacy_class")
+        .map_err(|e| map_row_err("artifacts", &e))?;
     let durability_class: String = row
         .try_get("durability_class")
-        .map_err(|e| map_row_err(&e))?;
-    let mutability: String = row.try_get("mutability").map_err(|e| map_row_err(&e))?;
-    let created: String = row.try_get("created_at").map_err(|e| map_row_err(&e))?;
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let mutability: String = row
+        .try_get("mutability")
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let created: String = row
+        .try_get("created_at")
+        .map_err(|e| map_row_err("artifacts", &e))?;
     Ok(ArtifactHandle {
         id: ArtifactHandleId(u64_from_i64(id)),
         privacy_class,
@@ -344,14 +355,24 @@ fn row_to_handle(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactHandle, VoomEr
 }
 
 fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactLocation, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
+    let id: i64 = row
+        .try_get("id")
+        .map_err(|e| map_row_err("artifacts", &e))?;
     let handle_id: i64 = row
         .try_get("artifact_handle_id")
-        .map_err(|e| map_row_err(&e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err(&e))?;
-    let value: String = row.try_get("value").map_err(|e| map_row_err(&e))?;
-    let observed: String = row.try_get("observed_at").map_err(|e| map_row_err(&e))?;
-    let retired: Option<String> = row.try_get("retired_at").map_err(|e| map_row_err(&e))?;
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let kind: String = row
+        .try_get("kind")
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let value: String = row
+        .try_get("value")
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let observed: String = row
+        .try_get("observed_at")
+        .map_err(|e| map_row_err("artifacts", &e))?;
+    let retired: Option<String> = row
+        .try_get("retired_at")
+        .map_err(|e| map_row_err("artifacts", &e))?;
     Ok(ArtifactLocation {
         id: ArtifactLocationId(u64_from_i64(id)),
         artifact_handle_id: ArtifactHandleId(u64_from_i64(handle_id)),
@@ -360,33 +381,6 @@ fn row_to_location(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactLocation, Vo
         observed_at: parse_iso8601(&observed)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
     })
-}
-
-fn map_row_err(e: &sqlx::Error) -> VoomError {
-    VoomError::Database(format!("artifacts row decode: {e}"))
-}
-
-fn serialize_json(v: &JsonValue, field: &str) -> Result<String, VoomError> {
-    serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
-}
-
-fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]

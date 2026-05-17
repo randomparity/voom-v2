@@ -7,6 +7,9 @@ use time::OffsetDateTime;
 use voom_core::{VoomError, WorkerId};
 
 use super::Repository;
+use super::common::{
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerKind {
@@ -409,14 +412,28 @@ async fn get_in_tx(
 }
 
 fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
-    let name: String = row.try_get("name").map_err(|e| map_row_err(&e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err(&e))?;
-    let status: String = row.try_get("status").map_err(|e| map_row_err(&e))?;
-    let registered: String = row.try_get("registered_at").map_err(|e| map_row_err(&e))?;
-    let last_seen: String = row.try_get("last_seen_at").map_err(|e| map_row_err(&e))?;
-    let retired: Option<String> = row.try_get("retired_at").map_err(|e| map_row_err(&e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err(&e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", &e))?;
+    let name: String = row
+        .try_get("name")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let kind: String = row
+        .try_get("kind")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let status: String = row
+        .try_get("status")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let registered: String = row
+        .try_get("registered_at")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let last_seen: String = row
+        .try_get("last_seen_at")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let retired: Option<String> = row
+        .try_get("retired_at")
+        .map_err(|e| map_row_err("workers", &e))?;
+    let epoch: i64 = row
+        .try_get("epoch")
+        .map_err(|e| map_row_err("workers", &e))?;
     Ok(Worker {
         id: WorkerId(u64_from_i64(id)),
         name,
@@ -431,33 +448,6 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
 
 fn serialize_string_vec(v: &[String], field: &str) -> Result<String, VoomError> {
     serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
-}
-
-fn serialize_json(v: &JsonValue, field: &str) -> Result<String, VoomError> {
-    serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
-}
-
-fn map_row_err(e: &sqlx::Error) -> VoomError {
-    VoomError::Database(format!("workers row decode: {e}"))
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
-}
-
-fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]

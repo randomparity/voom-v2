@@ -6,11 +6,11 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
-use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_events::{Event, EventEnvelope, EventId, EventKind, SubjectType, TraceId};
 
 use super::Repository;
+use super::common::{i64_from_u64, iso8601, parse_iso8601, u64_from_i64};
 
 #[derive(Debug, Clone, Default)]
 pub struct EventFilter {
@@ -76,10 +76,7 @@ impl EventRepo for SqliteEventRepo {
         // columns.
         let payload_json = serde_json::to_string(&inner_payload(&env.payload))
             .map_err(|e| VoomError::Internal(format!("payload serialize: {e}")))?;
-        let occurred = env
-            .occurred_at
-            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-            .map_err(|e| VoomError::Internal(format!("format occurred_at: {e}")))?;
+        let occurred = iso8601(env.occurred_at)?;
         let res = sqlx::query(
             "INSERT INTO events (occurred_at, kind, subject_type, subject_id, trace_id, payload) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -196,11 +193,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventRow, VoomError> {
         .try_get("payload")
         .map_err(|e| VoomError::Database(format!("read payload: {e}")))?;
 
-    let occurred_at = OffsetDateTime::parse(
-        &occurred,
-        &time::format_description::well_known::Iso8601::DEFAULT,
-    )
-    .map_err(|e| VoomError::Database(format!("parse occurred_at: {e}")))?;
+    let occurred_at = parse_iso8601(&occurred)?;
     // Decode via the explicit string → enum parsers. Using serde derives
     // would produce snake_case strings that don't match the dotted wire
     // form `as_str()` writes; see `EventKind` rustdoc.
@@ -243,15 +236,6 @@ fn reassemble_event(kind: EventKind, payload: &JsonValue) -> Result<Event, VoomE
     let tagged = serde_json::json!({ "kind": kind.as_str(), "payload": payload });
     serde_json::from_value::<Event>(tagged)
         .map_err(|e| VoomError::Database(format!("rebuild Event for {kind:?}: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 use voom_core::{JobId, VoomError};
 
 use super::Repository;
+use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
@@ -286,27 +287,19 @@ async fn transition_open_to(
 }
 
 fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> Result<Job, VoomError> {
-    let id: i64 = row
-        .try_get("id")
-        .map_err(|e| VoomError::Database(format!("jobs row decode id: {e}")))?;
-    let kind: String = row
-        .try_get("kind")
-        .map_err(|e| VoomError::Database(format!("jobs row decode kind: {e}")))?;
-    let state_str: String = row
-        .try_get("state")
-        .map_err(|e| VoomError::Database(format!("jobs row decode state: {e}")))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("jobs", &e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("jobs", &e))?;
+    let state_str: String = row.try_get("state").map_err(|e| map_row_err("jobs", &e))?;
     let priority: i64 = row
         .try_get("priority")
-        .map_err(|e| VoomError::Database(format!("jobs row decode priority: {e}")))?;
+        .map_err(|e| map_row_err("jobs", &e))?;
     let created: String = row
         .try_get("created_at")
-        .map_err(|e| VoomError::Database(format!("jobs row decode created_at: {e}")))?;
+        .map_err(|e| map_row_err("jobs", &e))?;
     let updated: String = row
         .try_get("updated_at")
-        .map_err(|e| VoomError::Database(format!("jobs row decode updated_at: {e}")))?;
-    let epoch: i64 = row
-        .try_get("epoch")
-        .map_err(|e| VoomError::Database(format!("jobs row decode epoch: {e}")))?;
+        .map_err(|e| map_row_err("jobs", &e))?;
+    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err("jobs", &e))?;
     Ok(Job {
         id: JobId(u64_from_i64(id)),
         kind,
@@ -316,25 +309,6 @@ fn row_to_job(row: &sqlx::sqlite::SqliteRow) -> Result<Job, VoomError> {
         updated_at: parse_iso8601(&updated)?,
         epoch: u64_from_i64(epoch),
     })
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
-}
-
-fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]

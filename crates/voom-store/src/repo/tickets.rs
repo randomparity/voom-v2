@@ -7,6 +7,9 @@ use time::OffsetDateTime;
 use voom_core::{JobId, TicketId, VoomError};
 
 use super::Repository;
+use super::common::{
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketState {
@@ -380,23 +383,43 @@ async fn get_in_tx_inner(
 }
 
 fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
-    let job_id: Option<i64> = row.try_get("job_id").map_err(|e| map_row_err(&e))?;
-    let kind: String = row.try_get("kind").map_err(|e| map_row_err(&e))?;
-    let state: String = row.try_get("state").map_err(|e| map_row_err(&e))?;
-    let priority: i64 = row.try_get("priority").map_err(|e| map_row_err(&e))?;
-    let payload: String = row.try_get("payload").map_err(|e| map_row_err(&e))?;
-    let result: Option<String> = row.try_get("result").map_err(|e| map_row_err(&e))?;
-    let attempt: i64 = row.try_get("attempt").map_err(|e| map_row_err(&e))?;
-    let max_attempts: i64 = row.try_get("max_attempts").map_err(|e| map_row_err(&e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+    let job_id: Option<i64> = row
+        .try_get("job_id")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let kind: String = row
+        .try_get("kind")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let state: String = row
+        .try_get("state")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let priority: i64 = row
+        .try_get("priority")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let payload: String = row
+        .try_get("payload")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let result: Option<String> = row
+        .try_get("result")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let attempt: i64 = row
+        .try_get("attempt")
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let max_attempts: i64 = row
+        .try_get("max_attempts")
+        .map_err(|e| map_row_err("tickets", &e))?;
     let next_eligible: String = row
         .try_get("next_eligible_at")
-        .map_err(|e| map_row_err(&e))?;
-    let created: String = row.try_get("created_at").map_err(|e| map_row_err(&e))?;
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let created: String = row
+        .try_get("created_at")
+        .map_err(|e| map_row_err("tickets", &e))?;
     let state_changed: String = row
         .try_get("state_changed_at")
-        .map_err(|e| map_row_err(&e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err(&e))?;
+        .map_err(|e| map_row_err("tickets", &e))?;
+    let epoch: i64 = row
+        .try_get("epoch")
+        .map_err(|e| map_row_err("tickets", &e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
         .map_err(|e| VoomError::Database(format!("parse payload: {e}")))?;
     let result_v = result
@@ -418,37 +441,6 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         state_changed_at: parse_iso8601(&state_changed)?,
         epoch: u64_from_i64(epoch),
     })
-}
-
-fn map_row_err(e: &sqlx::Error) -> VoomError {
-    VoomError::Database(format!("tickets row decode: {e}"))
-}
-
-fn serialize_json(v: &JsonValue, field: &str) -> Result<String, VoomError> {
-    serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
-}
-
-fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
-}
-
-fn u32_from_i64(v: i64) -> Result<u32, VoomError> {
-    u32::try_from(v).map_err(|e| VoomError::Database(format!("u32 conv: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]

@@ -7,6 +7,9 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{LeaseId, TicketId, VoomError, WorkerId};
 
 use super::Repository;
+use super::common::{
+    i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -536,8 +539,10 @@ impl LeaseRepo for SqliteLeaseRepo {
             pairs: Vec::new(),
         };
         for row in &rows {
-            let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
-            let ticket_id_i: i64 = row.try_get("ticket_id").map_err(|e| map_row_err(&e))?;
+            let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+            let ticket_id_i: i64 = row
+                .try_get("ticket_id")
+                .map_err(|e| map_row_err("leases", &e))?;
             let lease_id = LeaseId(u64_from_i64(lease_id_i));
             let ticket_id = TicketId(u64_from_i64(ticket_id_i));
             // Mark lease expired.
@@ -758,19 +763,37 @@ async fn get_lease_in_tx(
 }
 
 fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
-    let id: i64 = row.try_get("id").map_err(|e| map_row_err(&e))?;
-    let ticket_id: i64 = row.try_get("ticket_id").map_err(|e| map_row_err(&e))?;
-    let worker_id: i64 = row.try_get("worker_id").map_err(|e| map_row_err(&e))?;
-    let state: String = row.try_get("state").map_err(|e| map_row_err(&e))?;
-    let acquired: String = row.try_get("acquired_at").map_err(|e| map_row_err(&e))?;
-    let expires: String = row.try_get("expires_at").map_err(|e| map_row_err(&e))?;
+    let id: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let ticket_id: i64 = row
+        .try_get("ticket_id")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let worker_id: i64 = row
+        .try_get("worker_id")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let state: String = row
+        .try_get("state")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let acquired: String = row
+        .try_get("acquired_at")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let expires: String = row
+        .try_get("expires_at")
+        .map_err(|e| map_row_err("leases", &e))?;
     let last_hb: String = row
         .try_get("last_heartbeat_at")
-        .map_err(|e| map_row_err(&e))?;
-    let ttl: i64 = row.try_get("ttl_seconds").map_err(|e| map_row_err(&e))?;
-    let reason: Option<String> = row.try_get("release_reason").map_err(|e| map_row_err(&e))?;
-    let released: Option<String> = row.try_get("released_at").map_err(|e| map_row_err(&e))?;
-    let epoch: i64 = row.try_get("epoch").map_err(|e| map_row_err(&e))?;
+        .map_err(|e| map_row_err("leases", &e))?;
+    let ttl: i64 = row
+        .try_get("ttl_seconds")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let reason: Option<String> = row
+        .try_get("release_reason")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let released: Option<String> = row
+        .try_get("released_at")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let epoch: i64 = row
+        .try_get("epoch")
+        .map_err(|e| map_row_err("leases", &e))?;
     Ok(Lease {
         id: LeaseId(u64_from_i64(id)),
         ticket_id: TicketId(u64_from_i64(ticket_id)),
@@ -784,37 +807,6 @@ fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
         released_at: released.map(|s| parse_iso8601(&s)).transpose()?,
         epoch: u64_from_i64(epoch),
     })
-}
-
-fn map_row_err(e: &sqlx::Error) -> VoomError {
-    VoomError::Database(format!("leases row decode: {e}"))
-}
-
-fn serialize_json(v: &JsonValue, field: &str) -> Result<String, VoomError> {
-    serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
-}
-
-fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
-    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
-}
-
-fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
-}
-
-fn u32_from_i64(v: i64) -> Result<u32, VoomError> {
-    u32::try_from(v).map_err(|e| VoomError::Database(format!("u32 conv: {e}")))
-}
-
-#[expect(clippy::cast_possible_wrap, reason = "rowid fits i64")]
-const fn i64_from_u64(v: u64) -> i64 {
-    v as i64
-}
-#[expect(clippy::cast_sign_loss, reason = "rowid is non-negative")]
-const fn u64_from_i64(v: i64) -> u64 {
-    v as u64
 }
 
 #[cfg(test)]
