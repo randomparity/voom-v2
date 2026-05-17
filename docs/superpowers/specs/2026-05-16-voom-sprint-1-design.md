@@ -863,6 +863,21 @@ pub struct DiscoveredFile {
     pub content_hash: String,        // hex SHA-256
     pub size_bytes: u64,
     pub observed_at: OffsetDateTime,
+    /// Physical-object proof the watcher captured at the new path.
+    /// Persisted on the resulting `file_locations` row as
+    /// `(proof_kind, proof_value)` so future rename reconciliation can
+    /// prove same-physical-object identity against this location.
+    /// `None` is back-compat for filesystems without a generation-
+    /// stamped file ID and for arrival paths where the watcher could
+    /// not capture a proof.
+    pub proof: Option<LocationProof>,
+}
+
+pub enum LocationProof {
+    /// Local filesystem: generation-stamped file ID.
+    LocalFileIdGeneration { file_id: u128, generation: u64 },
+    /// Object store: immutable per-generation version identity.
+    ObjectStoreVersion    { bucket: String, key: String, version_id: String },
 }
 
 pub enum AliasProof {
@@ -879,6 +894,47 @@ pub enum AliasProof {
         key: String,
         version_id: String,
         prior_location_id: FileLocationId,
+    },
+}
+
+pub struct ObservedBytes {
+    pub content_hash: String,        // hex SHA-256
+    pub size_bytes: u64,
+}
+
+/// Proof required to reconcile a same-physical-object rename. Carries
+/// the physical-object identity (so the repo can match it against the
+/// retired location's stored proof), the new path, and the caller's
+/// assertion that the prior path is gone. The repo cross-checks every
+/// field — proof kind, proof bytes, prior-path absence, and the
+/// `FileVersion`'s hash/size against `ObservedBytes` — before retiring
+/// the prior location. Any mismatch returns `Conflict` and leaves the
+/// prior location live.
+pub enum RenameProof {
+    /// Local filesystem: caller observed the same (file_id,
+    /// generation) at the new path, and observed the prior path is
+    /// gone. The repo cross-checks against the retired location's
+    /// stored proof and the FileVersion's hash/size.
+    LocalFileIdGeneration {
+        prior_location_id: FileLocationId,
+        new_kind: FileLocationKind,
+        new_value: String,
+        file_id: u128,
+        generation: u64,
+        prior_path_missing: bool,
+    },
+    /// Object store: caller observed the same (bucket, key,
+    /// version_id) at the new key, and observed the prior key is
+    /// gone (or moved). In practice the (bucket, version_id) pin is
+    /// the physical-object identity; the key may shift.
+    ObjectStoreVersion {
+        prior_location_id: FileLocationId,
+        new_kind: FileLocationKind,
+        new_value: String,
+        bucket: String,
+        key: String,
+        version_id: String,
+        prior_key_missing: bool,
     },
 }
 
@@ -911,9 +967,8 @@ pub trait IdentityRepo: Repository {
     async fn reconcile_rename_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        prior_location_id: FileLocationId,
-        new_kind: FileLocationKind,
-        new_value: String,
+        proof: RenameProof,
+        observed: ObservedBytes,
         observed_at: OffsetDateTime,
     ) -> Result<RenameReconciledOutcome, VoomError>;
 
@@ -928,7 +983,15 @@ Behavior of `record_discovered_file_in_tx`:
   `identity_evidence(hash_match)` row against the existing
   `FileAsset` referencing the new `FileVersion`. Hash matches never
   collapse identity. ETag matches arrive at this code path with no
-  alias proof and produce identical behavior.
+  alias proof and produce identical behavior. The new `file_locations`
+  row carries `discovered.proof`: if `Some(LocalFileIdGeneration { … })`,
+  the row's `proof_kind = 'file_id_generation'` and `proof_value`
+  serializes `(file_id, generation)`; if
+  `Some(ObjectStoreVersion { … })`, `proof_kind = 'object_version_id'`
+  and `proof_value` serializes `(bucket, key, version_id)`; if `None`,
+  both columns are NULL (back-compat semantics for filesystems without
+  a generation-stamped file ID and for arrival paths where the watcher
+  could not capture a proof).
 - **`alias_proof = Some(LocalFileIdGeneration { … })`** → validate: prior
   location is live (`retired_at IS NULL`), its `proof_kind = 'file_id_generation'`,
   its `proof_value` parses to a `(file_id, generation)` matching what the
@@ -936,13 +999,25 @@ Behavior of `record_discovered_file_in_tx`:
   `size_bytes` match `discovered`. On match → `AliasAttached`. On any
   mismatch → `NewFileAsset` + `identity_evidence(path_rule_match)`. Inode
   alone (a `file_id` reuse after delete/recreate without generation match)
-  is **not** sufficient — the spec is explicit.
+  is **not** sufficient — the spec is explicit. On the `AliasAttached`
+  outcome the repo persists `discovered.proof` onto the new alias
+  `file_locations` row so a later rename reconciliation against this
+  new location has a basis to verify. The persisted proof on the new
+  alias location must match the alias_proof bytes — a mismatch returns
+  `VoomError::Conflict("proof drift on alias attach")` and does not
+  insert the row.
 - **`alias_proof = Some(ObjectStoreVersion { … })`** → analogous: prior
   location's `proof_kind = 'object_version_id'`, `proof_value` matches the
   `(bucket, key, version_id)` triple, hash and size match. On match →
   `AliasAttached`. On any mismatch → `NewFileAsset` +
   `identity_evidence(path_rule_match)` and (if hash matches an existing
-  version) also `identity_evidence(hash_match)`.
+  version) also `identity_evidence(hash_match)`. On the `AliasAttached`
+  outcome the repo persists `discovered.proof` onto the new alias
+  `file_locations` row under the same matching discipline as the
+  local variant; a `(bucket, key, version_id)` mismatch between
+  `discovered.proof` and `alias_proof` returns
+  `VoomError::Conflict("proof drift on alias attach")` and does not
+  insert the row.
 
 The repo never produces `RenameReconciled` from `record_discovered_file`;
 that outcome is reserved for `reconcile_rename`. Identity collapse via a
@@ -1011,14 +1086,42 @@ in-flight shifts the closure, and the Phase B `authorize` recheck
 
 Behavior of `reconcile_rename_in_tx` (M2 form):
 
-- Look up `prior_location_id`; assert it's live; bind its `FileVersion`.
-- Retire the prior location (`retired_at = observed_at`).
-- Insert a new `FileLocation` on the same `FileVersion` with the new
-  `kind` and `value`.
-- Emit `file_location.retired_by_move` and `file_location.recorded_by_move`
-  events with payload referencing both IDs.
-- Append a new `identity_evidence` row (assertion `PathRuleMatch`)
-  observing the new location.
+1. Bind `prior_location_id` from the `proof` payload; load the row.
+   Require `retired_at IS NULL`. Otherwise return `Conflict`.
+2. Require the prior location's `proof_kind` matches the
+   `RenameProof` variant (`file_id_generation` ↔ `LocalFileIdGeneration`;
+   `object_version_id` ↔ `ObjectStoreVersion`). Mismatch → `Conflict`.
+3. Parse the prior location's `proof_value`. Require the parsed
+   bytes match the caller-supplied proof bytes:
+   - `LocalFileIdGeneration`: `(file_id, generation)` must match.
+   - `ObjectStoreVersion`: `(bucket, key, version_id)` must match.
+
+   Mismatch → `Conflict`.
+4. Require the caller's `prior_path_missing` / `prior_key_missing`
+   flag is `true`. The spec's contract is that reconciliation only
+   records moves the host has *observed* outside its own authority;
+   a caller that did not verify prior-path absence is bypassing the
+   architectural invariant. `false` → `Conflict` ("rename requires
+   prior path missing").
+5. Load the `FileVersion` bound to the prior location. Require
+   `observed.content_hash == fv.content_hash` AND
+   `observed.size_bytes == fv.size_bytes`. Mismatch → `Conflict`
+   ("hash drift during rename" / "size drift during rename") — the
+   bytes are no longer the same physical object, so this is a new
+   file_asset story, not a rename.
+6. Retire the prior location (`retired_at = observed_at`).
+7. Insert a new `FileLocation` on the same `FileVersion` with the
+   new `kind`, `value`, and the caller-supplied `(proof_kind,
+   proof_value)` carried over from the `RenameProof` payload.
+8. Emit `file_location.retired_by_move` and
+   `file_location.recorded_by_move` events referencing both IDs.
+9. Append `identity_evidence(path_rule_match)` observing the new
+   location.
+
+Every `Conflict` path leaves the prior location live and the
+`FileVersion` untouched. Re-anchoring leases (the M3 extension)
+runs only after step 6 succeeds — the lease scope is never updated
+against an unproven rename.
 
 M3 extends `reconcile_rename_in_tx` to additionally:
 
@@ -1132,6 +1235,7 @@ CREATE TABLE commit_intents (
     closure_initial        TEXT NOT NULL,    -- JSON AffectedScopeClosure
     closure_authorized     TEXT,             -- JSON AffectedScopeClosure; set at Phase B success
     accepted_evidence_ids  TEXT NOT NULL,    -- JSON array of evidence IDs
+    override_token         TEXT,             -- JSON ForcePathToken | NULL
     state                  TEXT NOT NULL,    -- 'pending' | 'authorized' | 'completed' | 'aborted' | 'recovery_required'
     started_at             TEXT NOT NULL,
     authorized_at          TEXT,
@@ -1145,7 +1249,8 @@ CREATE TABLE commit_intents (
         OR (state = 'completed'         AND authorized_at IS NOT NULL AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL)
         OR (state = 'aborted'           AND finalized_at IS NULL      AND aborted_at IS NOT NULL   AND abort_reason IS NOT NULL)
         OR (state = 'recovery_required' AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL)
-    )
+    ),
+    CHECK (override_token IS NULL OR json_valid(override_token))
 ) STRICT;
 
 CREATE INDEX commit_intents_in_flight
@@ -1171,10 +1276,16 @@ populated once Phase B authorize succeeds; it captures the
 that the architectural spec requires (lines 1044–1052 of
 `docs/specs/voom-control-plane-design.md`).
 
-The override-token audit payload (`actor`, `reason`, `bypass`) is
-captured in the `commit.intent_recorded` event written alongside the
-row at prepare time; the table itself stores only the durable state
-the recovery path needs.
+The override-token decision is persisted on
+`commit_intents.override_token` so that
+`authorize_destructive_commit` and the Sprint 5+ recovery worker can
+read it inside their own IMMEDIATE transactions without a cross-table
+join against the event log. The `commit.intent_recorded` event
+payload (`actor`, `reason`, `bypass`) also carries the token for
+audit and replay, but the durable column is the source-of-truth for
+safety decisions; the event journal is audit. The `json_valid` CHECK
+keeps a corrupted token from silently passing the bypass check
+downstream.
 
 #### `commit_intent_scope_members`
 
@@ -1451,12 +1562,20 @@ pub enum MutationOutcome {
     /// disk. Optionally carries the observed post-mutation closure if
     /// the caller's mutation touched aliases the gate could not see.
     Applied { observed: Option<AffectedScopeClosure> },
-    /// Caller obtained a permit but decided not to mutate;
+    /// Caller obtained a permit but decided not to mutate.
     /// `finalize_destructive_commit` transitions the intent to
-    /// `aborted` with reason `operator_cancel`. This is the **only**
-    /// sanctioned post-authorize pre-success termination path; the
-    /// `abort_destructive_commit` entry point is pending-only and
-    /// rejects `state = 'authorized'` with `Conflict` (§9.3.2).
+    /// `aborted` with reason `'operator_cancel'`, emits
+    /// `commit.aborted_pre_mutation`, and returns
+    /// `Ok(CommitGateOutcome { result:
+    /// CommitGateResult::CancelledAfterAuthorize, ... })`. This is the
+    /// **only** sanctioned post-authorize pre-success termination path;
+    /// the `abort_destructive_commit` entry point is pending-only and
+    /// rejects `state = 'authorized'` with `Conflict` (§9.3.2). Recovery
+    /// callers must read the durable `commit_intents` row to learn the
+    /// terminal state; an `Ok(CancelledAfterAuthorize)` is idempotent
+    /// against retry-by-row-inspection because a second finalize on a
+    /// consumed permit hits the Phase C step-1 state/epoch check and
+    /// returns `Err(Conflict)` cleanly.
     NotPerformed,
 }
 
@@ -1472,6 +1591,14 @@ pub struct CommitGateOutcome {
 
 pub enum CommitGateResult {
     Allowed,
+    /// `finalize_destructive_commit` was called with
+    /// `MutationOutcome::NotPerformed`. The intent is durably
+    /// transitioned to `aborted` with `abort_reason =
+    /// 'operator_cancel'`; emits `commit.aborted_pre_mutation` with
+    /// `payload.prior_state = 'authorized'`. This is a successful
+    /// cancellation — callers treat it as an Ok outcome, not an
+    /// error. Distinct from `Allowed` (commit did not happen).
+    CancelledAfterAuthorize,
     BlockedByUseLease           { lease_id: UseLeaseId, lease_scope: LeaseScope },
     BlockedByStaleEvidence      { evidence_id: EvidenceId, drift: EvidenceDrift },
     BlockedByClosureIncomplete  { reason: ClosureFailure, unreachable: Vec<ClosureWarning> },
@@ -1731,7 +1858,8 @@ spec's serialization point.
    evidence revalidation.**
 4. Insert a `commit_intents` row with `state = 'pending'`,
    `target = input.target`, `closure_initial`, `accepted_evidence_ids`,
-   and `started_at = now`. Inside the same IMMEDIATE transaction, expand
+   `override_token = <serialized ForcePathToken | NULL>` (§9.1), and
+   `started_at = now`. Inside the same IMMEDIATE transaction, expand
    `closure_initial` into `commit_intent_scope_members` rows so the
    pending-commit lock (§9.1) is durable before the transaction commits:
    ```text
@@ -1773,16 +1901,20 @@ single point at which the gate observes the state the destructive
 mutation is about to act on. One IMMEDIATE transaction.
 
 1. Read the `commit_intents` row for `commit_id`; require
-   `state = 'pending'`. Missing row, terminal state, or `epoch`
-   mismatch → return `Conflict` without writing.
+   `state = 'pending'`. The SELECT returns `state`,
+   `closure_initial`, `accepted_evidence_ids`, `epoch`, **and
+   `override_token`** in a single round-trip so every safety decision
+   below evaluates against the durable column rather than parsing the
+   event journal. Missing row, terminal state, or `epoch` mismatch →
+   return `Conflict` without writing.
 2. Recompute `closure_authorized` against the current DB state and
    the `AliasResolver`, following the same walk as Phase A step 1. If
    any `AliasResolver` call fails or returns
    `AliasResolutionError::Unreachable`, surface
-   `BlockedByClosureIncomplete` unless the original
-   `commit_intents.target`-recorded `override_token` granted
-   `closure_incomplete` (the bypass is honored through to authorize
-   so the operator does not have to re-prepare; see §9.3.3). On
+   `BlockedByClosureIncomplete` unless the parsed
+   `override_token` read in step 1 granted `closure_incomplete` (the
+   bypass is honored through to authorize so the operator does not
+   have to re-prepare; see §9.3.3). On
    abort: emit `commit.aborted_by_closure_incomplete` with
    `payload.phase = 'authorize'`, transition the intent to
    `state = 'aborted'`, `authorized_at = NULL`, `aborted_at = now`,
@@ -1856,17 +1988,31 @@ filesystem (or the caller has decided not to mutate; see
    same `commit_id`, or a concurrent `abort_destructive_commit` that
    bumped the row underneath the permit holder).
 2. If `outcome == MutationOutcome::NotPerformed`: transition the
-   intent to `state = 'aborted'`, `aborted_at = now`, and
+   intent to `state = 'aborted'`, `aborted_at = now`,
    `abort_reason = 'operator_cancel'` (the `authorized_at` value is
    preserved per the §9.1 CHECK, which leaves `authorized_at`
-   unconstrained on `aborted`). Emit `commit.aborted_pre_mutation`
-   with `payload.prior_state = 'authorized'` so audit can distinguish
+   unconstrained on `aborted`). Bump `epoch`. Emit
+   `commit.aborted_pre_mutation` with
+   `payload.prior_state = 'authorized'` so audit can distinguish
    "aborted before authorize" (handled by `abort_destructive_commit`,
    `prior_state = 'pending'`) from "authorized but caller chose not
    to mutate" (handled here, `prior_state = 'authorized'`). COMMIT.
-   Sprint 1's contract: `finalize` returns
-   `Err(VoomError::Conflict("operator cancelled after authorize"))`
-   on the `NotPerformed` branch.
+
+   Return `Ok(CommitGateOutcome { commit_id,
+   closure_initial: <from intent row>,
+   closure_authorized: permit.closure_authorized,
+   closure_final: permit.closure_authorized,  // no FS mutation,
+                                              // no Phase C recheck
+   evaluated_lease_ids: permit.evaluated_lease_ids,
+   revalidated_evidence: permit.revalidated_evidence,
+   result: CommitGateResult::CancelledAfterAuthorize })`.
+
+   `closure_final` carries the authorized closure unchanged because
+   no filesystem mutation was applied and the Phase C defensive
+   trip-wire is skipped on the `NotPerformed` branch. The
+   `CancelledAfterAuthorize` result is distinct from `Allowed`: the
+   durable identity mutation did not run, and consumers must not
+   treat this as a completed commit.
 
    The `NotPerformed` branch is the **only** sanctioned way to abort
    an intent that has reached `authorized` without applying the
@@ -1878,10 +2024,11 @@ filesystem (or the caller has decided not to mutate; see
    step failed without producing partial on-disk state) **must**
    route through `finalize(permit, NotPerformed)`;
    `abort_destructive_commit` rejects `state = 'authorized'` with
-   `Conflict` precisely so this path cannot be bypassed. The durable
-   state transition (intent → `aborted` with `abort_reason =
-   'operator_cancel'`) and the `commit.aborted_pre_mutation` event
-   are the audit record.
+   `Conflict` precisely so this path cannot be bypassed.
+   `Err(Conflict)` is reserved for cases where no state transition
+   was applied (the Phase C step-1 wrong-state/epoch path); a
+   successful cancellation always returns
+   `Ok(CancelledAfterAuthorize)`.
 3. Otherwise (`outcome == MutationOutcome::Applied { observed }`):
    defensive trip-wire — recompute `closure_final` against the
    current DB state and the `AliasResolver`, and re-evaluate the
@@ -2065,12 +2212,14 @@ override event and reason"). The `ForcePathToken` carries `actor`,
   prepare time, the token's `closure_incomplete` bit is honored
   through to authorize, since otherwise the authorize-phase recheck
   could trap a commit the operator already chose to force.
-  Implementation: the `override_token` is recorded in the
-  `commit.intent_recorded` event payload at prepare time;
-  `authorize_destructive_commit` re-reads the token from the
-  `commit_intents` row (or from the journaled event payload via the
-  intent ID) and applies the same bypass logic to the authorize-phase
-  unreachable-closure abort.
+  Implementation: the `override_token` is persisted on
+  `commit_intents.override_token` at prepare time (§9.1) and also
+  mirrored into the `commit.intent_recorded` event payload for audit
+  and replay. `authorize_destructive_commit` reads the token from the
+  durable column inside its own IMMEDIATE transaction and applies the
+  same bypass logic to the authorize-phase unreachable-closure abort.
+  The event journal is audit, not state; authorize never parses the
+  event log for safety decisions.
 
 The architectural spec scopes the force path to incomplete closure
 resolution specifically. Fresh blocking use-leases are **not**
@@ -2628,6 +2777,28 @@ Cross-repo flows live as integration tests:
   - object-store `(bucket, key, version_id)` match → `AliasAttached`
   - hash match without alias proof → `NewFileAsset` + `hash_match` evidence
   - ETag match (same code path as hash match) → `NewFileAsset` + `hash_match`
+
+  Additional coverage for the §8 `DiscoveredFile.proof` persistence
+  contract:
+  - `discover_with_local_proof_persists_on_initial_location`:
+    `DiscoveredFile.proof = Some(LocationProof::LocalFileIdGeneration
+    { file_id, generation })` → `NewFileAsset` outcome; the new
+    `file_locations` row has `proof_kind = 'file_id_generation'` and
+    `proof_value` matching the supplied bytes.
+  - `discover_with_object_store_proof_persists`: analogous for
+    `LocationProof::ObjectStoreVersion` → `proof_kind =
+    'object_version_id'` and `proof_value` matching `(bucket, key,
+    version_id)`.
+  - `discover_without_proof_persists_nulls`: `discovered.proof = None`
+    → the new row's `proof_kind` and `proof_value` are both NULL
+    (back-compat semantics).
+  - `alias_attach_persists_proof_on_new_location`: an `AliasAttached`
+    outcome carries the matching proof onto the new alias
+    `file_locations` row so a later rename has a basis to verify.
+  - `alias_attach_proof_drift_rejected`: `alias_proof` and
+    `discovered.proof` disagree on `(file_id, generation)` →
+    `VoomError::Conflict("proof drift on alias attach")`; no row
+    inserted, no events.
 - `rename_reconciliation.rs` — `reconcile_rename` retires old + records
   new on the same `FileVersion`; M3 step re-anchors blocking, advisory,
   and manual leases; pinned evidence is preserved (not rewritten); new
@@ -2637,6 +2808,34 @@ Cross-repo flows live as integration tests:
   reconciliation is the one architecturally-exempt observation path
   (arch spec lines 697–708); local alias attachment is **not** exempt
   and is covered by separate tests in `commit_safety_gate.rs` below.
+
+  Additional coverage for the §8 `RenameProof` validation contract.
+  Every `Conflict` path asserts the prior location stays live, no new
+  `file_locations` row is inserted, and no `file_location.*_by_move`
+  events are written:
+  - `reconcile_rename_rejects_proof_kind_mismatch`: prior location has
+    `proof_kind = 'file_id_generation'`; caller passes
+    `RenameProof::ObjectStoreVersion` → `Conflict`; prior location
+    stays live; no events.
+  - `reconcile_rename_rejects_proof_value_mismatch_local`: same
+    `proof_kind`, different `(file_id, generation)` → `Conflict`.
+  - `reconcile_rename_rejects_proof_value_mismatch_object_store`: same
+    `proof_kind = 'object_version_id'`, different `version_id` →
+    `Conflict`.
+  - `reconcile_rename_rejects_prior_path_present`: caller sets
+    `prior_path_missing = false` → `Conflict` ("rename requires prior
+    path missing").
+  - `reconcile_rename_rejects_hash_drift`: proof matches but
+    `observed.content_hash != fv.content_hash` → `Conflict`; verifies
+    the bytes-still-the-same invariant.
+  - `reconcile_rename_rejects_size_drift`: same shape on `size_bytes`.
+  - `reconcile_rename_rejects_prior_retired`: prior_location was
+    already retired by an earlier reconciliation → `Conflict`.
+  - `reconcile_rename_happy_path_local`: full validation passes →
+    prior retired, new recorded with carried-over `(proof_kind,
+    proof_value)`, events emitted, M3 lease re-anchoring runs.
+  - `reconcile_rename_happy_path_object_store`: same shape for
+    `RenameProof::ObjectStoreVersion`.
 - `commit_safety_gate.rs` — covers each abort path under the
   three-phase prepare/authorize/finalize/abort API (§9.3.1).
 
@@ -2707,6 +2906,28 @@ Cross-repo flows live as integration tests:
     force-path `closure_incomplete` bypass token from the original
     `prepare` is honored through to `authorize` — the second run
     succeeds even when the resolver is still failing.
+
+  **`override_token` durability coverage (§9.1, §9.3.3):**
+  - `prepare_persists_override_token_on_row`: `prepare` with
+    `override_token = Some(ForcePathToken { actor, reason, bypass: {
+    closure_incomplete } })` → query
+    `commit_intents.override_token` for the inserted row and assert
+    it parses back to the same `ForcePathToken` shape.
+  - `prepare_no_override_token_persists_null`: `prepare` without a
+    token → `commit_intents.override_token IS NULL`.
+  - `authorize_honors_durable_override_token_without_event_journal`:
+    `prepare` with `Some(ForcePathToken { bypass: {
+    closure_incomplete } })`; delete the matching
+    `commit.intent_recorded` event row via direct SQL (simulating an
+    event-store inaccessibility or a fixture that doesn't replay the
+    journal); then run `authorize` against a `FailingAliasResolver`.
+    Assert the bypass is still honored — proving authorize reads the
+    durable column, not the event payload.
+  - `prepare_rejects_invalid_override_token_at_check`: directly
+    insert a row with `override_token = 'not-json'` via raw SQL
+    (bypassing prepare) and assert the schema's `json_valid` CHECK
+    rejects the write. This is defense-in-depth; the prepare path
+    always serializes valid JSON.
   - `authorize_scope_members_unchanged_on_success`: prepare with
     closure C₁; no closure-mutating activity occurs between prepare
     and authorize. Authorize succeeds with `closure_authorized ==
@@ -2735,9 +2956,22 @@ Cross-repo flows live as integration tests:
     `UseLeaseRepo::acquire` on the scope succeeds.
   - `finalize_not_performed`: prepare → authorize → caller decides
     not to mutate → `finalize(permit, MutationOutcome::NotPerformed)`
-    transitions the intent to `aborted` with `abort_reason =
-    'operator_cancel'`, emits `commit.aborted_pre_mutation` with
-    `payload.prior_state = 'authorized'`.
+    returns `Ok(CommitGateOutcome { result:
+    CommitGateResult::CancelledAfterAuthorize, ... })`; intent in
+    `state = 'aborted'` with `abort_reason = 'operator_cancel'`;
+    emits `commit.aborted_pre_mutation` with `payload.prior_state =
+    'authorized'`; the returned outcome's `closure_final` equals
+    `permit.closure_authorized` (no mutation, no recheck).
+  - `finalize_not_performed_then_retry_returns_conflict`: prepare →
+    authorize → `finalize(permit, NotPerformed)` →
+    reconstruct a synthetic permit (in a test, by capturing the
+    original permit bytes before consumption) and call finalize
+    again. The intent is now `aborted`, so Phase C step 1's state
+    check returns `Err(VoomError::Conflict)`. This locks the rule
+    that retry-after-success cleanly errors rather than silently
+    re-cancelling. (The test's "synthetic permit reconstruction"
+    simulates the future recovery worker's permit-from-row
+    reconstruction path described in the §9.3.2 Recovery contract.)
   - `finalize_stale_permit`: prepare → authorize → concurrent
     `abort_destructive_commit` bumps the epoch (or finalize is called
     with a permit whose `epoch` no longer matches the durable
