@@ -263,9 +263,14 @@ always operate on both:
   `authorize_destructive_commit(...)`,
   `finalize_destructive_commit(...)`, `abort_destructive_commit(...)`,
   and `list_pending_commit_intents(...)` against the `commit_intents`
-  table. Also owns `commit_intent_scope_members` — the per-closure-
-  member rows that back the pending-commit lock consulted by
-  `UseLeaseRepo::acquire_in_tx` (§9.1, §9.2)
+  table. `abort_destructive_commit` is **pending-only** — once an
+  intent reaches `state = 'authorized'`, the only sanctioned
+  pre-success termination path is
+  `finalize_destructive_commit(_, _, _, permit,
+  MutationOutcome::NotPerformed)`, gated by the `CommitPermit`
+  (§9.3.1, §9.3.2). Also owns `commit_intent_scope_members` — the
+  per-closure-member rows that back the pending-commit lock consulted
+  by `UseLeaseRepo::acquire_in_tx` (§9.1, §9.2)
 - `ExternalSystemRepo` → `external_systems` + `external_system_links` + `external_path_mappings`
 - `IssueRepo` → `issues` + `issue_links`
 - `QualityScoreRepo` → `quality_scoring_profiles` + `quality_scores`
@@ -1300,21 +1305,40 @@ other observes the committed row and rejects with no race window.
   heartbeat"). No event emitted in Sprint 1; Sprint 6 daemon may add a
   conditional "recovered after missed beat" event when it owns the
   missed-heartbeat-warning path.
-- `release(lease_id, reason)` — explicit release. Accepted reasons:
-  `released`, `force_released`, `superseded`, `issuer_lost`. Manual locks
-  accept `released`, `force_released`, or `issuer_lost` (the
-  stale-owner-recovery path; see `recover_stale_issuer`). Transitions to
-  terminal, sets `released_at = now`. Emits `use_lease.released` (or
-  `use_lease.force_released` carrying the actor + reason payload required
-  for audit).
+- `release(lease_id, reason)` — ordinary issuer-driven release.
+  Accepted reasons: `released`, `superseded`. The caller is the lease
+  issuer exercising its own release path. Transitions to terminal,
+  sets `released_at = now`, `release_reason = reason`. Emits
+  `use_lease.released` (payload carries `release_reason`; no actor
+  field because the issuer is the caller). `force_released` and
+  `issuer_lost` are **not** accepted reasons here — they require the
+  dedicated audited paths below; passing either rejects with
+  `VoomError::Config`.
+- `force_release(lease_id, actor, reason)` — admin/operator audited
+  path for clearing a blocking lease (typical use case: operator
+  needs to run a destructive commit and must terminate a stuck
+  blocking lease first; see §9.3.3). Accepts both blocking and
+  advisory leases, TTL-bound and manual. Transitions the lease to
+  terminal with `release_reason = 'force_released'`, `released_at =
+  now`. Emits `use_lease.force_released` with payload `{ lease_id,
+  actor, reason }`. The `actor` and `reason` are mandatory audit
+  fields. Sprint 1 does not enforce permissions on this path
+  (operator workflow is test-driven); Sprint 9 wires policy-based
+  authorization. The method signature stays stable across that
+  addition.
 - `expire_due(now) -> Result<ExpireReport>` — bulk: find non-terminal
   TTL-bound leases with `expires_at < now`. Per row: transition to
   `release_reason = 'expired'`, `released_at = now`. Manual locks are
   filtered out (`ttl_bound = 0`). Emits `use_lease.expired` per row.
 - `recover_stale_issuer(lease_id, actor, reason) -> Result<()>` —
-  manual-lock-specific path. Caller passes `actor` and `reason`. Transitions
-  lease to `release_reason = 'issuer_lost'`, `released_at = now`. Emits
-  `use_lease.recovered_stale_issuer` with `{ actor, reason }` payload.
+  manual-lock-specific path. Caller passes `actor` and `reason`.
+  Transitions lease to `release_reason = 'issuer_lost'`, `released_at
+  = now`. Emits `use_lease.recovered_stale_issuer` with `{ actor,
+  reason }` payload. This is the **only** path that sets
+  `release_reason = 'issuer_lost'`; `release(lease_id, reason)`
+  rejects `issuer_lost` with `VoomError::Config` so the audit
+  trail for stale-issuer recovery always carries `{actor, reason}`
+  on the `use_lease.recovered_stale_issuer` event.
 - `reanchor_on_move(retired_location_id, new_location_id, now) -> Result<ReanchorReport>` —
   invoked by `IdentityRepo::reconcile_rename_in_tx` (M3 extension). Finds
   all non-terminal leases on `scope_location_id = retired_location_id`,
@@ -1429,9 +1453,10 @@ pub enum MutationOutcome {
     Applied { observed: Option<AffectedScopeClosure> },
     /// Caller obtained a permit but decided not to mutate;
     /// `finalize_destructive_commit` transitions the intent to
-    /// `aborted` with reason `operator_cancel`. The
-    /// `abort_destructive_commit` entry point produces the same
-    /// outcome and exists for callers that haven't authorized yet.
+    /// `aborted` with reason `operator_cancel`. This is the **only**
+    /// sanctioned post-authorize pre-success termination path; the
+    /// `abort_destructive_commit` entry point is pending-only and
+    /// rejects `state = 'authorized'` with `Conflict` (§9.3.2).
     NotPerformed,
 }
 
@@ -1568,12 +1593,16 @@ pub async fn finalize_destructive_commit(
     outcome: MutationOutcome,
 ) -> Result<CommitGateOutcome, VoomError>;
 
-/// Aborts an intent in `state IN ('pending', 'authorized')` before
-/// any caller mutation has happened. Equivalent to a
-/// `finalize_destructive_commit(_, _, _, permit, NotPerformed)` call
-/// when the caller already holds a permit; this entry point exists
-/// for callers that haven't authorized yet (they hold a
-/// `CommitIntent`, not a `CommitPermit`).
+/// Aborts an intent in `state = 'pending'` only. After `authorize`,
+/// the only valid pre-success termination path is
+/// `finalize_destructive_commit(_, _, _, permit,
+/// MutationOutcome::NotPerformed)` — the caller must hold a
+/// `CommitPermit` and the epoch check inside `finalize` is what
+/// prevents a stale permit / concurrent abort race from desyncing
+/// durable state from filesystem state. Recovery of a stuck
+/// `authorized` intent (caller crashed after authorize) is the
+/// Sprint 5+ recovery worker's job; it calls `finalize` with the
+/// appropriate `MutationOutcome` based on filesystem inspection.
 pub async fn abort_destructive_commit(
     pool: &SqlitePool,
     event_repo: &dyn EventRepo,
@@ -1637,13 +1666,19 @@ types, for Sprint 9 report consumers.
 
 The gate runs in three phases — `prepare` (Phase A), `authorize`
 (Phase B), and `finalize` (Phase C) — plus a separate
-`abort_destructive_commit` entry point that aborts an in-flight intent
-without finalizing. Each phase is one IMMEDIATE transaction. Phase B
-is the architectural "immediately before the irreversible filesystem
-mutation" recheck (`docs/specs/voom-control-plane-design.md` lines
-1044–1052) and is the primary safety gate; Phase C's recheck is a
-defensive trip-wire that catches lock-bypass and resolver-escape paths
-the lock could not.
+`abort_destructive_commit` entry point that terminates a
+`state = 'pending'` intent (only) before authorize. Each phase is
+one IMMEDIATE transaction. Phase B is the architectural "immediately
+before the irreversible filesystem mutation" recheck
+(`docs/specs/voom-control-plane-design.md` lines 1044–1052) and is
+the primary safety gate; Phase C's recheck is a defensive trip-wire
+that catches lock-bypass and resolver-escape paths the lock could
+not. Once an intent reaches `state = 'authorized'`, the only
+sanctioned pre-success termination path is
+`finalize_destructive_commit(_, _, _, permit,
+MutationOutcome::NotPerformed)` — `abort_destructive_commit` rejects
+authorized intents with `Conflict` (§9.3.2 `abort_destructive_commit`
+algorithm, §9.3.2 Phase C `NotPerformed` branch).
 
 #### Phase A — `prepare_destructive_commit`
 
@@ -1829,22 +1864,24 @@ filesystem (or the caller has decided not to mutate; see
    "aborted before authorize" (handled by `abort_destructive_commit`,
    `prior_state = 'pending'`) from "authorized but caller chose not
    to mutate" (handled here, `prior_state = 'authorized'`). COMMIT.
-   Return `CommitGateOutcome { commit_id, closure_initial,
-   closure_authorized, closure_final: closure_authorized,
-   evaluated_lease_ids: permit.evaluated_lease_ids,
-   revalidated_evidence: permit.revalidated_evidence, result:
-   CommitGateResult::Allowed }` is **not** correct (the commit did
-   not happen); instead Sprint 1's contract: `finalize` returns
+   Sprint 1's contract: `finalize` returns
    `Err(VoomError::Conflict("operator cancelled after authorize"))`
-   on the `NotPerformed` branch. Callers that obtained a permit and
-   then decided not to mutate are expected to call
-   `abort_destructive_commit` directly; the `NotPerformed` branch
-   exists as the in-finalize escape hatch for callers whose
-   filesystem-mutation step failed between authorize and finalize
-   without producing partial on-disk state. The durable state
-   transition (intent → `aborted` with `abort_reason =
+   on the `NotPerformed` branch.
+
+   The `NotPerformed` branch is the **only** sanctioned way to abort
+   an intent that has reached `authorized` without applying the
+   durable mutation. It is gated by the `CommitPermit` and the
+   in-transaction epoch check, both of which prove the caller is the
+   rightful holder of the authorize decision. Callers that obtained
+   a permit and then decided not to mutate (whether because the
+   operator changed their mind or because the filesystem-mutation
+   step failed without producing partial on-disk state) **must**
+   route through `finalize(permit, NotPerformed)`;
+   `abort_destructive_commit` rejects `state = 'authorized'` with
+   `Conflict` precisely so this path cannot be bypassed. The durable
+   state transition (intent → `aborted` with `abort_reason =
    'operator_cancel'`) and the `commit.aborted_pre_mutation` event
-   are the audit record either way.
+   are the audit record.
 3. Otherwise (`outcome == MutationOutcome::Applied { observed }`):
    defensive trip-wire — recompute `closure_final` against the
    current DB state and the `AliasResolver`, and re-evaluate the
@@ -1948,23 +1985,30 @@ filesystem (or the caller has decided not to mutate; see
 
 #### `abort_destructive_commit`
 
-Called when the caller decides not to proceed, either before
-authorize (holding a `CommitIntent`) or after authorize (holding a
-`CommitPermit`, when the caller would rather route through this
-explicit entry point than through `finalize(NotPerformed)`). One
-IMMEDIATE transaction.
+Called when the caller decides not to proceed before `authorize`
+has been called (the caller holds a `CommitIntent`, not a
+`CommitPermit`). One IMMEDIATE transaction.
 
 1. Read the `commit_intents` row for `commit_id`; require
-   `state IN ('pending', 'authorized')`. Missing row or terminal
-   state → return `Conflict`.
-2. Record the prior state (`'pending'` or `'authorized'`) so the
-   audit event can distinguish "aborted before authorize" from
-   "aborted after authorize, caller chose not to mutate". Update
-   the row to `state = 'aborted'`, `aborted_at = now`,
-   `abort_reason = reason` (and preserve `authorized_at` as-is —
-   NULL if was `pending`, non-NULL if was `authorized`).
+   `state = 'pending'`. Missing row, `state = 'authorized'`, or any
+   terminal state → return `Conflict`. The `Conflict` path is the
+   safety property the caller relies on: a stuck `authorized` intent
+   cannot be terminated through this entry point, only through
+   `finalize` with a valid permit.
+2. Update the row to `state = 'aborted'`, `aborted_at = now`,
+   `abort_reason = reason`. (`authorized_at` is NULL by construction
+   since `state = 'pending'` means it has never been set.)
 3. Emit `commit.aborted_pre_mutation` with payload
-   `{ commit_id, prior_state, reason }`. COMMIT.
+   `{ commit_id, prior_state: 'pending', reason }`. COMMIT.
+
+The post-authorize counterpart is the `MutationOutcome::NotPerformed`
+branch of `finalize_destructive_commit` (see Phase C below). That is
+the **only** sanctioned way to abort an intent that has reached
+`authorized` without applying the durable mutation. It is gated by
+the `CommitPermit` and the in-transaction epoch check, both of which
+prove the caller is the rightful holder of the authorize decision.
+The `commit.aborted_pre_mutation` event payload sets
+`prior_state = 'authorized'` on that path.
 
 #### Recovery contract
 
@@ -1986,6 +2030,24 @@ itself — that lives with the real workers (Sprint 5+), and §15 records
 the deferral. The three-phase API makes the worker's job easier
 (`pending` vs. `authorized` tells it whether to expect any FS state
 change), but does not change what the worker must do.
+
+A stuck `authorized` intent (caller crashed between Phase B and
+Phase C) cannot be terminated by `abort_destructive_commit`. The
+Sprint 5+ recovery worker inspects filesystem state to decide
+whether to:
+
+- call `finalize(permit, Applied { observed: Some(...) })` if the
+  FS mutation has visibly succeeded (the trip-wire runs and either
+  completes the intent or transitions it to `recovery_required`),
+  or
+- call `finalize(permit, NotPerformed)` only if the worker can
+  prove no FS mutation occurred (the intent transitions cleanly to
+  `aborted`).
+
+The recovery worker reconstructs the `CommitPermit` from the durable
+`commit_intents` row and the journaled `commit.authorized` event
+payload. Sprint 1 ships the journal and the API; the worker arrives
+in Sprint 5+.
 
 ### 9.3.3 Force path
 
@@ -2027,7 +2089,7 @@ operator who needs a destructive commit to proceed while a blocking
 audited path:
 
 ```
-UseLeaseRepo::release(lease_id, reason = force_released, actor, reason)
+UseLeaseRepo::force_release(lease_id, actor, reason)
 ```
 
 That call writes its own `use_lease.force_released` event recording
@@ -2097,8 +2159,17 @@ to `recovery_required`. What the post-mutation abort skips is the
 durable identity mutation (step 4); the intent row update, the
 `recovery_required` transition, and the event row commit together as
 one atomic record of "the FS mutation happened but the closure check
-fell behind." The `abort_destructive_commit` entry point similarly
-writes `commit.aborted_pre_mutation` inside the abort transaction.
+fell behind."
+
+The `abort_destructive_commit` entry point (Phase A, pending-only)
+runs the abort + event emission in a **single** IMMEDIATE
+transaction, not the two-tx pattern: the `commit_intents` row already
+exists (it was inserted by `prepare`), so the intent transition to
+`aborted` and the `commit.aborted_pre_mutation` event row commit
+atomically together. The two-tx pattern is specific to Phase A
+*gate-check* aborts where the gate is rejecting the
+`prepare_destructive_commit` call itself and no `commit_intents` row
+ever materializes.
 
 ### 9.4 Rename reconciliation × evidence revalidation × authorize recheck
 
@@ -2428,7 +2499,10 @@ identifiers:
 - `ExternalSystemId`, `ExternalSystemLinkId`, `ExternalPathMappingId`
 - `IssueId`, `IssueLinkId`
 - `ScoreId`, `ScoreProfileId`
-- `NodeId`, `ArtifactHandleId`, `ArtifactLocationId`, `UseLeaseId`, `CommitId`
+- `ArtifactHandleId`, `ArtifactLocationId`, `UseLeaseId`, `CommitId`
+  (`NodeId` deferred to Sprint 4, when the `nodes` table lands
+  alongside remote-node lease acquisition — see the amended
+  architectural spec deliverables list)
 
 Sprint 0's placeholder `MediaId` (a single u64 newtype standing in for the
 yet-to-be-split identity layers) is removed in M2 because every Sprint 1
@@ -2497,6 +2571,36 @@ Each new repo source file ships its sibling `_test.rs` covering:
   `voom-store::test_support::test_pool()`
 - the optimistic-locking conflict path (`Conflict` returned on stale epoch)
 - one happy-path event emission per public write method
+
+`repo/use_leases_test.rs` additionally covers the §9.2 reason-routing
+contract (Finding 2):
+
+- `release_rejects_force_released_reason`: `release(lease_id, reason
+  = force_released)` returns `VoomError::Config`; the lease row
+  is unchanged; no event row written.
+- `release_rejects_issuer_lost_reason`: `release(lease_id, reason =
+  issuer_lost)` returns `VoomError::Config`; the lease row is
+  unchanged; no event row written.
+- `release_happy_path_released`: `release(lease_id, reason =
+  released)` transitions the lease to terminal with `release_reason
+  = 'released'`; emits `use_lease.released`.
+- `release_happy_path_superseded`: same shape with `reason =
+  superseded` → `release_reason = 'superseded'`; emits
+  `use_lease.released`.
+- `force_release_emits_audit_payload`: `force_release(lease_id,
+  actor = "alice", reason = "clearing stuck lease for destructive
+  commit")` succeeds; lease transitions to terminal with
+  `release_reason = 'force_released'`; emits
+  `use_lease.force_released` whose payload includes both `actor`
+  and `reason` fields.
+- `force_release_accepts_advisory_and_blocking`: parameterized
+  coverage that `force_release` works against both blocking and
+  advisory leases, TTL-bound and manual.
+- `recover_stale_issuer_is_only_path_to_issuer_lost`: asserts
+  `release` cannot reach `issuer_lost` (both rejections above) and
+  that `recover_stale_issuer(lease_id, actor, reason)` is the only
+  call that sets `release_reason = 'issuer_lost'` and emits
+  `use_lease.recovered_stale_issuer`.
 
 ### 13.2 Integration tests (`crates/voom-store/tests/`)
 
@@ -2670,6 +2774,26 @@ Cross-repo flows live as integration tests:
     `recovery_required`, and the returned `CommitGateResult` is
     `BlockedByClosureGrew`.
 
+  **`abort_destructive_commit` coverage (Phase A only — §9.3.2):**
+  - `abort_pending_intent_succeeds`: prepare an intent so the row
+    sits in `state = 'pending'`, call `abort_destructive_commit`,
+    assert the intent terminates in `state = 'aborted'` with
+    `abort_reason` matching the caller-supplied reason and the
+    `commit.aborted_pre_mutation` event payload sets
+    `prior_state = 'pending'`.
+  - `abort_authorized_intent_returns_conflict`: prepare → authorize
+    → `abort_destructive_commit` returns
+    `Err(VoomError::Conflict(...))` and does **not** transition the
+    intent (state stays `authorized`, no event row written). This
+    verifies the safety property that backs the recovery contract
+    in §9.3.2 — a stuck `authorized` intent cannot be terminated
+    through this entry point.
+  - `abort_terminal_intent_returns_conflict`: a completed (after
+    `finalize_happy_path` fixture) or aborted intent rejects a
+    subsequent `abort_destructive_commit` with `Conflict`.
+  - `abort_missing_intent_returns_conflict`: `abort_destructive_commit`
+    against an unknown `commit_id` returns `Conflict`.
+
   **IdentityRepo paths during in-flight intents:**
 
   *Alias attachment is locked (arch spec lines 1038–1043):*
@@ -2741,9 +2865,9 @@ Cross-repo flows live as integration tests:
     `closure_grew`.
   - A separate test exercises the documented operator workflow
     ("force-release the blocking lease via
-    `UseLeaseRepo::release(reason = force_released)`, then rerun
-    the gate") and asserts the second attempt is allowed without
-    any bypass token.
+    `UseLeaseRepo::force_release(lease_id, actor, reason)`, then
+    rerun the gate") and asserts the second attempt is allowed
+    without any bypass token.
 
   **Inspection:**
   - Pending intents and authorized intents are visible via
@@ -2826,6 +2950,12 @@ See §1 for the full list. The most likely-to-be-asked exclusions:
 - No worker process, no wire protocol (Sprint 2).
 - No policy parser, no planner, no execution-plan tables (Sprint 3).
 - No remote-node lease acquisition (Sprint 4).
+- No node registry. The architectural spec is amended in this
+  revision to defer the dedicated `nodes` table / `NodeRepo` to
+  Sprint 4 alongside remote-node lease acquisition. Sprint 1's
+  `workers` table (with `kind = synthetic | local | remote`) absorbs
+  the local/remote distinction; future Sprint 4 work adds a separate
+  `nodes` table and an FK from `workers.node_id`.
 - No real ingest, transcode, remux, restore, backup, verify, or commit
   workers (Sprint 5).
 - No filesystem watcher; ingest is exercised by tests calling

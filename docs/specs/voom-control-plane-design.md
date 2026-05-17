@@ -152,7 +152,9 @@ The control plane is the durable source of truth. It owns:
 - Quality scoring registry.
 - Policy registry.
 - Job queue and leases.
-- Node registry.
+- Node registry (Sprint 4 — see Sprint 1 design for the interim
+  `workers` table that absorbs remote/local/synthetic distinctions
+  via its `kind` column).
 - Artifact catalog.
 - Runtime use leases.
 - Event log.
@@ -1388,7 +1390,9 @@ Deliverables:
 
 - job and ticket tables
 - leases with stale lease recovery
-- node and worker registry
+- worker registry (the `workers` table carries a `kind` column that
+  distinguishes local / remote / synthetic; a separate `nodes`
+  registry is deferred to Sprint 4)
 - artifact catalog
 - media work, media variant, file asset, file version, file location, and
   identity evidence tables
@@ -1478,6 +1482,9 @@ Deliverables:
 - artifact handle access plans
 - locality/cost scoring
 - node-level concurrency limits
+- node registry (`nodes` table, `NodeRepo`, worker-to-node
+  relationship, node heartbeat / locality / concurrency), alongside
+  remote-node lease acquisition
 - remote-node integration tests
 
 Exit criteria:
