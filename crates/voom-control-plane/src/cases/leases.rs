@@ -84,7 +84,10 @@ impl ControlPlane {
     }
 
     /// Release a lease successfully. Emits `lease.released` +
-    /// `ticket.succeeded` in the same transaction.
+    /// `ticket.succeeded`, then walks the released ticket's dependents and
+    /// promotes any that are now unblocked (one `ticket.ready` per promoted
+    /// row), all inside the same transaction so the parent's `succeeded`
+    /// state is visible to the dependency-count check.
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
@@ -127,6 +130,27 @@ impl ControlPlane {
             }),
         )
         .await?;
+        let dependents = self
+            .tickets
+            .list_dependents_in_tx(&mut tx, lease.ticket_id)
+            .await?;
+        for dep in dependents {
+            let promoted = self
+                .tickets
+                .mark_ready_if_unblocked_in_tx(&mut tx, dep.id, now)
+                .await?;
+            for t in &promoted {
+                append_event(
+                    &self.events,
+                    &mut tx,
+                    SubjectType::Ticket,
+                    Some(t.id.0),
+                    now,
+                    Event::TicketReady(TicketReadyPayload { ticket_id: t.id.0 }),
+                )
+                .await?;
+            }
+        }
         commit_tx(tx).await?;
         Ok(lease)
     }

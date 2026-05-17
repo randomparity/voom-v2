@@ -4,7 +4,7 @@ use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::TicketId;
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::tickets::NewTicket;
+use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 
 use crate::cases::cp;
@@ -259,6 +259,135 @@ async fn force_release_with_requeue_emits_lease_force_released_and_ticket_ready(
     .unwrap();
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
     assert_eq!(count(&cp, EventKind::TicketReady).await, ready_before + 1);
+}
+
+#[tokio::test]
+async fn release_lease_promotes_dependent_and_emits_ticket_ready() {
+    // parent -> child. Releasing parent must promote child to ready and
+    // emit exactly one ticket.ready for child.id.
+    let (cp, _tmp) = cp().await;
+    let parent = cp.create_ticket(ticket("parent", 1)).await.unwrap();
+    let child = cp.create_ticket(ticket("child", 1)).await.unwrap();
+    cp.tickets()
+        .add_dependency(child.id, parent.id)
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(parent.id, T0).await.unwrap();
+    // child cannot promote yet — parent is not succeeded.
+    let none = cp.mark_ready_if_unblocked(child.id, T0).await.unwrap();
+    assert!(none.is_empty(), "child must stay pending while parent runs");
+
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: parent.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let ready_before = count(&cp, EventKind::TicketReady).await;
+    cp.release_lease(lease.id, serde_json::json!({}), T0 + TDuration::seconds(5))
+        .await
+        .unwrap();
+
+    let child_after = cp.tickets().get(child.id).await.unwrap().unwrap();
+    assert_eq!(
+        child_after.state,
+        TicketState::Ready,
+        "child must be promoted to ready when parent succeeds"
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketReady).await,
+        ready_before + 1,
+        "exactly one ticket.ready emitted for the promoted child"
+    );
+
+    // Verify the emitted ticket.ready payload references the child.
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::TicketReady),
+                subject_id: Some(child.id.0),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "exactly one ticket.ready for child");
+    let voom_events::Event::TicketReady(payload) = &page.items[0].envelope.payload else {
+        panic!("expected TicketReady payload");
+    };
+    assert_eq!(payload.ticket_id, child.id.0);
+}
+
+#[tokio::test]
+async fn release_lease_does_not_promote_child_with_outstanding_parent() {
+    // Diamond: child depends on parent_a AND parent_b. Releasing parent_a
+    // alone must not promote child (parent_b still leased), so no
+    // ticket.ready is emitted for child.
+    let (cp, _tmp) = cp().await;
+    let parent_a = cp.create_ticket(ticket("parent_a", 1)).await.unwrap();
+    let parent_b = cp.create_ticket(ticket("parent_b", 1)).await.unwrap();
+    let child = cp.create_ticket(ticket("child", 1)).await.unwrap();
+    cp.tickets()
+        .add_dependency(child.id, parent_a.id)
+        .await
+        .unwrap();
+    cp.tickets()
+        .add_dependency(child.id, parent_b.id)
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(parent_a.id, T0).await.unwrap();
+    cp.mark_ready_if_unblocked(parent_b.id, T0).await.unwrap();
+
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease_a = cp
+        .acquire_lease(NewLease {
+            ticket_id: parent_a.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    // parent_b is also leased so it cannot succeed.
+    let _lease_b = cp
+        .acquire_lease(NewLease {
+            ticket_id: parent_b.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let ready_before = count(&cp, EventKind::TicketReady).await;
+    cp.release_lease(
+        lease_a.id,
+        serde_json::json!({}),
+        T0 + TDuration::seconds(5),
+    )
+    .await
+    .unwrap();
+
+    let child_after = cp.tickets().get(child.id).await.unwrap().unwrap();
+    assert_eq!(
+        child_after.state,
+        TicketState::Pending,
+        "child must stay pending while a parent is still outstanding"
+    );
+    assert_eq!(
+        count(&cp, EventKind::TicketReady).await,
+        ready_before,
+        "no ticket.ready when a dependent remains blocked"
+    );
 }
 
 #[tokio::test]

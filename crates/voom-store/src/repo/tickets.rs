@@ -120,6 +120,15 @@ pub trait TicketRepo: Repository {
     async fn list_by_state(&self, state: TicketState, limit: u32)
     -> Result<Vec<Ticket>, VoomError>;
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError>;
+    /// Same as `list_dependents` but reads through the supplied transaction.
+    /// Required for the release-lease cascade so newly-succeeded parent state
+    /// is visible to the lookup (sqlx-on-SQLite isolates pool reads from an
+    /// open transaction).
+    async fn list_dependents_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        depends_on: TicketId,
+    ) -> Result<Vec<Ticket>, VoomError>;
 }
 
 #[derive(Debug, Clone)]
@@ -349,19 +358,24 @@ impl TicketRepo for SqliteTicketRepo {
     }
 
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
-        let rows = sqlx::query(
-            "SELECT t.id, t.job_id, t.kind, t.state, t.priority, t.payload, t.result, \
-                    t.attempt, t.max_attempts, t.next_eligible_at, t.created_at, \
-                    t.state_changed_at, t.epoch \
-             FROM tickets t \
-             JOIN ticket_dependencies td ON td.ticket_id = t.id \
-             WHERE td.depends_on_ticket_id = ? \
-             ORDER BY t.id ASC",
-        )
-        .bind(i64_from_u64(depends_on.0))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VoomError::Database(format!("tickets list_dependents: {e}")))?;
+        let rows = sqlx::query(SELECT_DEPENDENTS_OF)
+            .bind(i64_from_u64(depends_on.0))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VoomError::Database(format!("tickets list_dependents: {e}")))?;
+        rows.iter().map(row_to_ticket).collect()
+    }
+
+    async fn list_dependents_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        depends_on: TicketId,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let rows = sqlx::query(SELECT_DEPENDENTS_OF)
+            .bind(i64_from_u64(depends_on.0))
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("tickets list_dependents_in_tx: {e}")))?;
         rows.iter().map(row_to_ticket).collect()
     }
 }
@@ -369,6 +383,16 @@ impl TicketRepo for SqliteTicketRepo {
 const SELECT_TICKET_BY_ID: &str = "SELECT id, job_id, kind, state, priority, payload, result, attempt, \
             max_attempts, next_eligible_at, created_at, state_changed_at, epoch \
      FROM tickets WHERE id = ?";
+
+const SELECT_DEPENDENTS_OF: &str = concat!(
+    "SELECT t.id, t.job_id, t.kind, t.state, t.priority, t.payload, t.result, ",
+    "t.attempt, t.max_attempts, t.next_eligible_at, t.created_at, ",
+    "t.state_changed_at, t.epoch ",
+    "FROM tickets t ",
+    "JOIN ticket_dependencies td ON td.ticket_id = t.id ",
+    "WHERE td.depends_on_ticket_id = ? ",
+    "ORDER BY t.id ASC",
+);
 
 async fn get_in_tx_inner(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

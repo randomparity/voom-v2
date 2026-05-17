@@ -86,7 +86,9 @@ async fn linear_chain_unlocks_in_order() {
         assert!(promoted.is_empty(), "still blocked by upstream");
     }
 
-    // Walk the chain to completion.
+    // Walk the chain to completion. ControlPlane::release_lease auto-promotes
+    // dependents now (Fix 3), so each next ticket is `ready` without an
+    // explicit mark_ready_if_unblocked call.
     for (i, &id) in ids.iter().enumerate() {
         let offset = Duration::seconds(i64::try_from(i).unwrap() * 10);
         let l = cp
@@ -102,8 +104,13 @@ async fn linear_chain_unlocks_in_order() {
             .await
             .unwrap();
         if let Some(&next_id) = ids.get(i + 1) {
-            let next = cp.mark_ready_if_unblocked(next_id, T0).await.unwrap();
-            assert_eq!(next.len(), 1, "ticket {} should now be ready", i + 1);
+            let next = cp.tickets().get(next_id).await.unwrap().unwrap();
+            assert_eq!(
+                next.state,
+                TicketState::Ready,
+                "ticket {} should be auto-promoted by release_lease",
+                i + 1
+            );
         }
     }
 }
