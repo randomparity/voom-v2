@@ -260,6 +260,8 @@ async fn expire_due_fails_terminal_when_no_retries_remain() {
 
 #[tokio::test]
 async fn force_release_with_requeue() {
+    // setup() seeds max_attempts = 3, so after one acquire attempts remain
+    // (1 < 3). also_requeue + attempts_remain → ticket goes back to ready.
     let (_pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let l = lrepo
         .acquire(NewLease {
@@ -270,14 +272,129 @@ async fn force_release_with_requeue() {
         })
         .await
         .unwrap();
-    lrepo
+    let outcome = lrepo
         .force_release(l.id, /*also_requeue=*/ true, T0 + Duration::seconds(1))
         .await
         .unwrap();
+    assert!(
+        outcome.ticket_requeued,
+        "attempts remain, requeue requested → outcome.ticket_requeued"
+    );
+    assert_eq!(outcome.attempt, 1);
+    assert_eq!(outcome.max_attempts, 3);
     let lease = lrepo.get(l.id).await.unwrap().unwrap();
     assert_eq!(lease.state, LeaseState::ForceReleased);
     let t = trepo.get(tid).await.unwrap().unwrap();
     assert_eq!(t.state, TicketState::Ready);
+}
+
+#[tokio::test]
+async fn force_release_with_requeue_marks_failed_when_attempts_exhausted() {
+    // A max_attempts=1 ticket whose only attempt was consumed by acquire
+    // cannot be requeued — acquire's `attempt < max_attempts` predicate
+    // would refuse it forever and no held lease remains to expire. The
+    // repo must downgrade also_requeue=true to a terminal failure when
+    // attempts are gone.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    let trepo = SqliteTicketRepo::new(pool.clone());
+    let wrepo = SqliteWorkerRepo::new(pool.clone());
+    let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let t = trepo
+        .create(NewTicket {
+            job_id: None,
+            kind: "noop".to_owned(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = wrepo
+        .register(NewWorker {
+            name: "w-1".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+        })
+        .await
+        .unwrap();
+    let l = lrepo
+        .acquire(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    // After acquire: attempt = 1, max_attempts = 1, no attempts remain.
+    let outcome = lrepo
+        .force_release(l.id, /*also_requeue=*/ true, T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(
+        !outcome.ticket_requeued,
+        "attempts exhausted → requeue request demoted to failed"
+    );
+    assert_eq!(outcome.attempt, 1);
+    assert_eq!(outcome.max_attempts, 1);
+    let ticket = trepo.get(t.id).await.unwrap().unwrap();
+    assert_eq!(
+        ticket.state,
+        TicketState::Failed,
+        "ticket parked in failed, not ready, to avoid the lease-loop loophole"
+    );
+}
+
+#[tokio::test]
+async fn force_release_with_requeue_marks_ready_when_attempts_remain() {
+    // max_attempts = 2, one consumed by acquire (attempt = 1 < 2) → requeue
+    // succeeds, ticket returns to ready for the next attempt.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    let trepo = SqliteTicketRepo::new(pool.clone());
+    let wrepo = SqliteWorkerRepo::new(pool.clone());
+    let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let t = trepo
+        .create(NewTicket {
+            job_id: None,
+            kind: "noop".to_owned(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 2,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = wrepo
+        .register(NewWorker {
+            name: "w-1".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+        })
+        .await
+        .unwrap();
+    let l = lrepo
+        .acquire(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let outcome = lrepo
+        .force_release(l.id, /*also_requeue=*/ true, T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(outcome.ticket_requeued);
+    assert_eq!(outcome.attempt, 1);
+    assert_eq!(outcome.max_attempts, 2);
+    let ticket = trepo.get(t.id).await.unwrap().unwrap();
+    assert_eq!(ticket.state, TicketState::Ready);
 }
 
 #[tokio::test]

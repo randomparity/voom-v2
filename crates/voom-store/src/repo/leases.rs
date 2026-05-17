@@ -101,6 +101,21 @@ pub struct Lease {
     pub epoch: u64,
 }
 
+/// Outcome of `force_release_in_tx` — surfaces the post-update ticket fate
+/// so the case handler can emit `TicketReady` or `TicketFailedTerminal`
+/// based on what actually happened, not just the caller's `also_requeue`
+/// flag. `also_requeue` is suppressed when the ticket has no attempts
+/// remaining (the caller asked for requeue but the ticket is out of
+/// retries, so it's parked in `failed` instead — same pattern sibling
+/// `fail_in_tx` / `expire_due_in_tx` already use).
+#[derive(Debug, Clone)]
+pub struct ForceReleaseOutcome {
+    pub lease: Lease,
+    pub ticket_requeued: bool,
+    pub attempt: u32,
+    pub max_attempts: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpireReport {
     /// All expired leases, in id-order.
@@ -183,13 +198,13 @@ pub trait LeaseRepo: Repository {
         lease_id: LeaseId,
         also_requeue: bool,
         now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
+    ) -> Result<ForceReleaseOutcome, VoomError>;
     async fn force_release(
         &self,
         lease_id: LeaseId,
         also_requeue: bool,
         now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
+    ) -> Result<ForceReleaseOutcome, VoomError>;
 
     async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError>;
 }
@@ -680,7 +695,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         lease_id: LeaseId,
         also_requeue: bool,
         now: OffsetDateTime,
-    ) -> Result<Lease, VoomError> {
+    ) -> Result<ForceReleaseOutcome, VoomError> {
         let lease = get_lease_in_tx(tx, lease_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
@@ -689,6 +704,27 @@ impl LeaseRepo for SqliteLeaseRepo {
                 "force_release rejected: lease {lease_id} not held"
             )));
         }
+        // Mirror fail_in_tx / expire_due_in_tx: a requeue request can only
+        // promote the ticket back to ready while attempts remain. If
+        // `acquire` already consumed the last attempt and the operator
+        // asks for requeue, parking the ticket in `ready` would lock it
+        // forever — acquire refuses it (out of attempts) and no held lease
+        // remains to expire. Fall back to terminal failure in that case.
+        let (attempt, max_attempts): (i64, i64) =
+            sqlx::query_as("SELECT attempt, max_attempts FROM tickets WHERE id = ?")
+                .bind(i64_from_u64(lease.ticket_id.0))
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| VoomError::Database(format!("ticket attempts probe: {e}")))?
+                .ok_or_else(|| {
+                    VoomError::Internal(format!(
+                        "force_release: ticket {} vanished",
+                        lease.ticket_id
+                    ))
+                })?;
+        let attempts_remain = attempt < max_attempts;
+        let ticket_requeued = also_requeue && attempts_remain;
+        let next_ticket_state = if ticket_requeued { "ready" } else { "failed" };
         let now_str = iso8601(now)?;
         let lease_res = sqlx::query(
             "UPDATE leases \
@@ -711,7 +747,6 @@ impl LeaseRepo for SqliteLeaseRepo {
                 "force_release rejected: lease {lease_id} no longer held"
             )));
         }
-        let next_ticket_state = if also_requeue { "ready" } else { "failed" };
         let ticket_res = sqlx::query(
             "UPDATE tickets SET state = ?, state_changed_at = ?, epoch = epoch + 1 \
              WHERE id = ? AND state = 'leased'",
@@ -733,8 +768,14 @@ impl LeaseRepo for SqliteLeaseRepo {
                 lease.ticket_id
             )));
         }
-        get_lease_in_tx(tx, lease_id).await?.ok_or_else(|| {
+        let lease = get_lease_in_tx(tx, lease_id).await?.ok_or_else(|| {
             VoomError::Internal("force_release: post-update get vanished".to_owned())
+        })?;
+        Ok(ForceReleaseOutcome {
+            lease,
+            ticket_requeued,
+            attempt: u32_from_i64(attempt)?,
+            max_attempts: u32_from_i64(max_attempts)?,
         })
     }
 
@@ -743,7 +784,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         lease_id: LeaseId,
         also_requeue: bool,
         now: OffsetDateTime,
-    ) -> Result<Lease, VoomError> {
+    ) -> Result<ForceReleaseOutcome, VoomError> {
         let mut tx = self
             .pool
             .begin()

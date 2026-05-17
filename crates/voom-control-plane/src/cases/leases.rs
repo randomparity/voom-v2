@@ -11,7 +11,7 @@ use voom_events::payload::{
     TicketReadyPayload, TicketRequeuedAfterLeaseExpiryPayload, TicketSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::leases::{ExpireReport, Lease, LeaseRepo, NewLease};
+use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, NewLease};
 use voom_store::repo::tickets::{TicketRepo, TicketState};
 
 use crate::ControlPlane;
@@ -316,7 +316,13 @@ impl ControlPlane {
     }
 
     /// Force-release a held lease. Emits `lease.force_released` +
-    /// (`ticket.ready` | `ticket.failed_terminal`) based on `also_requeue`.
+    /// (`ticket.ready` | `ticket.failed_terminal`) based on the post-update
+    /// ticket fate (`ForceReleaseOutcome::ticket_requeued`), not the
+    /// caller's `also_requeue` flag — when attempts are already exhausted
+    /// the repo demotes a requeue request to terminal failure to keep the
+    /// ticket from getting stuck in `ready` with no attempts remaining.
+    /// The `LeaseForceReleased` event still records the operator's original
+    /// `also_requeue` request for audit fidelity.
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
@@ -327,9 +333,9 @@ impl ControlPlane {
         reason: String,
         also_requeue: bool,
         now: OffsetDateTime,
-    ) -> Result<Lease, VoomError> {
+    ) -> Result<ForceReleaseOutcome, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        let lease = self
+        let outcome = self
             .leases
             .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
             .await?;
@@ -337,54 +343,56 @@ impl ControlPlane {
             &self.events,
             &mut tx,
             SubjectType::Lease,
-            Some(lease.id.0),
+            Some(outcome.lease.id.0),
             now,
             Event::LeaseForceReleased(LeaseForceReleasedPayload {
-                lease_id: lease.id.0,
-                ticket_id: lease.ticket_id.0,
+                lease_id: outcome.lease.id.0,
+                ticket_id: outcome.lease.ticket_id.0,
                 actor,
                 reason,
                 also_requeue,
             }),
         )
         .await?;
-        if also_requeue {
+        if outcome.ticket_requeued {
             append_event(
                 &self.events,
                 &mut tx,
                 SubjectType::Ticket,
-                Some(lease.ticket_id.0),
+                Some(outcome.lease.ticket_id.0),
                 now,
                 Event::TicketReady(TicketReadyPayload {
-                    ticket_id: lease.ticket_id.0,
+                    ticket_id: outcome.lease.ticket_id.0,
                 }),
             )
             .await?;
         } else {
-            let ticket = self
-                .tickets
-                .get_in_tx(&mut tx, lease.ticket_id)
-                .await?
-                .ok_or_else(|| {
-                    VoomError::Internal("force_release_lease: ticket vanished mid-tx".to_owned())
-                })?;
+            // Either `also_requeue == false`, or the operator asked for
+            // requeue but the ticket is out of attempts. Both land here so
+            // the emitted event matches the actual ticket fate; the reason
+            // string distinguishes the two so audit logs stay legible.
+            let reason = if also_requeue {
+                "force-released with requeue requested, but no attempts remain".to_owned()
+            } else {
+                "force-released without requeue".to_owned()
+            };
             append_event(
                 &self.events,
                 &mut tx,
                 SubjectType::Ticket,
-                Some(ticket.id.0),
+                Some(outcome.lease.ticket_id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: ticket.id.0,
-                    attempt: ticket.attempt,
-                    max_attempts: ticket.max_attempts,
-                    reason: "force-released without requeue".to_owned(),
+                    ticket_id: outcome.lease.ticket_id.0,
+                    attempt: outcome.attempt,
+                    max_attempts: outcome.max_attempts,
+                    reason,
                 }),
             )
             .await?;
         }
         commit_tx(tx).await?;
-        Ok(lease)
+        Ok(outcome)
     }
 }
 

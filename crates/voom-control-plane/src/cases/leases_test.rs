@@ -233,7 +233,11 @@ async fn expire_due_emits_paired_events_terminal() {
 }
 
 #[tokio::test]
-async fn force_release_with_requeue_emits_lease_force_released_and_ticket_ready() {
+async fn force_release_with_requeue_emits_ticket_ready_when_attempts_remain() {
+    // Renamed from the original force_release_with_requeue_emits_lease_
+    // force_released_and_ticket_ready: max_attempts=2, so after acquire
+    // attempts remain (1 < 2). also_requeue=true → ticket back to ready
+    // and one ticket.ready event emitted.
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
     cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
@@ -248,17 +252,93 @@ async fn force_release_with_requeue_emits_lease_force_released_and_ticket_ready(
         .await
         .unwrap();
     let ready_before = count(&cp, EventKind::TicketReady).await;
-    cp.force_release_lease(
-        lease.id,
-        "operator".to_owned(),
-        "manual cleanup".to_owned(),
-        true,
-        T0 + TDuration::seconds(5),
-    )
-    .await
-    .unwrap();
+    let outcome = cp
+        .force_release_lease(
+            lease.id,
+            "operator".to_owned(),
+            "manual cleanup".to_owned(),
+            true,
+            T0 + TDuration::seconds(5),
+        )
+        .await
+        .unwrap();
+    assert!(outcome.ticket_requeued);
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
     assert_eq!(count(&cp, EventKind::TicketReady).await, ready_before + 1);
+    assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 0);
+}
+
+#[tokio::test]
+async fn force_release_with_requeue_emits_ticket_failed_terminal_when_exhausted() {
+    // max_attempts=1: acquire consumes the only attempt. Operator asks for
+    // requeue, but no attempts remain → ticket parks in failed and the
+    // emitted event MUST be TicketFailedTerminal (not TicketReady), with
+    // the correct attempt/max_attempts. Before Fix 3 the case handler
+    // emitted TicketReady based on the input flag, misreporting the
+    // outcome to anything reading the event log.
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let ready_before = count(&cp, EventKind::TicketReady).await;
+    let outcome = cp
+        .force_release_lease(
+            lease.id,
+            "operator".to_owned(),
+            "manual cleanup".to_owned(),
+            true,
+            T0 + TDuration::seconds(5),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !outcome.ticket_requeued,
+        "attempts exhausted → outcome must not claim requeue"
+    );
+    assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
+    assert_eq!(
+        count(&cp, EventKind::TicketReady).await,
+        ready_before,
+        "no ticket.ready emitted when ticket is actually parked in failed"
+    );
+    assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
+    // Verify the payload reports the correct attempt counts so consumers
+    // can tell why the ticket failed.
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::TicketFailedTerminal),
+                subject_id: Some(t.id.0),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
+        panic!("expected TicketFailedTerminal payload");
+    };
+    assert_eq!(payload.attempt, 1);
+    assert_eq!(payload.max_attempts, 1);
+    assert!(
+        payload.reason.contains("no attempts remain"),
+        "reason must distinguish this case from a plain force-release without requeue, got: {}",
+        payload.reason,
+    );
+    let _: TicketId = t.id;
 }
 
 #[tokio::test]
