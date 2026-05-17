@@ -153,12 +153,7 @@ async fn fail_retriable_requeues_ticket_and_sets_backoff() {
         .await
         .unwrap();
     lrepo
-        .fail(
-            l.id,
-            "transient".to_owned(),
-            true,
-            T0 + Duration::seconds(10),
-        )
+        .fail(l.id, true, T0 + Duration::seconds(10))
         .await
         .unwrap();
     let t = trepo.get(tid).await.unwrap().unwrap();
@@ -186,12 +181,7 @@ async fn fail_terminal_marks_ticket_failed() {
             .await
             .unwrap();
         lrepo
-            .fail(
-                l.id,
-                "bad".to_owned(),
-                true,
-                T0 + Duration::seconds(60 * i + 1),
-            )
+            .fail(l.id, true, T0 + Duration::seconds(60 * i + 1))
             .await
             .unwrap();
         if i < 2 {
@@ -283,13 +273,7 @@ async fn force_release_with_requeue() {
         .await
         .unwrap();
     lrepo
-        .force_release(
-            l.id,
-            "alice".to_owned(),
-            "manual".to_owned(),
-            /*also_requeue=*/ true,
-            T0 + Duration::seconds(1),
-        )
+        .force_release(l.id, /*also_requeue=*/ true, T0 + Duration::seconds(1))
         .await
         .unwrap();
     let lease = lrepo.get(l.id).await.unwrap().unwrap();
@@ -313,8 +297,6 @@ async fn force_release_without_requeue_fails_ticket() {
     lrepo
         .force_release(
             l.id,
-            "alice".to_owned(),
-            "manual".to_owned(),
             /*also_requeue=*/ false,
             T0 + Duration::seconds(1),
         )
@@ -385,7 +367,7 @@ async fn fail_retriable_returns_conflict_when_ticket_no_longer_leased() {
         .unwrap();
     // retriable + attempts remain → would take the requeue branch
     let err = lrepo
-        .fail(l.id, "x".to_owned(), true, T0 + Duration::seconds(1))
+        .fail(l.id, true, T0 + Duration::seconds(1))
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
@@ -407,7 +389,7 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
         .await
         .unwrap();
     lrepo
-        .fail(l1.id, "x".to_owned(), true, T0 + Duration::seconds(1))
+        .fail(l1.id, true, T0 + Duration::seconds(1))
         .await
         .unwrap();
     let now2 = trepo.get(tid).await.unwrap().unwrap().next_eligible_at + Duration::seconds(1);
@@ -421,7 +403,7 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
         .await
         .unwrap();
     lrepo
-        .fail(l2.id, "x".to_owned(), true, now2 + Duration::seconds(1))
+        .fail(l2.id, true, now2 + Duration::seconds(1))
         .await
         .unwrap();
     let now3 = trepo.get(tid).await.unwrap().unwrap().next_eligible_at + Duration::seconds(1);
@@ -443,7 +425,7 @@ async fn fail_terminal_returns_conflict_when_ticket_no_longer_leased() {
     // !retriable would also take the terminal branch; using retriable=true here
     // hits the terminal branch via the attempts-exhausted condition.
     let err = lrepo
-        .fail(l3.id, "x".to_owned(), true, now3 + Duration::seconds(2))
+        .fail(l3.id, true, now3 + Duration::seconds(2))
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
@@ -503,13 +485,7 @@ async fn force_release_returns_conflict_when_ticket_no_longer_leased() {
         .await
         .unwrap();
     let err = lrepo
-        .force_release(
-            l.id,
-            "alice".to_owned(),
-            "manual".to_owned(),
-            /*also_requeue=*/ true,
-            T0 + Duration::seconds(1),
-        )
+        .force_release(l.id, /*also_requeue=*/ true, T0 + Duration::seconds(1))
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");

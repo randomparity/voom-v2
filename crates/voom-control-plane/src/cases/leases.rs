@@ -142,7 +142,7 @@ impl ControlPlane {
         let mut tx = self.begin_tx().await?;
         let lease = self
             .leases
-            .fail_in_tx(&mut tx, lease_id, reason.clone(), retriable, now)
+            .fail_in_tx(&mut tx, lease_id, retriable, now)
             .await?;
         self.append_event(
             &mut tx,
@@ -300,14 +300,7 @@ impl ControlPlane {
         let mut tx = self.begin_tx().await?;
         let lease = self
             .leases
-            .force_release_in_tx(
-                &mut tx,
-                lease_id,
-                actor.clone(),
-                reason.clone(),
-                also_requeue,
-                now,
-            )
+            .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
             .await?;
         self.append_event(
             &mut tx,

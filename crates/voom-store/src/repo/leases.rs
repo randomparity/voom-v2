@@ -125,14 +125,12 @@ pub trait LeaseRepo: Repository {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        reason: String,
         retriable: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError>;
     async fn fail(
         &self,
         lease_id: LeaseId,
-        reason: String,
         retriable: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError>;
@@ -148,16 +146,12 @@ pub trait LeaseRepo: Repository {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        actor: String,
-        reason: String,
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError>;
     async fn force_release(
         &self,
         lease_id: LeaseId,
-        actor: String,
-        reason: String,
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError>;
@@ -388,11 +382,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        reason: String,
         retriable: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let _ = reason; // recorded by the event the caller emits; not stored on the lease row
         let lease = get_lease_in_tx(tx, lease_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
@@ -498,7 +490,6 @@ impl LeaseRepo for SqliteLeaseRepo {
     async fn fail(
         &self,
         lease_id: LeaseId,
-        reason: String,
         retriable: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
@@ -507,9 +498,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             .begin()
             .await
             .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
-        let out = self
-            .fail_in_tx(&mut tx, lease_id, reason, retriable, now)
-            .await?;
+        let out = self.fail_in_tx(&mut tx, lease_id, retriable, now).await?;
         tx.commit()
             .await
             .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
@@ -643,12 +632,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         lease_id: LeaseId,
-        actor: String,
-        reason: String,
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        let _ = (actor, reason); // captured in the caller-emitted event
         let lease = get_lease_in_tx(tx, lease_id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
@@ -710,8 +696,6 @@ impl LeaseRepo for SqliteLeaseRepo {
     async fn force_release(
         &self,
         lease_id: LeaseId,
-        actor: String,
-        reason: String,
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
@@ -721,7 +705,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             .await
             .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
         let out = self
-            .force_release_in_tx(&mut tx, lease_id, actor, reason, also_requeue, now)
+            .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
             .await?;
         tx.commit()
             .await
