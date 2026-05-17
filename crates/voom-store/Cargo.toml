@@ -39,4 +39,8 @@ tokio = { workspace = true }
 # Cargo permits dev-dep cycles (voom-control-plane normal-deps voom-store):
 # this dependency is only resolved for test/example builds, not for the
 # library itself, so it does not introduce a real circular build edge.
-voom-control-plane = { workspace = true }
+# `test-support` re-enables the writable repo accessors that production
+# builds of voom-control-plane lock down to pub(crate); the voom-store
+# integration suite needs them to drive state changes that don't have a
+# dedicated case handler.
+voom-control-plane = { workspace = true, features = ["test-support"] }

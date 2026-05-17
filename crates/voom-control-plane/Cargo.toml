@@ -10,6 +10,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only public surface: re-exposes the writable repo accessors so the
+# voom-store integration suite can drive state changes that don't have a
+# dedicated case handler (e.g. ticket_dependencies setup). Never enable in
+# production binaries — those callers must go through the case-handler
+# layer so every durable state change pairs with EventRepo::append_in_tx.
+test-support = ["voom-store/test-support"]
+
 [dependencies]
 serde_json = { workspace = true }
 sqlx = { workspace = true }

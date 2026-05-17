@@ -142,28 +142,92 @@ impl ControlPlane {
     pub fn clock(&self) -> &dyn Clock {
         &*self.clock
     }
+
+    // Writable repo accessors: production builds hide them behind
+    // `pub(crate)` so external callers must route every durable state change
+    // through a case handler (which pairs the repo write with an
+    // `EventRepo::append_in_tx`). The `test-support` feature (also
+    // implicitly enabled under `#[cfg(test)]`) re-exports them as `pub` so
+    // the voom-store integration suite can seed state directly. Each
+    // accessor is declared twice (once per cfg arm) rather than as a single
+    // method, so the visibility shows literally at every call site and the
+    // production build cannot accidentally leak the wider surface.
+    //
+    // The production arm uses `#[expect(dead_code, …)]` because case
+    // handlers currently reach into the repo fields directly (`self.tickets
+    // .…`), not via the accessor. The methods exist so that callers can
+    // switch over without re-changing visibility; the `expect` will fire if
+    // an internal caller is ever added, which is the signal to remove the
+    // attribute.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn events(&self) -> &SqliteEventRepo {
         &self.events
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.events` directly today")]
+    #[must_use]
+    pub(crate) fn events(&self) -> &SqliteEventRepo {
+        &self.events
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn jobs(&self) -> &SqliteJobRepo {
         &self.jobs
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.jobs` directly today")]
+    #[must_use]
+    pub(crate) fn jobs(&self) -> &SqliteJobRepo {
+        &self.jobs
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn tickets(&self) -> &SqliteTicketRepo {
         &self.tickets
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.tickets` directly today")]
+    #[must_use]
+    pub(crate) fn tickets(&self) -> &SqliteTicketRepo {
+        &self.tickets
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn workers(&self) -> &SqliteWorkerRepo {
         &self.workers
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.workers` directly today")]
+    #[must_use]
+    pub(crate) fn workers(&self) -> &SqliteWorkerRepo {
+        &self.workers
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn leases(&self) -> &SqliteLeaseRepo {
         &self.leases
     }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.leases` directly today")]
+    #[must_use]
+    pub(crate) fn leases(&self) -> &SqliteLeaseRepo {
+        &self.leases
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn artifacts(&self) -> &SqliteArtifactRepo {
+        &self.artifacts
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.artifacts` directly today")]
+    #[must_use]
+    pub(crate) fn artifacts(&self) -> &SqliteArtifactRepo {
         &self.artifacts
     }
 }
