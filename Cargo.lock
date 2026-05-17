@@ -2163,6 +2163,12 @@ dependencies = [
 [[package]]
 name = "voom-events"
 version = "0.1.0-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+ "time",
+ "voom-core",
+]
 
 [[package]]
 name = "voom-plan"
