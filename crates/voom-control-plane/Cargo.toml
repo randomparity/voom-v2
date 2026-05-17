@@ -11,12 +11,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1.89"
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
-tracing = { workspace = true }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 voom-store = { workspace = true }
