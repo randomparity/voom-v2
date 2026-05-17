@@ -7,9 +7,8 @@ fn envelope_construction_round_trips_payload_via_serde_json() {
     // The envelope itself isn't serialized; only the Event payload is.
     // This test pins the payload serde round-trip — EventRepo persists
     // each envelope field separately and reassembles the Event from the
-    // stored kind + payload columns.
+    // stored kind + payload columns. `kind` is derived from `payload`.
     let env = EventEnvelope {
-        kind: EventKind::SchemaInitialized,
         occurred_at: OffsetDateTime::UNIX_EPOCH,
         subject_type: SubjectType::System,
         subject_id: None,

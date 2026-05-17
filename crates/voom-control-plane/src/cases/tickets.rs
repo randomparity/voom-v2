@@ -5,7 +5,7 @@
 use time::OffsetDateTime;
 use voom_core::{TicketId, VoomError};
 use voom_events::payload::{TicketCreatedPayload, TicketReadyPayload};
-use voom_events::{Event, EventKind, SubjectType};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
 
 use crate::ControlPlane;
@@ -23,7 +23,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::TicketCreated,
             SubjectType::Ticket,
             Some(ticket.id.0),
             input.created_at,
@@ -61,7 +60,6 @@ impl ControlPlane {
             append_event(
                 &self.events,
                 &mut tx,
-                EventKind::TicketReady,
                 SubjectType::Ticket,
                 Some(t.id.0),
                 now,

@@ -13,7 +13,7 @@
 use time::OffsetDateTime;
 
 use voom_events::payload::SchemaInitializedPayload;
-use voom_events::{Event, EventEnvelope, EventKind, SubjectType};
+use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 use voom_store::test_support::fresh_initialized_pool_at;
 
@@ -28,7 +28,6 @@ async fn update_on_events_row_is_rejected() {
         .append_in_tx(
             &mut tx,
             EventEnvelope {
-                kind: EventKind::SchemaInitialized,
                 occurred_at: OffsetDateTime::UNIX_EPOCH,
                 subject_type: SubjectType::System,
                 subject_id: None,
@@ -63,7 +62,6 @@ async fn delete_on_events_row_is_rejected() {
         .append_in_tx(
             &mut tx,
             EventEnvelope {
-                kind: EventKind::SchemaInitialized,
                 occurred_at: OffsetDateTime::UNIX_EPOCH,
                 subject_type: SubjectType::System,
                 subject_id: None,

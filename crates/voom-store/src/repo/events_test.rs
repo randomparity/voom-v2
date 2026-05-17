@@ -15,7 +15,6 @@ async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
 
 fn sample_envelope() -> EventEnvelope {
     EventEnvelope {
-        kind: EventKind::SchemaInitialized,
         occurred_at: OffsetDateTime::UNIX_EPOCH,
         subject_type: SubjectType::System,
         subject_id: None,
@@ -46,7 +45,7 @@ async fn get_returns_appended_row() {
     let id = repo.append_in_tx(&mut tx, env.clone()).await.unwrap();
     tx.commit().await.unwrap();
     let row = repo.get(id).await.unwrap().expect("row exists");
-    assert_eq!(row.envelope.kind, env.kind);
+    assert_eq!(row.envelope.payload.kind(), env.payload.kind());
     assert_eq!(row.envelope.payload, env.payload);
 }
 
@@ -308,7 +307,6 @@ async fn append_then_get_round_trips_every_m1_kind() {
 
     for (kind, payload) in pairs {
         let env = EventEnvelope {
-            kind,
             occurred_at: OffsetDateTime::UNIX_EPOCH,
             subject_type: SubjectType::System,
             subject_id: None,
@@ -324,7 +322,8 @@ async fn append_then_get_round_trips_every_m1_kind() {
             .unwrap()
             .unwrap_or_else(|| panic!("row for {kind:?} not found"));
         assert_eq!(
-            row.envelope.kind, env.kind,
+            row.envelope.payload.kind(),
+            kind,
             "kind mismatch on round-trip for {kind:?}"
         );
         assert_eq!(

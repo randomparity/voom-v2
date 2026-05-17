@@ -8,7 +8,7 @@ use voom_events::payload::{
     WorkerCapabilityRecordedPayload, WorkerGrantRecordedPayload, WorkerRegisteredPayload,
     WorkerRetiredPayload,
 };
-use voom_events::{Event, EventKind, SubjectType};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerRepo,
 };
@@ -28,7 +28,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::WorkerRegistered,
             SubjectType::Worker,
             Some(worker.id.0),
             input.registered_at,
@@ -55,7 +54,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::WorkerCapabilityRecorded,
             SubjectType::Worker,
             Some(worker_id.0),
             self.clock().now(),
@@ -81,7 +79,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::WorkerGrantRecorded,
             SubjectType::Worker,
             Some(worker_id.0),
             self.clock().now(),
@@ -113,7 +110,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::WorkerRetired,
             SubjectType::Worker,
             Some(id.0),
             now,

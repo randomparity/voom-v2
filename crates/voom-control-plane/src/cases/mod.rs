@@ -10,7 +10,7 @@
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::VoomError;
-use voom_events::{Event, EventEnvelope, EventKind, SubjectType};
+use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
 pub mod artifacts;
@@ -34,7 +34,6 @@ pub(crate) async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomErr
 pub(crate) async fn append_event(
     events: &SqliteEventRepo,
     tx: &mut Transaction<'_, Sqlite>,
-    kind: EventKind,
     subject_type: SubjectType,
     subject_id: Option<u64>,
     occurred_at: OffsetDateTime,
@@ -44,7 +43,6 @@ pub(crate) async fn append_event(
         .append_in_tx(
             tx,
             EventEnvelope {
-                kind,
                 occurred_at,
                 subject_type,
                 subject_id,

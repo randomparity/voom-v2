@@ -1,9 +1,7 @@
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::VoomError;
-use voom_events::{
-    Event, EventEnvelope, EventKind, SubjectType, payload::SchemaInitializedPayload,
-};
+use voom_events::{Event, EventEnvelope, SubjectType, payload::SchemaInitializedPayload};
 
 use crate::migrator::MIGRATOR;
 use crate::pool::connect_or_create;
@@ -156,7 +154,6 @@ async fn emit_schema_initialized(
     schema_init_at: OffsetDateTime,
 ) -> Result<(), VoomError> {
     let envelope = EventEnvelope {
-        kind: EventKind::SchemaInitialized,
         occurred_at: schema_init_at,
         subject_type: SubjectType::System,
         subject_id: None,

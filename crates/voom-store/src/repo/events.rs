@@ -82,7 +82,7 @@ impl EventRepo for SqliteEventRepo {
              VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(occurred)
-        .bind(env.kind.as_str())
+        .bind(env.payload.kind().as_str())
         .bind(env.subject_type.as_str())
         .bind(env.subject_id.map(i64_from_u64))
         .bind(env.trace_id.as_ref().map(|t| t.0.clone()))
@@ -205,7 +205,6 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventRow, VoomError> {
     Ok(EventRow {
         id: EventId(u64_from_i64(id)),
         envelope: EventEnvelope {
-            kind,
             occurred_at,
             subject_type,
             subject_id: subject_id_i64.map(u64_from_i64),

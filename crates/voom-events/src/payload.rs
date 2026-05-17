@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::kind::EventKind;
+
 // --- system -----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +252,41 @@ pub enum Event {
     ArtifactLocationRetired(ArtifactLocationRetiredPayload),
     #[serde(rename = "artifact_lineage.recorded")]
     ArtifactLineageRecorded(ArtifactLineageRecordedPayload),
+}
+
+impl Event {
+    /// The `EventKind` that pairs with this payload. Derived by exhaustive
+    /// match so a new variant is a compile error until both `EventKind` and
+    /// the `as_str()` table grow to match.
+    #[must_use]
+    pub const fn kind(&self) -> EventKind {
+        match self {
+            Self::SchemaInitialized(_) => EventKind::SchemaInitialized,
+            Self::JobOpened(_) => EventKind::JobOpened,
+            Self::JobSucceeded(_) => EventKind::JobSucceeded,
+            Self::JobFailed(_) => EventKind::JobFailed,
+            Self::JobCancelled(_) => EventKind::JobCancelled,
+            Self::TicketCreated(_) => EventKind::TicketCreated,
+            Self::TicketReady(_) => EventKind::TicketReady,
+            Self::TicketLeased(_) => EventKind::TicketLeased,
+            Self::TicketSucceeded(_) => EventKind::TicketSucceeded,
+            Self::TicketFailedRetriable(_) => EventKind::TicketFailedRetriable,
+            Self::TicketFailedTerminal(_) => EventKind::TicketFailedTerminal,
+            Self::TicketRequeuedAfterLeaseExpiry(_) => EventKind::TicketRequeuedAfterLeaseExpiry,
+            Self::LeaseAcquired(_) => EventKind::LeaseAcquired,
+            Self::LeaseReleased(_) => EventKind::LeaseReleased,
+            Self::LeaseExpired(_) => EventKind::LeaseExpired,
+            Self::LeaseForceReleased(_) => EventKind::LeaseForceReleased,
+            Self::WorkerRegistered(_) => EventKind::WorkerRegistered,
+            Self::WorkerCapabilityRecorded(_) => EventKind::WorkerCapabilityRecorded,
+            Self::WorkerGrantRecorded(_) => EventKind::WorkerGrantRecorded,
+            Self::WorkerRetired(_) => EventKind::WorkerRetired,
+            Self::ArtifactHandleCreated(_) => EventKind::ArtifactHandleCreated,
+            Self::ArtifactLocationRecorded(_) => EventKind::ArtifactLocationRecorded,
+            Self::ArtifactLocationRetired(_) => EventKind::ArtifactLocationRetired,
+            Self::ArtifactLineageRecorded(_) => EventKind::ArtifactLineageRecorded,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use voom_events::payload::{
     TicketFailedRetriablePayload, TicketFailedTerminalPayload, TicketLeasedPayload,
     TicketReadyPayload, TicketRequeuedAfterLeaseExpiryPayload, TicketSucceededPayload,
 };
-use voom_events::{Event, EventKind, SubjectType};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::leases::{ExpireReport, Lease, LeaseRepo, NewLease};
 use voom_store::repo::tickets::{TicketRepo, TicketState};
 
@@ -32,7 +32,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::LeaseAcquired,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -55,7 +54,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::TicketLeased,
             SubjectType::Ticket,
             Some(ticket.id.0),
             now,
@@ -104,7 +102,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::LeaseReleased,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -121,7 +118,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::TicketSucceeded,
             SubjectType::Ticket,
             Some(lease.ticket_id.0),
             now,
@@ -155,7 +151,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::LeaseReleased,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -179,7 +174,6 @@ impl ControlPlane {
                 append_event(
                     &self.events,
                     &mut tx,
-                    EventKind::TicketFailedRetriable,
                     SubjectType::Ticket,
                     Some(ticket.id.0),
                     now,
@@ -197,7 +191,6 @@ impl ControlPlane {
                 append_event(
                     &self.events,
                     &mut tx,
-                    EventKind::TicketFailedTerminal,
                     SubjectType::Ticket,
                     Some(ticket.id.0),
                     now,
@@ -250,7 +243,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             tx,
-            EventKind::LeaseExpired,
             SubjectType::Lease,
             Some(lease_id.0),
             now,
@@ -264,7 +256,6 @@ impl ControlPlane {
             append_event(
                 &self.events,
                 tx,
-                EventKind::TicketRequeuedAfterLeaseExpiry,
                 SubjectType::Ticket,
                 Some(ticket_id.0),
                 now,
@@ -285,7 +276,6 @@ impl ControlPlane {
             append_event(
                 &self.events,
                 tx,
-                EventKind::TicketFailedTerminal,
                 SubjectType::Ticket,
                 Some(ticket.id.0),
                 now,
@@ -322,7 +312,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::LeaseForceReleased,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -339,7 +328,6 @@ impl ControlPlane {
             append_event(
                 &self.events,
                 &mut tx,
-                EventKind::TicketReady,
                 SubjectType::Ticket,
                 Some(lease.ticket_id.0),
                 now,
@@ -359,7 +347,6 @@ impl ControlPlane {
             append_event(
                 &self.events,
                 &mut tx,
-                EventKind::TicketFailedTerminal,
                 SubjectType::Ticket,
                 Some(ticket.id.0),
                 now,

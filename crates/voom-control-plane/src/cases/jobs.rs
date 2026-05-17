@@ -7,7 +7,7 @@ use voom_core::{JobId, VoomError};
 use voom_events::payload::{
     JobCancelledPayload, JobFailedPayload, JobOpenedPayload, JobSucceededPayload,
 };
-use voom_events::{Event, EventKind, SubjectType};
+use voom_events::{Event, SubjectType};
 use voom_store::repo::jobs::{Job, JobRepo, NewJob};
 
 use crate::ControlPlane;
@@ -25,7 +25,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::JobOpened,
             SubjectType::Job,
             Some(job.id.0),
             input.created_at,
@@ -50,7 +49,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::JobSucceeded,
             SubjectType::Job,
             Some(id.0),
             now,
@@ -76,7 +74,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::JobFailed,
             SubjectType::Job,
             Some(id.0),
             now,
@@ -105,7 +102,6 @@ impl ControlPlane {
         append_event(
             &self.events,
             &mut tx,
-            EventKind::JobCancelled,
             SubjectType::Job,
             Some(id.0),
             now,
