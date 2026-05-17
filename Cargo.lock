@@ -2141,13 +2141,11 @@ dependencies = [
 name = "voom-control-plane"
 version = "0.1.0-dev"
 dependencies = [
- "async-trait",
  "serde_json",
  "sqlx",
  "tempfile",
  "time",
  "tokio",
- "tracing",
  "voom-core",
  "voom-events",
  "voom-store",
