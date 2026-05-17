@@ -147,6 +147,14 @@ CREATE INDEX leases_by_ticket ON leases (ticket_id);
 CREATE INDEX leases_by_worker ON leases (worker_id);
 
 -- ---------- artifact catalog -----------------------------------------------
+-- Note: the link columns from artifact_handles to media_work /
+-- media_variant / asset_bundle / file_asset / file_version are
+-- intentionally OMITTED from this M1 migration. The identity tables
+-- land in M2's 0003_identity.sql; M2 will ADD those columns with
+-- proper FOREIGN KEY clauses in the same migration, so the columns
+-- can never carry orphan references. M1 has no caller that needs
+-- these links (the M1 use cases don't construct artifact handles
+-- tied to specific identity rows).
 CREATE TABLE artifact_handles (
     id                    INTEGER PRIMARY KEY,
     size_bytes            INTEGER,
@@ -160,14 +168,6 @@ CREATE TABLE artifact_handles (
     CHECK (json_valid(allowed_access_modes)),
     CHECK (source_lineage IS NULL OR json_valid(source_lineage))
 ) STRICT;
--- Note: the link columns from artifact_handles to media_work /
--- media_variant / asset_bundle / file_asset / file_version are
--- intentionally OMITTED from this M1 migration. The identity tables
--- land in M2's 0003_identity.sql; M2 will ADD those columns with
--- proper FOREIGN KEY clauses in the same migration, so the columns
--- can never carry orphan references. M1 has no caller that needs
--- these links (the M1 use cases don't construct artifact handles
--- tied to specific identity rows).
 
 CREATE TABLE artifact_locations (
     id                   INTEGER PRIMARY KEY,
