@@ -23,11 +23,15 @@
 
 use std::path::Path;
 
+use serde_json::Value as JsonValue;
 use sqlx::SqlitePool;
-use voom_core::VoomError;
+use time::OffsetDateTime;
+use voom_core::{JobId, VoomError};
 
 use crate::init::init;
 use crate::pool::connect;
+use crate::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
+use crate::repo::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo};
 
 /// Format a filesystem path as a `sqlite://` URL. Centralizes the
 /// `format!("sqlite://{}", path.display())` literal that otherwise appears
@@ -77,4 +81,151 @@ pub async fn insert_synthetic_migration(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// -- builders ---------------------------------------------------------------
+//
+// Deterministic fixtures for repo tests. Each builder ships with sane defaults
+// keyed on `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across
+// runs. Builders call the BARE repo methods (not `_in_tx`) because they own
+// their own transaction boundary; tests that need event emission go through
+// the `ControlPlane` use-cases (Task 14) directly.
+
+#[derive(Debug, Clone)]
+pub struct TicketBuilder {
+    job_id: Option<JobId>,
+    kind: String,
+    priority: i64,
+    payload: JsonValue,
+    max_attempts: u32,
+    created_at: OffsetDateTime,
+}
+
+impl Default for TicketBuilder {
+    fn default() -> Self {
+        Self {
+            job_id: None,
+            kind: "test.noop".to_owned(),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+}
+
+impl TicketBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_kind(mut self, k: impl Into<String>) -> Self {
+        self.kind = k.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_priority(mut self, p: i64) -> Self {
+        self.priority = p;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_attempts(mut self, n: u32) -> Self {
+        self.max_attempts = n;
+        self
+    }
+
+    #[must_use]
+    pub fn with_payload(mut self, v: JsonValue) -> Self {
+        self.payload = v;
+        self
+    }
+
+    #[must_use]
+    pub fn with_created_at(mut self, t: OffsetDateTime) -> Self {
+        self.created_at = t;
+        self
+    }
+
+    #[must_use]
+    pub fn with_job(mut self, j: JobId) -> Self {
+        self.job_id = Some(j);
+        self
+    }
+
+    /// Build via the bare `create` (opens its own tx).
+    ///
+    /// # Errors
+    ///
+    /// Propagates `TicketRepo::create` errors.
+    pub async fn build(self, repo: &SqliteTicketRepo) -> Result<Ticket, VoomError> {
+        repo.create(NewTicket {
+            job_id: self.job_id,
+            kind: self.kind,
+            priority: self.priority,
+            payload: self.payload,
+            max_attempts: self.max_attempts,
+            created_at: self.created_at,
+        })
+        .await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerBuilder {
+    name: String,
+    kind: WorkerKind,
+    registered_at: OffsetDateTime,
+}
+
+impl Default for WorkerBuilder {
+    fn default() -> Self {
+        Self {
+            name: "test-worker".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+}
+
+impl WorkerBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_name(mut self, n: impl Into<String>) -> Self {
+        self.name = n.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_kind(mut self, k: WorkerKind) -> Self {
+        self.kind = k;
+        self
+    }
+
+    #[must_use]
+    pub fn with_registered_at(mut self, t: OffsetDateTime) -> Self {
+        self.registered_at = t;
+        self
+    }
+
+    /// Build via the bare `register` (opens its own tx).
+    ///
+    /// # Errors
+    ///
+    /// Propagates `WorkerRepo::register` errors.
+    pub async fn build(self, repo: &SqliteWorkerRepo) -> Result<Worker, VoomError> {
+        repo.register(NewWorker {
+            name: self.name,
+            kind: self.kind,
+            registered_at: self.registered_at,
+        })
+        .await
+    }
 }
