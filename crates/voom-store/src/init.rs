@@ -1,11 +1,11 @@
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::VoomError;
-use voom_events::{Event, EventEnvelope, SubjectType, payload::SchemaInitializedPayload};
+use voom_events::{EventKind, SubjectType, payload::SchemaInitializedPayload};
 
 use crate::migrator::MIGRATOR;
 use crate::pool::connect_or_create;
-use crate::repo::events::{EventRepo, SqliteEventRepo};
+use crate::repo::common::iso8601;
 use crate::schema::{SchemaState, probe_schema};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,11 +96,24 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
         //                surfaces verbatim.
         let after = probe_schema(pool).await?;
         return match after {
-            SchemaState::Current { schema_init_at, .. } => Ok(InitReport {
-                migrations_applied: 0,
+            SchemaState::Current {
                 schema_init_at,
-                already_initialized: true,
-            }),
+                migration_count,
+            } => {
+                // Race recovery doesn't tell us whether the other process
+                // also emitted `schema.initialized` — they may have applied
+                // migrations and then crashed before the event append. Run
+                // the same atomic emit-if-missing as the happy path so the
+                // row is present regardless. The statement is a no-op when
+                // the row already exists, so the cost of always running it
+                // is one indexed lookup.
+                emit_schema_initialized_if_missing(pool, migration_count, schema_init_at).await?;
+                Ok(InitReport {
+                    migrations_applied: 0,
+                    schema_init_at,
+                    already_initialized: true,
+                })
+            }
             SchemaState::Dirty {
                 failed_version,
                 applied,
@@ -137,9 +150,22 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
 
     let migrations_applied = migration_count.saturating_sub(before_count);
 
-    if before_count == 0 && migrations_applied > 0 {
-        emit_schema_initialized(pool, migrations_applied, schema_init_at).await?;
-    }
+    // Recovery-safe emit: a single INSERT ... WHERE NOT EXISTS statement is
+    // atomic under SQLite's single-writer locking, so the existence check
+    // and the insert cannot race against a concurrent init. If a prior
+    // call applied migrations but failed (or crashed) before the event was
+    // durably appended, the next call re-emits the missing row; if two
+    // calls run simultaneously, the first one inserts and the second sees
+    // the row already there. Exactly one row regardless of races or
+    // partial-failure retries. The `events` table has no UNIQUE constraint
+    // on `kind`, so this statement is the only thing keeping the
+    // single-row invariant.
+    //
+    // The payload's `migrations_applied` is the absolute `migration_count`
+    // at emit time so the recovery write carries the same snapshot value
+    // a fresh init would have produced (on a fresh init these are equal;
+    // on recovery the per-call delta is zero and useless).
+    emit_schema_initialized_if_missing(pool, migration_count, schema_init_at).await?;
 
     Ok(InitReport {
         migrations_applied,
@@ -148,30 +174,36 @@ async fn run_migrations_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     })
 }
 
-async fn emit_schema_initialized(
+async fn emit_schema_initialized_if_missing(
     pool: &SqlitePool,
     migrations_applied: u32,
     schema_init_at: OffsetDateTime,
 ) -> Result<(), VoomError> {
-    let envelope = EventEnvelope {
-        occurred_at: schema_init_at,
-        subject_type: SubjectType::System,
-        subject_id: None,
-        trace_id: None,
-        payload: Event::SchemaInitialized(SchemaInitializedPayload {
-            migrations_applied,
-            schema_init_at,
-        }),
-    };
-    let repo = SqliteEventRepo::new(pool.clone());
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
-    repo.append_in_tx(&mut tx, envelope).await?;
-    tx.commit()
-        .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+    // `SchemaInitializedPayload` serializes directly to the inner-payload
+    // shape the events table stores; `kind` lives in its own column, so
+    // we deliberately bypass the `Event` tag wrapper here. The `events`
+    // table column order is (occurred_at, kind, subject_type, subject_id,
+    // trace_id, payload).
+    let payload_json = serde_json::to_string(&SchemaInitializedPayload {
+        migrations_applied,
+        schema_init_at,
+    })
+    .map_err(|e| VoomError::Internal(format!("payload serialize: {e}")))?;
+    let occurred = iso8601(schema_init_at)?;
+
+    sqlx::query(
+        "INSERT INTO events (occurred_at, kind, subject_type, subject_id, trace_id, payload) \
+         SELECT ?, ?, ?, NULL, NULL, ? \
+         WHERE NOT EXISTS (SELECT 1 FROM events WHERE kind = ?)",
+    )
+    .bind(occurred)
+    .bind(EventKind::SchemaInitialized.as_str())
+    .bind(SubjectType::System.as_str())
+    .bind(payload_json)
+    .bind(EventKind::SchemaInitialized.as_str())
+    .execute(pool)
+    .await
+    .map_err(|e| VoomError::Database(format!("schema.initialized append: {e}")))?;
     Ok(())
 }
 
