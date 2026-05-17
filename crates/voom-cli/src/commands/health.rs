@@ -70,7 +70,9 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::ConfigInvalid
         | ErrorCode::NotFound
         | ErrorCode::Internal
-        | ErrorCode::BadArgs => None,
+        | ErrorCode::BadArgs
+        | ErrorCode::DependencyCycle
+        | ErrorCode::Conflict => None,
     }
 }
 

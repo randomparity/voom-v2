@@ -155,7 +155,9 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         ErrorCode::DbUninitialized
         | ErrorCode::NotFound
         | ErrorCode::Internal
-        | ErrorCode::BadArgs => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::BadArgs
+        | ErrorCode::DependencyCycle
+        | ErrorCode::Conflict => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, err.code(), err.to_string(), hint)
 }
