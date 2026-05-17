@@ -202,6 +202,25 @@ impl TicketRepo for SqliteTicketRepo {
                 "ticket {ticket_id} cannot depend on itself"
             )));
         }
+        // Dependencies may only be added while the dependent is still
+        // pending. Once a ticket has crossed the readiness gate
+        // (ready/leased/succeeded/failed), adding a new edge would not
+        // demote it back to pending — and `acquire_in_tx` only checks
+        // `state = 'ready'`, so a late edge would let the ticket lease and
+        // run before the new blocker succeeds.
+        let row: Option<(String,)> = sqlx::query_as("SELECT state FROM tickets WHERE id = ?")
+            .bind(i64_from_u64(ticket_id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("ticket state probe: {e}")))?;
+        let Some((state,)) = row else {
+            return Err(VoomError::NotFound(format!("ticket {ticket_id}")));
+        };
+        if state != TicketState::Pending.as_str() {
+            return Err(VoomError::Conflict(format!(
+                "add_dependency rejected: ticket {ticket_id} is {state}, not pending"
+            )));
+        }
         // Cycle detection: walk dependencies of `depends_on` transitively.
         // If `ticket_id` appears, adding `ticket_id -> depends_on` would
         // close a cycle.

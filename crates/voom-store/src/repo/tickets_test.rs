@@ -131,6 +131,92 @@ async fn add_dependency_accepts_dag() {
 }
 
 #[tokio::test]
+async fn add_dependency_rejects_ready_dependent() {
+    // Once the dependent has crossed the readiness gate, a late edge does
+    // not demote it back to pending — and acquire only checks `state =
+    // 'ready'`. The gate must surface this as Conflict, not silently
+    // insert.
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let a = repo.create(sample_new_ticket()).await.unwrap();
+    let b = repo.create(sample_new_ticket()).await.unwrap();
+    let _ = repo
+        .mark_ready_if_unblocked(a.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    let err = repo.add_dependency(a.id, b.id).await.unwrap_err();
+    let msg = match &err {
+        VoomError::Conflict(s) => s.clone(),
+        other => panic!("expected Conflict, got: {other:?}"),
+    };
+    assert!(
+        msg.contains(&a.id.to_string()) && msg.contains("ready"),
+        "Conflict message must name the ticket and its state, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn add_dependency_rejects_leased_dependent() {
+    // A leased ticket is mid-execution — adding a new blocker now would
+    // pretend it had been gated on the new edge all along. Reject it.
+    use crate::repo::leases::{LeaseRepo, NewLease, SqliteLeaseRepo};
+    use crate::repo::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
+    use time::Duration;
+
+    let (pool, _tmp) = pool().await;
+    let trepo = SqliteTicketRepo::new(pool.clone());
+    let wrepo = SqliteWorkerRepo::new(pool.clone());
+    let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let a = trepo.create(sample_new_ticket()).await.unwrap();
+    let b = trepo.create(sample_new_ticket()).await.unwrap();
+    trepo
+        .mark_ready_if_unblocked(a.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    let w = wrepo
+        .register(NewWorker {
+            name: "w".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    lrepo
+        .acquire(NewLease {
+            ticket_id: a.id,
+            worker_id: w.id,
+            ttl: Duration::seconds(60),
+            now: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let err = trepo.add_dependency(a.id, b.id).await.unwrap_err();
+    let msg = match &err {
+        VoomError::Conflict(s) => s.clone(),
+        other => panic!("expected Conflict, got: {other:?}"),
+    };
+    assert!(
+        msg.contains(&a.id.to_string()) && msg.contains("leased"),
+        "Conflict message must name the ticket and its state, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn add_dependency_rejects_missing_dependent() {
+    // A non-existent dependent must surface NotFound — previously the
+    // function returned Ok(()) after the cycle check (the dependent's id
+    // was never read), masking caller bugs.
+    use voom_core::TicketId;
+
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let b = repo.create(sample_new_ticket()).await.unwrap();
+    let missing = TicketId(99_999);
+    let err = repo.add_dependency(missing, b.id).await.unwrap_err();
+    assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
+}
+
+#[tokio::test]
 async fn list_dependents_returns_tickets_that_depend_on_this_one() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteTicketRepo::new(pool.clone());
