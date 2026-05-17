@@ -15,7 +15,7 @@ use time::{Duration, OffsetDateTime};
 
 use voom_control_plane::ControlPlane;
 use voom_core::SystemClock;
-use voom_store::repo::leases::{LeaseRepo, NewLease};
+use voom_store::repo::leases::{LeaseRepo, NewLease, ReleaseReason};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind, WorkerRepo};
 use voom_store::test_support::sqlite_url_for;
@@ -80,8 +80,8 @@ async fn m1_fixture_flow_persists_across_reconnect() {
     assert_eq!(t.state, TicketState::Succeeded, "ticket persisted");
     let l = cp2.leases().get(lid).await.unwrap().unwrap();
     assert_eq!(
-        l.release_reason.as_deref(),
-        Some("released"),
+        l.release_reason,
+        Some(ReleaseReason::Released),
         "lease persisted"
     );
     let w = cp2.workers().get(wid).await.unwrap().unwrap();

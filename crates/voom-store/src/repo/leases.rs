@@ -43,6 +43,41 @@ impl LeaseState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseReason {
+    Released,
+    FailedRetriable,
+    FailedTerminal,
+    IssuerLost,
+    ForceReleased,
+}
+
+impl ReleaseReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::FailedRetriable => "failed_retriable",
+            Self::FailedTerminal => "failed_terminal",
+            Self::IssuerLost => "issuer_lost",
+            Self::ForceReleased => "force_released",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, VoomError> {
+        match s {
+            "released" => Ok(Self::Released),
+            "failed_retriable" => Ok(Self::FailedRetriable),
+            "failed_terminal" => Ok(Self::FailedTerminal),
+            "issuer_lost" => Ok(Self::IssuerLost),
+            "force_released" => Ok(Self::ForceReleased),
+            other => Err(VoomError::Database(format!(
+                "leases.release_reason {other:?} not in vocab"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NewLease {
     pub ticket_id: TicketId,
@@ -61,7 +96,7 @@ pub struct Lease {
     pub expires_at: OffsetDateTime,
     pub last_heartbeat_at: OffsetDateTime,
     pub ttl_seconds: i64,
-    pub release_reason: Option<String>,
+    pub release_reason: Option<ReleaseReason>,
     pub released_at: Option<OffsetDateTime>,
     pub epoch: u64,
 }
@@ -312,10 +347,11 @@ impl LeaseRepo for SqliteLeaseRepo {
         // and this update.
         let lease_res = sqlx::query(
             "UPDATE leases \
-             SET state = 'released', release_reason = 'released', released_at = ?, \
+             SET state = 'released', release_reason = ?, released_at = ?, \
                  epoch = epoch + 1 \
              WHERE id = ? AND state = 'held'",
         )
+        .bind(ReleaseReason::Released.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
         .execute(&mut **tx)
@@ -402,10 +438,10 @@ impl LeaseRepo for SqliteLeaseRepo {
                 .map_err(|e| VoomError::Database(format!("tickets read: {e}")))?;
         let attempts_remain = attempt < max_attempts;
         let now_str = iso8601(now)?;
-        let release_reason_str = if retriable && attempts_remain {
-            "failed_retriable"
+        let release_reason = if retriable && attempts_remain {
+            ReleaseReason::FailedRetriable
         } else {
-            "failed_terminal"
+            ReleaseReason::FailedTerminal
         };
         // Transition lease to released with the matching reason.
         let lease_res = sqlx::query(
@@ -414,7 +450,7 @@ impl LeaseRepo for SqliteLeaseRepo {
                  epoch = epoch + 1 \
              WHERE id = ? AND state = 'held'",
         )
-        .bind(release_reason_str)
+        .bind(release_reason.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
         .execute(&mut **tx)
@@ -536,11 +572,11 @@ impl LeaseRepo for SqliteLeaseRepo {
             let ticket_id = TicketId(u64_from_i64(ticket_id_i));
             // Mark lease expired.
             let lease_res = sqlx::query(
-                "UPDATE leases \
-                 SET state = 'expired', release_reason = 'issuer_lost', \
-                     released_at = ?, epoch = epoch + 1 \
+                "UPDATE leases SET state = 'expired', release_reason = ?, \
+                 released_at = ?, epoch = epoch + 1 \
                  WHERE id = ? AND state = 'held'",
             )
+            .bind(ReleaseReason::IssuerLost.as_str())
             .bind(&now_str)
             .bind(lease_id_i)
             .execute(&mut **tx)
@@ -646,10 +682,11 @@ impl LeaseRepo for SqliteLeaseRepo {
         let now_str = iso8601(now)?;
         let lease_res = sqlx::query(
             "UPDATE leases \
-             SET state = 'force_released', release_reason = 'force_released', \
+             SET state = 'force_released', release_reason = ?, \
                  released_at = ?, epoch = epoch + 1 \
              WHERE id = ? AND state = 'held'",
         )
+        .bind(ReleaseReason::ForceReleased.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
         .execute(&mut **tx)
@@ -787,7 +824,7 @@ fn row_to_lease(row: &sqlx::sqlite::SqliteRow) -> Result<Lease, VoomError> {
         expires_at: parse_iso8601(&expires)?,
         last_heartbeat_at: parse_iso8601(&last_hb)?,
         ttl_seconds: ttl,
-        release_reason: reason,
+        release_reason: reason.map(|s| ReleaseReason::parse(&s)).transpose()?,
         released_at: released.map(|s| parse_iso8601(&s)).transpose()?,
         epoch: u64_from_i64(epoch),
     })

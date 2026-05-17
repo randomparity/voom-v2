@@ -107,7 +107,10 @@ impl ControlPlane {
             Event::LeaseReleased(LeaseReleasedPayload {
                 lease_id: lease.id.0,
                 ticket_id: lease.ticket_id.0,
-                release_reason: lease.release_reason.clone().unwrap_or_default(),
+                release_reason: lease
+                    .release_reason
+                    .map(|r| r.as_str().to_owned())
+                    .unwrap_or_default(),
             }),
         )
         .await?;
@@ -153,7 +156,10 @@ impl ControlPlane {
             Event::LeaseReleased(LeaseReleasedPayload {
                 lease_id: lease.id.0,
                 ticket_id: lease.ticket_id.0,
-                release_reason: lease.release_reason.clone().unwrap_or_default(),
+                release_reason: lease
+                    .release_reason
+                    .map(|r| r.as_str().to_owned())
+                    .unwrap_or_default(),
             }),
         )
         .await?;

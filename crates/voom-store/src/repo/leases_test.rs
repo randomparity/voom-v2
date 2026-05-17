@@ -134,7 +134,7 @@ async fn release_transitions_lease_and_ticket_to_succeeded() {
         .unwrap();
     let lease = lrepo.get(l.id).await.unwrap().unwrap();
     assert_eq!(lease.state, LeaseState::Released);
-    assert_eq!(lease.release_reason.as_deref(), Some("released"));
+    assert_eq!(lease.release_reason, Some(ReleaseReason::Released));
     let t = trepo.get(tid).await.unwrap().unwrap();
     assert_eq!(t.state, TicketState::Succeeded);
     assert_eq!(t.result.unwrap(), json!({"ok": true}));
