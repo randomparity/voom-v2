@@ -2,8 +2,11 @@
     test,
     expect(
         clippy::unwrap_used,
+        clippy::expect_used,
         clippy::panic,
-        reason = "tests favor unwrap/panic over plumbing Result<()> through every assertion"
+        clippy::too_many_lines,
+        reason = "tests favor unwrap/expect/panic over plumbing Result<()> through every \
+                  assertion; data-table tests pairing many enum variants exceed the line cap"
     )
 )]
 //! Storage layer: `SQLite` pool, migrations, repositories.

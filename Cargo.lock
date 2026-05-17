@@ -2188,11 +2188,13 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "libsqlite3-sys",
+ "serde_json",
  "sqlx",
  "tempfile",
  "time",
  "tokio",
  "voom-core",
+ "voom-events",
 ]
 
 [[package]]
