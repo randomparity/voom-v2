@@ -12,11 +12,13 @@
 //! over per-kind payload structs; `EventEnvelope` is the row shape the
 //! `events` table stores.
 
+pub mod assertion;
 pub mod envelope;
 pub mod kind;
 pub mod payload;
 pub mod subject;
 
+pub use assertion::AssertionKind;
 pub use envelope::{EventEnvelope, EventId, TraceId};
 pub use kind::EventKind;
 pub use payload::Event;
