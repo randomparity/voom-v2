@@ -521,6 +521,30 @@ grants:
     probe_file: 8
 ```
 
+The scheduler enforces `max_parallel` per worker as a counting
+semaphore at lease acquisition. The check-and-increment of the
+worker's active-lease count for the requested operation happens in the
+same transaction as the `ticket.leased` transition, so two schedulers
+or two concurrent acquire calls cannot race past the same grant cap.
+The SQL shape inside the IMMEDIATE acquire transaction is:
+
+```sql
+SELECT 1
+  FROM workers w
+ WHERE w.id = :worker_id
+   AND (
+        SELECT COUNT(*)
+          FROM leases l
+          JOIN tickets t ON t.id = l.ticket_id
+         WHERE l.worker_id = :worker_id
+           AND l.release_reason IS NULL
+           AND t.kind = :operation
+       ) < :max_parallel_for_operation;
+```
+
+An empty result aborts the acquire with `no eligible worker` (capacity
+exhausted) and the scheduler tries the next candidate.
+
 Original-file write access is never implicit. Default execution produces staged
 artifacts. The host verifies and commits.
 
@@ -890,6 +914,21 @@ Issues include:
 - artifact unavailable
 - variant retention conflict
 - untrusted worker
+- terminal failure
+
+When a ticket transitions to `failed` terminally — whether because its
+`FailureClass` is non-retriable or operator-required, or because its
+retry budget is exhausted — the host opens a `terminal_failure` issue
+linked to the ticket and its last lease in the same transaction that
+records the terminal transition. Severity and priority are both
+derived from the failure's category in the taxonomy (see Error
+Handling And Recovery → Failure taxonomy): operator-required and
+non-retriable failures default to higher severity and priority than a
+retriable failure that simply exhausted its retries. Exactly one
+`terminal_failure` issue is opened per terminal transition: the
+ticket state machine treats `failed` as terminal, so a given ticket
+transitions to that state at most once. This is the DLQ analogue:
+terminal failures do not silently disappear into the event log.
 
 Issues have both severity and priority:
 
@@ -1199,6 +1238,18 @@ ticket execution. It must also support bundle-level transactions,
 external-system sync history, issue lifecycle, quality-score provenance, and
 runtime use leases.
 
+SQLite serializes concurrent writers through `BEGIN IMMEDIATE`: there
+is no `SKIP LOCKED` primitive, and one writer at a time holds the
+database write lock. Sprint 1 deliberately does not need a non-
+blocking dequeue — there is no scheduler yet, and the single-writer
+boundary is sufficient for lease-acquire, lease-release, and
+commit-safety-gate transactions. The Postgres deployment profile
+already hinted at above is the natural place to migrate the
+ticket-dequeue path to `SELECT ... FOR UPDATE SKIP LOCKED`, which lets
+multiple scheduler processes claim disjoint ready tickets without
+lock-escalation contention. Sprint 4's multi-scheduler reasoning
+starts from this fact rather than re-deriving it.
+
 ## Error Handling And Recovery
 
 Errors should be classified at the boundary where they occur:
@@ -1227,6 +1278,62 @@ Errors should be classified at the boundary where they occur:
 Every failure records an event and updates durable state. Retriable failures
 remain attached to tickets with attempt count, backoff, and reason. Non-retriable
 failures stop the affected plan branch and surface actionable diagnostics.
+
+### Retry policy
+
+Retriable failures are rescheduled by setting the ticket's next-eligible
+time to `now + wait(attempt)`, where
+`wait(attempt) = random_between(0, min(cap, base * 2^attempt))`. The
+distribution is capped-exponential with full jitter; full jitter is
+required because tickets that share a lockstep retry schedule retry in
+unison and create thundering-herd load spikes on whatever they share a
+bottleneck with (worker pool, external system, scheduler). The `base`
+and `cap` parameters are owned by scheduling policy (Sprint 4+); the
+control-plane core supplies a deterministic-by-injection seam — the
+RNG is passed through the same `Clock`-style boundary the identity
+model already uses for time, so unit and integration tests remain
+fully deterministic across builds.
+
+### Failure taxonomy
+
+Each error category maps to one of three retry classes. The mapping is
+normative: it is the source the `FailureClass` enum compiles against,
+the input the retry-policy decision uses, and the basis on which a
+terminal-failure transition is surfaced as an `Issue` (see Issue
+Model). `retriable` re-queues with backoff up to `max_attempts`;
+`non_retriable` transitions the ticket to `failed` immediately and is
+not unblocked by re-attempting the same input; `operator_required`
+also transitions to `failed`, but the diagnostic names a concrete
+operator action that, once taken, makes a fresh attempt viable.
+
+| Failure category               | Class               |
+|--------------------------------|---------------------|
+| `worker_timeout`               | `retriable`         |
+| `worker_crash`                 | `retriable`         |
+| `no_eligible_worker`           | `retriable`         |
+| `artifact_unavailable`         | `retriable`         |
+| `artifact_checksum_mismatch`   | `retriable`         |
+| `external_system_unavailable`  | `retriable`         |
+| `external_system_rate_limited` | `retriable`         |
+| `verification_failure`         | `retriable`         |
+| `backup_failure`               | `retriable`         |
+| `commit_failure`               | `retriable`         |
+| `policy_parse_error`           | `non_retriable`     |
+| `policy_validation_error`      | `non_retriable`     |
+| `missing_capability`           | `non_retriable`     |
+| `malformed_worker_result`      | `non_retriable`     |
+| `user_cancellation`            | `non_retriable`     |
+| `stale_identity_evidence`      | `operator_required` |
+| `closure_resolution_incomplete`| `operator_required` |
+| `blocked_by_active_use_lease`  | `operator_required` |
+| `approval_required`            | `operator_required` |
+| `priority_policy_conflict`     | `operator_required` |
+
+A terminally-failed ticket is not allowed to vanish into the event log:
+it is the durable analogue of a dead-letter queue. The host opens a
+`terminal_failure` issue (see Issue Model) in the same transaction
+that records the terminal transition, so the failure stays visible
+until an operator or policy resolves, suppresses, or accepts it.
 
 Stale leases are recovered by heartbeat timeout. Partially produced artifacts
 are either promoted only after verification or marked abandoned and eligible for

@@ -122,6 +122,15 @@ Implements:
   `blocking_mode`)
 - the ancillary registries (external systems, issues, quality scores) as
   CRUD repos
+- the terminal-failure → `IssueRepo` auto-open wiring on
+  `ControlPlane::handle_lease_fail` /
+  `ControlPlane::expire_due_leases` (§10.2 / S3): every
+  `ticket.failed_terminal` transition opens exactly one new
+  `terminal_failure` issue linked to the ticket and last lease in the
+  same transaction. This is the architectural DLQ analogue (arch spec
+  → Error Handling And Recovery / Issue Model). M1's `LeaseRepo`
+  emits the event but does not open the issue; M3 adds the wiring
+  without changing the M1 `LeaseRepo` API.
 - the resource-then-verb CLI inspection surface (read-only)
 - the Sprint 1 smoke recipe additions
 
@@ -136,7 +145,7 @@ rename re-anchors leases).
 
 | Crate | Sprint 1 contents added |
 |---|---|
-| `voom-core` | New ID newtypes (see §12). New `ErrorCode` variants and `VoomError` cases. Test-only `FrozenClock` / `ManualClock` exposed via `voom-core::clock_test_support`. |
+| `voom-core` | New ID newtypes (see §12.2). New `ErrorCode` variants and `VoomError` cases (§12.1). New `voom-core::failure` module exposing `FailureClass` and `FailureRetryClass` with `is_retriable` / `retry_class` / `issue_severity` / `issue_priority` / `into_error_code` (§12.5). New `voom-core::issue` module exposing `IssueSeverity` and `IssuePriority` enums — shared by `voom-core::failure`, `voom-events` payloads, `voom-store::repo::issues`, and the CLI inspection surface (§10.2). Test-only `FrozenClock` / `ManualClock` exposed via `voom-core::clock_test_support`, and test-only `FrozenRng` / `SeededRng` exposed via `voom-core::rng_test_support` (§7.5 backoff seam). |
 | `voom-store` | `repo/jobs.rs`, `repo/tickets.rs`, `repo/leases.rs`, `repo/workers.rs`, `repo/artifacts.rs`, `repo/events.rs`, `repo/identity.rs`, `repo/bundles.rs`, `repo/use_leases.rs`, `repo/commit_safety_gate.rs`, `repo/external_systems.rs`, `repo/issues.rs`, `repo/quality_scores.rs`. Three new SQL migrations under `migrations/`. |
 | `voom-events` | `EventKind` enum (one variant per state transition Sprint 1 emits), `EventEnvelope`, per-kind typed payload structs, the `Event` sum type that pairs kind with payload, `AssertionKind` enum used by `identity_evidence.assertion_type` validation. No DB code — emission goes through `voom-store::repo::events::EventRepo`. |
 | `voom-control-plane` | One use-case method per durable write the tests need (job/ticket creation, dependency declaration, lease lifecycle calls, ingest, rename reconciliation, evidence acceptance, use-lease lifecycle, destructive-commit runner, bundle membership, issue lifecycle, score recording, external-system registration). Each use case opens one transaction and composes the repo `_in_tx` calls. |
@@ -184,6 +193,12 @@ column. Every UPDATE includes `WHERE id = ? AND epoch = ?` and bumps
 `epoch = epoch + 1`. A zero-rows-affected result becomes
 `VoomError::Conflict` → `ErrorCode::Conflict` so callers retry without
 manual re-reads.
+
+Sprint 1 deliberately relies on SQLite's `BEGIN IMMEDIATE`
+single-writer serialization — there is no `SKIP LOCKED` and no
+scheduler yet to need one (see design doc → Data Storage for the
+SQLite/Postgres dequeue contract). Sprint 4's scheduler reasoning
+starts from that fact rather than re-deriving it.
 
 The full SQL lives in the migrations. Per-column descriptions appear in
 each domain section below (§§6–10).
@@ -330,6 +345,7 @@ pub enum EventKind {
     TicketFailedRetriable,              // 'ticket.failed_retriable'
     TicketFailedTerminal,               // 'ticket.failed_terminal'
     TicketRequeuedAfterLeaseExpiry,     // 'ticket.requeued_after_lease_expiry'
+    TicketRequeuedAfterForceRelease,    // 'ticket.requeued_after_force_release'
     JobOpened,                          // 'job.opened'
     JobSucceeded,                       // 'job.succeeded'
     JobFailed,                          // 'job.failed'
@@ -429,6 +445,16 @@ Per-kind payload schemas are part of the wire contract; the spec defines
 them by Rust struct definition in `voom-events`, not in this prose
 document.
 
+The `TicketFailedRetriable` and `TicketFailedTerminal` payloads each
+carry a `class: FailureClass` field (see §12.5) so audit can
+reconstruct the retriability decision that drove the transition.
+`TicketFailedRetriable` additionally carries the `next_eligible_at`
+the backoff seam (§7.5) produced; `TicketFailedTerminal` carries the
+`issue_id` of the `terminal_failure` issue the use case opened
+alongside the transition (§10.2 / S3), or `null` on the M1 milestone
+where `IssueRepo` does not yet exist. No new event kinds are added;
+the payloads grow.
+
 ### 6.2 `EventRepo` interface
 
 ```rust
@@ -502,7 +528,7 @@ plan. Sprint 1 jobs have no plan.
 | `result` | TEXT NULL | JSON; opaque; populated on `succeeded`/`failed` |
 | `attempt` | INTEGER NOT NULL DEFAULT 0 | Number of times this ticket has been acquired by a worker. New tickets start at 0. Each successful `LeaseRepo::acquire` increments by 1. Never decremented; never bumped on `fail`/`expire_due` (the bump happens on the next acquire). |
 | `max_attempts` | INTEGER NOT NULL DEFAULT 1 | |
-| `next_eligible_at` | TEXT NOT NULL | ISO-8601; used for backoff after retriable failure. New tickets default to `created_at`; `LeaseRepo::fail(retriable=true)` sets it to `now + backoff(attempt)` |
+| `next_eligible_at` | TEXT NOT NULL | ISO-8601; used for backoff after retriable failure. New tickets default to `created_at`; `LeaseRepo::fail` with a retriable `FailureClass` (S2) sets it to `now + TicketRepo::default_backoff(attempt, clock, rng)` (see §7.5 below; arch spec → Error Handling And Recovery → Retry policy) |
 | `created_at` | TEXT NOT NULL | |
 | `state_changed_at` | TEXT NOT NULL | |
 | `epoch` | INTEGER NOT NULL DEFAULT 0 | |
@@ -515,9 +541,11 @@ State transitions, all atomic via `_in_tx`:
   dependent of the ticket that just completed.
 - `ready` → `leased` via `LeaseRepo::acquire`.
 - `leased` → `succeeded` via `LeaseRepo::release`.
-- `leased` → `ready` via `LeaseRepo::fail` when `retriable && ticket.attempt < ticket.max_attempts`. `next_eligible_at` is set to `now + backoff(attempt)`. `attempt` is **not** bumped here — the bump happens on the next `acquire`. Sprint 1 uses a fixed backoff (5s × attempt); the policy will live in `voom-scheduler` later.
+- `leased` → `ready` via `LeaseRepo::fail` when the failure's `FailureClass` (S2) is retriable and `ticket.attempt < ticket.max_attempts`. `next_eligible_at` is set to `now + TicketRepo::default_backoff(attempt, clock, rng)` (see below). `attempt` is **not** bumped here — the bump happens on the next `acquire`.
 - `leased` → `failed` via `LeaseRepo::fail` otherwise.
 - `leased` → `ready` via `LeaseRepo::expire_due` if retries remain (`ticket.attempt < ticket.max_attempts`); `leased` → `failed` otherwise. Same convention: no bump on requeue; the next `acquire` increments.
+- `leased` → `ready` via `LeaseRepo::force_release(_, _, _, also_requeue = true)`, gated on `attempt < max_attempts` (retries-exhausted callers receive `VoomError::Conflict` and the lease/ticket/event log stay unchanged — see §7.5). Same no-bump convention; `next_eligible_at` is set to `now` (operator-driven requeue, no backoff). Emits `ticket.requeued_after_force_release`.
+- `leased` → `failed` via `LeaseRepo::force_release(_, _, _, also_requeue = false)` — terminal, equivalent to the `fail` terminal branch with implicit `FailureClass::UserCancellation`. Emits `ticket.failed_terminal`.
 
 ### 7.3 `ticket_dependencies`
 
@@ -566,39 +594,138 @@ Index on `(state, expires_at)` filtered to non-terminal rows to keep
   transition lease to `released`, transition ticket to `succeeded`, write
   `result` JSON. Use case emits `ticket.succeeded` + `lease.released`,
   then calls `TicketRepo::mark_ready_if_unblocked` for every dependent ticket.
-- `fail(lease_id, FailureReason, retriable: bool) -> Result<()>` — assert
-  `state = 'held'`. If `retriable && ticket.attempt < ticket.max_attempts`,
-  transition ticket to `ready`, set `next_eligible_at = now + backoff(attempt)`,
-  do **not** bump `attempt`; emit `ticket.failed_retriable`. Else transition
-  ticket to `failed`; emit `ticket.failed_terminal`. Lease transitions to
-  `released` with `release_reason = 'failed_retriable' | 'failed_terminal'`;
-  emit `lease.released`.
+- `fail(lease_id, class: FailureClass) -> Result<()>` — assert
+  `state = 'held'`. The free `(FailureReason, retriable: bool)` pair
+  is gone: retriability is derived from `class.is_retriable()`
+  (`voom-core::failure::FailureClass`), so a caller cannot retry a
+  `stale_identity_evidence` or `closure_resolution_incomplete`
+  failure that the architectural taxonomy (design doc → Error
+  Handling And Recovery → Failure taxonomy) requires to fail-closed.
+  If `class.is_retriable() && ticket.attempt < ticket.max_attempts`,
+  transition ticket to `ready`, set `next_eligible_at = now +
+  TicketRepo::default_backoff(attempt, clock, rng)`, do **not** bump
+  `attempt`; emit `ticket.failed_retriable` with payload carrying
+  the `FailureClass`. Else transition ticket to `failed`; emit
+  `ticket.failed_terminal`, also carrying the `FailureClass`. Lease
+  transitions to `released` with `release_reason =
+  'failed_retriable' | 'failed_terminal'`; emit `lease.released`.
+  On the terminal branch, the use case (§10.2 / S3) also opens a
+  new `terminal_failure` issue in the same transaction (M3 onwards;
+  M1 emits the event with `issue_id = null`).
 - `expire_due(now) -> Result<ExpireReport>` — bulk: find leases with
   `state = 'held' AND expires_at < now`. Per row: transition lease to
   `expired` (`release_reason = 'issuer_lost'`, `released_at = now`),
   transition ticket to `ready` if retries remain
-  (`ticket.attempt < ticket.max_attempts`) or `failed` otherwise. Same
-  convention as `fail`: do **not** bump `attempt` on requeue — `acquire`
-  will bump on the next dispatch. Emit `lease.expired` +
-  `ticket.requeued_after_lease_expiry` or `ticket.failed_terminal` per row.
-  Returns `ExpireReport { expired_leases: Vec<LeaseId>, requeued_tickets: Vec<TicketId>, failed_tickets: Vec<TicketId> }`.
+  (`ticket.attempt < ticket.max_attempts`) or `failed` otherwise. The
+  expiry path's implicit `FailureClass` is `worker_crash` (retriable);
+  callers do not supply one. Same convention as `fail`: do **not**
+  bump `attempt` on requeue — `acquire` will bump on the next
+  dispatch. Emit `lease.expired` +
+  `ticket.requeued_after_lease_expiry` or `ticket.failed_terminal` per
+  row; the terminal payload carries `FailureClass::WorkerCrash` so
+  audit can reconstruct the decision. On the terminal branch the use
+  case (§10.2 / S3) also opens a new `terminal_failure` issue in the
+  same transaction (M3 onwards; M1 emits the event with `issue_id =
+  null`). Returns
+  `ExpireReport { expired_leases: Vec<LeaseId>, requeued_tickets:
+  Vec<TicketId>, failed_tickets: Vec<TicketId> }`.
 - `force_release(lease_id, actor, reason, also_requeue: bool) -> Result<()>` —
   admin/test path: transition lease to `force_released`, ticket to
-  `ready` if `also_requeue` else `failed`. Emit `lease.force_released`
-  with `{ actor, reason }` in the payload.
+  `ready` if `also_requeue` else `failed`. Both branches emit
+  `lease.force_released` with `{ actor, reason }` in the payload, and
+  both emit a matching `ticket.*` event so the ticket state transition
+  is durably recorded (§14: "Events are recorded for all state
+  transitions"). Specifically:
 
-**Worked example: `max_attempts = 2`.** This sequence yields the expected
-two dispatched attempts before terminal failure:
+  - **Failed branch (`also_requeue = false`)** — the ticket transition
+    is itself a terminal failure, equivalent to the `fail` terminal
+    branch. The use case emits `ticket.failed_terminal` with
+    `class = FailureClass::UserCancellation` (the operator's `actor`
+    and `reason` are preserved on the accompanying
+    `lease.force_released` payload, not duplicated onto
+    `ticket.failed_terminal`), and on M3 onwards opens a new
+    `terminal_failure` issue per the §10.2 / S3 auto-open contract;
+    on M1 the `issue_id` payload field is `null`.
+  - **Requeue branch (`also_requeue = true`)** — the ticket
+    transitions from `leased` back to `ready`. The branch has a
+    retry-budget precondition: `ticket.attempt < ticket.max_attempts`
+    must hold at call time. If retries are exhausted
+    (`attempt >= max_attempts`), the call rejects with
+    `VoomError::Conflict` (message names the ticket id, current
+    `attempt`, `max_attempts`, and tells the operator to use
+    `also_requeue = false` for the terminal path); the lease, ticket,
+    and event log are **all unchanged** — no `lease.force_released`,
+    no ticket transition, no issue. Mirrors the same retry-budget
+    rule `fail` and `expire_due` already enforce, and prevents
+    stranding a ticket in `ready` that no subsequent `acquire` will
+    claim (acquire's precondition includes `attempt < max_attempts`).
+    On success, the use case emits a
+    `ticket.requeued_after_force_release` event (parallel to
+    `ticket.requeued_after_lease_expiry` for the expire-driven
+    requeue) whose payload carries `{ ticket_id, lease_id, actor,
+    reason }`. `attempt` is **not** bumped on the requeue itself —
+    the next `acquire` bumps it, matching the convention §7.5
+    already establishes for `fail` and `expire_due` requeue paths.
+    `next_eligible_at` is set to `now` (no backoff — the operator
+    explicitly chose to requeue immediately; this differs from the
+    backoff-driven `fail`-retriable requeue).
+
+**Backoff seam.** Backoff is exposed as a named function on
+`TicketRepo` so the policy is replaceable without changing the lease
+lifecycle:
+
+```rust
+pub trait TicketRepo: Repository {
+    /// Returns the duration to wait before the next acquire is eligible.
+    /// Sprint 1 implementation produces a deterministic seeded-jitter
+    /// value (or a stable fixed step picked to keep existing tests
+    /// stable); Sprint 4+ replaces the body with the architectural
+    /// capped-exponential-with-jitter shape from the design doc
+    /// (Error Handling And Recovery → Retry policy). The signature
+    /// stays stable across that swap.
+    fn default_backoff(
+        attempt: u32,
+        clock: &dyn Clock,
+        rng:   &mut dyn RngCore,
+    ) -> Duration;
+    /* + all other TicketRepo methods */
+}
+```
+
+The `clock` and `rng` parameters mirror the existing `Clock`-injection
+seam used by §12.3 — `RngCore` is injected through a small
+`voom-core::rng_test_support` module that exposes a deterministic
+`FrozenRng` (returns a single configured value) and a `SeededRng` for
+property-style tests. `ControlPlane::handle_lease_fail` constructs the
+RNG from its injected `Arc<dyn Rng>` and passes it through to
+`LeaseRepo::fail`, which forwards to `TicketRepo::default_backoff`.
+The architectural retry-policy parameters (`base`, `cap`) are owned by
+scheduling policy in Sprint 4+; Sprint 1 hard-codes whatever
+deterministic shape keeps the §13 integration tests stable, since the
+backoff *shape* does not affect the attempt-accounting invariant the
+worked example below exercises.
+
+**Worked example: `max_attempts = 2`.** Using a retriable class
+(`FailureClass::WorkerTimeout` here, but any class for which
+`class.is_retriable()` is `true` would behave identically), this
+sequence yields the expected two dispatched attempts before terminal
+failure:
 
 1. Initial: `attempt = 0`, `state = ready`.
 2. `acquire` → `attempt = 1`, `state = leased`.
-3. `fail(retriable = true)` → `attempt = 1`, `state = ready` (1 < 2).
+3. `fail(FailureClass::WorkerTimeout)` → `is_retriable() = true` and
+   `1 < 2`, so the ticket requeues: `attempt = 1`, `state = ready`.
 4. `acquire` → `attempt = 2`, `state = leased`.
-5. `fail(retriable = true)` → `attempt = 2`, `state = failed` (2 < 2 is
-   false, so the ticket transitions to terminal failure).
+5. `fail(FailureClass::WorkerTimeout)` → `is_retriable() = true` but
+   `2 < 2` is `false`, so the ticket goes terminal:
+   `attempt = 2`, `state = failed`.
 
 Total dispatched attempts: 2. The same convention applies to
-`expire_due` in place of `fail`.
+`expire_due` in place of `fail` (its implicit class is
+`FailureClass::WorkerCrash`, also retriable). Passing a non-retriable
+or operator-required class to `fail` short-circuits this entirely:
+`is_retriable()` returns `false`, so the ticket transitions to
+`failed` on the first call regardless of `attempt` vs. `max_attempts`.
 
 ### 7.6 `workers`, `worker_capabilities`, `worker_grants`
 
@@ -2413,7 +2540,7 @@ Sprint 1.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK | |
-| `kind` | TEXT NOT NULL | `unknown_identity` \| `missing_subtitle` \| `duplicate_candidate` \| `policy_noncompliant` \| `health_failed` \| `external_sync_failed` \| `artifact_unavailable` \| `variant_retention_conflict` \| `worker_untrusted` |
+| `kind` | TEXT NOT NULL | `unknown_identity` \| `missing_subtitle` \| `duplicate_candidate` \| `policy_noncompliant` \| `health_failed` \| `external_sync_failed` \| `artifact_unavailable` \| `variant_retention_conflict` \| `worker_untrusted` \| `terminal_failure` |
 | `severity` | TEXT NOT NULL | `critical` \| `high` \| `medium` \| `low` \| `info` |
 | `priority` | TEXT NOT NULL | `urgent` \| `high` \| `normal` \| `low` \| `someday` |
 | `priority_source` | TEXT NOT NULL | `system` \| `user` \| `policy` \| `external` |
@@ -2433,7 +2560,7 @@ Sprint 1.
 |---|---|---|
 | `id` | INTEGER PK | |
 | `issue_id` | INTEGER NOT NULL REFERENCES `issues(id)` ON DELETE CASCADE | |
-| `link_type` | TEXT NOT NULL | `evidence` \| `file_asset` \| `bundle` \| `worker` \| `external_system` \| `ticket` \| `use_lease` |
+| `link_type` | TEXT NOT NULL | `evidence` \| `file_asset` \| `bundle` \| `worker` \| `external_system` \| `ticket` \| `lease` \| `use_lease` |
 | `target_type` | TEXT NOT NULL | |
 | `target_id` | INTEGER NOT NULL | |
 | `created_at` | TEXT NOT NULL | |
@@ -2441,11 +2568,90 @@ Sprint 1.
 `IssueRepo` operations:
 
 - `open(NewIssue) -> IssueId` → `issue.opened`
+- `open_in_tx(tx, NewIssue) -> IssueId` → `issue.opened` inside the
+  caller's transaction
 - `reprioritize(issue_id, priority, source, reason)` → `issue.priority_changed`
 - `resolve(issue_id)` → `issue.resolved`
 - `suppress(issue_id, until)` → `issue.suppressed`
 - `accept(issue_id, actor)` → `issue.accepted`
 - `link(issue_id, link)` → `issue.linked`
+- `link_in_tx(tx, issue_id, link)` → `issue.linked` inside the
+  caller's transaction
+
+**Terminal-failure auto-open contract (arch spec → Issue Model;
+research-note §11.2 DLQ analogue).** Whenever a ticket transitions to
+`failed` terminally — via any of:
+
+- `LeaseRepo::fail` with a non-retriable or operator-required
+  `FailureClass`, or with retries exhausted on a retriable class,
+- `LeaseRepo::expire_due` past `max_attempts` (implicit
+  `FailureClass::WorkerCrash`),
+- `LeaseRepo::force_release(_, _, _, also_requeue = false)` (implicit
+  `FailureClass::UserCancellation` — the operator's `actor` /
+  `reason` are captured on the accompanying `lease.force_released`
+  event payload, not on the issue itself)
+
+— the corresponding control-plane use case
+(`ControlPlane::handle_lease_fail` /
+`ControlPlane::expire_due_leases` /
+`ControlPlane::force_release_lease`) calls, **in the same transaction
+that writes `ticket.failed_terminal` and the matching
+`lease.released` / `lease.expired` / `lease.force_released` event**:
+
+- `IssueRepo::open_in_tx(tx, NewIssue { kind: terminal_failure,
+  severity, priority, priority_source: 'system', title: …, body: … })`
+  followed by `link_in_tx` for `{ link_type: 'ticket', target_type:
+  'ticket', target_id: ticket_id }` and `{ link_type: 'lease',
+  target_type: 'lease', target_id: last_lease_id }`.
+
+Cardinality, by milestone:
+
+- **M1** — no `terminal_failure` issue is opened (the `issues` table
+  does not exist yet; `IssueRepo` lands in M3). M1's
+  `LeaseRepo::fail` and `LeaseRepo::expire_due` emit the
+  `ticket.failed_terminal` event with `issue_id = null`. M1
+  integration tests that exercise terminal transitions assert the
+  null payload and confirm the `issues` table is unaffected (no rows
+  exist because no table exists).
+- **M3** — every terminal transition opens exactly one new
+  `terminal_failure` issue. There is no "update existing" branch: the
+  ticket state machine (§7.2) makes `failed` terminal, so a given
+  ticket transitions to `failed` at most once, and there is no prior
+  `terminal_failure` issue for the same ticket to update. Aggregation
+  across multiple failed tickets of the same job is deferred to
+  Sprint 3 once jobs acquire an execution plan and a natural roll-up
+  scope. The `ticket.failed_terminal` payload's `issue_id` is set to
+  the newly-opened issue's id.
+
+On the M3 path the `severity` and `priority` fields of `NewIssue` are
+derived from the `FailureClass` value the use case has in hand,
+through the methods defined in §12.5:
+
+- `severity = class.issue_severity()` —
+  `FailureRetryClass::OperatorRequired` and `NonRetriable` map to
+  `IssueSeverity::High`; `Retriable` (only reachable on the terminal
+  branch with retries exhausted) maps to `IssueSeverity::Medium`.
+- `priority = class.issue_priority()` —
+  `FailureRetryClass::OperatorRequired` and `NonRetriable` map to
+  `IssuePriority::High`; `Retriable` maps to `IssuePriority::Normal`.
+
+Both methods are total and `const`; the use case never has to invent
+a default. The `title` and `body` strings are composed by the use case
+from the ticket's `kind`, the `FailureClass` variant, and the last
+lease's worker — the spec does not pin their exact wording because
+they are operator-facing diagnostic text, not part of any machine
+contract. `TicketFailedTerminal`'s event payload carries `issue_id`
+(§6.1) so audit and the CLI can navigate from the event to the issue.
+
+The M3 wiring extends the M1 `LeaseRepo` API by zero — the issue
+auto-open is a use-case-layer composition of `_in_tx` calls on
+`IssueRepo` and the existing `LeaseRepo` / `TicketRepo` / `EventRepo`
+methods, not a new repo method on `LeaseRepo` or `TicketRepo`. The M3
+migration that introduces the `issues` / `issue_links` tables is the
+same migration that flips the use-case wiring on; before that
+migration runs, `ControlPlane::handle_lease_fail` /
+`ControlPlane::expire_due_leases` follow the M1 path and write the
+`ticket.failed_terminal` event with `issue_id = null`.
 
 ### 10.3 Quality scores
 
@@ -2609,6 +2815,37 @@ JSON for at least:
 - `DependencyCycle` → `"DEPENDENCY_CYCLE"`
 - `Conflict` → `"CONFLICT"`
 
+In addition, `FailureClass::into_error_code` (§12.5) maps each
+ticket-failure category to an `ErrorCode`. Most reuse the variants
+above (`BlockedByUseLease`, `StaleIdentityEvidence`,
+`ClosureResolutionIncomplete`); the remaining failure categories add
+their own ErrorCode variants so the JSON envelope's `error.code`
+field is unambiguous on a `ticket.failed_terminal` surfacing path:
+
+- `WorkerTimeout` → `"WORKER_TIMEOUT"`
+- `WorkerCrash` → `"WORKER_CRASH"`
+- `NoEligibleWorker` → `"NO_ELIGIBLE_WORKER"`
+- `ArtifactUnavailable` → `"ARTIFACT_UNAVAILABLE"`
+- `ArtifactChecksumMismatch` → `"ARTIFACT_CHECKSUM_MISMATCH"`
+- `ExternalSystemUnavailable` → `"EXTERNAL_SYSTEM_UNAVAILABLE"`
+- `ExternalSystemRateLimited` → `"EXTERNAL_SYSTEM_RATE_LIMITED"`
+- `VerificationFailure` → `"VERIFICATION_FAILURE"`
+- `BackupFailure` → `"BACKUP_FAILURE"`
+- `CommitFailure` → `"COMMIT_FAILURE"`
+- `PolicyParseError` → `"POLICY_PARSE_ERROR"`
+- `PolicyValidationError` → `"POLICY_VALIDATION_ERROR"`
+- `MissingCapability` → `"MISSING_CAPABILITY"`
+- `MalformedWorkerResult` → `"MALFORMED_WORKER_RESULT"`
+- `UserCancellation` → `"USER_CANCELLATION"`
+- `ApprovalRequired` → `"APPROVAL_REQUIRED"`
+- `PriorityPolicyConflict` → `"PRIORITY_POLICY_CONFLICT"`
+
+Sprint 1 has no callers that *emit* most of these (no worker process,
+no policy parser); they exist to make the `FailureClass →
+ErrorCode` mapping total at the type level so tests can construct
+synthetic terminal failures of any class and the CLI envelope shape
+stays stable.
+
 `VoomError` gains matching `(String)`-tuple variants — matching Sprint 0's
 pattern. The message text carries the human-readable context (lease ID,
 evidence drift summary, blocking `commit_id` plus scope type and id for
@@ -2632,6 +2869,24 @@ pub enum VoomError {
     ClosureResolutionIncomplete(String),
     DependencyCycle(String),
     Conflict(String),
+    /* FailureClass-derived variants, see list above */
+    WorkerTimeout(String),
+    WorkerCrash(String),
+    NoEligibleWorker(String),
+    ArtifactUnavailable(String),
+    ArtifactChecksumMismatch(String),
+    ExternalSystemUnavailable(String),
+    ExternalSystemRateLimited(String),
+    VerificationFailure(String),
+    BackupFailure(String),
+    CommitFailure(String),
+    PolicyParseError(String),
+    PolicyValidationError(String),
+    MissingCapability(String),
+    MalformedWorkerResult(String),
+    UserCancellation(String),
+    ApprovalRequired(String),
+    PriorityPolicyConflict(String),
 }
 ```
 
@@ -2707,6 +2962,111 @@ tracing targets land per repo module (`voom_store::repo::leases`,
 `voom_store::repo::commit_safety_gate`, …) as a natural consequence of
 the module layout.
 
+### 12.5 `FailureClass`
+
+`voom-core::failure::FailureClass` enumerates the failure categories
+defined by the architectural spec's Failure taxonomy table (Error
+Handling And Recovery → Failure taxonomy). It is the single source of
+truth for retriability decisions across `LeaseRepo::fail`,
+`LeaseRepo::expire_due`, and the `ticket.failed_*` event payloads.
+
+```rust
+pub enum FailureClass {
+    // Retriable
+    WorkerTimeout,
+    WorkerCrash,
+    NoEligibleWorker,
+    ArtifactUnavailable,
+    ArtifactChecksumMismatch,
+    ExternalSystemUnavailable,
+    ExternalSystemRateLimited,
+    VerificationFailure,
+    BackupFailure,
+    CommitFailure,
+    // Non-retriable
+    PolicyParseError,
+    PolicyValidationError,
+    MissingCapability,
+    MalformedWorkerResult,
+    UserCancellation,
+    // Operator-required
+    StaleIdentityEvidence,
+    ClosureResolutionIncomplete,
+    BlockedByActiveUseLease,
+    ApprovalRequired,
+    PriorityPolicyConflict,
+}
+
+impl FailureClass {
+    /// True if a fresh attempt against the same input could plausibly
+    /// succeed without operator intervention or upstream change.
+    pub const fn is_retriable(self) -> bool { /* ... */ }
+
+    /// Coarse-grained retry class — used by the terminal-failure
+    /// auto-open path (§10.2) to derive issue priority and severity.
+    pub const fn retry_class(self) -> FailureRetryClass { /* ... */ }
+
+    /// Severity to stamp on the `terminal_failure` issue opened by
+    /// the auto-open path (§10.2 / S3). `OperatorRequired` and
+    /// `NonRetriable` classes default to `IssueSeverity::High`;
+    /// `Retriable` (always reached only with retries exhausted)
+    /// defaults to `IssueSeverity::Medium`.
+    pub const fn issue_severity(self) -> IssueSeverity {
+        match self.retry_class() {
+            FailureRetryClass::OperatorRequired | FailureRetryClass::NonRetriable
+                => IssueSeverity::High,
+            FailureRetryClass::Retriable
+                => IssueSeverity::Medium,
+        }
+    }
+
+    /// Priority to stamp on the `terminal_failure` issue opened by
+    /// the auto-open path (§10.2 / S3). `OperatorRequired` and
+    /// `NonRetriable` classes default to `IssuePriority::High`;
+    /// `Retriable` (retries exhausted) defaults to
+    /// `IssuePriority::Normal`.
+    pub const fn issue_priority(self) -> IssuePriority {
+        match self.retry_class() {
+            FailureRetryClass::OperatorRequired | FailureRetryClass::NonRetriable
+                => IssuePriority::High,
+            FailureRetryClass::Retriable
+                => IssuePriority::Normal,
+        }
+    }
+
+    /// Maps to the `ErrorCode` the CLI envelope surfaces on a
+    /// `ticket.failed_terminal` path (§12.1).
+    pub const fn into_error_code(self) -> ErrorCode { /* ... */ }
+}
+
+pub enum FailureRetryClass {
+    Retriable,
+    NonRetriable,
+    OperatorRequired,
+}
+```
+
+`IssueSeverity` and `IssuePriority` are the enum forms of the
+`severity` and `priority` columns on `issues` (§10.2); both live in
+`voom-core::issue` so cross-crate consumers (events, control plane,
+CLI) reference one type. The retriability partition mirrors the
+architectural taxonomy exactly: the ten `retriable` variants return
+`true` from `is_retriable` and `FailureRetryClass::Retriable` from
+`retry_class`; the five `non_retriable` variants return
+`FailureRetryClass::NonRetriable`; the five `operator_required`
+variants return `FailureRetryClass::OperatorRequired`. The
+compiler-derived totality of the match inside each method is what
+prevents a future variant from silently defaulting. Operator-required
+variants are non-retriable from the lease lifecycle's perspective —
+they still surface a `terminal_failure` issue (§10.2 / S3), and the
+issue's body names the operator action that, once taken, makes a
+fresh attempt viable.
+
+`FailureClass` is also the payload field on
+`TicketFailedRetriable`/`TicketFailedTerminal` events (§6.1), so
+audit can reconstruct the retriability decision without re-deriving
+it from the message text.
+
 ## 13. Testing Strategy
 
 Sprint 0 ADR 0004 established sibling unit tests (`foo.rs` + `foo_test.rs`)
@@ -2759,10 +3119,73 @@ Cross-repo flows live as integration tests:
   → heartbeat (multiple) → expired (via `expire_due`) → requeued → leased
   → succeeded. Asserts every event row. Also covers attempt accounting:
   with `max_attempts = 2`, exercises the §7.5 worked example end-to-end
-  through `fail(retriable = true)` (two dispatched attempts before
-  `ticket.failed_terminal`) and through `expire_due` (same convention);
-  with `max_attempts = 3`, exercises a mixed `fail` + `expire_due`
-  sequence and asserts the final state matches the documented semantics.
+  through `fail(FailureClass::WorkerTimeout)` (two dispatched attempts
+  before `ticket.failed_terminal`) and through `expire_due` (same
+  convention); with `max_attempts = 3`, exercises a mixed `fail` +
+  `expire_due` sequence and asserts the final state matches the
+  documented semantics. Also exercises the new `FailureClass`-driven
+  retriability seam: `fail(FailureClass::StaleIdentityEvidence)`
+  transitions the ticket to `failed` immediately (no
+  `is_retriable`), regardless of remaining attempts; the
+  `ticket.failed_terminal` payload carries
+  `class = stale_identity_evidence`. Additionally, exercises the
+  `force_release` requeue-budget precondition: with `max_attempts =
+  1`, after `acquire` (which bumps `attempt` to 1),
+  `force_release(_, _, _, also_requeue = true)` returns
+  `VoomError::Conflict` (`attempt = 1`, `max_attempts = 1` —
+  no headroom for requeue); asserts the lease state is unchanged,
+  the ticket is still `leased`, and no `lease.force_released` or
+  `ticket.requeued_after_force_release` event row was written. The
+  same fixture then calls `force_release(_, _, _, also_requeue =
+  false)` and asserts the terminal path lands cleanly (lease
+  `force_released`, ticket `failed`, single `lease.force_released`
+  + `ticket.failed_terminal` pair). This locks the invariant that
+  the requeue branch never produces a ticket no future `acquire`
+  can claim.
+- `terminal_failure_opens_issue.rs` (M3) — covers the §10.2 / S3
+  auto-open contract. The test is parameterized over the three
+  terminal-transition paths defined in §7.5; each case shares the
+  same issue/event assertions except for the lease event kind, which
+  is fixed by the trigger:
+
+  | Trigger | Implicit `FailureClass` | Lease event |
+  |---|---|---|
+  | `fail(_, FailureClass::MalformedWorkerResult)` | `MalformedWorkerResult` | `lease.released` |
+  | `expire_due` past `max_attempts` | `WorkerCrash` | `lease.expired` |
+  | `force_release(_, actor, reason, also_requeue = false)` | `UserCancellation` | `lease.force_released` |
+
+  Per case, with a fresh ticket and no prior issues, the trigger
+  results in: exactly one new row in `issues` with
+  `kind = 'terminal_failure'`, `priority_source = 'system'`, status
+  `open`, `severity = class.issue_severity()`,
+  `priority = class.issue_priority()` (§12.5); exactly one
+  `issue_links` row of `link_type = 'ticket'` referencing the failed
+  ticket and one of `link_type = 'lease'` referencing the last
+  lease; exactly one `ticket.failed_terminal` event whose payload's
+  `class` matches the row's implicit `FailureClass` and whose
+  `issue_id` matches the new issue id; exactly one lease event of
+  the kind named in the trigger row above; all rows committed
+  atomically — a fixture that injects a panic mid-transaction proves
+  no partial state survives. The `force_release` case additionally
+  asserts the operator's `actor` / `reason` ride on the
+  `lease.force_released` event payload and are **not** duplicated
+  onto the issue.
+  - Retriable-then-terminal: with `max_attempts = 2`, the first
+    `fail(FailureClass::WorkerTimeout)` opens **no** issue (the
+    `issues` table is empty after the call; the
+    `ticket.failed_retriable` event payload has no `issue_id` field
+    per §6.1, only `next_eligible_at`); a second
+    `fail(FailureClass::WorkerTimeout)` exhausts retries, transitions
+    the ticket to `failed`, and opens exactly one `terminal_failure`
+    issue whose id appears in the `ticket.failed_terminal` payload's
+    `issue_id` field — proving the auto-open path fires only on the
+    terminal transition, never on a retriable one.
+  - Negative test: a retriable failure with `attempt <
+    max_attempts` does **not** open a `terminal_failure` issue —
+    the `issues` table is empty after the call. This is the
+    invariant the DLQ analogue rests on: a `terminal_failure` issue
+    is exactly as durable as the terminal transition, and never
+    appears on a retry-able path.
 - `lease_expire_and_recover.rs` — bulk `expire_due` with hundreds of
   leases; per-row events; second invocation is a no-op.
 - `ticket_dependency_unlock.rs` — DAG of N tickets with `phase`
@@ -3173,7 +3596,7 @@ snapshot diffs stable.
 |---|---|
 | Tests can create jobs, lease tickets, expire leases, and recover work. | `crates/voom-store/tests/ticket_lease_lifecycle.rs`, `lease_expire_and_recover.rs` |
 | Tests can create a file asset, add versions and locations, and report its event/evidence history. | `crates/voom-store/tests/ingest_identity_invariants.rs`, `rename_reconciliation.rs`; the `voom asset get` CLI snapshot exercises the read-side report |
-| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::prepare_blocked_by_use_lease` (Phase A `BlockedByUseLease` under the three-phase API; the matching `authorize_blocked_by_use_lease` test exercises the architectural pre-mutation recheck path) together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record` |
+| Tests can create a bundle, open and prioritize an issue, record a quality score, and block a commit with a use lease. | `crates/voom-store/tests/commit_safety_gate.rs::prepare_blocked_by_use_lease` (Phase A `BlockedByUseLease` under the three-phase API; the matching `authorize_blocked_by_use_lease` test exercises the architectural pre-mutation recheck path) together with `repo/issues_test.rs::prioritize` and `repo/quality_scores_test.rs::record`. The DLQ-analogue terminal-failure → issue wiring (§10.2 / S3) is verified by `crates/voom-store/tests/terminal_failure_opens_issue.rs`. |
 | Events are recorded for all state transitions. | Every repo `_test.rs` asserts the matching `events` row; `event_log_append_only.rs` asserts immutability |
 | In-memory SQLite tests exercise the same repositories as disk mode. | Repos inherit `test_support::test_pool()` for `:memory:`; `tests/disk_mode.rs` runs the same fixture flow against a `tempfile`-backed disk DB; `just ci` runs both |
 
