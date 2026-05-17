@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+use voom_core::{FailureClass, IssueId};
 
 use crate::kind::EventKind;
 
@@ -77,6 +78,10 @@ pub struct TicketFailedRetriablePayload {
     pub attempt: u32,
     pub max_attempts: u32,
     pub reason: String,
+    /// Failure category that drove the retriability decision. Audit
+    /// reads this back through `EventKind::TicketFailedRetriable` to
+    /// reconstruct the decision without re-deriving it from `reason`.
+    pub class: FailureClass,
     #[serde(with = "time::serde::iso8601")]
     pub next_eligible_at: OffsetDateTime,
 }
@@ -87,12 +92,32 @@ pub struct TicketFailedTerminalPayload {
     pub attempt: u32,
     pub max_attempts: u32,
     pub reason: String,
+    /// Failure category. M3's auto-open path (§10.2 / S3) reads it back
+    /// to populate `issues.severity` / `issues.priority`.
+    pub class: FailureClass,
+    /// `terminal_failure` issue auto-opened by the §10.2 / S3 path.
+    /// `None` in M1 (the `issues` table doesn't exist yet) — `Some(id)`
+    /// in M3 once `IssueRepo` lands. Always serialized (`null` in M1)
+    /// so the wire shape stays stable across the M3 migration.
+    pub issue_id: Option<IssueId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TicketRequeuedAfterLeaseExpiryPayload {
     pub ticket_id: u64,
     pub lease_id: u64,
+}
+
+/// Emitted alongside `lease.force_released` when the operator asked
+/// for `also_requeue = true` and the ticket still had attempts
+/// remaining. Carries the operator `actor` / `reason` for audit
+/// continuity even though `lease.force_released` also records them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TicketRequeuedAfterForceReleasePayload {
+    pub ticket_id: u64,
+    pub lease_id: u64,
+    pub actor: String,
+    pub reason: String,
 }
 
 // --- leases (worker-execution) ---------------------------------------------
@@ -367,6 +392,8 @@ pub enum Event {
     TicketFailedTerminal(TicketFailedTerminalPayload),
     #[serde(rename = "ticket.requeued_after_lease_expiry")]
     TicketRequeuedAfterLeaseExpiry(TicketRequeuedAfterLeaseExpiryPayload),
+    #[serde(rename = "ticket.requeued_after_force_release")]
+    TicketRequeuedAfterForceRelease(TicketRequeuedAfterForceReleasePayload),
     #[serde(rename = "lease.acquired")]
     LeaseAcquired(LeaseAcquiredPayload),
     #[serde(rename = "lease.released")]
@@ -442,6 +469,7 @@ impl Event {
             Self::TicketFailedRetriable(_) => EventKind::TicketFailedRetriable,
             Self::TicketFailedTerminal(_) => EventKind::TicketFailedTerminal,
             Self::TicketRequeuedAfterLeaseExpiry(_) => EventKind::TicketRequeuedAfterLeaseExpiry,
+            Self::TicketRequeuedAfterForceRelease(_) => EventKind::TicketRequeuedAfterForceRelease,
             Self::LeaseAcquired(_) => EventKind::LeaseAcquired,
             Self::LeaseReleased(_) => EventKind::LeaseReleased,
             Self::LeaseExpired(_) => EventKind::LeaseExpired,
