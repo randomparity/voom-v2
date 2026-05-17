@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_core::SystemClock;
@@ -22,8 +22,8 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::test_support::T0;
 
-const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const N: usize = 500;
 
 async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {

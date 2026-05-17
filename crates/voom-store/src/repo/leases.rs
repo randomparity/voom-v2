@@ -359,7 +359,6 @@ impl LeaseRepo for SqliteLeaseRepo {
         .map_err(|e| VoomError::Database(format!("leases release: {e}")))?;
         if lease_res.rows_affected() != 1 {
             tracing::warn!(
-                target: "voom_store::repo::leases",
                 lease_id = i64_from_u64(lease_id.0),
                 "release aborting: lease no longer held"
             );
@@ -381,7 +380,6 @@ impl LeaseRepo for SqliteLeaseRepo {
         .map_err(|e| VoomError::Database(format!("tickets release: {e}")))?;
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
-                target: "voom_store::repo::leases",
                 lease_id = i64_from_u64(lease_id.0),
                 ticket_id = i64_from_u64(lease.ticket_id.0),
                 "release aborting: ticket no longer leased"
@@ -458,7 +456,6 @@ impl LeaseRepo for SqliteLeaseRepo {
         .map_err(|e| VoomError::Database(format!("leases release on fail: {e}")))?;
         if lease_res.rows_affected() != 1 {
             tracing::warn!(
-                target: "voom_store::repo::leases",
                 lease_id = i64_from_u64(lease_id.0),
                 "fail aborting: lease no longer held"
             );
@@ -485,7 +482,6 @@ impl LeaseRepo for SqliteLeaseRepo {
             .map_err(|e| VoomError::Database(format!("tickets requeue: {e}")))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
-                    target: "voom_store::repo::leases",
                     lease_id = i64_from_u64(lease_id.0),
                     ticket_id = i64_from_u64(lease.ticket_id.0),
                     "fail aborting: ticket no longer leased on requeue"
@@ -507,7 +503,6 @@ impl LeaseRepo for SqliteLeaseRepo {
             .map_err(|e| VoomError::Database(format!("tickets fail terminal: {e}")))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
-                    target: "voom_store::repo::leases",
                     lease_id = i64_from_u64(lease_id.0),
                     ticket_id = i64_from_u64(lease.ticket_id.0),
                     "fail aborting: ticket no longer leased on terminal fail"
@@ -584,7 +579,6 @@ impl LeaseRepo for SqliteLeaseRepo {
             .map_err(|e| VoomError::Database(format!("lease expire: {e}")))?;
             if lease_res.rows_affected() != 1 {
                 tracing::warn!(
-                    target: "voom_store::repo::leases",
                     lease_id = lease_id_i,
                     ticket_id = ticket_id_i,
                     "expire_due aborting: lease no longer held"
@@ -612,7 +606,6 @@ impl LeaseRepo for SqliteLeaseRepo {
                 .map_err(|e| VoomError::Database(format!("ticket requeue: {e}")))?;
                 if ticket_res.rows_affected() != 1 {
                     tracing::warn!(
-                        target: "voom_store::repo::leases",
                         lease_id = lease_id_i,
                         ticket_id = ticket_id_i,
                         "expire_due aborting: ticket not leased on requeue"
@@ -634,7 +627,6 @@ impl LeaseRepo for SqliteLeaseRepo {
                 .map_err(|e| VoomError::Database(format!("ticket fail: {e}")))?;
                 if ticket_res.rows_affected() != 1 {
                     tracing::warn!(
-                        target: "voom_store::repo::leases",
                         lease_id = lease_id_i,
                         ticket_id = ticket_id_i,
                         "expire_due aborting: ticket not leased on terminal fail"
@@ -694,7 +686,6 @@ impl LeaseRepo for SqliteLeaseRepo {
         .map_err(|e| VoomError::Database(format!("lease force_release: {e}")))?;
         if lease_res.rows_affected() != 1 {
             tracing::warn!(
-                target: "voom_store::repo::leases",
                 lease_id = i64_from_u64(lease_id.0),
                 "force_release aborting: lease no longer held"
             );
@@ -715,7 +706,6 @@ impl LeaseRepo for SqliteLeaseRepo {
         .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?;
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
-                target: "voom_store::repo::leases",
                 lease_id = i64_from_u64(lease_id.0),
                 ticket_id = i64_from_u64(lease.ticket_id.0),
                 "force_release aborting: ticket no longer leased"

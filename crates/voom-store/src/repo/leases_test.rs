@@ -1,14 +1,12 @@
 use super::*;
 
 use serde_json::json;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 use voom_core::{TicketId, VoomError, WorkerId};
 
 use crate::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
 use crate::repo::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
-use crate::test_support::fresh_initialized_pool_at;
-
-const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Returns the pool, the three repos, the seeded ticket id, the seeded
 /// worker id, and the tempfile (caller must bind it to keep the `SQLite`

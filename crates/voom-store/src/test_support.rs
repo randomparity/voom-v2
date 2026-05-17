@@ -33,6 +33,12 @@ use crate::pool::connect;
 use crate::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
 use crate::repo::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo};
 
+/// Shared default timestamp for builder fixtures and tests. Keyed on
+/// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
+/// Hoisted here so the 6+ `const T0` declarations across the test suite
+/// import a single source of truth instead of redeclaring it.
+pub const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
 /// Format a filesystem path as a `sqlite://` URL. Centralizes the
 /// `format!("sqlite://{}", path.display())` literal that otherwise appears
 /// 20+ times across the test suite.

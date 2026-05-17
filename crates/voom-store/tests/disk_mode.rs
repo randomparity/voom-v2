@@ -11,17 +11,15 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use time::{Duration, OffsetDateTime};
+use time::Duration;
 
 use voom_control_plane::ControlPlane;
 use voom_core::SystemClock;
 use voom_store::repo::leases::{LeaseRepo, NewLease, ReleaseReason};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind, WorkerRepo};
-use voom_store::test_support::sqlite_url_for;
+use voom_store::test_support::{T0, sqlite_url_for};
 use voom_store::{connect, init};
-
-const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
 #[tokio::test]
 async fn m1_fixture_flow_persists_across_reconnect() {

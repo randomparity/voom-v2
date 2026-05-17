@@ -139,10 +139,6 @@ impl ControlPlane {
     }
 
     #[must_use]
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
-    }
-    #[must_use]
     pub fn clock(&self) -> &dyn Clock {
         &*self.clock
     }
