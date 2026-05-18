@@ -27,6 +27,8 @@ pub enum SubjectType {
     FileLocation,
     IdentityEvidence,
     MediaSnapshot,
+    // M3 — use leases.
+    AssetUseLease,
 }
 
 impl SubjectType {
@@ -48,6 +50,7 @@ impl SubjectType {
             Self::FileLocation => "file_location",
             Self::IdentityEvidence => "identity_evidence",
             Self::MediaSnapshot => "media_snapshot",
+            Self::AssetUseLease => "asset_use_lease",
         }
     }
 
@@ -79,6 +82,7 @@ impl SubjectType {
             "file_location" => Self::FileLocation,
             "identity_evidence" => Self::IdentityEvidence,
             "media_snapshot" => Self::MediaSnapshot,
+            "asset_use_lease" => Self::AssetUseLease,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.subject_type {other:?} not in SubjectType vocab"

@@ -23,7 +23,7 @@ use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
     artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
     identity::SqliteIdentityRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo,
-    tickets::SqliteTicketRepo, workers::SqliteWorkerRepo,
+    tickets::SqliteTicketRepo, use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -49,6 +49,7 @@ pub struct ControlPlane {
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) identity: SqliteIdentityRepo,
     pub(crate) bundles: SqliteBundleRepo,
+    pub(crate) use_leases: SqliteUseLeaseRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -69,6 +70,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("artifacts", &self.artifacts)
             .field("identity", &self.identity)
             .field("bundles", &self.bundles)
+            .field("use_leases", &self.use_leases)
             .finish()
     }
 }
@@ -138,6 +140,7 @@ impl ControlPlane {
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             identity: SqliteIdentityRepo::new(pool.clone()),
             bundles: SqliteBundleRepo::new(pool.clone()),
+            use_leases: SqliteUseLeaseRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -284,6 +287,18 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
         &self.bundles
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn use_leases(&self) -> &SqliteUseLeaseRepo {
+        &self.use_leases
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.use_leases` directly today")]
+    #[must_use]
+    pub(crate) fn use_leases(&self) -> &SqliteUseLeaseRepo {
+        &self.use_leases
     }
 }
 

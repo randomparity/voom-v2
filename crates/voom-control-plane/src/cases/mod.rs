@@ -19,6 +19,7 @@ pub mod identity;
 pub mod jobs;
 pub mod leases;
 pub mod tickets;
+pub mod use_leases;
 pub mod workers;
 
 pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite>, VoomError> {

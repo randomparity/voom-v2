@@ -20,6 +20,9 @@ use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof, ObservedBytes,
     RenameProof,
 };
+use voom_store::repo::use_leases::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseRepo,
+};
 use voom_store::test_support::T0;
 
 async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {
@@ -201,6 +204,88 @@ async fn reconcile_rename_happy_path_object_store() {
         recorded_before + 1
     );
     let _ = outcome;
+}
+
+#[tokio::test]
+async fn reconcile_rename_reanchors_location_scoped_use_lease() {
+    // §9.2: a location-scoped use lease attached to the about-to-be-retired
+    // FileLocation must be re-anchored to the new FileLocation in the same
+    // transaction as the rename. Verifies (a) the lease's scope now points
+    // at the new location, (b) one UseLeaseReanchoredByMove event was
+    // emitted with the right ids, (c) the lease epoch bumped.
+    let (cp, _tmp) = cp().await;
+    let prior_id = seed_local(&cp, "/srv/old.mkv", "h", 10).await;
+    let prior_loc = voom_core::FileLocationId(prior_id);
+    let lease = cp
+        .use_leases()
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Location(prior_loc),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let lease_before = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(lease_before.scope, LeaseScope::Location(prior_loc));
+    let reanchor_before = count_kind(&cp, EventKind::UseLeaseReanchoredByMove).await;
+    let outcome = cp
+        .reconcile_rename(
+            RenameProof::LocalFileIdGeneration {
+                prior_location_id: prior_loc,
+                new_kind: FileLocationKind::LocalPath,
+                new_value: "/srv/new.mkv".to_owned(),
+                file_id: 99,
+                generation: 1,
+                prior_path_missing: true,
+            },
+            ObservedBytes {
+                content_hash: "h".to_owned(),
+                size_bytes: 10,
+            },
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap();
+    let lease_after = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(
+        lease_after.scope,
+        LeaseScope::Location(outcome.new_file_location_id),
+        "lease scope points at the new FileLocation"
+    );
+    assert!(
+        lease_after.epoch > lease_before.epoch,
+        "lease epoch must bump on reanchor"
+    );
+    assert_eq!(
+        count_kind(&cp, EventKind::UseLeaseReanchoredByMove).await,
+        reanchor_before + 1,
+        "exactly one UseLeaseReanchoredByMove event recorded"
+    );
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::UseLeaseReanchoredByMove),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let voom_events::Event::UseLeaseReanchoredByMove(payload) = &page.items[0].envelope.payload
+    else {
+        panic!("expected UseLeaseReanchoredByMove payload");
+    };
+    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.retired_location_id, prior_loc.0);
+    assert_eq!(payload.new_location_id, outcome.new_file_location_id.0);
 }
 
 // --- Conflict paths: every one asserts no side effects -------------------

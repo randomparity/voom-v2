@@ -11,7 +11,7 @@ use voom_events::payload::{
     FileLocationRecordedPayload, FileLocationRetiredByMovePayload, FileVersionCreatedPayload,
     IdentityEvidenceAcceptedPayload, IdentityEvidenceRecordedPayload,
     IdentityEvidenceSupersededPayload, MediaSnapshotRecordedPayload, MediaVariantCreatedPayload,
-    MediaWorkCreatedPayload,
+    MediaWorkCreatedPayload, UseLeaseReanchoredByMovePayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::identity::{
@@ -20,6 +20,7 @@ use voom_store::repo::identity::{
     NewFileLocation, NewFileVersion, NewIdentityEvidence, NewMediaSnapshot, NewMediaVariant,
     NewMediaWork, ObservedBytes, RenameProof, RenameReconciledOutcome,
 };
+use voom_store::repo::use_leases::UseLeaseRepo;
 
 use crate::ControlPlane;
 
@@ -191,12 +192,20 @@ impl ControlPlane {
     }
 
     /// Reconcile a same-physical-object rename. Composes
-    /// `IdentityRepo::reconcile_rename_in_tx` with
-    /// `file_location.retired_by_move` + `file_location.recorded_by_move`
-    /// + `identity_evidence.recorded` (`path_rule_match`) events.
+    /// `IdentityRepo::reconcile_rename_in_tx` with the matching
+    /// `file_location.retired_by_move`, `file_location.recorded_by_move`,
+    /// and `identity_evidence.recorded` (`path_rule_match`) events.
+    /// Any live `Location`-scoped use leases on the retired location
+    /// are re-anchored in the same transaction and each emits a
+    /// `use_lease.reanchored_by_move` event (sprint-1 design §9.2).
     ///
     /// # Errors
     /// Propagates repo and event-append errors.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "rename + evidence + reanchor compose one atomic §9.2 sequence; \
+                  splitting the helper would scatter the event chain"
+    )]
     pub async fn reconcile_rename(
         &self,
         proof: RenameProof,
@@ -273,6 +282,36 @@ impl ControlPlane {
                     provider_version: e.provider_version.clone(),
                     confidence: e.confidence,
                     observed_at: e.observed_at,
+                }),
+            )
+            .await?;
+        }
+        // Per sprint-1 design §9.2: any live `Location`-scoped use leases
+        // attached to the retired `FileLocation` must be re-anchored to
+        // its replacement inside the same transaction as the rename, so
+        // a destructive commit targeting the new location still sees the
+        // protecting lease.
+        let reanchor = self
+            .use_leases
+            .reanchor_on_move_in_tx(
+                &mut tx,
+                outcome.retired_location_id,
+                outcome.new_file_location_id,
+                observed_at,
+            )
+            .await?;
+        for &lease_id in &reanchor.reanchored {
+            append_event(
+                &self.events,
+                &mut tx,
+                SubjectType::AssetUseLease,
+                Some(lease_id.0),
+                observed_at,
+                Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
+                    lease_id: lease_id.0,
+                    retired_location_id: outcome.retired_location_id.0,
+                    new_location_id: outcome.new_file_location_id.0,
+                    reanchored_at: observed_at,
                 }),
             )
             .await?;

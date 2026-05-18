@@ -49,6 +49,7 @@ fn identity_layer_subjects_round_trip() {
         SubjectType::FileLocation,
         SubjectType::IdentityEvidence,
         SubjectType::MediaSnapshot,
+        SubjectType::AssetUseLease,
     ] {
         let wire = s.as_str();
         let back = SubjectType::from_str(wire).unwrap();
@@ -66,4 +67,5 @@ fn identity_layer_subjects_use_expected_wire_format() {
     assert_eq!(SubjectType::FileLocation.as_str(), "file_location");
     assert_eq!(SubjectType::IdentityEvidence.as_str(), "identity_evidence");
     assert_eq!(SubjectType::MediaSnapshot.as_str(), "media_snapshot");
+    assert_eq!(SubjectType::AssetUseLease.as_str(), "asset_use_lease");
 }

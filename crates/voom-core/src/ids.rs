@@ -45,6 +45,9 @@ define_id!(MediaSnapshotId);
 // `issues` table exists yet).
 define_id!(IssueId);
 
+// --- M3 (use leases) ---
+define_id!(UseLeaseId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;

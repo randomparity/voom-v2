@@ -13,6 +13,10 @@ const MIGRATION_0002_SQL: &str = include_str!("../../../migrations/0002_durable_
 /// SQL for migration 0003 (M2 identity & bundles), embedded at compile time.
 const MIGRATION_0003_SQL: &str = include_str!("../../../migrations/0003_identity.sql");
 
+/// SQL for migration 0004 (M3 use leases + commit gate + ancillary registries),
+/// embedded at compile time.
+const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_use_leases_ancillary.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -47,6 +51,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("identity"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0003_SQL),
+            false,
+        ),
+        Migration::new(
+            4,
+            Cow::Borrowed("use_leases_ancillary"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0004_SQL),
             false,
         ),
     ]),

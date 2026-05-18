@@ -5,6 +5,9 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, LocationProof, MediaWorkKind, NewMediaWork,
 };
+use voom_store::repo::use_leases::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
+};
 
 use crate::cases::cp;
 
@@ -166,6 +169,109 @@ async fn reconcile_rename_emits_paired_move_events() {
     );
     // path_rule_match evidence emitted on the new location.
     assert!(count(&cp, EventKind::IdentityEvidenceRecorded).await >= 1);
+}
+
+#[tokio::test]
+async fn reconcile_rename_reanchors_location_scoped_use_lease_in_same_tx() {
+    // §9.2: a live Location-scoped use lease attached to the retired
+    // FileLocation must be re-anchored to the new FileLocation in the
+    // same transaction as the rename, and the reanchor event must land
+    // in the journal alongside the existing rename events.
+    let (cp, _tmp) = cp().await;
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/old.mkv".to_owned(),
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+                observed_at: T0,
+                proof: Some(LocationProof::LocalFileIdGeneration {
+                    file_id: 11,
+                    generation: 1,
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_location_id, ..
+    } = outcome
+    else {
+        panic!("expected NewFileAsset");
+    };
+    // Live Location-scoped lease on the about-to-be-retired location.
+    let lease = cp
+        .acquire_use_lease(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Location(file_location_id),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let reanchor_before = count(&cp, EventKind::UseLeaseReanchoredByMove).await;
+    let retired_before = count(&cp, EventKind::FileLocationRetiredByMove).await;
+    let recorded_before = count(&cp, EventKind::FileLocationRecordedByMove).await;
+    let result = cp
+        .reconcile_rename(
+            voom_store::repo::identity::RenameProof::LocalFileIdGeneration {
+                prior_location_id: file_location_id,
+                new_kind: FileLocationKind::LocalPath,
+                new_value: "/srv/new.mkv".to_owned(),
+                file_id: 11,
+                generation: 1,
+                prior_path_missing: true,
+            },
+            voom_store::repo::identity::ObservedBytes {
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+            },
+            T0 + Duration::seconds(20),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.retired_location_id, file_location_id);
+    // All three rename-side events incremented by one.
+    assert_eq!(
+        count(&cp, EventKind::FileLocationRetiredByMove).await,
+        retired_before + 1
+    );
+    assert_eq!(
+        count(&cp, EventKind::FileLocationRecordedByMove).await,
+        recorded_before + 1
+    );
+    assert_eq!(
+        count(&cp, EventKind::UseLeaseReanchoredByMove).await,
+        reanchor_before + 1
+    );
+    // Verify the reanchor event payload references the right lease and
+    // the right pair of location ids.
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::UseLeaseReanchoredByMove),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let voom_events::Event::UseLeaseReanchoredByMove(payload) = &page.items[0].envelope.payload
+    else {
+        panic!("expected UseLeaseReanchoredByMove payload");
+    };
+    assert_eq!(payload.lease_id, lease.id.0);
+    assert_eq!(payload.retired_location_id, file_location_id.0);
+    assert_eq!(payload.new_location_id, result.new_file_location_id.0);
 }
 
 #[tokio::test]

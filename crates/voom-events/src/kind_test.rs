@@ -28,6 +28,12 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::UseLeaseAcquired,
+        EventKind::UseLeaseReleased,
+        EventKind::UseLeaseExpired,
+        EventKind::UseLeaseForceReleased,
+        EventKind::UseLeaseRecoveredStaleIssuer,
+        EventKind::UseLeaseReanchoredByMove,
     ];
     let mut seen = std::collections::HashSet::new();
     for k in kinds {
@@ -78,6 +84,12 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::UseLeaseAcquired,
+        EventKind::UseLeaseReleased,
+        EventKind::UseLeaseExpired,
+        EventKind::UseLeaseForceReleased,
+        EventKind::UseLeaseRecoveredStaleIssuer,
+        EventKind::UseLeaseReanchoredByMove,
     ];
     for k in kinds {
         let s = k.as_str();
@@ -115,6 +127,12 @@ fn identity_layer_event_kinds_round_trip() {
         EventKind::IdentityEvidenceAccepted,
         EventKind::IdentityEvidenceSuperseded,
         EventKind::MediaSnapshotRecorded,
+        EventKind::UseLeaseAcquired,
+        EventKind::UseLeaseReleased,
+        EventKind::UseLeaseExpired,
+        EventKind::UseLeaseForceReleased,
+        EventKind::UseLeaseRecoveredStaleIssuer,
+        EventKind::UseLeaseReanchoredByMove,
     ] {
         let wire = k.as_str();
         let back = EventKind::from_str(wire).unwrap();
@@ -177,5 +195,20 @@ fn identity_layer_event_kinds_use_dotted_wire_format() {
     assert_eq!(
         EventKind::MediaSnapshotRecorded.as_str(),
         "media_snapshot.recorded"
+    );
+    assert_eq!(EventKind::UseLeaseAcquired.as_str(), "use_lease.acquired");
+    assert_eq!(EventKind::UseLeaseReleased.as_str(), "use_lease.released");
+    assert_eq!(EventKind::UseLeaseExpired.as_str(), "use_lease.expired");
+    assert_eq!(
+        EventKind::UseLeaseForceReleased.as_str(),
+        "use_lease.force_released"
+    );
+    assert_eq!(
+        EventKind::UseLeaseRecoveredStaleIssuer.as_str(),
+        "use_lease.recovered_stale_issuer"
+    );
+    assert_eq!(
+        EventKind::UseLeaseReanchoredByMove.as_str(),
+        "use_lease.reanchored_by_move"
     );
 }
