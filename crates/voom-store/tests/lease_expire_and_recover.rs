@@ -118,3 +118,58 @@ async fn expire_due_handles_bulk_overdue_leases() {
     assert_eq!(expired.items.len(), N);
     assert_eq!(requeued.items.len(), N);
 }
+
+/// Regression for the unbounded `IN (?,…,?)` prefetch in
+/// `expire_due_in_tx`: on a restart backlog larger than the chunk size
+/// (and the `SQLite` historical 999-variable floor), the per-ticket
+/// attempt prefetch must still succeed by splitting into multiple
+/// chunks rather than building one oversized statement that fails
+/// before any lease transitions. `TICKET_ATTEMPT_CHUNK` is an internal
+/// 500-row constant, so 501 tickets is the smallest size that
+/// exercises a second chunk.
+const N_BACKLOG: usize = 501;
+
+#[tokio::test]
+async fn expire_due_handles_backlog_above_chunk_size() {
+    let (cp, _tmp) = cp().await;
+    let w = cp
+        .register_worker(NewWorker {
+            name: "w-backlog".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+        })
+        .await
+        .unwrap();
+    for i in 0..N_BACKLOG {
+        let t = cp
+            .create_ticket(NewTicket {
+                job_id: None,
+                kind: format!("k-{i}"),
+                priority: 0,
+                payload: json!({}),
+                max_attempts: 3,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+        let _l = cp
+            .acquire_lease(NewLease {
+                ticket_id: t.id,
+                worker_id: w.id,
+                ttl: Duration::seconds(10),
+                now: T0,
+            })
+            .await
+            .unwrap();
+    }
+
+    let report = cp.expire_due(T0 + Duration::seconds(11)).await.unwrap();
+    assert_eq!(report.expired_leases.len(), N_BACKLOG);
+    assert_eq!(report.requeued_tickets.len(), N_BACKLOG);
+    assert_eq!(report.pairs.len(), N_BACKLOG);
+    assert!(
+        report.failed_expiries.is_empty(),
+        "with max_attempts=3 and attempt=1, all should requeue"
+    );
+}

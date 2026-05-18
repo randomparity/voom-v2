@@ -907,3 +907,66 @@ async fn reanchor_on_move_with_no_matching_leases_is_empty() {
         .unwrap();
     assert!(report.reanchored.is_empty());
 }
+
+/// `retired == new` is a contractual no-op. The repo must return an
+/// empty report without touching any rows — case-handler drain loops
+/// rely on this to terminate, since the candidate scan keys on
+/// `scope_location_id = retired` and an update setting
+/// `scope_location_id = retired` would leave every row still matching
+/// the filter and re-pick the same batch forever.
+#[tokio::test]
+async fn reanchor_on_move_with_same_location_is_noop() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         created_at) VALUES (?, 'hash', 1, 'ingest', ?)",
+    )
+    .bind(i64::try_from(asset.0).unwrap())
+    .bind(
+        T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let now_iso = T0
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap();
+    let loc = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/same', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc = FileLocationId(u64::try_from(loc).unwrap());
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Location(loc),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let report = repo
+        .reanchor_on_move(loc, loc, T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert!(report.reanchored.is_empty());
+
+    // The lease must be untouched: same scope, same epoch.
+    let after = repo.get(lease.id).await.unwrap().unwrap();
+    assert_eq!(after.scope, LeaseScope::Location(loc));
+    assert_eq!(after.epoch, lease.epoch);
+}
