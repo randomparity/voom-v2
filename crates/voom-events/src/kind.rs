@@ -54,6 +54,13 @@ pub enum EventKind {
     IdentityEvidenceAccepted,
     IdentityEvidenceSuperseded,
     MediaSnapshotRecorded,
+    // M3 — asset use leases (Phase 1).
+    UseLeaseAcquired,
+    UseLeaseReleased,
+    UseLeaseExpired,
+    UseLeaseForceReleased,
+    UseLeaseRecoveredStaleIssuer,
+    UseLeaseReanchoredByMove,
 }
 
 impl EventKind {
@@ -100,6 +107,12 @@ impl EventKind {
             Self::IdentityEvidenceAccepted => "identity_evidence.accepted",
             Self::IdentityEvidenceSuperseded => "identity_evidence.superseded",
             Self::MediaSnapshotRecorded => "media_snapshot.recorded",
+            Self::UseLeaseAcquired => "use_lease.acquired",
+            Self::UseLeaseReleased => "use_lease.released",
+            Self::UseLeaseExpired => "use_lease.expired",
+            Self::UseLeaseForceReleased => "use_lease.force_released",
+            Self::UseLeaseRecoveredStaleIssuer => "use_lease.recovered_stale_issuer",
+            Self::UseLeaseReanchoredByMove => "use_lease.reanchored_by_move",
         }
     }
 
@@ -156,6 +169,12 @@ impl EventKind {
             "identity_evidence.accepted" => Self::IdentityEvidenceAccepted,
             "identity_evidence.superseded" => Self::IdentityEvidenceSuperseded,
             "media_snapshot.recorded" => Self::MediaSnapshotRecorded,
+            "use_lease.acquired" => Self::UseLeaseAcquired,
+            "use_lease.released" => Self::UseLeaseReleased,
+            "use_lease.expired" => Self::UseLeaseExpired,
+            "use_lease.force_released" => Self::UseLeaseForceReleased,
+            "use_lease.recovered_stale_issuer" => Self::UseLeaseRecoveredStaleIssuer,
+            "use_lease.reanchored_by_move" => Self::UseLeaseReanchoredByMove,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"
