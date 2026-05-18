@@ -613,12 +613,16 @@ impl LeaseRepo for SqliteLeaseRepo {
     ) -> Result<ExpireReport, VoomError> {
         let now_str = iso8601(now)?;
         // Find candidates first so we can return their IDs in the report.
+        // `LIMIT` caps lock-hold time per call; the Sprint 6+ daemon
+        // drains by re-invoking `expire_due` until the report is empty.
         let rows = sqlx::query(
             "SELECT id, ticket_id FROM leases \
              WHERE state = 'held' AND expires_at < ? \
-             ORDER BY id ASC",
+             ORDER BY id ASC \
+             LIMIT ?",
         )
         .bind(&now_str)
+        .bind(LEASE_BATCH_LIMIT)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("expire_due scan: {e}")))?;
@@ -814,6 +818,17 @@ fn extract_ticket_id_i(row: &sqlx::sqlite::SqliteRow) -> Result<i64, VoomError> 
 /// never exceeds `SQLITE_MAX_VARIABLE_NUMBER` regardless of which
 /// `SQLite` the binary is linked against. Internal — not a tuning knob.
 const TICKET_ATTEMPT_CHUNK: usize = 500;
+
+/// Maximum rows touched by a single `expire_due_in_tx` call. Bounds
+/// transaction size, memory allocation, and lock-hold time on restart
+/// backlogs. The Sprint 6+ daemon loops until the report is empty;
+/// under steady state each tick stays well under the cap. M1 ticket
+/// events emit two rows per pair (`LeaseExpired` plus
+/// `TicketRequeuedAfterLeaseExpiry` or `TicketFailedTerminal`), so
+/// per-batch lock-hold is roughly twice the M3 `USE_LEASE_BATCH_LIMIT`
+/// case — still conservative; if production data warrants tuning, the
+/// Sprint 6+ daemon spec can promote it to a policy-driven knob.
+pub const LEASE_BATCH_LIMIT: i64 = 1000;
 
 /// Pre-fetch every distinct ticket's (`attempt`, `max_attempts`) in
 /// chunked SELECTs. Used by `expire_due_in_tx` to replace what was a

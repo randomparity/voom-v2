@@ -253,6 +253,11 @@ impl ControlPlane {
     /// the matching ticket-side event (`ticket.requeued_after_lease_expiry`
     /// for tickets in `requeued_tickets`, else `ticket.failed_terminal`).
     ///
+    /// Each call processes at most `LEASE_BATCH_LIMIT` candidates inside a
+    /// single transaction so lock-hold time stays bounded under
+    /// restart-backlog conditions. The Sprint 6+ daemon drains by
+    /// re-invoking `expire_due` until `report.expired_leases.is_empty()`.
+    ///
     /// # Errors
     /// Propagates repo and event-append errors. The transaction aborts on
     /// any error and no events are persisted.
