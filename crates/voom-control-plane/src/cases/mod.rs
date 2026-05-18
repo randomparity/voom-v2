@@ -13,6 +13,11 @@ use voom_core::VoomError;
 use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
+#[cfg(test)]
+use voom_events::EventKind;
+#[cfg(test)]
+use voom_store::repo::events::{EventFilter, Page};
+
 pub mod artifacts;
 pub mod bundles;
 pub mod identity;
@@ -55,6 +60,25 @@ pub(crate) async fn append_event(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
+    cp.events()
+        .list(
+            EventFilter {
+                kind: Some(kind),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 200,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .len()
 }
 
 #[cfg(test)]
