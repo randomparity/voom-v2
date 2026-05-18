@@ -403,6 +403,15 @@ const USE_LEASE_RETURNING_COLS: &str = "id, kind, scope_asset_id, scope_bundle_i
      ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
      release_reason, released_at, epoch";
 
+/// Maximum rows touched by a single `expire_due_in_tx` /
+/// `reanchor_on_move_in_tx` call. Bounds transaction size, memory
+/// allocation, and lock-hold time. The Sprint 6+ daemon loops until
+/// the report is empty; under steady state each tick stays well under
+/// the cap. The chosen value is conservative; if production data shows
+/// it's too small (or too large) the Sprint 6+ daemon spec can promote
+/// it to a policy-driven configuration knob.
+pub const USE_LEASE_BATCH_LIMIT: i64 = 1000;
+
 /// Decode a single `asset_use_leases` row into `UseLease`. Used by every
 /// read path and every `_in_tx` post-write re-read.
 fn row_to_use_lease(row: &sqlx::sqlite::SqliteRow) -> Result<UseLease, VoomError> {
@@ -877,16 +886,26 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
         let now_iso = iso8601(now)?;
+        // Bounded batch: pick up to `USE_LEASE_BATCH_LIMIT` overdue rows
+        // per call so the transaction's lock-hold time and memory use
+        // stay bounded under daemon-restart backlogs. The Sprint 6+
+        // daemon loops until the report is empty.
         let rows = sqlx::query(
             "UPDATE asset_use_leases \
               SET release_reason = 'expired', released_at = ?, epoch = epoch + 1 \
-              WHERE release_reason IS NULL \
-                AND ttl_bound = 1 \
-                AND expires_at < ? \
+              WHERE id IN ( \
+                  SELECT id FROM asset_use_leases \
+                   WHERE release_reason IS NULL \
+                     AND ttl_bound = 1 \
+                     AND expires_at < ? \
+                   ORDER BY id ASC \
+                   LIMIT ? \
+              ) \
             RETURNING id",
         )
         .bind(&now_iso)
         .bind(&now_iso)
+        .bind(USE_LEASE_BATCH_LIMIT)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_use_leases expire update: {e}")))?;
@@ -989,14 +1008,23 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         new: FileLocationId,
         _now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
+        // Bounded batch: see `expire_due_in_tx` for the rationale. The
+        // Sprint 6+ daemon spec is responsible for looping until the
+        // report is empty.
         let rows = sqlx::query(
             "UPDATE asset_use_leases \
               SET scope_location_id = ?, epoch = epoch + 1 \
-              WHERE scope_location_id = ? AND release_reason IS NULL \
+              WHERE id IN ( \
+                  SELECT id FROM asset_use_leases \
+                   WHERE scope_location_id = ? AND release_reason IS NULL \
+                   ORDER BY id ASC \
+                   LIMIT ? \
+              ) \
             RETURNING id",
         )
         .bind(i64_from_u64(new.0))
         .bind(i64_from_u64(retired.0))
+        .bind(USE_LEASE_BATCH_LIMIT)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor update: {e}")))?;
