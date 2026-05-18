@@ -43,8 +43,6 @@ async fn init_then_health_reports_current() {
 
 #[tokio::test]
 async fn control_plane_open_rejects_uninitialized_db() {
-    // Writable use cases require a Current schema; ControlPlane::open
-    // must refuse anything else. Use HealthPlane for diagnostic flows.
     let (_keep, url) = fresh_url();
     voom_store::connect_or_create(&url).await.unwrap();
     let err = ControlPlane::open(&url).await.unwrap_err();

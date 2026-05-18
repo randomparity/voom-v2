@@ -287,7 +287,7 @@ impl BundleRepo for SqliteBundleRepo {
         let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
             "DELETE FROM asset_bundle_members \
              WHERE bundle_id = ? AND file_asset_id = ? \
-             RETURNING id, role",
+             RETURNING id, bundle_id, file_asset_id, role",
         )
         .bind(i64_from_u64(bundle_id.0))
         .bind(i64_from_u64(file_asset_id.0))
@@ -299,18 +299,7 @@ impl BundleRepo for SqliteBundleRepo {
                 "asset_bundle_members not found: bundle={bundle_id} asset={file_asset_id}"
             ))
         })?;
-        let id: i64 = row
-            .try_get("id")
-            .map_err(|e| map_row_err("asset_bundle_members", &e))?;
-        let role: String = row
-            .try_get("role")
-            .map_err(|e| map_row_err("asset_bundle_members", &e))?;
-        Ok(BundleMember {
-            id: u64_from_i64(id),
-            bundle_id,
-            file_asset_id,
-            role: BundleMemberRole::parse(&role)?,
-        })
+        row_to_bundle_member(&row)
     }
 
     async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError> {

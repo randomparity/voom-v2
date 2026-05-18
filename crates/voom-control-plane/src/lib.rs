@@ -88,17 +88,7 @@ impl ControlPlane {
     /// `VoomError::Migration` if the schema probe is not `Current`.
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
-        let probe = probe_schema(&pool).await?;
-        if !matches!(probe, SchemaState::Current { .. }) {
-            return Err(VoomError::Migration(format!(
-                "ControlPlane requires a Current schema; got {probe:?}"
-            )));
-        }
-        Ok(Self::new_unchecked(
-            pool,
-            Arc::new(SystemClock),
-            production_rng(),
-        ))
+        Self::open_with_pool_and_rng(pool, Arc::new(SystemClock), production_rng()).await
     }
 
     /// Wrap an already-connected pool with the supplied clock. The DB MUST
@@ -326,14 +316,6 @@ impl HealthPlane {
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
         Ok(Self { pool })
-    }
-
-    /// Wrap an already-connected pool without probing the schema. Tests
-    /// that need to assert diagnostic behavior against a synthesized
-    /// non-Current state pass an existing pool.
-    #[must_use]
-    pub fn from_pool(pool: SqlitePool) -> Self {
-        Self { pool }
     }
 
     /// Read-only health snapshot.
