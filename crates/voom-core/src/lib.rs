@@ -26,7 +26,7 @@ pub use failure::{FailureClass, FailureRetryClass};
 pub use ids::{
     ArtifactHandleId, ArtifactLocationId, BundleId, EventId, EvidenceId, FileAssetId,
     FileLocationId, FileVersionId, IssueId, JobId, LeaseId, MediaSnapshotId, MediaVariantId,
-    MediaWorkId, TicketId, WorkerId,
+    MediaWorkId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use version::VersionInfo;

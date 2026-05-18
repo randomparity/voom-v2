@@ -66,3 +66,8 @@ fn evidence_id_displays_inner_u64() {
 fn media_snapshot_id_displays_inner_u64() {
     assert_eq!(MediaSnapshotId(8).to_string(), "8");
 }
+
+#[test]
+fn use_lease_id_displays_inner_u64() {
+    assert_eq!(UseLeaseId(42).to_string(), "42");
+}
