@@ -39,7 +39,9 @@ Captured here so the per-commit plan below is unambiguous:
 | Decision | Choice | Rationale |
 |---|---|---|
 | Skeleton placement | Minimal scaffold first (commit 1) | Cross-crate type additions and the empty module land together so the algorithmic commits don't drag `voom-core` deltas. Pragmatic deviation from sequencing doc §2 step 1 "types ride with their use-site". |
-| `ForcePathToken` plumbing | Stub-then-fill | Define the struct in commit 1; plumb `Option<ForcePathToken>` through prepare/authorize from commit 4. Commit 10 then adds parsing, bypass-set validation, and the `commit.forced_override` event. No retrofit of signatures. |
+| `ForcePathToken` plumbing | All force-path plumbing in commit 10 | Define the struct stub in commit 1 for compile-stability, but do **not** thread it through prepare/authorize until commit 10. Commit 10 retrofits both signatures to accept `Option<ForcePathToken>`, ships the JSON serde, bypass-set validation, `commit.forced_override` emission, and the `closure_incomplete` bypass branches together. Revised from "stub-then-fill" after Codex finding #2 (bypass logic landing six commits ahead of audit/validation). |
+| `ArchiveFileVersion` `CommitTarget` variant | Deferred to Sprint 5+ | `file_versions` (migration 0003) carries `retired_at` + `epoch` only — no `archived_at` column. Parent §9.3.1 already defers `ArchiveBundle` and `DeleteBundle` for the same reason ("the schema does not carry the soft-delete/archive columns those targets need"); `ArchiveFileVersion` was overlooked in that paragraph (see §9 follow-up). This plan mirrors the existing precedent and omits the variant entirely. Revised after Codex finding #1. |
+| Per-member epoch guard | Snapshot at Phase B, verify at Phase C | `CommitPermit.target_row_epochs: Vec<(TargetMemberKind, u64, u64)>` captures `(scope_kind, row_id, epoch)` for every member of `closure_authorized` inside the authorize tx. Phase C's destructive dispatch passes the captured epoch as `expected_epoch` to each `IdentityRepo` mutation; any drift since authorize → `recovery_required` with `commit.aborted_post_mutation { reason='stale_target_epoch' }`. Added after Codex finding #3 (the original plan dropped M2's per-row epoch guard). |
 | Branch scope | One branch, ~10 commits | Matches PR #21's pattern of carrying all of Phase 1 on a single branch. One adversarial-review round at end. |
 | `FailureClass::into_error_code` remap | Rides commit 1 | `StaleIdentityEvidence` / `ClosureResolutionIncomplete` / `BlockedByActiveUseLease` currently route to `ApprovalRequired` as a placeholder. The proper `ErrorCode` variants land in commit 1, so the mapping switches in the same commit. Small M1 cleanup riding inside a Phase 2 commit, approved as part of branch scope. |
 | `CommitTarget::MoveFileLocation` vs `ReplaceFileLocation` | Same `IdentityRepo` mutation | Parent §9.3.2 Phase C step 4 dispatches both to `replace_file_location_in_tx`. The gate distinguishes them only for `target` payload audit. |
@@ -68,8 +70,11 @@ alongside the slice that introduces the code path under test.
 
 **`voom-store::repo::commit_safety_gate`** (new module, registered in `repo/mod.rs`)
 - Public type stubs only — no algorithms yet:
-  - `CommitTarget`, `AffectedScopeClosure`, `DestructiveCommit`, `CommitIntent`, `CommitPermit`, `CommitGateOutcome`, `CommitGateResult`, `CommitIntentState`, `MutationOutcome`, `AbortReason`.
-  - `ForcePathToken { actor: String, reason: String, bypass: BTreeSet<BypassKind> }`, with `BypassKind` enum carrying just `ClosureIncomplete` for Sprint 1.
+  - `CommitTarget` — variants for Sprint 1: `DeleteFileLocation`, `DeleteFileVersion`, `ReplaceFileLocation`, `MoveFileLocation`. (`ArchiveFileVersion` is omitted; deferred to Sprint 5+ per §3 — schema has no `archived_at` column.)
+  - `AffectedScopeClosure`, `DestructiveCommit`, `CommitIntent`, `CommitPermit`, `CommitGateOutcome`, `CommitGateResult`, `CommitIntentState`, `MutationOutcome`, `AbortReason`, `TargetMemberKind`.
+  - `CommitPermit` carries `target_row_epochs: Vec<(TargetMemberKind, u64, u64)>` — a flat triple-list of `(kind, row_id, epoch)` for every member of `closure_authorized`, captured at Phase B and consumed at Phase C as `expected_epoch` arguments. Append-only and JSON-serializable (no map type); ordering is irrelevant since Phase C dispatch looks up by `(kind, id)`.
+  - `CommitGateResult` variants for Sprint 1: `Allowed`, `BlockedByUseLease`, `BlockedByPendingCommit`, `BlockedByClosureGrew`, `BlockedByClosureIncomplete`, `BlockedByStaleEvidence`, `BlockedByStaleTargetEpoch { drift }`, `CancelledAfterAuthorize`.
+  - `ForcePathToken { actor: String, reason: String, bypass: BTreeSet<BypassKind> }`, with `BypassKind` enum carrying just `ClosureIncomplete` for Sprint 1. **Stub only** — defined for compile-stability, but no caller in commits 1–9. Commit 10 retrofits `prepare_destructive_commit` and `authorize_destructive_commit` to accept `Option<ForcePathToken>` and ships the serde + validation + bypass branches in one slice.
   - `BlockedByPendingCommitDetail`, `BlockedByClosureGrewDetail`, `ClosureWarning`, `ClosureFailure`, `EvidenceDrift`, `EvidenceRevalidationResult`, `PendingCommitIntent`.
 
 **Sibling test** `commit_safety_gate_test.rs`: constructor + Debug round-trip smoke for the public types.
@@ -88,16 +93,17 @@ alongside the slice that introduces the code path under test.
 
 ### Commit 3 — `IdentityRepo` destructive `_in_tx` mutations (sub-slice 3)
 
-Four new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure additions — no callers yet:
+Three new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure additions — no callers yet. Every signature takes `expected_epoch: u64` to match the existing M2 retire-method convention (`identity.rs:557–624`):
 
-- `retire_file_location_in_tx(tx, location_id, now)` — sets `retired_at = now`, bumps `epoch`. Returns `VoomError::Conflict` on a row already terminal (matching M2 soft-delete semantics; not idempotent).
-- `retire_file_version_in_tx(tx, version_id, now)` — sets `retired_at = now` on the version row, bumps `epoch`. Live `FileLocation` rows under the version remain (Phase C's caller decides whether to cascade-retire via `replace_file_location_in_tx`).
-- `archive_file_version_in_tx(tx, version_id, now)` — sets `archived_at = now`, bumps `epoch`. Distinct from retire (archive is recoverable; retire is terminal).
-- `replace_file_location_in_tx(tx, retired, new_proposal, now)` — atomically retires `retired` and inserts a new `FileLocation` on the same `FileVersion`.
+- `retire_file_location_in_tx(tx, location_id, retired_at, expected_epoch) -> Result<(), VoomError>` — guarded UPDATE on `file_locations` (`WHERE id = ? AND epoch = ?`); sets `retired_at`, bumps `epoch`. Returns `VoomError::Conflict` on a row already terminal **or** on `expected_epoch` mismatch (matching M2 soft-delete semantics; not idempotent).
+- `retire_file_version_in_tx(tx, version_id, retired_at, expected_epoch) -> Result<(), VoomError>` — guarded UPDATE on `file_versions`; sets `retired_at`, bumps `epoch`. Live `FileLocation` rows under the version remain (Phase C's caller decides whether to cascade-retire via `replace_file_location_in_tx`).
+- `replace_file_location_in_tx(tx, retired_id, retired_expected_epoch, new_proposal, retired_at) -> Result<FileLocationId, VoomError>` — atomically retires `retired_id` under its `expected_epoch` guard and inserts a new `FileLocation` on the same `FileVersion`. Single tx; either both steps land or neither.
 
-**Sibling tests** in `identity_test.rs`: each method asserts the column shape, epoch bump, and the Conflict path on a row already in the target state.
+(`ArchiveFileVersion` was previously a fourth method; removed because the schema has no `archived_at` column. See §3 deferral and §9 follow-up.)
 
-**Exit:** `just ci` green; mutations sibling-tested; no integration test (no caller yet).
+**Sibling tests** in `identity_test.rs`: each method asserts the column shape, epoch bump, and the Conflict path on a row already in the target state. **Additionally**, each method gets a dedicated sibling-test row asserting the `expected_epoch` mismatch path returns `Conflict` — including the case where the row is live (not terminal) but the caller's snapshot epoch is stale. This is the guard Phase C will rely on.
+
+**Exit:** `just ci` green; mutations sibling-tested for both terminal-row and stale-epoch Conflict paths; no integration test (no caller yet).
 
 ### Commit 4 — `prepare_destructive_commit` (Phase A) (sub-slice 4)
 
@@ -108,13 +114,13 @@ Four new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure addit
 
 **`voom-store::repo::commit_safety_gate`**
 - `phase_a_gate_abort_with_event(...)` helper encoding the two-tx pattern (sequencing doc §5.2): named to reflect narrow scope so the pattern cannot accidentally leak into Phases B/C.
+- `DestructiveCommit` input shape in commit 4 does **not** carry an `override_token` field. The force path lands in commit 10 (see §3 decision row) which retrofits the signature.
 - `prepare_destructive_commit` implementation:
-  1. Closure walk: target → `FileVersion`(s) → live `FileLocation`s + `AliasResolver.aliases_for_version` + owning `AssetBundle`(s).
+  1. Closure walk: target → `FileVersion`(s) → live `FileLocation`s + `AliasResolver.aliases_for_version` + owning `AssetBundle`(s). On `Unreachable`, abort unconditionally with `BlockedByClosureIncomplete` + `commit.aborted_by_closure_incomplete` (two-tx pattern). No bypass branch exists in this commit; commit 10 adds the `closure_incomplete` bypass.
   2. Blocking-lease check via UNION over four `scope_*_id` columns against the closure.
   3. Accepted-evidence revalidation: compare pinned `FileVersion` IDs, hashes, locations against current state.
-  4. Insert `commit_intents` row (`state = 'pending'`, `target`, `closure_initial`, `accepted_evidence_ids`, `override_token = <serialized | NULL>`, `started_at = now`) + expand `commit_intent_scope_members` across all four granularities.
+  4. Insert `commit_intents` row (`state = 'pending'`, `target`, `closure_initial`, `accepted_evidence_ids`, `override_token = NULL`, `started_at = now`) + expand `commit_intent_scope_members` across all four granularities. The `override_token` column is reserved (commit 10 starts populating it).
   5. Emit `commit.intent_recorded`. COMMIT.
-- `ForcePathToken` plumbed as `Option<_>` through `DestructiveCommit`. The `closure_incomplete` bypass branch is honored here: if the closure walk surfaces an `Unreachable` and `input.override_token.as_ref().is_some_and(|t| t.bypass.contains(&BypassKind::ClosureIncomplete))`, the abort is skipped. Sibling tests construct `ForcePathToken { actor, reason, bypass: {ClosureIncomplete} }` directly to cover this branch. Commit 10 adds upstream validation (rejecting other bypass bits before the gate runs) and the `commit.forced_override` event — no change to the prepare-time bypass logic itself.
 
 **Sibling tests** cover each Phase A `Blocked*` exit (use lease, stale evidence, closure incomplete) and the success path. Each test asserts both the durable row state (or absence) and the matching event row in the same call.
 
@@ -147,15 +153,17 @@ Four new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure addit
 
 **`voom-store::repo::commit_safety_gate`**
 - `authorize_destructive_commit` implementation. One IMMEDIATE tx:
-  1. Read `commit_intents` row: require `state = 'pending'`; carry `state`, `closure_initial`, `accepted_evidence_ids`, `epoch`, **and** `override_token` back in one round-trip.
-  2. Recompute `closure_authorized` against current DB + `AliasResolver`. Honor `override_token`'s `closure_incomplete` bypass.
+  1. Read `commit_intents` row: require `state = 'pending'`; carry `state`, `closure_initial`, `accepted_evidence_ids`, `epoch` back in one round-trip. (`override_token` is reserved for commit 10; this commit does not read it.)
+  2. Recompute `closure_authorized` against current DB + `AliasResolver`. On `Unreachable`, abort unconditionally with `BlockedByClosureIncomplete` + `commit.aborted_by_closure_incomplete`. No bypass branch exists in this commit; commit 10 adds the `closure_incomplete` bypass to both prepare and authorize.
   3. Compute delta vs `closure_initial` across all four granularities — any non-empty delta → `BlockedByClosureGrew`, transition to `aborted` with `abort_reason = 'closure_grew'`, emit `commit.aborted_by_closure_grew`. COMMIT. Return.
   4. Re-evaluate blocking-lease check against `closure_authorized`. Match → `BlockedByUseLease`, transition with `abort_reason = 'fresh_lease'`, emit `commit.aborted_by_use_lease` (with `payload.phase = 'authorize'`). COMMIT. Return.
   5. Re-validate accepted evidence → `BlockedByStaleEvidence` if drift.
-  6. Reconcile `commit_intent_scope_members` with `closure_authorized` (delete removed, insert added rows). Update intent row to `state = 'authorized'`, set `closure_authorized`, `authorized_at = now`, bump `epoch`. Emit `commit.authorized`. COMMIT. Return `CommitPermit`.
+  6. **Snapshot per-member epochs.** Inside the same tx, run four parallel `SELECT id, epoch FROM <table> WHERE id IN (...)` reads keyed off the granularity-specific FK lists in `closure_authorized` (file_locations, file_versions, asset_bundles, assets). Pack the results into `permit.target_row_epochs: Vec<(TargetMemberKind, u64, u64)>`. This is the snapshot point that Phase C will use as `expected_epoch` arguments to the destructive mutations.
+  7. Reconcile `commit_intent_scope_members` with `closure_authorized` (delete removed, insert added rows). Update intent row to `state = 'authorized'`, set `closure_authorized`, `authorized_at = now`, bump `epoch`. Emit `commit.authorized`. COMMIT. Return `CommitPermit` carrying `target_row_epochs`.
 - Phase B aborts commit in-tx (no two-tx pattern; sequencing doc §5.2).
+- The triples in `target_row_epochs` capture the per-row epoch of every member of `closure_authorized` at the moment authorize commits. Phase C uses them as `expected_epoch` arguments to each `IdentityRepo` destructive mutation; any drift between Phase B and Phase C is caught by the M2 epoch guard already present on those rows.
 
-**Sibling tests** cover each Phase B outcome including the `override_token` honor path.
+**Sibling tests** cover each Phase B outcome and assert `target_row_epochs` is populated for every member of `closure_authorized` on the success path.
 
 **Integration test** `commit_safety_gate_after_rename.rs` (new): the §9.4 e2e. Sequence: prepare against a `FileVersion` with one location → external rename lands (records via `reconcile_rename_in_tx`, exempt from the lock) → authorize observes non-empty `removed_locations` (prior) and `added_locations` (new) → `BlockedByClosureGrew`. Re-asserts the existing re-anchoring still fires for any leases on the retired location.
 
@@ -165,26 +173,27 @@ Four new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure addit
 
 **`voom-events`**
 - `commit.completed`, `commit.aborted_post_mutation`, `commit.aborted_pre_mutation` (carries `prior_state` ∈ `{'pending', 'authorized'}`), `commit.recovery_required` event kinds + payloads.
-- `commit.aborted_post_mutation` payload follows the unified schema from sprint spec §9.3.2 Phase C step 3: carries `reason` ∈ `{'closure_grew', 'fresh_lease', 'closure_grew_and_fresh_lease'}`, both `added_*`/`removed_*` arrays, and `fresh_lease_ids`.
+- `commit.aborted_post_mutation` payload follows the unified schema from sprint spec §9.3.2 Phase C step 3: carries `reason` ∈ `{'closure_grew', 'fresh_lease', 'closure_grew_and_fresh_lease', 'stale_target_epoch'}`, both `added_*`/`removed_*` arrays, `fresh_lease_ids`, and `target_epoch_drift` (a list of `(kind, id, expected, observed)` triples, present only when `reason = 'stale_target_epoch'` or carries both drift kinds in combination).
 
 **`voom-store::repo::commit_safety_gate`**
 - `finalize_destructive_commit` implementation. One IMMEDIATE tx:
   1. Read `commit_intents` row: require `state = 'authorized'` and `epoch == permit.epoch`. Wrong state or epoch → `Conflict` without writing.
   2. `MutationOutcome::NotPerformed` branch → transition to `aborted`, `abort_reason = 'operator_cancel'`, emit `commit.aborted_pre_mutation` with `prior_state = 'authorized'`. Return `Ok(CommitGateOutcome { result: CancelledAfterAuthorize, .. })` (the `closure_final` carries the authorized closure unchanged — no recheck).
-  3. `Applied { observed }` branch — defensive trip-wire: recompute `closure_final` + re-evaluate leases. Three sub-branches per sprint spec §9.3.2 Phase C step 3:
-     - Closure grew/shifted (delta non-empty vs `closure_authorized`, no fresh lease) → `recovery_required`, emit `commit.aborted_post_mutation` with `reason='closure_grew'`. Return `BlockedByClosureGrew`.
-     - Fresh blocking lease (delta empty, fresh lease overlaps) → `recovery_required`, emit with `reason='fresh_lease'`. Return `BlockedByUseLease`.
-     - Both fire → emit one event with `reason='closure_grew_and_fresh_lease'` and both populated arrays. Return `BlockedByClosureGrew`.
-  4. Silent trip-wire → dispatch by `CommitTarget`:
-     - `DeleteFileLocation` → `retire_file_location_in_tx`.
-     - `DeleteFileVersion` → `retire_file_version_in_tx`.
-     - `ArchiveFileVersion` → `archive_file_version_in_tx`.
-     - `ReplaceFileLocation` / `MoveFileLocation` → `replace_file_location_in_tx`.
+  3. `Applied { observed }` branch — defensive trip-wire: recompute `closure_final`, re-evaluate leases, **and** compare every member's current `epoch` against `permit.target_row_epochs`. Four sub-branches per sprint spec §9.3.2 Phase C step 3 plus the per-row epoch guard added under §3:
+     - Closure grew/shifted (delta non-empty vs `closure_authorized`, no fresh lease, no epoch drift) → `recovery_required`, emit `commit.aborted_post_mutation` with `reason='closure_grew'`. Return `BlockedByClosureGrew`.
+     - Fresh blocking lease (delta empty, fresh lease overlaps, no epoch drift) → `recovery_required`, emit with `reason='fresh_lease'`. Return `BlockedByUseLease`.
+     - Closure grew and fresh lease both fire (no epoch drift) → emit one event with `reason='closure_grew_and_fresh_lease'` and both populated arrays. Return `BlockedByClosureGrew`.
+     - **Stale target epoch** (any member's current `epoch` differs from the value snapshotted in `permit.target_row_epochs`, regardless of whether the other two trip-wires also fire) → `recovery_required`, emit `commit.aborted_post_mutation` with `reason='stale_target_epoch'` and a `target_epoch_drift` payload field listing the drifted `(kind, id, expected, observed)` triples. Do **not** apply the durable mutation. Return `BlockedByStaleTargetEpoch { drift }` (variant defined in commit 1).
+  4. Silent dispatch trip-wire → look up each target member's snapshotted epoch in `permit.target_row_epochs` and pass it as `expected_epoch` to the matching `IdentityRepo` mutation:
+     - `DeleteFileLocation` → `retire_file_location_in_tx(tx, location_id, now, expected_epoch)`.
+     - `DeleteFileVersion` → `retire_file_version_in_tx(tx, version_id, now, expected_epoch)`.
+     - `ReplaceFileLocation` / `MoveFileLocation` → `replace_file_location_in_tx(tx, retired_id, retired_expected_epoch, new_proposal, now)`.
+     (`ArchiveFileVersion` dispatch removed — variant does not exist in Sprint 1.)
   5. Update row to `completed`, `finalized_at = now`, bump `epoch`. Emit `commit.completed` with `closure_final` carrying the just-recomputed silent-path closure. COMMIT. Return `Allowed`.
 
-**Sibling tests** for the state/epoch check, `NotPerformed`, each trip-wire sub-branch, and the silent path × each `CommitTarget` variant.
+**Sibling tests** for the state/epoch check, `NotPerformed`, each of the four trip-wire sub-branches (including a dedicated test that bumps a target member's `epoch` between authorize and finalize to drive the `stale_target_epoch` path), and the silent path × each `CommitTarget` variant (each sourcing `expected_epoch` from the permit).
 
-**Integration test** `commit_safety_gate_recovery_required.rs` (new): all three trip-wire sub-branches end in `recovery_required` with the matching event payload. Disk-mode parity.
+**Integration test** `commit_safety_gate_recovery_required.rs` (new): all four trip-wire sub-branches end in `recovery_required` with the matching event payload. The `stale_target_epoch` case bumps a member's `epoch` via a direct UPDATE between authorize and finalize. Disk-mode parity.
 
 **Exit:** `just ci` green; every Phase C `CommitGateResult` variant exercised; defensive trip-wire payloads carry the unified schema.
 
@@ -212,19 +221,23 @@ Four new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure addit
 
 **Exit:** `just ci` green; read-only list path exercised.
 
-### Commit 10 — Force path (sub-slice 11)
+### Commit 10 — Force path + retrofit (sub-slice 11)
+
+This is the single landing point for all force-path plumbing. The `ForcePathToken` stub has lived in the module since commit 1 for compile-stability, but no upstream caller threads it through prepare/authorize. Commit 10 retrofits both signatures, ships the serde + validation + emission, and wires the `closure_incomplete` bypass branches in both Phase A and Phase B atomically.
 
 **`voom-events`**
 - `commit.forced_override` event kind + payload (`actor`, `reason`, `bypass`) + round-trip coverage.
 
 **`voom-store::repo::commit_safety_gate`**
-- `ForcePathToken` JSON serde (the column has been populated as a serialized blob since commit 4; this commit ships the canonical serde impl).
+- Signature retrofit: `prepare_destructive_commit` and `authorize_destructive_commit` both grow an `Option<ForcePathToken>` parameter. `DestructiveCommit` gains an `override_token: Option<ForcePathToken>` field. Authorize re-reads the token from `commit_intents.override_token` (a serialized blob populated by prepare in this same commit).
+- `ForcePathToken` JSON serde — canonical impl used both to write the `commit_intents.override_token` column and to round-trip on read.
 - `ForcePathToken::validate_bypass(...)` — rejects any non-`ClosureIncomplete` bit with `VoomError::Config("force-path bypass not supported: <name>")`. Called by `prepare_destructive_commit` before the gate runs (validation precedes the closure walk; an invalid token never writes a row).
-- `prepare_destructive_commit` emits `commit.forced_override` when `override_token.is_some()`, after validation and before the closure walk.
+- `closure_incomplete` bypass branches added to both Phase A and Phase B: if the closure walk surfaces an `Unreachable` and the token has `BypassKind::ClosureIncomplete`, the abort path is skipped and the walk falls through with the partial closure.
+- `prepare_destructive_commit` emits `commit.forced_override` when `override_token.is_some()`, after validation and before the closure walk. The column blob is populated atomically with the `commit.intent_recorded` insert.
 
-**Integration test** `commit_safety_gate_force_path.rs` (new): valid token honored through to authorize (`closure_incomplete` bypass exercised against `FailingAliasResolver`); invalid bypass bits surface the `Config` error envelope without a `commit_intents` row materializing.
+**Integration test** `commit_safety_gate_force_path.rs` (new): valid token honored through to authorize (`closure_incomplete` bypass exercised against `FailingAliasResolver` in both phases); invalid bypass bits surface the `Config` error envelope without a `commit_intents` row materializing. The test also asserts that pre-commit-10 callers (which pass no token) continue to abort on `Unreachable`, encoding the property that **bypass logic and audit event ship together atomically** — no in-tree caller has access to a bypass branch without the corresponding `commit.forced_override` audit trail.
 
-**Exit:** `just ci` green; force path end-to-end exercised; invalid bypass bits rejected before any state change.
+**Exit:** `just ci` green; force path end-to-end exercised in both phases; invalid bypass bits rejected before any state change; pre-retrofit code paths still abort unconditionally on `Unreachable`.
 
 ## 5. Phase 2 exit gate (matches sequencing doc §3)
 
@@ -232,7 +245,8 @@ After commit 10:
 
 - Every `CommitGateResult` variant triggered in at least one integration test in the correct phase.
 - Pending-commit lock asserted to block `UseLeaseRepo::acquire` and the `AliasAttached` branch; asserted to **not** block `reconcile_rename_in_tx`.
-- Force path rejects non-`closure_incomplete` bypass bits with `Config`.
+- Stale target epoch at finalize is rejected with `recovery_required` + `commit.aborted_post_mutation { reason='stale_target_epoch' }` — covered by a sibling test that bumps a member's `epoch` between authorize and finalize.
+- `ArchiveFileVersion` is not implemented; the `CommitTarget` enum does not carry the variant. Deferred to Sprint 5+ per parent-spec precedent for `ArchiveBundle`/`DeleteBundle` (see §9 follow-up).
 - M2 sibling tests for `record_discovered_file_in_tx` and `reconcile_rename_in_tx` extended (not rewritten) and still pass.
 - Two-tx pattern is used only for Phase A gate-check aborts (grep-asserted).
 - `just ci` green.
@@ -241,16 +255,16 @@ After commit 10:
 
 | Commit | `voom-core` | `voom-events` | `voom-store` | Tests |
 |---|---|---|---|---|
-| 1 | `CommitId`; 5 `ErrorCode` + `VoomError` variants; `FailureClass` remap | — | `commit_safety_gate` module + type stubs | sibling smoke + extended `failure_test.rs` |
+| 1 | `CommitId`; 5 `ErrorCode` + `VoomError` variants; `FailureClass` remap | — | `commit_safety_gate` module + type stubs incl. `CommitPermit.target_row_epochs` and `CommitGateResult::BlockedByStaleTargetEpoch` | sibling smoke + extended `failure_test.rs` |
 | 2 | — | — | `AliasResolver` trait + `SqliteAliasResolver` + `FailingAliasResolver` | sibling for both resolvers |
-| 3 | — | — | 4 new `IdentityRepo` `_in_tx` mutations | sibling for each |
+| 3 | — | — | 3 new `IdentityRepo` `_in_tx` mutations, all guarded by `expected_epoch` | sibling for each (incl. dedicated `expected_epoch` mismatch row) |
 | 4 | — | `SubjectType::CommitIntent`; `commit.intent_recorded`, `.aborted_by_use_lease`, `.aborted_by_stale_evidence`, `.aborted_by_closure_incomplete` | `prepare_destructive_commit` + `phase_a_gate_abort_with_event` | sibling + integration `commit_safety_gate.rs` (Phase A) |
 | 5 | — | — | `consult_pending_commit_lock_in_tx` + 2 callers retrofitted | extended M2 sibling + integration `commit_safety_gate_pending_lock.rs` |
-| 6 | — | `commit.authorized`, `.aborted_by_closure_grew` | `authorize_destructive_commit` | sibling + integration `commit_safety_gate_after_rename.rs` |
-| 7 | — | `commit.completed`, `.aborted_post_mutation`, `.aborted_pre_mutation`, `.recovery_required` | `finalize_destructive_commit` | sibling + integration `commit_safety_gate_recovery_required.rs` |
+| 6 | — | `commit.authorized`, `.aborted_by_closure_grew` | `authorize_destructive_commit` (Phase B snapshots `target_row_epochs` into `CommitPermit`) | sibling + integration `commit_safety_gate_after_rename.rs` |
+| 7 | — | `commit.completed`, `.aborted_post_mutation` (now incl. `reason='stale_target_epoch'` + `target_epoch_drift` payload field), `.aborted_pre_mutation`, `.recovery_required` | `finalize_destructive_commit` (sources `expected_epoch` from `permit.target_row_epochs`) | sibling + integration `commit_safety_gate_recovery_required.rs` |
 | 8 | — | — | `abort_destructive_commit` | sibling + recovery-contract integration |
 | 9 | — | — | `list_pending_commit_intents` | sibling |
-| 10 | — | `commit.forced_override` | `ForcePathToken` serde + validation + emission | integration `commit_safety_gate_force_path.rs` |
+| 10 | — | `commit.forced_override` | `prepare_destructive_commit` + `authorize_destructive_commit` signature retrofit; `ForcePathToken` serde + validation + emission; `closure_incomplete` bypass branches in both phases | integration `commit_safety_gate_force_path.rs` |
 
 ## 7. Touch-back into M1/M2 code
 
@@ -271,7 +285,8 @@ No M1 or M2 code is otherwise touched.
 
 ## 9. Open follow-ups
 
-None blocking. Two items to remember at PR time:
+None blocking. Three items to remember at PR time:
 
 - Adversarial review round before opening the PR (per project convention; sprint-spec iteration memory).
 - PR description names commits 1–10 individually and points at the parent spec sections each commit satisfies.
+- **Parent-spec inconsistency to surface upstream.** Parent §9.3.1 lists the Sprint 1 `CommitTarget` variants as `DeleteFileLocation`, `DeleteFileVersion`, `ReplaceFileLocation`, `MoveFileLocation`, **and** `ArchiveFileVersion` — while the same paragraph defers `ArchiveBundle` and `DeleteBundle` to Sprint 5 with the explicit rationale "the schema does not carry the soft-delete/archive columns those targets need." The `file_versions` schema (migration 0003) has no `archived_at` column either, so the same rationale applies to `ArchiveFileVersion` but was not invoked. This plan resolves the inconsistency by omitting `ArchiveFileVersion`; the parent spec should either remove it from §9.3.1's enum list or add the corresponding `archived_at` schema column with explicit recoverable semantics. Tag for the next sprint-1 spec adversarial round.
