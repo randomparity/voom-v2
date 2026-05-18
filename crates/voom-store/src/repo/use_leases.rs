@@ -727,23 +727,84 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn heartbeat_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "heartbeat_in_tx not implemented yet (Task 7)".to_owned(),
-        ))
+        // Read the row inside the same tx (per project rule
+        // `_in_tx` re-reads use the tx handle).
+        let row = sqlx::query(
+            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+                    release_reason, released_at, epoch \
+             FROM asset_use_leases WHERE id = ?",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases heartbeat read: {e}")))?
+        .ok_or_else(|| VoomError::NotFound(format!("use_lease {lease_id} not found")))?;
+
+        let existing = row_to_use_lease(&row)?;
+        if existing.release_reason.is_some() {
+            return Err(VoomError::Conflict(format!(
+                "use_lease {lease_id} is already terminal"
+            )));
+        }
+        if !existing.ttl_bound {
+            return Err(VoomError::Conflict(
+                "manual locks do not heartbeat".to_owned(),
+            ));
+        }
+        // Derive TTL from original (expires_at - acquired_at).
+        let original_expires = existing.expires_at.ok_or_else(|| {
+            VoomError::Database(
+                "TTL-bound lease missing expires_at — schema CHECK should have caught this"
+                    .to_owned(),
+            )
+        })?;
+        let ttl = original_expires - existing.acquired_at;
+        let new_expires = now + ttl;
+
+        let new_expires_iso = iso8601(new_expires)?;
+        let now_iso = iso8601(now)?;
+
+        let res = sqlx::query(
+            "UPDATE asset_use_leases \
+             SET last_heartbeat_at = ?, expires_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND epoch = ? AND release_reason IS NULL",
+        )
+        .bind(&now_iso)
+        .bind(&new_expires_iso)
+        .bind(i64_from_u64(lease_id.0))
+        .bind(i64_from_u64(existing.epoch))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases heartbeat update: {e}")))?;
+        if res.rows_affected() == 0 {
+            return Err(VoomError::Conflict(format!(
+                "use_lease {lease_id} concurrent modification"
+            )));
+        }
+
+        Ok(UseLease {
+            last_heartbeat_at: Some(now),
+            expires_at: Some(new_expires),
+            epoch: existing.epoch + 1,
+            ..existing
+        })
     }
 
     async fn heartbeat(
         &self,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "heartbeat not implemented yet (Task 7)".to_owned(),
-        ))
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self.heartbeat_in_tx(&mut tx, lease_id, now).await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn release_in_tx<'tx>(

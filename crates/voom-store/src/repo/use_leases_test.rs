@@ -194,3 +194,90 @@ async fn acquire_against_retired_asset_is_conflict() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
+
+// --- Task 7: heartbeat ---
+
+#[tokio::test]
+async fn heartbeat_extends_expires_at_by_original_ttl() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let later = T0 + Duration::seconds(30);
+    let beat = repo.heartbeat(lease.id, later).await.unwrap();
+    assert_eq!(beat.last_heartbeat_at, Some(later));
+    assert_eq!(beat.expires_at, Some(later + Duration::seconds(60)));
+    assert_eq!(beat.epoch, 1);
+}
+
+#[tokio::test]
+async fn heartbeat_against_manual_lock_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let err = repo
+        .heartbeat(lease.id, T0 + Duration::seconds(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+#[ignore = "depends on Task 8 release"]
+async fn heartbeat_against_terminal_lease_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.release(
+        lease.id,
+        UseLeaseReleaseReason::Released,
+        T0 + Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let err = repo
+        .heartbeat(lease.id, T0 + Duration::seconds(10))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn heartbeat_against_unknown_id_is_not_found() {
+    let (pool, _tmp, _asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo.heartbeat(UseLeaseId(99_999), T0).await.unwrap_err();
+    assert!(matches!(err, VoomError::NotFound(_)), "got {err:?}");
+}
