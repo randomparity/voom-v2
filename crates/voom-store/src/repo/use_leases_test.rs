@@ -518,3 +518,70 @@ async fn force_release_against_terminal_is_conflict() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
+
+// --- Task 10: expire_due ---
+
+#[tokio::test]
+async fn expire_due_transitions_overdue_leases() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let a = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(10)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let b = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Scan,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "w-1".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: Some(Duration::seconds(120)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    // Now = T0 + 30s — `a` is overdue (expired at T0+10), `b` is not (T0+120).
+    let report = repo.expire_due(T0 + Duration::seconds(30)).await.unwrap();
+    assert_eq!(report.expired, vec![a.id]);
+    let a_after = repo.get(a.id).await.unwrap().unwrap();
+    let b_after = repo.get(b.id).await.unwrap().unwrap();
+    assert_eq!(a_after.release_reason, Some(UseLeaseReleaseReason::Expired));
+    assert!(b_after.is_live());
+}
+
+#[tokio::test]
+async fn expire_due_skips_manual_locks() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let _m = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let report = repo.expire_due(T0 + Duration::hours(24)).await.unwrap();
+    assert!(report.expired.is_empty());
+}
+
+#[tokio::test]
+async fn expire_due_on_clean_db_is_empty() {
+    let (pool, _tmp, _asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let report = repo.expire_due(T0 + Duration::hours(1)).await.unwrap();
+    assert!(report.expired.is_empty());
+}

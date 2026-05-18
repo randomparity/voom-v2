@@ -949,18 +949,57 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn expire_due_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _now: OffsetDateTime,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
-        Err(VoomError::Internal(
-            "expire_due_in_tx not implemented yet (Task 10)".to_owned(),
-        ))
+        let now_iso = iso8601(now)?;
+
+        // Identify the rows first so we can return their IDs to the caller.
+        let rows = sqlx::query(
+            "SELECT id FROM asset_use_leases \
+             WHERE release_reason IS NULL \
+               AND ttl_bound = 1 \
+               AND expires_at < ?",
+        )
+        .bind(&now_iso)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases expire scan: {e}")))?;
+        let ids: Vec<UseLeaseId> = rows
+            .iter()
+            .map(|r| -> Result<UseLeaseId, VoomError> {
+                let id: i64 = r
+                    .try_get("id")
+                    .map_err(|e| map_row_err("asset_use_leases", &e))?;
+                Ok(UseLeaseId(u64_from_i64(id)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        if ids.is_empty() {
+            return Ok(ExpireReport::default());
+        }
+
+        sqlx::query(
+            "UPDATE asset_use_leases \
+             SET release_reason = 'expired', released_at = ?, epoch = epoch + 1 \
+             WHERE release_reason IS NULL \
+               AND ttl_bound = 1 \
+               AND expires_at < ?",
+        )
+        .bind(&now_iso)
+        .bind(&now_iso)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases expire update: {e}")))?;
+
+        Ok(ExpireReport { expired: ids })
     }
 
-    async fn expire_due(&self, _now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
-        Err(VoomError::Internal(
-            "expire_due not implemented yet (Task 10)".to_owned(),
-        ))
+    async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self.expire_due_in_tx(&mut tx, now).await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn recover_stale_issuer_in_tx<'tx>(
