@@ -231,6 +231,16 @@ impl Repository for SqliteLeaseRepo {}
 
 #[async_trait]
 impl LeaseRepo for SqliteLeaseRepo {
+    // Sprint 1 contract: acquire enforces only ticket-state invariants
+    // (`state = 'ready'`, `next_eligible_at <= now`, `attempt < max_attempts`)
+    // plus worker existence and not-retired.
+    //
+    // `worker_capabilities`, `worker_grants.can_execute`, `denies`, and
+    // `max_parallel` are deliberately NOT consulted here. Sprint 1 use
+    // cases populate those tables so Sprint 3 (policy compilation) and
+    // Sprint 4 (remote-worker acquisition) can gate acquire without a
+    // schema change. See
+    // docs/superpowers/specs/2026-05-16-voom-sprint-1-design.md §7.5.
     async fn acquire_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,

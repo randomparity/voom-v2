@@ -586,6 +586,15 @@ Index on `(state, expires_at)` filtered to non-terminal rows to keep
   Transition `state` to `leased`. Increment `attempt` by 1. Insert lease
   row with `expires_at = now + ttl`. Use case emits `ticket.leased` +
   `lease.acquired`.
+
+  > **Deferred to Sprint 3+:** `worker_capabilities`,
+  > `worker_grants.can_execute`, `denies`, and `max_parallel` are NOT
+  > consulted at acquire time in Sprint 1. The tables exist so Sprint 1
+  > use cases (`record_capability`, `record_grant`) can populate them;
+  > acquire-time gating ships with policy compilation in Sprint 3 and
+  > remote-worker acquisition in Sprint 4. Until then, callers (the
+  > Sprint 1 in-process scheduler) are the sole eligibility authority.
+
 - `heartbeat(lease_id) -> Result<Lease>` — assert `state = 'held'`, set
   `last_heartbeat_at = now`, `expires_at = now + ttl`. No event in
   Sprint 1 (Sprint 6 daemon may emit a recovery event after a previously
