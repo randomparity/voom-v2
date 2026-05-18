@@ -749,14 +749,19 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
                 "manual locks do not heartbeat".to_owned(),
             ));
         }
-        // Derive TTL from original (expires_at - acquired_at).
+        // Derive TTL from the anchor that produced the current expires_at.
+        // On a freshly-acquired lease the anchor is `acquired_at`; after each
+        // heartbeat the anchor advances to `last_heartbeat_at`. Anchoring on
+        // `acquired_at` directly would inflate the TTL on every heartbeat
+        // (60s → 90s → 150s …) because `expires_at` already moved forward.
         let original_expires = existing.expires_at.ok_or_else(|| {
             VoomError::Database(
                 "TTL-bound lease missing expires_at — schema CHECK should have caught this"
                     .to_owned(),
             )
         })?;
-        let ttl = original_expires - existing.acquired_at;
+        let anchor = existing.last_heartbeat_at.unwrap_or(existing.acquired_at);
+        let ttl = original_expires - anchor;
         let new_expires = now + ttl;
 
         let new_expires_iso = iso8601(new_expires)?;

@@ -217,6 +217,42 @@ async fn heartbeat_extends_expires_at_by_original_ttl() {
 }
 
 #[tokio::test]
+async fn heartbeat_twice_does_not_inflate_ttl() {
+    // Regression: anchoring `ttl` on `acquired_at` after the first
+    // heartbeat already shifted `expires_at` forward inflated the
+    // derived TTL on every subsequent heartbeat (60s → 90s → 150s …).
+    // The anchor must be `last_heartbeat_at` once set, falling back to
+    // `acquired_at` only on the first heartbeat.
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let _beat1 = repo
+        .heartbeat(lease.id, T0 + Duration::seconds(30))
+        .await
+        .unwrap();
+    let beat2 = repo
+        .heartbeat(lease.id, T0 + Duration::seconds(60))
+        .await
+        .unwrap();
+    // After two heartbeats with TTL = 60s, expires_at must be
+    // (second heartbeat) + 60s = T0 + 120s, NOT T0 + 150s (the bug).
+    assert_eq!(beat2.expires_at, Some(T0 + Duration::seconds(120)));
+    assert_eq!(beat2.last_heartbeat_at, Some(T0 + Duration::seconds(60)));
+    assert_eq!(beat2.epoch, 2);
+}
+
+#[tokio::test]
 async fn heartbeat_against_manual_lock_is_rejected() {
     let (pool, _tmp, asset) = pool_with_asset().await;
     let repo = SqliteUseLeaseRepo::new(pool);
