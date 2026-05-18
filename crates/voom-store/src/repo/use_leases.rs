@@ -1004,23 +1004,74 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn recover_stale_issuer_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "recover_stale_issuer_in_tx not implemented yet (Task 11)".to_owned(),
-        ))
+        // Pre-check TTL-bound: ManualLock is the only valid target.
+        let row =
+            sqlx::query("SELECT ttl_bound, release_reason FROM asset_use_leases WHERE id = ?")
+                .bind(i64_from_u64(lease_id.0))
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| VoomError::Database(format!("asset_use_leases recover read: {e}")))?
+                .ok_or_else(|| VoomError::NotFound(format!("use_lease {lease_id} not found")))?;
+
+        let ttl_bound: i64 = row
+            .try_get("ttl_bound")
+            .map_err(|e| map_row_err("asset_use_leases", &e))?;
+        let release_reason: Option<String> = row
+            .try_get("release_reason")
+            .map_err(|e| map_row_err("asset_use_leases", &e))?;
+
+        if release_reason.is_some() {
+            return Err(VoomError::Conflict(format!(
+                "use_lease {lease_id} already terminal"
+            )));
+        }
+        if ttl_bound != 0 {
+            return Err(VoomError::Config(
+                "recover_stale_issuer applies to manual locks only".to_owned(),
+            ));
+        }
+
+        let now_iso = iso8601(now)?;
+        sqlx::query(
+            "UPDATE asset_use_leases \
+             SET release_reason = 'issuer_lost', released_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND release_reason IS NULL",
+        )
+        .bind(&now_iso)
+        .bind(i64_from_u64(lease_id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases recover update: {e}")))?;
+
+        let row = sqlx::query(
+            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+                    release_reason, released_at, epoch \
+             FROM asset_use_leases WHERE id = ?",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases post-recover re-read: {e}")))?;
+        row_to_use_lease(&row)
     }
 
     async fn recover_stale_issuer(
         &self,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "recover_stale_issuer not implemented yet (Task 11)".to_owned(),
-        ))
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self
+            .recover_stale_issuer_in_tx(&mut tx, lease_id, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn reanchor_on_move_in_tx<'tx>(

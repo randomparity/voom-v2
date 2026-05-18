@@ -585,3 +585,78 @@ async fn expire_due_on_clean_db_is_empty() {
     let report = repo.expire_due(T0 + Duration::hours(1)).await.unwrap();
     assert!(report.expired.is_empty());
 }
+
+// --- Task 11: recover_stale_issuer ---
+
+#[tokio::test]
+async fn recover_stale_issuer_on_manual_lock_marks_issuer_lost() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "w-1".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let out = repo
+        .recover_stale_issuer(l.id, T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(out.release_reason, Some(UseLeaseReleaseReason::IssuerLost));
+    assert_eq!(out.released_at, Some(T0 + Duration::seconds(5)));
+}
+
+#[tokio::test]
+async fn recover_stale_issuer_on_ttl_lease_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let err = repo
+        .recover_stale_issuer(l.id, T0 + Duration::seconds(5))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn recover_stale_issuer_against_terminal_is_conflict() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "w-1".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.force_release(l.id, T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    let err = repo
+        .recover_stale_issuer(l.id, T0 + Duration::seconds(10))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
