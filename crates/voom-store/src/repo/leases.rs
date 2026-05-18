@@ -368,6 +368,13 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Release a held lease.
+    ///
+    /// The lease-side transition is one `UPDATE … RETURNING` round-trip
+    /// (no pre-read, no post-read). When the RETURNING matches nothing
+    /// the lease was already absent or in a non-`held` state — both
+    /// outcomes surface as `VoomError::Conflict`. Callers that need to
+    /// distinguish "missing" from "wrong state" should `get` first.
     async fn release_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -376,40 +383,28 @@ impl LeaseRepo for SqliteLeaseRepo {
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
         let now_str = iso8601(now)?;
-        let lease = get_lease_in_tx(tx, lease_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
-        if lease.state != LeaseState::Held {
-            return Err(VoomError::Conflict(format!(
-                "release rejected: lease {lease_id} not held (state {:?})",
-                lease.state
-            )));
-        }
-        // Transition lease. Row-count gate catches the racy window where a
-        // concurrent writer flipped the lease state between the read above
-        // and this update.
-        let lease_res = sqlx::query(
+        let lease_row = sqlx::query(&format!(
             "UPDATE leases \
-             SET state = 'released', release_reason = ?, released_at = ?, \
-                 epoch = epoch + 1 \
-             WHERE id = ? AND state = 'held'",
-        )
+              SET state = 'released', release_reason = ?, released_at = ?, \
+                  epoch = epoch + 1 \
+              WHERE id = ? AND state = 'held' \
+            RETURNING {LEASE_RETURNING_COLS}"
+        ))
         .bind(ReleaseReason::Released.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("leases release: {e}")))?;
-        if lease_res.rows_affected() != 1 {
+        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
             tracing::warn!(
                 lease_id = i64_from_u64(lease_id.0),
-                "release aborting: lease no longer held"
+                "release rejected: lease not held"
             );
             return Err(VoomError::Conflict(format!(
-                "release rejected: lease {lease_id} no longer held"
+                "release rejected: lease {lease_id} not held or not found"
             )));
-        }
-        // Transition ticket.
+        };
         let result_json = serialize_json(&result, "result")?;
         let ticket_res = sqlx::query(
             "UPDATE tickets SET state = 'succeeded', result = ?, \
@@ -432,9 +427,7 @@ impl LeaseRepo for SqliteLeaseRepo {
                 lease.ticket_id
             )));
         }
-        get_lease_in_tx(tx, lease_id)
-            .await?
-            .ok_or_else(|| VoomError::Internal("release: post-update get vanished".to_owned()))
+        Ok(lease)
     }
 
     async fn release(
@@ -455,6 +448,13 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
+    /// Fail a held lease.
+    ///
+    /// The lease-side transition is one `UPDATE … RETURNING` round-trip
+    /// after a single JOIN pre-read that fetches ticket attempts gated on
+    /// `state = 'held'` (replaces the previous wide `get_lease_in_tx`).
+    /// On a missing lease, on a non-`held` lease, or on a lost race the
+    /// caller sees `VoomError::Conflict`.
     async fn fail_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -464,21 +464,28 @@ impl LeaseRepo for SqliteLeaseRepo {
         clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
     ) -> Result<Lease, VoomError> {
-        let lease = get_lease_in_tx(tx, lease_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
-        if lease.state != LeaseState::Held {
+        // Single JOIN read: ticket attempts gated on the lease being held.
+        // Replaces the wide `get_lease_in_tx` pre-read; also gives us
+        // ticket_id, attempt, and max_attempts in one round-trip.
+        let probe: Option<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT t.id, t.attempt, t.max_attempts \
+             FROM tickets t JOIN leases l ON l.ticket_id = t.id \
+             WHERE l.id = ? AND l.state = 'held'",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("fail probe: {e}")))?;
+        let Some((ticket_id_i, attempt, max_attempts)) = probe else {
+            tracing::warn!(
+                lease_id = i64_from_u64(lease_id.0),
+                "fail rejected: lease not held"
+            );
             return Err(VoomError::Conflict(format!(
-                "fail rejected: lease {lease_id} not held"
+                "fail rejected: lease {lease_id} not held or not found"
             )));
-        }
-        // Inspect the ticket: how many attempts remain after this one?
-        let (attempt, max_attempts): (i64, i64) =
-            sqlx::query_as("SELECT attempt, max_attempts FROM tickets WHERE id = ?")
-                .bind(i64_from_u64(lease.ticket_id.0))
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("tickets read: {e}")))?;
+        };
+        let ticket_id = TicketId(u64_from_i64(ticket_id_i));
         let attempts_remain = attempt < max_attempts;
         let retriable = class.is_retriable();
         let now_str = iso8601(now)?;
@@ -487,20 +494,20 @@ impl LeaseRepo for SqliteLeaseRepo {
         } else {
             ReleaseReason::FailedTerminal
         };
-        // Transition lease to released with the matching reason.
-        let lease_res = sqlx::query(
+        let lease_row = sqlx::query(&format!(
             "UPDATE leases \
-             SET state = 'released', release_reason = ?, released_at = ?, \
-                 epoch = epoch + 1 \
-             WHERE id = ? AND state = 'held'",
-        )
+              SET state = 'released', release_reason = ?, released_at = ?, \
+                  epoch = epoch + 1 \
+              WHERE id = ? AND state = 'held' \
+            RETURNING {LEASE_RETURNING_COLS}"
+        ))
         .bind(release_reason.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("leases release on fail: {e}")))?;
-        if lease_res.rows_affected() != 1 {
+        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
             tracing::warn!(
                 lease_id = i64_from_u64(lease_id.0),
                 "fail aborting: lease no longer held"
@@ -508,7 +515,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             return Err(VoomError::Conflict(format!(
                 "fail rejected: lease {lease_id} no longer held"
             )));
-        }
+        };
         // Transition ticket: ready (with backoff) or failed.
         if retriable && attempts_remain {
             // attempt is already incremented to reflect "this dispatch"; backoff
@@ -522,19 +529,18 @@ impl LeaseRepo for SqliteLeaseRepo {
             )
             .bind(&now_str)
             .bind(iso8601(next_eligible)?)
-            .bind(i64_from_u64(lease.ticket_id.0))
+            .bind(ticket_id_i)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::Database(format!("tickets requeue: {e}")))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
                     lease_id = i64_from_u64(lease_id.0),
-                    ticket_id = i64_from_u64(lease.ticket_id.0),
+                    ticket_id = ticket_id_i,
                     "fail aborting: ticket no longer leased on requeue"
                 );
                 return Err(VoomError::Conflict(format!(
-                    "fail rejected (retriable): ticket {} not in expected state",
-                    lease.ticket_id
+                    "fail rejected (retriable): ticket {ticket_id} not in expected state"
                 )));
             }
         } else {
@@ -543,25 +549,22 @@ impl LeaseRepo for SqliteLeaseRepo {
                  epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
             )
             .bind(&now_str)
-            .bind(i64_from_u64(lease.ticket_id.0))
+            .bind(ticket_id_i)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::Database(format!("tickets fail terminal: {e}")))?;
             if ticket_res.rows_affected() != 1 {
                 tracing::warn!(
                     lease_id = i64_from_u64(lease_id.0),
-                    ticket_id = i64_from_u64(lease.ticket_id.0),
+                    ticket_id = ticket_id_i,
                     "fail aborting: ticket no longer leased on terminal fail"
                 );
                 return Err(VoomError::Conflict(format!(
-                    "fail rejected (terminal): ticket {} not in expected state",
-                    lease.ticket_id
+                    "fail rejected (terminal): ticket {ticket_id} not in expected state"
                 )));
             }
         }
-        get_lease_in_tx(tx, lease_id)
-            .await?
-            .ok_or_else(|| VoomError::Internal("fail: post-update get vanished".to_owned()))
+        Ok(lease)
     }
 
     async fn fail(
@@ -713,26 +716,28 @@ impl LeaseRepo for SqliteLeaseRepo {
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<ForceReleaseOutcome, VoomError> {
-        let lease = get_lease_in_tx(tx, lease_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
-        if lease.state != LeaseState::Held {
+        // Single JOIN read: ticket attempts gated on the lease being held.
+        // Replaces the wide `get_lease_in_tx` pre-read; also gives us
+        // ticket_id, attempt, and max_attempts in one round-trip.
+        let probe: Option<(i64, i64, i64)> = sqlx::query_as(
+            "SELECT t.id, t.attempt, t.max_attempts \
+             FROM tickets t JOIN leases l ON l.ticket_id = t.id \
+             WHERE l.id = ? AND l.state = 'held'",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("force_release probe: {e}")))?;
+        let Some((ticket_id_i, attempt, max_attempts)) = probe else {
+            tracing::warn!(
+                lease_id = i64_from_u64(lease_id.0),
+                "force_release rejected: lease not held"
+            );
             return Err(VoomError::Conflict(format!(
-                "force_release rejected: lease {lease_id} not held"
+                "force_release rejected: lease {lease_id} not held or not found"
             )));
-        }
-        let (attempt, max_attempts): (i64, i64) =
-            sqlx::query_as("SELECT attempt, max_attempts FROM tickets WHERE id = ?")
-                .bind(i64_from_u64(lease.ticket_id.0))
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("ticket attempts probe: {e}")))?
-                .ok_or_else(|| {
-                    VoomError::Internal(format!(
-                        "force_release: ticket {} vanished",
-                        lease.ticket_id
-                    ))
-                })?;
+        };
+        let ticket_id = TicketId(u64_from_i64(ticket_id_i));
         // Operator asked for requeue but the ticket is already out of
         // attempts: refuse the call entirely. Promoting back to `ready`
         // would strand the ticket — `acquire` refuses it (out of
@@ -742,28 +747,26 @@ impl LeaseRepo for SqliteLeaseRepo {
         // intend a terminal force-release.
         if also_requeue && attempt >= max_attempts {
             return Err(VoomError::Conflict(format!(
-                "force_release requeue rejected: ticket {tid} attempt {a} >= \
-                 max_attempts {m}; use also_requeue = false",
-                tid = lease.ticket_id,
-                a = attempt,
-                m = max_attempts,
+                "force_release requeue rejected: ticket {ticket_id} attempt {attempt} >= \
+                 max_attempts {max_attempts}; use also_requeue = false"
             )));
         }
         let ticket_requeued = also_requeue;
         let now_str = iso8601(now)?;
-        let lease_res = sqlx::query(
+        let lease_row = sqlx::query(&format!(
             "UPDATE leases \
-             SET state = 'force_released', release_reason = ?, \
-                 released_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND state = 'held'",
-        )
+              SET state = 'force_released', release_reason = ?, \
+                  released_at = ?, epoch = epoch + 1 \
+              WHERE id = ? AND state = 'held' \
+            RETURNING {LEASE_RETURNING_COLS}"
+        ))
         .bind(ReleaseReason::ForceReleased.as_str())
         .bind(&now_str)
         .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("lease force_release: {e}")))?;
-        if lease_res.rows_affected() != 1 {
+        let Some(lease) = lease_row.as_ref().map(row_to_lease).transpose()? else {
             tracing::warn!(
                 lease_id = i64_from_u64(lease_id.0),
                 "force_release aborting: lease no longer held"
@@ -771,7 +774,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             return Err(VoomError::Conflict(format!(
                 "force_release rejected: lease {lease_id} no longer held"
             )));
-        }
+        };
         // On requeue, set next_eligible_at = now (operator-driven, no
         // backoff). On terminal, the column is irrelevant.
         let ticket_res = if ticket_requeued {
@@ -782,7 +785,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             )
             .bind(&now_str)
             .bind(&now_str)
-            .bind(i64_from_u64(lease.ticket_id.0))
+            .bind(ticket_id_i)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?
@@ -792,7 +795,7 @@ impl LeaseRepo for SqliteLeaseRepo {
                  epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
             )
             .bind(&now_str)
-            .bind(i64_from_u64(lease.ticket_id.0))
+            .bind(ticket_id_i)
             .execute(&mut **tx)
             .await
             .map_err(|e| VoomError::Database(format!("tickets force_release: {e}")))?
@@ -800,17 +803,13 @@ impl LeaseRepo for SqliteLeaseRepo {
         if ticket_res.rows_affected() != 1 {
             tracing::warn!(
                 lease_id = i64_from_u64(lease_id.0),
-                ticket_id = i64_from_u64(lease.ticket_id.0),
+                ticket_id = ticket_id_i,
                 "force_release aborting: ticket no longer leased"
             );
             return Err(VoomError::Conflict(format!(
-                "force_release rejected: ticket {} not in expected state",
-                lease.ticket_id
+                "force_release rejected: ticket {ticket_id} not in expected state"
             )));
         }
-        let lease = get_lease_in_tx(tx, lease_id).await?.ok_or_else(|| {
-            VoomError::Internal("force_release: post-update get vanished".to_owned())
-        })?;
         Ok(ForceReleaseOutcome {
             lease,
             ticket_requeued,
@@ -852,6 +851,12 @@ impl LeaseRepo for SqliteLeaseRepo {
 const SELECT_LEASE_COLS: &str = "SELECT id, ticket_id, worker_id, state, acquired_at, expires_at, \
             last_heartbeat_at, ttl_seconds, release_reason, released_at, epoch \
      FROM leases WHERE id = ?";
+
+/// Column list for `UPDATE leases ... RETURNING <cols>` in the lease
+/// lifecycle methods. Mirrors `SELECT_LEASE_COLS` so `row_to_lease`
+/// can decode the row uniformly.
+const LEASE_RETURNING_COLS: &str = "id, ticket_id, worker_id, state, acquired_at, expires_at, \
+     last_heartbeat_at, ttl_seconds, release_reason, released_at, epoch";
 
 async fn get_lease_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
