@@ -809,25 +809,79 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn release_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _lease_id: UseLeaseId,
-        _reason: UseLeaseReleaseReason,
-        _now: OffsetDateTime,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: UseLeaseId,
+        reason: UseLeaseReleaseReason,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "release_in_tx not implemented yet (Task 8)".to_owned(),
-        ))
+        // §9.2: only the issuer-driven release reasons are accepted on
+        // this path. The other terminal reasons have dedicated paths.
+        if !matches!(
+            reason,
+            UseLeaseReleaseReason::Released | UseLeaseReleaseReason::Superseded
+        ) {
+            return Err(VoomError::Config(format!(
+                "UseLeaseRepo::release accepts Released or Superseded only; got {reason:?}"
+            )));
+        }
+
+        let now_iso = iso8601(now)?;
+        let res = sqlx::query(
+            "UPDATE asset_use_leases \
+             SET release_reason = ?, released_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND release_reason IS NULL",
+        )
+        .bind(reason.as_str())
+        .bind(&now_iso)
+        .bind(i64_from_u64(lease_id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases release: {e}")))?;
+
+        if res.rows_affected() == 0 {
+            // Distinguish missing from terminal:
+            let exists = sqlx::query("SELECT 1 FROM asset_use_leases WHERE id = ?")
+                .bind(i64_from_u64(lease_id.0))
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| VoomError::Database(format!("asset_use_leases probe: {e}")))?
+                .is_some();
+            return if exists {
+                Err(VoomError::Conflict(format!(
+                    "use_lease {lease_id} already terminal"
+                )))
+            } else {
+                Err(VoomError::NotFound(format!(
+                    "use_lease {lease_id} not found"
+                )))
+            };
+        }
+
+        // Re-read inside the same tx.
+        let row = sqlx::query(
+            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+                    release_reason, released_at, epoch \
+             FROM asset_use_leases WHERE id = ?",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases post-release re-read: {e}")))?;
+        row_to_use_lease(&row)
     }
 
     async fn release(
         &self,
-        _lease_id: UseLeaseId,
-        _reason: UseLeaseReleaseReason,
-        _now: OffsetDateTime,
+        lease_id: UseLeaseId,
+        reason: UseLeaseReleaseReason,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "release not implemented yet (Task 8)".to_owned(),
-        ))
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self.release_in_tx(&mut tx, lease_id, reason, now).await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn force_release_in_tx<'tx>(

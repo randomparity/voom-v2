@@ -244,7 +244,6 @@ async fn heartbeat_against_manual_lock_is_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "depends on Task 8 release"]
 async fn heartbeat_against_terminal_lease_is_rejected() {
     let (pool, _tmp, asset) = pool_with_asset().await;
     let repo = SqliteUseLeaseRepo::new(pool);
@@ -280,4 +279,157 @@ async fn heartbeat_against_unknown_id_is_not_found() {
     let repo = SqliteUseLeaseRepo::new(pool);
     let err = repo.heartbeat(UseLeaseId(99_999), T0).await.unwrap_err();
     assert!(matches!(err, VoomError::NotFound(_)), "got {err:?}");
+}
+
+// --- Task 8: release ---
+
+#[tokio::test]
+async fn release_with_released_marks_terminal() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let released = repo
+        .release(
+            l.id,
+            UseLeaseReleaseReason::Released,
+            T0 + Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        released.release_reason,
+        Some(UseLeaseReleaseReason::Released)
+    );
+    assert_eq!(released.released_at, Some(T0 + Duration::seconds(5)));
+    assert!(!released.is_live());
+}
+
+#[tokio::test]
+async fn release_with_superseded_marks_terminal() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let released = repo
+        .release(
+            l.id,
+            UseLeaseReleaseReason::Superseded,
+            T0 + Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        released.release_reason,
+        Some(UseLeaseReleaseReason::Superseded)
+    );
+}
+
+#[tokio::test]
+async fn release_with_expired_reason_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let err = repo
+        .release(
+            l.id,
+            UseLeaseReleaseReason::Expired,
+            T0 + Duration::seconds(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn release_with_force_released_or_issuer_lost_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    for bad in [
+        UseLeaseReleaseReason::ForceReleased,
+        UseLeaseReleaseReason::IssuerLost,
+    ] {
+        let err = repo
+            .release(l.id, bad, T0 + Duration::seconds(5))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VoomError::Config(_)), "{bad:?}: got {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn release_against_already_released_is_conflict() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.release(
+        l.id,
+        UseLeaseReleaseReason::Released,
+        T0 + Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let err = repo
+        .release(
+            l.id,
+            UseLeaseReleaseReason::Released,
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
