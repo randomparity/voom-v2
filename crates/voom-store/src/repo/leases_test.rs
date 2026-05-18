@@ -763,3 +763,72 @@ async fn force_release_returns_conflict_when_ticket_no_longer_leased() {
     let lease = lrepo.get(l.id).await.unwrap().unwrap();
     assert_eq!(lease.state, LeaseState::Held);
 }
+
+/// Regression for the unbounded `expire_due` candidate scan: with a
+/// backlog larger than `LEASE_BATCH_LIMIT` a single call must cap the
+/// processed set at the limit, and a follow-up call must drain the
+/// remainder. Mirrors the M3 `reanchor_on_move_drains_past_batch_limit`
+/// integration test but exercises the repo directly so the bound is
+/// pinned at the SQL layer, not at the case handler.
+#[tokio::test]
+async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    let trepo = SqliteTicketRepo::new(pool.clone());
+    let wrepo = SqliteWorkerRepo::new(pool.clone());
+    let lrepo = SqliteLeaseRepo::new(pool.clone());
+    let w = wrepo
+        .register(NewWorker {
+            name: "w-cap".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let limit = usize::try_from(LEASE_BATCH_LIMIT).unwrap();
+    let total = limit + 1;
+    for i in 0..total {
+        let t = trepo
+            .create(NewTicket {
+                job_id: None,
+                kind: format!("k-{i}"),
+                priority: 0,
+                payload: json!({}),
+                max_attempts: 3,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        trepo.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+        let _l = lrepo
+            .acquire(NewLease {
+                ticket_id: t.id,
+                worker_id: w.id,
+                ttl: Duration::seconds(10),
+                now: T0,
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = lrepo.expire_due(T0 + Duration::seconds(11)).await.unwrap();
+    assert_eq!(
+        first.expired_leases.len(),
+        limit,
+        "first call must cap at LEASE_BATCH_LIMIT"
+    );
+
+    let second = lrepo.expire_due(T0 + Duration::seconds(11)).await.unwrap();
+    assert_eq!(
+        second.expired_leases.len(),
+        total - limit,
+        "second call must process the remainder"
+    );
+
+    let third = lrepo.expire_due(T0 + Duration::seconds(11)).await.unwrap();
+    assert!(
+        third.expired_leases.is_empty(),
+        "no candidates remain after the drain"
+    );
+}
