@@ -376,6 +376,33 @@ async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), VoomEr
         .map_err(|e| VoomError::Database(format!("commit: {e}")))
 }
 
+/// Diagnose a single-row lifecycle UPDATE that returned no row. Runs
+/// one tiny existence probe (`SELECT 1 FROM asset_use_leases WHERE id = ?`)
+/// to pick between `NotFound` and `Conflict(already terminal)`. Only
+/// the error path pays this round-trip — the happy path stays single-RT.
+async fn diagnose_use_lease_miss(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lease_id: UseLeaseId,
+) -> VoomError {
+    match sqlx::query_scalar::<_, i64>("SELECT 1 FROM asset_use_leases WHERE id = ?")
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+    {
+        Ok(Some(_)) => VoomError::Conflict(format!("use_lease {lease_id} already terminal")),
+        Ok(None) => VoomError::NotFound(format!("use_lease {lease_id} not found")),
+        Err(e) => VoomError::Database(format!("asset_use_leases probe: {e}")),
+    }
+}
+
+/// Column list for `UPDATE asset_use_leases ... RETURNING <cols>` in
+/// the lifecycle methods. Mirrors the SELECT projection used by `get`
+/// / `list_for_scope` so `row_to_use_lease` can decode the row uniformly.
+const USE_LEASE_RETURNING_COLS: &str = "id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+     scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+     ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+     release_reason, released_at, epoch";
+
 /// Decode a single `asset_use_leases` row into `UseLease`. Used by every
 /// read path and every `_in_tx` post-write re-read.
 fn row_to_use_lease(row: &sqlx::sqlite::SqliteRow) -> Result<UseLease, VoomError> {
@@ -779,50 +806,22 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         }
 
         let now_iso = iso8601(now)?;
-        let res = sqlx::query(
+        let row = sqlx::query(&format!(
             "UPDATE asset_use_leases \
-             SET release_reason = ?, released_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND release_reason IS NULL",
-        )
+              SET release_reason = ?, released_at = ?, epoch = epoch + 1 \
+              WHERE id = ? AND release_reason IS NULL \
+            RETURNING {USE_LEASE_RETURNING_COLS}"
+        ))
         .bind(reason.as_str())
         .bind(&now_iso)
         .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_use_leases release: {e}")))?;
-
-        if res.rows_affected() == 0 {
-            // Distinguish missing from terminal:
-            let exists = sqlx::query("SELECT 1 FROM asset_use_leases WHERE id = ?")
-                .bind(i64_from_u64(lease_id.0))
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("asset_use_leases probe: {e}")))?
-                .is_some();
-            return if exists {
-                Err(VoomError::Conflict(format!(
-                    "use_lease {lease_id} already terminal"
-                )))
-            } else {
-                Err(VoomError::NotFound(format!(
-                    "use_lease {lease_id} not found"
-                )))
-            };
+        match row.as_ref().map(row_to_use_lease).transpose()? {
+            Some(lease) => Ok(lease),
+            None => Err(diagnose_use_lease_miss(tx, lease_id).await),
         }
-
-        // Re-read inside the same tx.
-        let row = sqlx::query(
-            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
-                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
-                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
-                    release_reason, released_at, epoch \
-             FROM asset_use_leases WHERE id = ?",
-        )
-        .bind(i64_from_u64(lease_id.0))
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases post-release re-read: {e}")))?;
-        row_to_use_lease(&row)
     }
 
     async fn release(
@@ -844,49 +843,21 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
         let now_iso = iso8601(now)?;
-        let res = sqlx::query(
+        let row = sqlx::query(&format!(
             "UPDATE asset_use_leases \
-             SET release_reason = 'force_released', released_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND release_reason IS NULL",
-        )
+              SET release_reason = 'force_released', released_at = ?, epoch = epoch + 1 \
+              WHERE id = ? AND release_reason IS NULL \
+            RETURNING {USE_LEASE_RETURNING_COLS}"
+        ))
         .bind(&now_iso)
         .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_use_leases force_release: {e}")))?;
-
-        if res.rows_affected() == 0 {
-            let exists = sqlx::query("SELECT 1 FROM asset_use_leases WHERE id = ?")
-                .bind(i64_from_u64(lease_id.0))
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("asset_use_leases probe: {e}")))?
-                .is_some();
-            return if exists {
-                Err(VoomError::Conflict(format!(
-                    "use_lease {lease_id} already terminal"
-                )))
-            } else {
-                Err(VoomError::NotFound(format!(
-                    "use_lease {lease_id} not found"
-                )))
-            };
+        match row.as_ref().map(row_to_use_lease).transpose()? {
+            Some(lease) => Ok(lease),
+            None => Err(diagnose_use_lease_miss(tx, lease_id).await),
         }
-
-        let row = sqlx::query(
-            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
-                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
-                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
-                    release_reason, released_at, epoch \
-             FROM asset_use_leases WHERE id = ?",
-        )
-        .bind(i64_from_u64(lease_id.0))
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| {
-            VoomError::Database(format!("asset_use_leases post-force-release re-read: {e}"))
-        })?;
-        row_to_use_lease(&row)
     }
 
     async fn force_release(
@@ -906,19 +877,20 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
         let now_iso = iso8601(now)?;
-
-        // Identify the rows first so we can return their IDs to the caller.
         let rows = sqlx::query(
-            "SELECT id FROM asset_use_leases \
-             WHERE release_reason IS NULL \
-               AND ttl_bound = 1 \
-               AND expires_at < ?",
+            "UPDATE asset_use_leases \
+              SET release_reason = 'expired', released_at = ?, epoch = epoch + 1 \
+              WHERE release_reason IS NULL \
+                AND ttl_bound = 1 \
+                AND expires_at < ? \
+            RETURNING id",
         )
+        .bind(&now_iso)
         .bind(&now_iso)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases expire scan: {e}")))?;
-        let ids: Vec<UseLeaseId> = rows
+        .map_err(|e| VoomError::Database(format!("asset_use_leases expire update: {e}")))?;
+        let expired: Vec<UseLeaseId> = rows
             .iter()
             .map(|r| -> Result<UseLeaseId, VoomError> {
                 let id: i64 = r
@@ -927,25 +899,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
                 Ok(UseLeaseId(u64_from_i64(id)))
             })
             .collect::<Result<_, _>>()?;
-
-        if ids.is_empty() {
-            return Ok(ExpireReport::default());
-        }
-
-        sqlx::query(
-            "UPDATE asset_use_leases \
-             SET release_reason = 'expired', released_at = ?, epoch = epoch + 1 \
-             WHERE release_reason IS NULL \
-               AND ttl_bound = 1 \
-               AND expires_at < ?",
-        )
-        .bind(&now_iso)
-        .bind(&now_iso)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases expire update: {e}")))?;
-
-        Ok(ExpireReport { expired: ids })
+        Ok(ExpireReport { expired })
     }
 
     async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
@@ -961,62 +915,58 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        // Pre-check TTL-bound: ManualLock is the only valid target.
-        let row =
+        // Manual locks only: gate the UPDATE on `ttl_bound = 0` so the
+        // common success path is one round-trip via RETURNING. The error
+        // branch falls back to a single diagnostic SELECT to pick between
+        // NotFound, Conflict (already terminal), and Config (TTL-bound).
+        let now_iso = iso8601(now)?;
+        let row = sqlx::query(&format!(
+            "UPDATE asset_use_leases \
+              SET release_reason = 'issuer_lost', released_at = ?, epoch = epoch + 1 \
+              WHERE id = ? AND release_reason IS NULL AND ttl_bound = 0 \
+            RETURNING {USE_LEASE_RETURNING_COLS}"
+        ))
+        .bind(&now_iso)
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases recover update: {e}")))?;
+        if let Some(lease) = row.as_ref().map(row_to_use_lease).transpose()? {
+            return Ok(lease);
+        }
+        // Disambiguate: read both columns in one query.
+        let probe =
             sqlx::query("SELECT ttl_bound, release_reason FROM asset_use_leases WHERE id = ?")
                 .bind(i64_from_u64(lease_id.0))
                 .fetch_optional(&mut **tx)
                 .await
-                .map_err(|e| VoomError::Database(format!("asset_use_leases recover read: {e}")))?
-                .ok_or_else(|| VoomError::NotFound(format!("use_lease {lease_id} not found")))?;
-
-        let ttl_bound: i64 = row
+                .map_err(|e| VoomError::Database(format!("asset_use_leases recover probe: {e}")))?;
+        let Some(probe) = probe else {
+            return Err(VoomError::NotFound(format!(
+                "use_lease {lease_id} not found"
+            )));
+        };
+        let ttl_bound: i64 = probe
             .try_get("ttl_bound")
             .map_err(|e| map_row_err("asset_use_leases", &e))?;
-        let release_reason: Option<String> = row
+        let release_reason: Option<String> = probe
             .try_get("release_reason")
             .map_err(|e| map_row_err("asset_use_leases", &e))?;
-
         if release_reason.is_some() {
-            return Err(VoomError::Conflict(format!(
+            Err(VoomError::Conflict(format!(
                 "use_lease {lease_id} already terminal"
-            )));
-        }
-        if ttl_bound != 0 {
-            return Err(VoomError::Config(
+            )))
+        } else if ttl_bound != 0 {
+            Err(VoomError::Config(
                 "recover_stale_issuer applies to manual locks only".to_owned(),
-            ));
-        }
-
-        let now_iso = iso8601(now)?;
-        let res = sqlx::query(
-            "UPDATE asset_use_leases \
-             SET release_reason = 'issuer_lost', released_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND release_reason IS NULL",
-        )
-        .bind(&now_iso)
-        .bind(i64_from_u64(lease_id.0))
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases recover update: {e}")))?;
-        if res.rows_affected() == 0 {
-            return Err(VoomError::Conflict(format!(
+            ))
+        } else {
+            // Live + manual, but the gated UPDATE matched zero rows.
+            // Only a concurrent writer can land us here.
+            Err(VoomError::Conflict(format!(
                 "use_lease {lease_id} concurrent modification"
-            )));
+            )))
         }
-
-        let row = sqlx::query(
-            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
-                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
-                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
-                    release_reason, released_at, epoch \
-             FROM asset_use_leases WHERE id = ?",
-        )
-        .bind(i64_from_u64(lease_id.0))
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases post-recover re-read: {e}")))?;
-        row_to_use_lease(&row)
     }
 
     async fn recover_stale_issuer(
@@ -1039,16 +989,18 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         new: FileLocationId,
         _now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
-        // Identify affected IDs first.
         let rows = sqlx::query(
-            "SELECT id FROM asset_use_leases \
-             WHERE scope_location_id = ? AND release_reason IS NULL",
+            "UPDATE asset_use_leases \
+              SET scope_location_id = ?, epoch = epoch + 1 \
+              WHERE scope_location_id = ? AND release_reason IS NULL \
+            RETURNING id",
         )
+        .bind(i64_from_u64(new.0))
         .bind(i64_from_u64(retired.0))
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor scan: {e}")))?;
-        let ids: Vec<UseLeaseId> = rows
+        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor update: {e}")))?;
+        let reanchored: Vec<UseLeaseId> = rows
             .iter()
             .map(|r| -> Result<UseLeaseId, VoomError> {
                 let id: i64 = r
@@ -1057,23 +1009,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
                 Ok(UseLeaseId(u64_from_i64(id)))
             })
             .collect::<Result<_, _>>()?;
-
-        if ids.is_empty() {
-            return Ok(ReanchorReport::default());
-        }
-
-        sqlx::query(
-            "UPDATE asset_use_leases \
-             SET scope_location_id = ?, epoch = epoch + 1 \
-             WHERE scope_location_id = ? AND release_reason IS NULL",
-        )
-        .bind(i64_from_u64(new.0))
-        .bind(i64_from_u64(retired.0))
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor update: {e}")))?;
-
-        Ok(ReanchorReport { reanchored: ids })
+        Ok(ReanchorReport { reanchored })
     }
 
     async fn reanchor_on_move(
