@@ -237,6 +237,67 @@ async fn accept_then_re_accept_returns_conflict() {
 }
 
 #[tokio::test]
+async fn accept_rejects_superseded_evidence() {
+    // A superseded row leaves accepted_at NULL on the old row; the accept
+    // UPDATE must not match it, so a stale UI / retried operator action
+    // cannot stamp acceptance on an obsolete assertion.
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let old = repo
+        .record_identity_evidence_in_tx(
+            &mut tx,
+            NewIdentityEvidence {
+                target_type: IdentityEvidenceTarget::FileAsset,
+                target_id: asset.id.0,
+                assertion_type: voom_events::AssertionKind::PathRuleMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "1".to_owned(),
+                confidence: 0.4,
+                provenance: json!({}),
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let _new = repo
+        .supersede_identity_evidence_in_tx(
+            &mut tx,
+            old.id,
+            NewIdentityEvidence {
+                target_type: IdentityEvidenceTarget::FileAsset,
+                target_id: asset.id.0,
+                assertion_type: voom_events::AssertionKind::PathRuleMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "2".to_owned(),
+                confidence: 0.9,
+                provenance: json!({}),
+                observed_at: T0 + Duration::seconds(5),
+            },
+            T0 + Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+    // Attempting to accept the now-superseded original must Conflict.
+    let err = repo
+        .accept_identity_evidence_in_tx(
+            &mut tx,
+            old.id,
+            Some("operator".to_owned()),
+            T0 + Duration::seconds(6),
+            AcceptedPin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
 async fn supersede_inserts_new_row_and_marks_old() {
     let (repo, _tmp) = fresh().await;
     let asset = repo.create_file_asset(T0).await.unwrap();

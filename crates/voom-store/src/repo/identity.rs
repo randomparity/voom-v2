@@ -1408,7 +1408,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         let res = sqlx::query(
             "UPDATE identity_evidence SET accepted_at = ?, accepted_user_id = ?, \
                  pinned_file_version_ids = ?, pinned_hashes = ?, pinned_locations = ? \
-             WHERE id = ? AND accepted_at IS NULL",
+             WHERE id = ? AND accepted_at IS NULL AND superseded_at IS NULL",
         )
         .bind(&ts)
         .bind(&actor)
@@ -1421,7 +1421,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .map_err(|e| VoomError::Database(format!("identity_evidence accept: {e}")))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
-                "identity_evidence accept: id={id} already accepted or missing"
+                "identity_evidence accept: id={id} already accepted, superseded, or missing"
             )));
         }
         get_identity_evidence_in_tx(tx, id).await?.ok_or_else(|| {
