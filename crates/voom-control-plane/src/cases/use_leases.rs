@@ -65,7 +65,13 @@ impl ControlPlane {
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        self.use_leases.heartbeat(lease_id, now).await
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self
+            .use_leases
+            .heartbeat_in_tx(&mut tx, lease_id, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     /// Release a use lease with the given reason. Emits `use_lease.released`.
