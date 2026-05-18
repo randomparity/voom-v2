@@ -611,6 +611,13 @@ impl LeaseRepo for SqliteLeaseRepo {
             failed_tickets: Vec::new(),
             pairs: Vec::new(),
         };
+        // Pre-fetch every candidate ticket's (attempt, max_attempts) in
+        // one query so the per-row loop below stays O(N) instead of
+        // O(2N) round-trips. At the documented bulk scale (500 leases
+        // in tests/lease_expire_and_recover.rs) this saves 500 SELECTs
+        // inside a single transaction.
+        let ticket_attempts =
+            fetch_ticket_attempts(tx, rows.iter().map(extract_ticket_id_i)).await?;
         for row in &rows {
             let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
             let ticket_id_i: i64 = row
@@ -640,13 +647,12 @@ impl LeaseRepo for SqliteLeaseRepo {
                     "expire_due aborted: lease {lease_id} no longer held"
                 )));
             }
-            // Decide ticket fate.
-            let (attempt, max_attempts): (i64, i64) =
-                sqlx::query_as("SELECT attempt, max_attempts FROM tickets WHERE id = ?")
-                    .bind(ticket_id_i)
-                    .fetch_one(&mut **tx)
-                    .await
-                    .map_err(|e| VoomError::Database(format!("ticket lookup: {e}")))?;
+            // Decide ticket fate from the pre-fetched batch.
+            let &(attempt, max_attempts) = ticket_attempts.get(&ticket_id_i).ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "expire_due: ticket {ticket_id} missing from pre-fetch"
+                ))
+            })?;
             if attempt < max_attempts {
                 let ticket_res = sqlx::query(
                     "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
@@ -857,6 +863,50 @@ const SELECT_LEASE_COLS: &str = "SELECT id, ticket_id, worker_id, state, acquire
 /// can decode the row uniformly.
 const LEASE_RETURNING_COLS: &str = "id, ticket_id, worker_id, state, acquired_at, expires_at, \
      last_heartbeat_at, ttl_seconds, release_reason, released_at, epoch";
+
+fn extract_ticket_id_i(row: &sqlx::sqlite::SqliteRow) -> Result<i64, VoomError> {
+    row.try_get("ticket_id")
+        .map_err(|e| map_row_err("leases", &e))
+}
+
+/// Pre-fetch every distinct ticket's (`attempt`, `max_attempts`) in
+/// one SELECT. Used by `expire_due_in_tx` to replace what was a
+/// per-row `SELECT ... FROM tickets WHERE id = ?` (N+1 over the
+/// scanned lease batch) with a single bulk query.
+async fn fetch_ticket_attempts<I>(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ticket_ids: I,
+) -> Result<std::collections::HashMap<i64, (i64, i64)>, VoomError>
+where
+    I: IntoIterator<Item = Result<i64, VoomError>>,
+{
+    let ids: Vec<i64> = ticket_ids.into_iter().collect::<Result<_, _>>()?;
+    let mut out = std::collections::HashMap::with_capacity(ids.len());
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("SELECT id, attempt, max_attempts FROM tickets WHERE id IN ({placeholders})");
+    let mut q = sqlx::query(&sql);
+    for id in &ids {
+        q = q.bind(id);
+    }
+    let rows = q
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("ticket attempts batch: {e}")))?;
+    for row in &rows {
+        let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+        let attempt: i64 = row
+            .try_get("attempt")
+            .map_err(|e| map_row_err("tickets", &e))?;
+        let max_attempts: i64 = row
+            .try_get("max_attempts")
+            .map_err(|e| map_row_err("tickets", &e))?;
+        out.insert(id, (attempt, max_attempts));
+    }
+    Ok(out)
+}
 
 async fn get_lease_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
