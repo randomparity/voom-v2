@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 use tempfile::NamedTempFile;
 use time::Duration;
-use voom_core::{FileAssetId, UseLeaseId};
+use voom_core::{FileAssetId, FileLocationId, UseLeaseId};
 
 use super::*;
 use crate::test_support::{T0, fresh_initialized_pool_at};
@@ -659,4 +659,219 @@ async fn recover_stale_issuer_against_terminal_is_conflict() {
         .await
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+// --- Task 12: reanchor_on_move ---
+
+#[tokio::test]
+async fn reanchor_on_move_updates_all_live_leases() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    // Seed a file_version + two file_locations to use as the rename pair.
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         created_at) VALUES (?, 'hash', 1, 'ingest', ?)",
+    )
+    .bind(i64::try_from(asset.0).unwrap())
+    .bind(
+        T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let now_iso = T0
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap();
+    let loc_old = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/old', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc_new = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/new', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc_old = FileLocationId(u64::try_from(loc_old).unwrap());
+    let loc_new = FileLocationId(u64::try_from(loc_new).unwrap());
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    // Two leases on the old location: one TTL-bound blocking, one manual advisory.
+    let a = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Location(loc_old),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let b = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Location(loc_old),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let report = repo
+        .reanchor_on_move(loc_old, loc_new, T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(report.reanchored.len(), 2);
+    assert!(report.reanchored.contains(&a.id));
+    assert!(report.reanchored.contains(&b.id));
+
+    let a_after = repo.get(a.id).await.unwrap().unwrap();
+    let b_after = repo.get(b.id).await.unwrap().unwrap();
+    assert_eq!(a_after.scope, LeaseScope::Location(loc_new));
+    assert_eq!(b_after.scope, LeaseScope::Location(loc_new));
+    // Epoch bumped:
+    assert_eq!(a_after.epoch, 1);
+    assert_eq!(b_after.epoch, 1);
+    // Other fields preserved (per §9.2 last paragraph):
+    assert_eq!(a_after.acquired_at, a.acquired_at);
+    assert_eq!(a_after.expires_at, a.expires_at);
+    assert_eq!(b_after.acquired_at, b.acquired_at);
+}
+
+#[tokio::test]
+async fn reanchor_skips_terminal_leases() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         created_at) VALUES (?, 'hash', 1, 'ingest', ?)",
+    )
+    .bind(i64::try_from(asset.0).unwrap())
+    .bind(
+        T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let now_iso = T0
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap();
+    let loc_old = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/old', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc_new = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/new', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc_old = FileLocationId(u64::try_from(loc_old).unwrap());
+    let loc_new = FileLocationId(u64::try_from(loc_new).unwrap());
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Location(loc_old),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.release(
+        lease.id,
+        UseLeaseReleaseReason::Released,
+        T0 + Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let report = repo
+        .reanchor_on_move(loc_old, loc_new, T0 + Duration::seconds(10))
+        .await
+        .unwrap();
+    assert!(report.reanchored.is_empty());
+    let l_after = repo.get(lease.id).await.unwrap().unwrap();
+    assert_eq!(l_after.scope, LeaseScope::Location(loc_old));
+}
+
+#[tokio::test]
+async fn reanchor_on_move_with_no_matching_leases_is_empty() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let version_id = sqlx::query(
+        "INSERT INTO file_versions (file_asset_id, content_hash, size_bytes, produced_by, \
+         created_at) VALUES (?, 'h', 1, 'ingest', ?)",
+    )
+    .bind(i64::try_from(asset.0).unwrap())
+    .bind(
+        T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let now_iso = T0
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap();
+    let loc_old = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/old', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let loc_new = sqlx::query(
+        "INSERT INTO file_locations (file_version_id, kind, value, observed_at) VALUES (?, \
+         'local_path', '/new', ?)",
+    )
+    .bind(version_id)
+    .bind(&now_iso)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let report = repo
+        .reanchor_on_move(
+            FileLocationId(u64::try_from(loc_old).unwrap()),
+            FileLocationId(u64::try_from(loc_new).unwrap()),
+            T0 + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert!(report.reanchored.is_empty());
 }

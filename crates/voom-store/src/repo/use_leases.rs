@@ -1076,25 +1076,60 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn reanchor_on_move_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _retired: FileLocationId,
-        _new: FileLocationId,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        retired: FileLocationId,
+        new: FileLocationId,
         _now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
-        Err(VoomError::Internal(
-            "reanchor_on_move_in_tx not implemented yet (Task 12)".to_owned(),
-        ))
+        // Identify affected IDs first.
+        let rows = sqlx::query(
+            "SELECT id FROM asset_use_leases \
+             WHERE scope_location_id = ? AND release_reason IS NULL",
+        )
+        .bind(i64_from_u64(retired.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor scan: {e}")))?;
+        let ids: Vec<UseLeaseId> = rows
+            .iter()
+            .map(|r| -> Result<UseLeaseId, VoomError> {
+                let id: i64 = r
+                    .try_get("id")
+                    .map_err(|e| map_row_err("asset_use_leases", &e))?;
+                Ok(UseLeaseId(u64_from_i64(id)))
+            })
+            .collect::<Result<_, _>>()?;
+
+        if ids.is_empty() {
+            return Ok(ReanchorReport::default());
+        }
+
+        sqlx::query(
+            "UPDATE asset_use_leases \
+             SET scope_location_id = ?, epoch = epoch + 1 \
+             WHERE scope_location_id = ? AND release_reason IS NULL",
+        )
+        .bind(i64_from_u64(new.0))
+        .bind(i64_from_u64(retired.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor update: {e}")))?;
+
+        Ok(ReanchorReport { reanchored: ids })
     }
 
     async fn reanchor_on_move(
         &self,
-        _retired: FileLocationId,
-        _new: FileLocationId,
-        _now: OffsetDateTime,
+        retired: FileLocationId,
+        new: FileLocationId,
+        now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
-        Err(VoomError::Internal(
-            "reanchor_on_move not implemented yet (Task 12)".to_owned(),
-        ))
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self
+            .reanchor_on_move_in_tx(&mut tx, retired, new, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 }
 
