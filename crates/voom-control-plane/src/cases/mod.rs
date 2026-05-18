@@ -14,6 +14,8 @@ use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
 pub mod artifacts;
+pub mod bundles;
+pub mod identity;
 pub mod jobs;
 pub mod leases;
 pub mod tickets;

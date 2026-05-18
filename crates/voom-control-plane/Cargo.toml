@@ -31,3 +31,6 @@ voom-store = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# FrozenRng/SeededRng from voom-core::rng_test_support, used by lease
+# case tests to pin the backoff jitter.
+voom-core = { workspace = true, features = ["test-support"] }

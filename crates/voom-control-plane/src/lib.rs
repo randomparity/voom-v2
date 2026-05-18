@@ -21,8 +21,9 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
-    artifacts::SqliteArtifactRepo, events::SqliteEventRepo, jobs::SqliteJobRepo,
-    leases::SqliteLeaseRepo, tickets::SqliteTicketRepo, workers::SqliteWorkerRepo,
+    artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
+    identity::SqliteIdentityRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo,
+    tickets::SqliteTicketRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -46,6 +47,8 @@ pub struct ControlPlane {
     pub(crate) workers: SqliteWorkerRepo,
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
+    pub(crate) identity: SqliteIdentityRepo,
+    pub(crate) bundles: SqliteBundleRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -64,6 +67,8 @@ impl std::fmt::Debug for ControlPlane {
             .field("workers", &self.workers)
             .field("leases", &self.leases)
             .field("artifacts", &self.artifacts)
+            .field("identity", &self.identity)
+            .field("bundles", &self.bundles)
             .finish()
     }
 }
@@ -135,6 +140,8 @@ impl ControlPlane {
             workers: SqliteWorkerRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
+            identity: SqliteIdentityRepo::new(pool.clone()),
+            bundles: SqliteBundleRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -279,6 +286,30 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn artifacts(&self) -> &SqliteArtifactRepo {
         &self.artifacts
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn identity(&self) -> &SqliteIdentityRepo {
+        &self.identity
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.identity` directly today")]
+    #[must_use]
+    pub(crate) fn identity(&self) -> &SqliteIdentityRepo {
+        &self.identity
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn bundles(&self) -> &SqliteBundleRepo {
+        &self.bundles
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.bundles` directly today")]
+    #[must_use]
+    pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
+        &self.bundles
     }
 }
 
