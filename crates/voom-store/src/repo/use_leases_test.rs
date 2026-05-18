@@ -1,5 +1,6 @@
 use sqlx::SqlitePool;
 use tempfile::NamedTempFile;
+use time::Duration;
 use voom_core::{FileAssetId, UseLeaseId};
 
 use super::*;
@@ -35,4 +36,161 @@ async fn list_for_scope_returns_empty_on_clean_db() {
     let repo = SqliteUseLeaseRepo::new(pool);
     let listed = repo.list_for_scope(LeaseScope::Asset(asset)).await.unwrap();
     assert!(listed.is_empty());
+}
+
+// --- Task 6: acquire ---
+
+#[tokio::test]
+async fn acquire_ttl_bound_persists_expires_at() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    assert!(lease.ttl_bound);
+    assert_eq!(lease.expires_at, Some(T0 + Duration::seconds(60)));
+    assert!(lease.release_reason.is_none());
+    assert_eq!(lease.epoch, 0);
+    assert_eq!(lease.scope, LeaseScope::Asset(asset));
+}
+
+#[tokio::test]
+async fn acquire_manual_lock_has_no_expires_at() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "operator".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    assert!(!lease.ttl_bound);
+    assert!(lease.expires_at.is_none());
+}
+
+#[tokio::test]
+async fn acquire_ttl_bound_with_no_ttl_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    // `Playback` is a TTL-bound kind; passing `ttl: None` is a contract
+    // violation surfaced as Config (callers picked the wrong combination).
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_manual_lock_with_ttl_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "operator".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_zero_or_negative_ttl_is_rejected() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    for ttl in [Duration::ZERO, Duration::seconds(-1)] {
+        let err = repo
+            .acquire(NewUseLease {
+                kind: UseLeaseKind::Playback,
+                scope: LeaseScope::Asset(asset),
+                issuer_kind: IssuerKind::User,
+                issuer_ref: "alice".to_owned(),
+                blocking_mode: BlockingMode::Blocking,
+                ttl: Some(ttl),
+                acquired_at: T0,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VoomError::Config(_)),
+            "ttl={ttl:?}: got {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn acquire_against_unknown_asset_is_not_found() {
+    let (pool, _tmp, _real_asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(FileAssetId(99_999)),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::NotFound(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_against_retired_asset_is_conflict() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    // Soft-delete the asset:
+    sqlx::query("UPDATE file_assets SET retired_at = ? WHERE id = ?")
+        .bind(
+            T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
+                .unwrap(),
+        )
+        .bind(i64::try_from(asset.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }

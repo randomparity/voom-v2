@@ -15,7 +15,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId, VoomError};
 
 use super::Repository;
-use super::common::{i64_from_u64, map_row_err, parse_iso8601, u64_from_i64};
+use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
 
 // ============================================================================
 // Domain enums (CHECK-constraint mirrors)
@@ -364,15 +364,12 @@ impl Repository for SqliteUseLeaseRepo {}
 
 // ----- shared helpers -------------------------------------------------------
 
-// Tasks 6–12 call begin_tx / commit_tx in their bare-wrapper bodies.
-#[expect(dead_code, reason = "used by Tasks 6-12 write-method wrappers")]
 async fn begin_tx(pool: &SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, VoomError> {
     pool.begin()
         .await
         .map_err(|e| VoomError::Database(format!("begin: {e}")))
 }
 
-#[expect(dead_code, reason = "used by Tasks 6-12 write-method wrappers")]
 async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await
@@ -537,20 +534,195 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
     // so the compiler sees the trait as satisfied. The corresponding
     // task body replaces the stub.
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two-probe scope liveness + existence pattern requires the extra branches"
+    )]
     async fn acquire_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _input: NewUseLease,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewUseLease,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "acquire_in_tx not implemented yet (Task 6)".to_owned(),
-        ))
+        // 1) Validate TTL vs manual-lock invariant. (§9.2 acquire step 1.)
+        let is_manual = matches!(input.kind, UseLeaseKind::ManualLock);
+        match (is_manual, input.ttl) {
+            (true, Some(_)) => {
+                return Err(VoomError::Config(
+                    "manual locks must not carry a TTL".to_owned(),
+                ));
+            }
+            (false, None) => {
+                return Err(VoomError::Config(format!(
+                    "TTL-bound lease kind {:?} requires a positive TTL",
+                    input.kind
+                )));
+            }
+            (false, Some(ttl)) if ttl <= Duration::ZERO => {
+                return Err(VoomError::Config(format!(
+                    "TTL must be positive; got {ttl}"
+                )));
+            }
+            _ => {}
+        }
+
+        // 2) Liveness check on the parent row. The CHECK constraint and FK
+        //    cover the basic "exactly one of four scope cols" + existence
+        //    invariants, but soft-deleted rows are still present — we need
+        //    to read `retired_at` (or its analogue for the bundle table)
+        //    to detect them.
+        let live = match input.scope {
+            LeaseScope::Asset(id) => {
+                sqlx::query("SELECT 1 FROM file_assets WHERE id = ? AND retired_at IS NULL")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
+                    })?
+                    .is_some()
+            }
+            LeaseScope::Version(id) => {
+                sqlx::query("SELECT 1 FROM file_versions WHERE id = ? AND retired_at IS NULL")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
+                    })?
+                    .is_some()
+            }
+            LeaseScope::Location(id) => {
+                sqlx::query("SELECT 1 FROM file_locations WHERE id = ? AND retired_at IS NULL")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
+                    })?
+                    .is_some()
+            }
+            LeaseScope::Bundle(id) => {
+                // `asset_bundles` has no `retired_at` in M2; existence is
+                // the liveness condition.
+                sqlx::query("SELECT 1 FROM asset_bundles WHERE id = ?")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
+                    })?
+                    .is_some()
+            }
+        };
+
+        // Distinguish "does not exist" from "exists but retired":
+        if !live {
+            // Re-probe ignoring the live filter so we can pick the right error.
+            let exists = match input.scope {
+                LeaseScope::Asset(id) => sqlx::query("SELECT 1 FROM file_assets WHERE id = ?")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire existence probe: {e}"))
+                    })?
+                    .is_some(),
+                LeaseScope::Version(id) => sqlx::query("SELECT 1 FROM file_versions WHERE id = ?")
+                    .bind(i64_from_u64(id.0))
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_err(|e| {
+                        VoomError::Database(format!("use_lease acquire existence probe: {e}"))
+                    })?
+                    .is_some(),
+                LeaseScope::Location(id) => {
+                    sqlx::query("SELECT 1 FROM file_locations WHERE id = ?")
+                        .bind(i64_from_u64(id.0))
+                        .fetch_optional(&mut **tx)
+                        .await
+                        .map_err(|e| {
+                            VoomError::Database(format!("use_lease acquire existence probe: {e}"))
+                        })?
+                        .is_some()
+                }
+                LeaseScope::Bundle(_) => false, // bundles have no soft-delete
+            };
+            return if exists {
+                Err(VoomError::Conflict(format!(
+                    "use_lease scope {} {} is retired",
+                    input.scope.type_str(),
+                    input.scope.id_u64()
+                )))
+            } else {
+                Err(VoomError::NotFound(format!(
+                    "use_lease scope {} {} not found",
+                    input.scope.type_str(),
+                    input.scope.id_u64()
+                )))
+            };
+        }
+
+        // TODO(m3-phase-2): consult `commit_intent_scope_members` here
+        // before the insert — sprint-1 design §9.2. Phase 2 lands the
+        // shared helper in `voom-store::repo::commit_safety_gate`. Until
+        // then the lock is a no-op (no in-flight commits exist yet).
+
+        // 3) Insert. `clock_source = 'control_plane'` is the only Sprint 1
+        //    value. Manual locks have NULL `expires_at`.
+        let (sa, sb, sv, sl) = scope_bind_columns(input.scope);
+        let acquired_iso = iso8601(input.acquired_at)?;
+        let expires_iso = input
+            .ttl
+            .map(|ttl| iso8601(input.acquired_at + ttl))
+            .transpose()?;
+        let ttl_bound_int: i64 = i64::from(!is_manual);
+
+        let res = sqlx::query(
+            "INSERT INTO asset_use_leases ( \
+                kind, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id, \
+                issuer_kind, issuer_ref, blocking_mode, ttl_bound, acquired_at, expires_at, \
+                clock_source \
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'control_plane')",
+        )
+        .bind(input.kind.as_str())
+        .bind(sa)
+        .bind(sb)
+        .bind(sv)
+        .bind(sl)
+        .bind(input.issuer_kind.as_str())
+        .bind(&input.issuer_ref)
+        .bind(input.blocking_mode.as_str())
+        .bind(ttl_bound_int)
+        .bind(&acquired_iso)
+        .bind(&expires_iso)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases insert: {e}")))?;
+
+        // 4) Construct the return value directly (no post-write re-read needed —
+        //    every field is deterministic from input + the rowid).
+        Ok(UseLease {
+            id: UseLeaseId(u64_from_i64(res.last_insert_rowid())),
+            kind: input.kind,
+            scope: input.scope,
+            issuer_kind: input.issuer_kind,
+            issuer_ref: input.issuer_ref,
+            blocking_mode: input.blocking_mode,
+            ttl_bound: !is_manual,
+            acquired_at: input.acquired_at,
+            expires_at: input.ttl.map(|ttl| input.acquired_at + ttl),
+            last_heartbeat_at: None,
+            release_reason: None,
+            released_at: None,
+            epoch: 0,
+        })
     }
 
-    async fn acquire(&self, _input: NewUseLease) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "acquire not implemented yet (Task 6)".to_owned(),
-        ))
+    async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self.acquire_in_tx(&mut tx, input).await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn heartbeat_in_tx<'tx>(
