@@ -18,7 +18,7 @@ use voom_store::repo::tickets::{TicketRepo, TicketState};
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, begin_tx, commit_tx, require_audit_field};
 
 impl ControlPlane {
     /// Acquire a worker lease. Emits `lease.acquired` + `ticket.leased` in
@@ -352,6 +352,8 @@ impl ControlPlane {
         also_requeue: bool,
         now: OffsetDateTime,
     ) -> Result<ForceReleaseOutcome, VoomError> {
+        require_audit_field("actor", &actor)?;
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let outcome = self
             .leases

@@ -39,6 +39,19 @@ pub(crate) async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomErr
         .map_err(|e| VoomError::Database(format!("commit: {e}")))
 }
 
+/// Reject empty or whitespace-only audit strings. The `force_release` and
+/// `recover_stale_issuer` paths exist specifically to record operator intent
+/// (sprint-1 design §9.2) — a blank actor or reason would terminate a
+/// lease and leave an audit row that carries no operator information.
+pub(crate) fn require_audit_field(name: &str, value: &str) -> Result<(), VoomError> {
+    if value.trim().is_empty() {
+        return Err(VoomError::Config(format!(
+            "{name} must not be empty or whitespace"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn append_event(
     events: &SqliteEventRepo,
     tx: &mut Transaction<'_, Sqlite>,
