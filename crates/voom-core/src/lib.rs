@@ -24,7 +24,7 @@ pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
 pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};
 pub use ids::{
-    ArtifactHandleId, ArtifactLocationId, BundleId, EventId, EvidenceId, FileAssetId,
+    ArtifactHandleId, ArtifactLocationId, BundleId, CommitId, EventId, EvidenceId, FileAssetId,
     FileLocationId, FileVersionId, IssueId, JobId, LeaseId, MediaSnapshotId, MediaVariantId,
     MediaWorkId, TicketId, UseLeaseId, WorkerId,
 };
