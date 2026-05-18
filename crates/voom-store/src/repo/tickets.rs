@@ -326,12 +326,19 @@ impl TicketRepo for SqliteTicketRepo {
         ticket_id: TicketId,
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
-        // Only pending tickets are candidates.
-        let current = get_in_tx_inner(tx, ticket_id)
-            .await?
-            .ok_or_else(|| VoomError::NotFound(format!("ticket {ticket_id}")))?;
-        if current.state != TicketState::Pending {
-            return Ok(Vec::new());
+        // Lean state probe (one column, by PK). Replaces the previous
+        // wide `get_in_tx_inner` pre-read whose only consumer was the
+        // pending-state gate below. The post-read after the UPDATE is
+        // gone — we use `RETURNING` instead.
+        let state: Option<String> = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+            .bind(i64_from_u64(ticket_id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("tickets state probe: {e}")))?;
+        match state.as_deref() {
+            None => return Err(VoomError::NotFound(format!("ticket {ticket_id}"))),
+            Some("pending") => {}
+            Some(_) => return Ok(Vec::new()),
         }
         // Count unsucceeded dependencies.
         let unsucceeded: (i64,) = sqlx::query_as(
@@ -347,24 +354,25 @@ impl TicketRepo for SqliteTicketRepo {
             return Ok(Vec::new());
         }
         let ts = iso8601(now)?;
-        let res = sqlx::query(
+        let row = sqlx::query(&format!(
             "UPDATE tickets SET state = 'ready', state_changed_at = ?, epoch = epoch + 1 \
-             WHERE id = ? AND state = 'pending' AND epoch = ?",
-        )
+             WHERE id = ? AND state = 'pending' \
+             RETURNING {TICKET_RETURNING_COLS}"
+        ))
         .bind(&ts)
         .bind(i64_from_u64(ticket_id.0))
-        .bind(i64_from_u64(current.epoch))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("tickets update: {e}")))?;
-        if res.rows_affected() == 0 {
-            return Err(VoomError::Conflict(format!(
-                "tickets mark_ready_if_unblocked: id={ticket_id} epoch raced"
-            )));
-        }
-        let promoted = get_in_tx_inner(tx, ticket_id).await?.ok_or_else(|| {
-            VoomError::Internal(format!("ticket {ticket_id} vanished post-promote"))
-        })?;
+        let promoted = row
+            .as_ref()
+            .map(row_to_ticket)
+            .transpose()?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!(
+                    "tickets mark_ready_if_unblocked: id={ticket_id} no longer pending"
+                ))
+            })?;
         Ok(vec![promoted])
     }
 
@@ -449,6 +457,12 @@ impl TicketRepo for SqliteTicketRepo {
 const SELECT_TICKET_BY_ID: &str = "SELECT id, job_id, kind, state, priority, payload, result, attempt, \
             max_attempts, next_eligible_at, created_at, state_changed_at, epoch \
      FROM tickets WHERE id = ?";
+
+/// Column list for `UPDATE tickets ... RETURNING <cols>`. Mirrors the
+/// projection in `SELECT_TICKET_BY_ID` so `row_to_ticket` can decode
+/// the returned row uniformly.
+const TICKET_RETURNING_COLS: &str = "id, job_id, kind, state, priority, payload, result, attempt, \
+     max_attempts, next_eligible_at, created_at, state_changed_at, epoch";
 
 const SELECT_DEPENDENTS_OF: &str = concat!(
     "SELECT t.id, t.job_id, t.kind, t.state, t.priority, t.payload, t.result, ",
