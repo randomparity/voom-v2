@@ -476,8 +476,7 @@ const fn scope_bind_columns(
 }
 
 // ============================================================================
-// `UseLeaseRepo` impl — read methods only in this task; writes follow in
-// Tasks 6–12.
+// `UseLeaseRepo` impl
 // ============================================================================
 
 #[async_trait]
@@ -528,11 +527,6 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         .map_err(|e| VoomError::Database(format!("asset_use_leases list_for_scope: {e}")))?;
         rows.iter().map(row_to_use_lease).collect()
     }
-
-    // Write methods — STUBS until Tasks 6–12 implement them. Each stub
-    // returns `VoomError::Internal("not implemented in Phase 1 Task N")`
-    // so the compiler sees the trait as satisfied. The corresponding
-    // task body replaces the stub.
 
     #[expect(
         clippy::too_many_lines,
@@ -1036,7 +1030,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         }
 
         let now_iso = iso8601(now)?;
-        sqlx::query(
+        let res = sqlx::query(
             "UPDATE asset_use_leases \
              SET release_reason = 'issuer_lost', released_at = ?, epoch = epoch + 1 \
              WHERE id = ? AND release_reason IS NULL",
@@ -1046,6 +1040,11 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_use_leases recover update: {e}")))?;
+        if res.rows_affected() == 0 {
+            return Err(VoomError::Conflict(format!(
+                "use_lease {lease_id} concurrent modification"
+            )));
+        }
 
         let row = sqlx::query(
             "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
