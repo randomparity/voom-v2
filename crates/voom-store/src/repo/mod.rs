@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod leases;
 pub mod schema_meta;
 pub mod tickets;
+pub mod use_leases;
 pub mod workers;
 
 pub use artifacts::{
@@ -23,6 +24,11 @@ pub use leases::{
 };
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};
+pub use use_leases::{
+    BlockingMode, ExpireReport as UseLeaseExpireReport, IssuerKind, LeaseScope, NewUseLease,
+    ReanchorReport, SqliteUseLeaseRepo, UseLease, UseLeaseKind, UseLeaseReleaseReason,
+    UseLeaseRepo,
+};
 pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
     WorkerRepo, WorkerStatus,
