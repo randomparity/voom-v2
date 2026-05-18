@@ -433,3 +433,88 @@ async fn release_against_already_released_is_conflict() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
+
+// --- Task 9: force_release ---
+
+#[tokio::test]
+async fn force_release_marks_terminal_with_force_released() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let out = repo
+        .force_release(l.id, T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.release_reason,
+        Some(UseLeaseReleaseReason::ForceReleased)
+    );
+    assert_eq!(out.released_at, Some(T0 + Duration::seconds(5)));
+}
+
+#[tokio::test]
+async fn force_release_accepts_manual_locks_too() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::ControlPlane,
+            issuer_ref: "op".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    let out = repo
+        .force_release(l.id, T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.release_reason,
+        Some(UseLeaseReleaseReason::ForceReleased)
+    );
+}
+
+#[tokio::test]
+async fn force_release_against_terminal_is_conflict() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let l = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.release(
+        l.id,
+        UseLeaseReleaseReason::Released,
+        T0 + Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let err = repo
+        .force_release(l.id, T0 + Duration::seconds(10))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}

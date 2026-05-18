@@ -886,23 +886,65 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn force_release_in_tx<'tx>(
         &self,
-        _tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "force_release_in_tx not implemented yet (Task 9)".to_owned(),
-        ))
+        let now_iso = iso8601(now)?;
+        let res = sqlx::query(
+            "UPDATE asset_use_leases \
+             SET release_reason = 'force_released', released_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND release_reason IS NULL",
+        )
+        .bind(&now_iso)
+        .bind(i64_from_u64(lease_id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_use_leases force_release: {e}")))?;
+
+        if res.rows_affected() == 0 {
+            let exists = sqlx::query("SELECT 1 FROM asset_use_leases WHERE id = ?")
+                .bind(i64_from_u64(lease_id.0))
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| VoomError::Database(format!("asset_use_leases probe: {e}")))?
+                .is_some();
+            return if exists {
+                Err(VoomError::Conflict(format!(
+                    "use_lease {lease_id} already terminal"
+                )))
+            } else {
+                Err(VoomError::NotFound(format!(
+                    "use_lease {lease_id} not found"
+                )))
+            };
+        }
+
+        let row = sqlx::query(
+            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+                    release_reason, released_at, epoch \
+             FROM asset_use_leases WHERE id = ?",
+        )
+        .bind(i64_from_u64(lease_id.0))
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| {
+            VoomError::Database(format!("asset_use_leases post-force-release re-read: {e}"))
+        })?;
+        row_to_use_lease(&row)
     }
 
     async fn force_release(
         &self,
-        _lease_id: UseLeaseId,
-        _now: OffsetDateTime,
+        lease_id: UseLeaseId,
+        now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
-        Err(VoomError::Internal(
-            "force_release not implemented yet (Task 9)".to_owned(),
-        ))
+        let mut tx = begin_tx(&self.pool).await?;
+        let out = self.force_release_in_tx(&mut tx, lease_id, now).await?;
+        commit_tx(tx).await?;
+        Ok(out)
     }
 
     async fn expire_due_in_tx<'tx>(
