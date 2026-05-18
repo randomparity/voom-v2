@@ -504,3 +504,69 @@ async fn force_release_without_requeue_emits_lease_force_released_and_ticket_fai
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, 1);
     assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
 }
+
+#[tokio::test]
+async fn force_release_lease_rejects_empty_actor() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::LeaseForceReleased).await;
+    let err = cp
+        .force_release_lease(
+            lease.id,
+            String::new(),
+            "manual cleanup".to_owned(),
+            false,
+            T0 + TDuration::seconds(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    // Validation runs before the tx — the lease must still be held and
+    // no audit event row must have been written.
+    assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
+    let still = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+}
+
+#[tokio::test]
+async fn force_release_lease_rejects_whitespace_reason() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::LeaseForceReleased).await;
+    let err = cp
+        .force_release_lease(
+            lease.id,
+            "operator".to_owned(),
+            "   \t\n".to_owned(),
+            false,
+            T0 + TDuration::seconds(5),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
+    let still = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+}
