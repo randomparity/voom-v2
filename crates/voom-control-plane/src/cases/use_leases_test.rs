@@ -8,27 +8,9 @@ use voom_store::repo::use_leases::{
     UseLeaseRepo,
 };
 
-use crate::cases::cp;
+use crate::cases::{count, cp};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
-
-async fn count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
-    cp.events()
-        .list(
-            EventFilter {
-                kind: Some(kind),
-                ..EventFilter::default()
-            },
-            Page {
-                limit: 100,
-                cursor: None,
-            },
-        )
-        .await
-        .unwrap()
-        .items
-        .len()
-}
 
 fn ttl_input(scope: LeaseScope) -> NewUseLease {
     NewUseLease {

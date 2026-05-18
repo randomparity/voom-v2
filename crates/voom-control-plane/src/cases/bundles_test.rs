@@ -5,27 +5,9 @@ use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 
-use crate::cases::cp;
+use crate::cases::{count, cp};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
-
-async fn count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
-    cp.events()
-        .list(
-            EventFilter {
-                kind: Some(kind),
-                ..EventFilter::default()
-            },
-            Page {
-                limit: 100,
-                cursor: None,
-            },
-        )
-        .await
-        .unwrap()
-        .items
-        .len()
-}
 
 #[tokio::test]
 async fn create_bundle_emits_event() {

@@ -9,27 +9,9 @@ use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 
-use crate::cases::cp;
+use crate::cases::{count, cp};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
-
-async fn count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
-    cp.events()
-        .list(
-            EventFilter {
-                kind: Some(kind),
-                ..EventFilter::default()
-            },
-            Page {
-                limit: 200,
-                cursor: None,
-            },
-        )
-        .await
-        .unwrap()
-        .items
-        .len()
-}
 
 #[tokio::test]
 async fn create_media_work_emits_event() {
