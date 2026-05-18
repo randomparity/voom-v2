@@ -479,6 +479,44 @@ const fn scope_bind_columns(
 // `UseLeaseRepo` impl
 // ============================================================================
 
+/// One-probe scope liveness lookup used by `acquire_in_tx`. Reads
+/// `retired_at` directly (where the column exists) so the caller
+/// can distinguish three outcomes from a single round-trip:
+///
+/// - `Ok(None)`            — row absent → `NotFound`
+/// - `Ok(Some(None))`      — row exists and is live → proceed
+/// - `Ok(Some(Some(_)))`   — row exists and is retired → `Conflict`
+///
+/// `asset_bundles` has no `retired_at` column in M2; existence
+/// alone is liveness, so the bundle arm maps `Some(_)` to
+/// `Some(None)` to keep the outer match exhaustive.
+async fn probe_scope_liveness(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scope: LeaseScope,
+) -> Result<Option<Option<String>>, VoomError> {
+    let err =
+        |e: sqlx::Error| VoomError::Database(format!("use_lease acquire liveness check: {e}"));
+    let id_arg = i64_from_u64(scope.id_u64());
+    let sql = match scope {
+        LeaseScope::Asset(_) => "SELECT retired_at FROM file_assets WHERE id = ?",
+        LeaseScope::Version(_) => "SELECT retired_at FROM file_versions WHERE id = ?",
+        LeaseScope::Location(_) => "SELECT retired_at FROM file_locations WHERE id = ?",
+        LeaseScope::Bundle(_) => {
+            return sqlx::query_scalar::<_, i64>("SELECT 1 FROM asset_bundles WHERE id = ?")
+                .bind(id_arg)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(err)
+                .map(|opt| opt.map(|_| None));
+        }
+    };
+    sqlx::query_scalar::<_, Option<String>>(sql)
+        .bind(id_arg)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(err)
+}
+
 #[async_trait]
 impl UseLeaseRepo for SqliteUseLeaseRepo {
     async fn get(&self, id: UseLeaseId) -> Result<Option<UseLease>, VoomError> {
@@ -526,10 +564,6 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         rows.iter().map(row_to_use_lease).collect()
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "two-probe scope liveness + existence pattern requires the extra branches"
-    )]
     async fn acquire_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -557,101 +591,23 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
             _ => {}
         }
 
-        // 2) Liveness check on the parent row. The CHECK constraint and FK
-        //    cover the basic "exactly one of four scope cols" + existence
-        //    invariants, but soft-deleted rows are still present — we need
-        //    to read `retired_at` (or its analogue for the bundle table)
-        //    to detect them.
-        let live = match input.scope {
-            LeaseScope::Asset(id) => {
-                sqlx::query("SELECT 1 FROM file_assets WHERE id = ? AND retired_at IS NULL")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
-                    })?
-                    .is_some()
-            }
-            LeaseScope::Version(id) => {
-                sqlx::query("SELECT 1 FROM file_versions WHERE id = ? AND retired_at IS NULL")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
-                    })?
-                    .is_some()
-            }
-            LeaseScope::Location(id) => {
-                sqlx::query("SELECT 1 FROM file_locations WHERE id = ? AND retired_at IS NULL")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
-                    })?
-                    .is_some()
-            }
-            LeaseScope::Bundle(id) => {
-                // `asset_bundles` has no `retired_at` in M2; existence is
-                // the liveness condition.
-                sqlx::query("SELECT 1 FROM asset_bundles WHERE id = ?")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire liveness check: {e}"))
-                    })?
-                    .is_some()
-            }
-        };
-
-        // Distinguish "does not exist" from "exists but retired":
-        if !live {
-            // Re-probe ignoring the live filter so we can pick the right error.
-            let exists = match input.scope {
-                LeaseScope::Asset(id) => sqlx::query("SELECT 1 FROM file_assets WHERE id = ?")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire existence probe: {e}"))
-                    })?
-                    .is_some(),
-                LeaseScope::Version(id) => sqlx::query("SELECT 1 FROM file_versions WHERE id = ?")
-                    .bind(i64_from_u64(id.0))
-                    .fetch_optional(&mut **tx)
-                    .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("use_lease acquire existence probe: {e}"))
-                    })?
-                    .is_some(),
-                LeaseScope::Location(id) => {
-                    sqlx::query("SELECT 1 FROM file_locations WHERE id = ?")
-                        .bind(i64_from_u64(id.0))
-                        .fetch_optional(&mut **tx)
-                        .await
-                        .map_err(|e| {
-                            VoomError::Database(format!("use_lease acquire existence probe: {e}"))
-                        })?
-                        .is_some()
-                }
-                LeaseScope::Bundle(_) => false, // bundles have no soft-delete
-            };
-            return if exists {
-                Err(VoomError::Conflict(format!(
+        // 2) Single-probe scope liveness check (see `probe_scope_liveness`).
+        match probe_scope_liveness(tx, input.scope).await? {
+            Some(None) => {}
+            Some(Some(_)) => {
+                return Err(VoomError::Conflict(format!(
                     "use_lease scope {} {} is retired",
                     input.scope.type_str(),
                     input.scope.id_u64()
-                )))
-            } else {
-                Err(VoomError::NotFound(format!(
+                )));
+            }
+            None => {
+                return Err(VoomError::NotFound(format!(
                     "use_lease scope {} {} not found",
                     input.scope.type_str(),
                     input.scope.id_u64()
-                )))
-            };
+                )));
+            }
         }
 
         // TODO(m3-phase-2): consult `commit_intent_scope_members` here
