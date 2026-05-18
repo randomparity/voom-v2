@@ -168,7 +168,7 @@ async fn expire_due_emits_paired_events_requeued() {
     let report = cp.expire_due(T0 + TDuration::seconds(60)).await.unwrap();
     assert_eq!(report.pairs.len(), 1);
     assert_eq!(report.requeued_tickets, vec![t.id]);
-    assert!(report.failed_tickets.is_empty());
+    assert!(report.failed_expiries.is_empty());
     assert_eq!(count(&cp, EventKind::LeaseExpired).await, 1);
     assert_eq!(
         count(&cp, EventKind::TicketRequeuedAfterLeaseExpiry).await,
@@ -194,7 +194,8 @@ async fn expire_due_emits_paired_events_terminal() {
         .unwrap();
     let report = cp.expire_due(T0 + TDuration::seconds(60)).await.unwrap();
     assert_eq!(report.pairs.len(), 1);
-    assert_eq!(report.failed_tickets, vec![t.id]);
+    assert_eq!(report.failed_expiries.len(), 1);
+    assert_eq!(report.failed_expiries[0].ticket_id, t.id);
     assert_eq!(count(&cp, EventKind::LeaseExpired).await, 1);
     assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
     let page = cp

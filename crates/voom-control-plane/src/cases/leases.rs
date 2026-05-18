@@ -301,23 +301,28 @@ impl ControlPlane {
             )
             .await?;
         } else {
-            let ticket = self
-                .tickets
-                .get_in_tx(tx, ticket_id)
-                .await?
+            // Read attempt/max_attempts straight from the report — the repo
+            // already had them in scope when it decided the ticket's fate
+            // (see `FailedExpiry` in `voom_store::repo::leases`).
+            let failed = report
+                .failed_expiries
+                .iter()
+                .find(|f| f.ticket_id == ticket_id)
                 .ok_or_else(|| {
-                    VoomError::Internal("expire_due: ticket vanished mid-tx".to_owned())
+                    VoomError::Internal(format!(
+                        "expire_due: ticket {ticket_id} missing from failed_expiries"
+                    ))
                 })?;
             append_event(
                 &self.events,
                 tx,
                 SubjectType::Ticket,
-                Some(ticket.id.0),
+                Some(ticket_id.0),
                 now,
                 Event::TicketFailedTerminal(TicketFailedTerminalPayload {
-                    ticket_id: ticket.id.0,
-                    attempt: ticket.attempt,
-                    max_attempts: ticket.max_attempts,
+                    ticket_id: ticket_id.0,
+                    attempt: failed.attempt,
+                    max_attempts: failed.max_attempts,
                     reason: "lease expired with no retries remaining".to_owned(),
                     // Per spec §10.2: lease-expiry terminal failures
                     // implicitly classify as WorkerCrash.
