@@ -13,15 +13,23 @@ use voom_core::ids::{
     BundleId, CommitId, EvidenceId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId,
 };
 
-use crate::repo::identity::NewFileLocation;
+use crate::repo::identity::{FileLocationKind, LocationProof};
 use crate::repo::use_leases::LeaseScope;
 
-/// Stand-in for the parent spec's `FileLocationProposal`. Aliased to
-/// `NewFileLocation` for Sprint 1 — the existing `IdentityRepo` input
-/// type already carries every field needed to propose a replacement
-/// location. If a semantic distinction surfaces later, replace the
-/// alias with a dedicated newtype.
-pub type FileLocationProposal = NewFileLocation;
+/// Caller-facing proposal for a new `FileLocation` inside a destructive
+/// commit's `ReplaceFileLocation` / `MoveFileLocation` target. The
+/// `file_version_id` is intentionally absent: it is inferred from the
+/// retired location's current `FileVersion` inside Phase C, which makes
+/// a cross-version target unrepresentable at the type level. Phase C
+/// converts a `FileLocationProposal` into a `NewFileLocation` by
+/// pairing it with the retired row's `file_version_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLocationProposal {
+    pub kind: FileLocationKind,
+    pub value: String,
+    pub proof: Option<LocationProof>,
+    pub observed_at: OffsetDateTime,
+}
 
 /// The destructive operation a commit-safety-gate caller is asking
 /// the gate to authorize. Sprint 1 ships four variants; the parent
@@ -49,11 +57,94 @@ pub enum CommitTarget {
 /// compared to detect closure drift.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AffectedScopeClosure {
-    pub file_assets: Vec<FileAssetId>,
-    pub file_versions: Vec<FileVersionId>,
-    pub file_locations: Vec<FileLocationId>,
-    pub bundles: Vec<BundleId>,
+    pub file_assets: BTreeSet<FileAssetId>,
+    pub file_versions: BTreeSet<FileVersionId>,
+    pub file_locations: BTreeSet<FileLocationId>,
+    pub bundles: BTreeSet<BundleId>,
     pub resolution_warnings: Vec<ClosureWarning>,
+}
+
+impl AffectedScopeClosure {
+    /// Compute the member delta between `self` and `other`,
+    /// considering only the four ID sets. `added_*` is
+    /// `other - self`; `removed_*` is `self - other`. The
+    /// `resolution_warnings` field is intentionally excluded —
+    /// non-fatal warnings may differ between Phase A and Phase B
+    /// snapshots even when no protected ID row has changed, and
+    /// the drift check must not treat warning churn as closure
+    /// growth.
+    #[must_use]
+    pub fn id_member_delta(&self, other: &Self) -> ClosureMemberDelta {
+        ClosureMemberDelta {
+            added_assets: other
+                .file_assets
+                .difference(&self.file_assets)
+                .copied()
+                .collect(),
+            removed_assets: self
+                .file_assets
+                .difference(&other.file_assets)
+                .copied()
+                .collect(),
+            added_bundles: other.bundles.difference(&self.bundles).copied().collect(),
+            removed_bundles: self.bundles.difference(&other.bundles).copied().collect(),
+            added_versions: other
+                .file_versions
+                .difference(&self.file_versions)
+                .copied()
+                .collect(),
+            removed_versions: self
+                .file_versions
+                .difference(&other.file_versions)
+                .copied()
+                .collect(),
+            added_locations: other
+                .file_locations
+                .difference(&self.file_locations)
+                .copied()
+                .collect(),
+            removed_locations: self
+                .file_locations
+                .difference(&other.file_locations)
+                .copied()
+                .collect(),
+        }
+    }
+}
+
+/// Four-set delta between two `AffectedScopeClosure` snapshots,
+/// computed by `AffectedScopeClosure::id_member_delta`. Mirrors the
+/// shape of `CommitGateResult::BlockedByClosureGrew` so the drift
+/// check hands it straight through. Warnings on the underlying
+/// closures are intentionally excluded: they are non-fatal audit
+/// annotations whose ordering and multiplicity can vary between
+/// Phase A and Phase B even when the protected ID rows are unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClosureMemberDelta {
+    pub added_assets: BTreeSet<FileAssetId>,
+    pub added_bundles: BTreeSet<BundleId>,
+    pub added_versions: BTreeSet<FileVersionId>,
+    pub added_locations: BTreeSet<FileLocationId>,
+    pub removed_assets: BTreeSet<FileAssetId>,
+    pub removed_bundles: BTreeSet<BundleId>,
+    pub removed_versions: BTreeSet<FileVersionId>,
+    pub removed_locations: BTreeSet<FileLocationId>,
+}
+
+impl ClosureMemberDelta {
+    /// True iff every add/remove set is empty — i.e., the two
+    /// closures protect exactly the same ID rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.added_assets.is_empty()
+            && self.added_bundles.is_empty()
+            && self.added_versions.is_empty()
+            && self.added_locations.is_empty()
+            && self.removed_assets.is_empty()
+            && self.removed_bundles.is_empty()
+            && self.removed_versions.is_empty()
+            && self.removed_locations.is_empty()
+    }
 }
 
 /// Non-fatal note attached to an `AffectedScopeClosure` walk — e.g.,
@@ -234,8 +325,12 @@ pub enum CommitGateResult {
         lease_scope: LeaseScope,
     },
     /// Another in-flight commit-intent owns one of the scopes in the
-    /// affected closure.
-    BlockedByPendingCommit { commit_id: CommitId },
+    /// affected closure. The blocked caller uses `offending_scope` to
+    /// scope its wait / takeover decision without a race-prone re-query.
+    BlockedByPendingCommit {
+        commit_id: CommitId,
+        offending_scope: LeaseScope,
+    },
     /// An accepted-evidence pin no longer matches current state.
     BlockedByStaleEvidence {
         evidence_id: EvidenceId,
@@ -246,19 +341,12 @@ pub enum CommitGateResult {
         reason: ClosureFailure,
         unreachable: Vec<ClosureWarning>,
     },
-    /// Closure delta detected. Eight disjoint Vecs encode
-    /// `(closure_authorized or closure_final) - closure_initial` in
-    /// `added_*` and the inverse in `removed_*`.
-    BlockedByClosureGrew {
-        added_assets: Vec<FileAssetId>,
-        added_bundles: Vec<BundleId>,
-        added_versions: Vec<FileVersionId>,
-        added_locations: Vec<FileLocationId>,
-        removed_assets: Vec<FileAssetId>,
-        removed_bundles: Vec<BundleId>,
-        removed_versions: Vec<FileVersionId>,
-        removed_locations: Vec<FileLocationId>,
-    },
+    /// Closure delta detected between two snapshots (Phase A vs
+    /// Phase B, or Phase B vs Phase C). The delta excludes
+    /// `resolution_warnings` so transient warning churn cannot
+    /// falsely trigger this variant — see
+    /// `AffectedScopeClosure::id_member_delta`.
+    BlockedByClosureGrew { delta: ClosureMemberDelta },
     /// Phase C defensive trip-wire: one or more members of
     /// `closure_authorized` have a different `epoch` than the value
     /// snapshotted in `CommitPermit.target_row_epochs`. Drives the
@@ -276,32 +364,6 @@ pub enum CommitGateResult {
 pub struct DestructiveCommit {
     pub target: CommitTarget,
     pub accepted_evidence_ids: Vec<EvidenceId>,
-}
-
-/// Detail payload for `CommitGateResult::BlockedByPendingCommit`. The
-/// gate fills this in when the pending-commit-lock check detects an
-/// in-flight intent overlapping the closure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockedByPendingCommitDetail {
-    pub commit_id: CommitId,
-    pub offending_scope: LeaseScope,
-}
-
-/// Detail payload for `CommitGateResult::BlockedByClosureGrew`. The
-/// eight Vecs encode the delta across all four granularities; sets
-/// are disjoint by construction. Mirrors the parent spec's
-/// `BlockedByClosureGrew` variant fields one-to-one so payload
-/// translation later is mechanical.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BlockedByClosureGrewDetail {
-    pub added_assets: Vec<FileAssetId>,
-    pub added_bundles: Vec<BundleId>,
-    pub added_versions: Vec<FileVersionId>,
-    pub added_locations: Vec<FileLocationId>,
-    pub removed_assets: Vec<FileAssetId>,
-    pub removed_bundles: Vec<BundleId>,
-    pub removed_versions: Vec<FileVersionId>,
-    pub removed_locations: Vec<FileLocationId>,
 }
 
 /// Per-pin result of accepted-evidence revalidation. Phase A and Phase

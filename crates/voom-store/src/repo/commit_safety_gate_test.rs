@@ -81,7 +81,6 @@ fn target_epoch_drift_constructor_smokes() {
 fn file_location_proposal_fixture() -> FileLocationProposal {
     use crate::repo::identity::FileLocationKind;
     FileLocationProposal {
-        file_version_id: FileVersionId(99),
         kind: FileLocationKind::LocalPath,
         value: "/tmp/stub".to_owned(),
         proof: None,
@@ -191,6 +190,7 @@ fn commit_gate_result_every_sprint_1_variant_constructs() {
     };
     let _ = CommitGateResult::BlockedByPendingCommit {
         commit_id: CommitId(2),
+        offending_scope: LeaseScope::Bundle(BundleId(1)),
     };
     let _ = CommitGateResult::BlockedByStaleEvidence {
         evidence_id: voom_core::ids::EvidenceId(3),
@@ -203,14 +203,7 @@ fn commit_gate_result_every_sprint_1_variant_constructs() {
         unreachable: Vec::new(),
     };
     let _ = CommitGateResult::BlockedByClosureGrew {
-        added_assets: Vec::new(),
-        added_bundles: Vec::new(),
-        added_versions: Vec::new(),
-        added_locations: Vec::new(),
-        removed_assets: Vec::new(),
-        removed_bundles: Vec::new(),
-        removed_versions: Vec::new(),
-        removed_locations: Vec::new(),
+        delta: ClosureMemberDelta::default(),
     };
     let _ = CommitGateResult::BlockedByStaleTargetEpoch { drift: Vec::new() };
 }
@@ -227,27 +220,47 @@ fn destructive_commit_constructs_without_override_token() {
 }
 
 #[test]
-fn blocked_by_pending_commit_detail_constructs() {
-    let d = BlockedByPendingCommitDetail {
-        commit_id: CommitId(7),
-        offending_scope: LeaseScope::Bundle(BundleId(1)),
-    };
-    assert_eq!(d.commit_id, CommitId(7));
+fn affected_scope_closure_equality_is_order_insensitive() {
+    // Same three locations inserted in different orders must compare
+    // equal — that is the whole point of using BTreeSet over Vec.
+    let mut a = AffectedScopeClosure::default();
+    a.file_locations.insert(FileLocationId(3));
+    a.file_locations.insert(FileLocationId(1));
+    a.file_locations.insert(FileLocationId(2));
+
+    let mut b = AffectedScopeClosure::default();
+    b.file_locations.insert(FileLocationId(1));
+    b.file_locations.insert(FileLocationId(2));
+    b.file_locations.insert(FileLocationId(3));
+
+    assert_eq!(a, b);
 }
 
 #[test]
-fn blocked_by_closure_grew_detail_constructs() {
-    let d = BlockedByClosureGrewDetail {
-        added_assets: Vec::new(),
-        added_bundles: Vec::new(),
-        added_versions: Vec::new(),
-        added_locations: Vec::new(),
-        removed_assets: Vec::new(),
-        removed_bundles: Vec::new(),
-        removed_versions: Vec::new(),
-        removed_locations: Vec::new(),
-    };
-    assert!(d.added_assets.is_empty());
+fn affected_scope_closure_deduplicates_on_insert() {
+    // A second insert of the same ID must not grow the set; the
+    // commit_intent_scope_members write derived from this must not
+    // emit duplicate rows for the same scope.
+    let mut c = AffectedScopeClosure::default();
+    c.file_locations.insert(FileLocationId(7));
+    c.file_locations.insert(FileLocationId(7));
+    assert_eq!(c.file_locations.len(), 1);
+}
+
+#[test]
+fn file_location_proposal_does_not_carry_file_version_id() {
+    // Finding 1: the type level forbids constructing a proposal
+    // anchored to a different FileVersion than the retired location.
+    // This test is a compile-time guarantee: if someone re-adds a
+    // file_version_id field, the exhaustive destructuring below stops
+    // compiling and the new field name must be added explicitly.
+    let p = file_location_proposal_fixture();
+    let FileLocationProposal {
+        kind: _,
+        value: _,
+        proof: _,
+        observed_at: _,
+    } = p;
 }
 
 #[test]
@@ -325,4 +338,50 @@ fn force_path_token_serde_round_trips_through_json() {
     let json = serde_json::to_string(&t).unwrap();
     let back: ForcePathToken = serde_json::from_str(&json).unwrap();
     assert_eq!(t, back);
+}
+
+#[test]
+fn id_member_delta_ignores_resolution_warnings() {
+    // Round-3 finding: warnings are non-fatal audit annotations and
+    // must not contribute to closure drift. Two closures with the
+    // same ID sets but different warning order, content, or
+    // multiplicity must produce an empty delta.
+    let mut a = AffectedScopeClosure::default();
+    a.file_locations.insert(FileLocationId(1));
+    a.resolution_warnings.push(ClosureWarning {
+        message: "alias mount slow".to_owned(),
+    });
+
+    let mut b = AffectedScopeClosure::default();
+    b.file_locations.insert(FileLocationId(1));
+    b.resolution_warnings.push(ClosureWarning {
+        message: "different warning text".to_owned(),
+    });
+    b.resolution_warnings.push(ClosureWarning {
+        message: "second warning only on b".to_owned(),
+    });
+
+    let delta = a.id_member_delta(&b);
+    assert!(delta.is_empty());
+}
+
+#[test]
+fn id_member_delta_reports_added_and_removed_ids() {
+    let mut initial = AffectedScopeClosure::default();
+    initial.file_locations.insert(FileLocationId(1));
+    initial.file_locations.insert(FileLocationId(2));
+    initial.bundles.insert(BundleId(10));
+
+    let mut recomputed = AffectedScopeClosure::default();
+    recomputed.file_locations.insert(FileLocationId(2));
+    recomputed.file_locations.insert(FileLocationId(3));
+    recomputed.bundles.insert(BundleId(10));
+    recomputed.bundles.insert(BundleId(11));
+
+    let delta = initial.id_member_delta(&recomputed);
+    assert!(!delta.is_empty());
+    assert!(delta.added_locations.contains(&FileLocationId(3)));
+    assert!(delta.removed_locations.contains(&FileLocationId(1)));
+    assert!(delta.added_bundles.contains(&BundleId(11)));
+    assert!(delta.removed_bundles.is_empty());
 }

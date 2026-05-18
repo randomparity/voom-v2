@@ -18,11 +18,11 @@ pub use artifacts::{
     NewArtifactLineage, NewArtifactLocation, SqliteArtifactRepo,
 };
 pub use commit_safety_gate::{
-    AbortReason, AffectedScopeClosure, BlockedByClosureGrewDetail, BlockedByPendingCommitDetail,
-    BypassKind, ClosureFailure, ClosureWarning, CommitGateOutcome, CommitGateResult, CommitIntent,
-    CommitIntentState, CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift,
-    EvidenceRevalidationResult, FileLocationProposal, ForcePathToken, MutationOutcome,
-    PendingCommitIntent, TargetEpochDrift, TargetMemberKind,
+    AbortReason, AffectedScopeClosure, BypassKind, ClosureFailure, ClosureMemberDelta,
+    ClosureWarning, CommitGateOutcome, CommitGateResult, CommitIntent, CommitIntentState,
+    CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift, EvidenceRevalidationResult,
+    FileLocationProposal, ForcePathToken, MutationOutcome, PendingCommitIntent, TargetEpochDrift,
+    TargetMemberKind,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};
