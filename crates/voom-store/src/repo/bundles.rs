@@ -122,7 +122,7 @@ pub trait BundleRepo: Repository {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         bundle_id: BundleId,
         file_asset_id: FileAssetId,
-    ) -> Result<(), VoomError>;
+    ) -> Result<BundleMember, VoomError>;
     async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError>;
 }
 
@@ -283,21 +283,34 @@ impl BundleRepo for SqliteBundleRepo {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         bundle_id: BundleId,
         file_asset_id: FileAssetId,
-    ) -> Result<(), VoomError> {
-        let res = sqlx::query(
-            "DELETE FROM asset_bundle_members WHERE bundle_id = ? AND file_asset_id = ?",
+    ) -> Result<BundleMember, VoomError> {
+        let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+            "DELETE FROM asset_bundle_members \
+             WHERE bundle_id = ? AND file_asset_id = ? \
+             RETURNING id, role",
         )
         .bind(i64_from_u64(bundle_id.0))
         .bind(i64_from_u64(file_asset_id.0))
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("asset_bundle_members delete: {e}")))?;
-        if res.rows_affected() == 0 {
-            return Err(VoomError::NotFound(format!(
+        let row = row.ok_or_else(|| {
+            VoomError::NotFound(format!(
                 "asset_bundle_members not found: bundle={bundle_id} asset={file_asset_id}"
-            )));
-        }
-        Ok(())
+            ))
+        })?;
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        let role: String = row
+            .try_get("role")
+            .map_err(|e| map_row_err("asset_bundle_members", &e))?;
+        Ok(BundleMember {
+            id: u64_from_i64(id),
+            bundle_id,
+            file_asset_id,
+            role: BundleMemberRole::parse(&role)?,
+        })
     }
 
     async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError> {

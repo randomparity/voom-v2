@@ -89,17 +89,20 @@ impl ControlPlane {
     /// `asset_bundle.member_removed`. Returns `NotFound` if the pair
     /// wasn't a member.
     ///
+    /// The event's `role` is derived from the persisted row so the audit
+    /// log cannot disagree with the committed state.
+    ///
     /// # Errors
     /// Propagates repo and event-append errors.
     pub async fn remove_bundle_member(
         &self,
         bundle_id: BundleId,
         file_asset_id: FileAssetId,
-        role: BundleMemberRole,
         observed_at: OffsetDateTime,
-    ) -> Result<(), VoomError> {
+    ) -> Result<BundleMember, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        self.bundles
+        let removed = self
+            .bundles
             .remove_member_in_tx(&mut tx, bundle_id, file_asset_id)
             .await?;
         append_event(
@@ -111,12 +114,12 @@ impl ControlPlane {
             Event::AssetBundleMemberRemoved(AssetBundleMemberRemovedPayload {
                 bundle_id: bundle_id.0,
                 file_asset_id: file_asset_id.0,
-                role: role.as_str().to_owned(),
+                role: removed.role.as_str().to_owned(),
             }),
         )
         .await?;
         commit_tx(tx).await?;
-        Ok(())
+        Ok(removed)
     }
 
     // Thin read-only accessor wrappers for the case-handler surface
