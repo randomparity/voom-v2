@@ -25,7 +25,9 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
-    assert_eq!(expected_migrations(), 1);
+    // Intentional literal: this is the canary that forces an explicit
+    // review whenever a migration is added/removed.
+    assert_eq!(expected_migrations(), 3);
 }
 
 #[tokio::test]
@@ -82,22 +84,27 @@ async fn probe_returns_migration_error_on_malformed_sqlx_migrations_table() {
 
 #[tokio::test]
 async fn probe_returns_too_new_on_renumbered_migration_at_same_count() {
-    // Pathological case: count matches expectation but the *version* is
+    // Pathological case: count matches expectation but the *versions* are
     // not in the embedded MIGRATOR. Seed migrations table by hand — no
-    // dependency on init_on (which lands in Task 11).
+    // dependency on init_on (which lands in Task 11). We insert one
+    // renumbered row per embedded migration so `applied == expected` and
+    // probe must classify on version mismatch alone, not on count drift.
     let pool = connect("sqlite::memory:").await.unwrap();
     sqlx::query(CREATE_MIGRATIONS_TABLE)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO _sqlx_migrations \
-         (version, description, installed_on, success, checksum, execution_time) \
-         VALUES (42, 'renumbered', strftime('%s','now'), 1, X'00', 0)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    for offset in 0..expected_migrations() {
+        let synthetic_version = 1_000 + i64::from(offset);
+        sqlx::query(&format!(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES ({synthetic_version}, 'renumbered', strftime('%s','now'), 1, X'00', 0)"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
 
     let state = probe_schema(&pool).await.unwrap();
     match state {

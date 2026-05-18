@@ -7,25 +7,25 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Serialize;
-use voom_control_plane::{ControlPlane, HealthSnapshot};
+use voom_control_plane::{HealthPlane, HealthSnapshot};
 use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 pub const SCHEMA_VERSION: &str = "0";
 
 #[derive(Clone, Debug)]
 pub struct AppState {
-    pub control_plane: ControlPlane,
+    pub health_plane: HealthPlane,
     /// Number of tokio worker threads, snapshotted at router construction
     /// so `/health` doesn't re-syscall `available_parallelism()` per request.
     tokio_workers: usize,
 }
 
-pub fn router(control_plane: ControlPlane) -> axum::Router {
+pub fn router(health_plane: HealthPlane) -> axum::Router {
     let tokio_workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     axum::Router::new()
         .route("/health", get(health))
         .with_state(AppState {
-            control_plane,
+            health_plane,
             tokio_workers,
         })
 }
@@ -69,7 +69,7 @@ struct HealthRuntime {
 }
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    match state.control_plane.health().await {
+    match state.health_plane.health().await {
         Ok(HealthSnapshot::Current {
             migration_count,
             schema_init_at,
@@ -155,7 +155,30 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         ErrorCode::DbUninitialized
         | ErrorCode::NotFound
         | ErrorCode::Internal
-        | ErrorCode::BadArgs => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::BadArgs
+        | ErrorCode::DependencyCycle
+        | ErrorCode::Conflict
+        // FailureClass-derived codes don't surface from `connect` /
+        // `probe_schema` — they belong to lease/ticket use cases that
+        // are not on this response path yet. Classify as internal if
+        // one ever appears here; the visibility is the point.
+        | ErrorCode::WorkerTimeout
+        | ErrorCode::WorkerCrash
+        | ErrorCode::NoEligibleWorker
+        | ErrorCode::ArtifactUnavailable
+        | ErrorCode::ArtifactChecksumMismatch
+        | ErrorCode::ExternalSystemUnavailable
+        | ErrorCode::ExternalSystemRateLimited
+        | ErrorCode::VerificationFailure
+        | ErrorCode::BackupFailure
+        | ErrorCode::CommitFailure
+        | ErrorCode::PolicyParseError
+        | ErrorCode::PolicyValidationError
+        | ErrorCode::MissingCapability
+        | ErrorCode::MalformedWorkerResult
+        | ErrorCode::UserCancellation
+        | ErrorCode::ApprovalRequired
+        | ErrorCode::PriorityPolicyConflict => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, err.code(), err.to_string(), hint)
 }

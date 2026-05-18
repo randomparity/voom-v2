@@ -10,7 +10,7 @@ fn fresh_url() -> (tempfile::NamedTempFile, String) {
 async fn open_refuses_missing_database() {
     let tmp = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}", tmp.path().join("nope.db").display());
-    let err = ControlPlane::open(&url).await.unwrap_err();
+    let err = HealthPlane::open(&url).await.unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
 }
 
@@ -19,8 +19,8 @@ async fn health_on_existing_but_uninitialized_db_is_uninitialized() {
     let (_keep, url) = fresh_url();
     voom_store::connect_or_create(&url).await.unwrap();
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let snap = cp.health().await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let snap = hp.health().await.unwrap();
     assert_eq!(snap, HealthSnapshot::Uninitialized);
 }
 
@@ -36,9 +36,29 @@ async fn init_then_health_reports_current() {
         HealthSnapshot::Current {
             migration_count,
             schema_init_at: _,
-        } => assert_eq!(migration_count, 1),
+        } => assert_eq!(migration_count, voom_store::expected_migrations()),
         other => panic!("expected Current, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn control_plane_open_rejects_uninitialized_db() {
+    let (_keep, url) = fresh_url();
+    voom_store::connect_or_create(&url).await.unwrap();
+    let err = ControlPlane::open(&url).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::DbPartialSchema);
+}
+
+#[tokio::test]
+async fn health_plane_open_succeeds_on_uninitialized_db() {
+    let (_keep, url) = fresh_url();
+    voom_store::connect_or_create(&url).await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let snap = hp.health().await.unwrap();
+    assert!(
+        snap.diagnostic().is_some(),
+        "uninitialized DB must produce a diagnostic"
+    );
 }
 
 #[tokio::test]
@@ -63,8 +83,8 @@ async fn health_maps_dirty_state() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let snap = cp.health().await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let snap = hp.health().await.unwrap();
     match snap {
         HealthSnapshot::Dirty {
             failed_version,
@@ -92,8 +112,8 @@ async fn health_maps_too_new_state() {
         .unwrap();
     }
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let snap = cp.health().await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let snap = hp.health().await.unwrap();
     match snap {
         HealthSnapshot::TooNew { applied, expected } => {
             assert!(applied > expected);

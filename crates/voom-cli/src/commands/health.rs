@@ -1,7 +1,7 @@
 use std::io;
 
 use serde::Serialize;
-use voom_control_plane::{ControlPlane, HealthSnapshot};
+use voom_control_plane::{HealthPlane, HealthSnapshot};
 use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 use crate::envelope::{Local, emit_err, emit_ok};
@@ -26,8 +26,8 @@ pub struct HealthRuntime {
     pub tokio_workers: usize,
 }
 
-pub async fn run(cp: &ControlPlane, local: Local) -> io::Result<i32> {
-    match cp.health().await {
+pub async fn run(hp: &HealthPlane, local: Local) -> io::Result<i32> {
+    match hp.health().await {
         Ok(snap) => emit_snapshot(snap, local),
         Err(err) => {
             emit_err(
@@ -70,7 +70,28 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::ConfigInvalid
         | ErrorCode::NotFound
         | ErrorCode::Internal
-        | ErrorCode::BadArgs => None,
+        | ErrorCode::BadArgs
+        | ErrorCode::DependencyCycle
+        | ErrorCode::Conflict
+        // FailureClass-derived codes belong to lease/ticket flows the
+        // health command never reaches.
+        | ErrorCode::WorkerTimeout
+        | ErrorCode::WorkerCrash
+        | ErrorCode::NoEligibleWorker
+        | ErrorCode::ArtifactUnavailable
+        | ErrorCode::ArtifactChecksumMismatch
+        | ErrorCode::ExternalSystemUnavailable
+        | ErrorCode::ExternalSystemRateLimited
+        | ErrorCode::VerificationFailure
+        | ErrorCode::BackupFailure
+        | ErrorCode::CommitFailure
+        | ErrorCode::PolicyParseError
+        | ErrorCode::PolicyValidationError
+        | ErrorCode::MissingCapability
+        | ErrorCode::MalformedWorkerResult
+        | ErrorCode::UserCancellation
+        | ErrorCode::ApprovalRequired
+        | ErrorCode::PriorityPolicyConflict => None,
     }
 }
 

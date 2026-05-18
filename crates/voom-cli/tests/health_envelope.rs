@@ -7,7 +7,7 @@
 use tempfile::NamedTempFile;
 use voom_cli::commands::health::{self, HealthData, HealthDb, HealthRuntime};
 use voom_cli::envelope::Local;
-use voom_control_plane::ControlPlane;
+use voom_control_plane::HealthPlane;
 use voom_store::test_support::sqlite_url_for;
 
 #[test]
@@ -36,8 +36,8 @@ async fn health_against_uninitialized_db_returns_exit_code_2() {
     let url = sqlite_url_for(tmp.path());
     voom_store::connect_or_create(&url).await.unwrap();
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let code = health::run(&cp, local_for(&url)).await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let code = health::run(&hp, local_for(&url)).await.unwrap();
     assert_eq!(
         code, 2,
         "uninitialized DB must surface as DB_UNINITIALIZED with exit code 2"
@@ -50,8 +50,8 @@ async fn health_against_initialized_db_returns_exit_code_0() {
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let code = health::run(&cp, local_for(&url)).await.unwrap();
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let code = health::run(&hp, local_for(&url)).await.unwrap();
     assert_eq!(code, 0);
 }
 

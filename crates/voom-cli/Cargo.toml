@@ -24,7 +24,7 @@ clap = { version = "4.6.1", features = ["derive", "env"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
-tracing = "0.1.44"
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 voom-control-plane = { workspace = true }
 voom-core = { workspace = true }

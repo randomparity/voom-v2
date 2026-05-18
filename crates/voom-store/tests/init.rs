@@ -6,7 +6,7 @@
 
 use tempfile::NamedTempFile;
 use voom_store::test_support::sqlite_url_for;
-use voom_store::{SchemaState, connect, init, probe_schema};
+use voom_store::{SchemaState, connect, expected_migrations, init, probe_schema};
 
 // Integration tests use the disk-backed public `init(url)` exclusively.
 // The :memory: + init_on path is covered by Task 11's lib-internal unit tests.
@@ -28,7 +28,7 @@ async fn init_on_disk_creates_schema_meta() {
     else {
         panic!("expected Current, got {state:?}");
     };
-    assert_eq!(migration_count, 1);
+    assert_eq!(migration_count, expected_migrations());
 }
 
 #[tokio::test]
@@ -97,7 +97,11 @@ async fn concurrent_init_on_same_disk_db_is_safe() {
         voom_store::SchemaState::Current {
             migration_count, ..
         } => {
-            assert_eq!(migration_count, 1, "exactly one migration row must exist");
+            assert_eq!(
+                migration_count,
+                expected_migrations(),
+                "every embedded migration must have produced exactly one row"
+            );
         }
         other => panic!("post-race state must be Current, got {other:?}"),
     }
@@ -150,8 +154,10 @@ async fn concurrent_init_stress() {
                 migration_count, ..
             } => {
                 assert_eq!(
-                    migration_count, 1,
-                    "iteration {iteration}: exactly one migration row must exist"
+                    migration_count,
+                    expected_migrations(),
+                    "iteration {iteration}: every embedded migration must have \
+                     produced exactly one row"
                 );
             }
             other => {

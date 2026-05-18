@@ -10,23 +10,23 @@ use serde_json::Value;
 use tempfile::NamedTempFile;
 use tower::ServiceExt;
 use voom_api::router;
-use voom_control_plane::ControlPlane;
+use voom_control_plane::HealthPlane;
 use voom_store::test_support::{insert_synthetic_migration, sqlite_url_for};
 
 async fn fixture_uninit() -> (NamedTempFile, axum::Router) {
     let tmp = NamedTempFile::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::connect_or_create(&url).await.unwrap();
-    let cp = ControlPlane::open(&url).await.unwrap();
-    (tmp, router(cp))
+    let hp = HealthPlane::open(&url).await.unwrap();
+    (tmp, router(hp))
 }
 
 async fn fixture_initialized() -> (NamedTempFile, axum::Router) {
     let tmp = NamedTempFile::new().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
-    let cp = ControlPlane::open(&url).await.unwrap();
-    (tmp, router(cp))
+    let hp = HealthPlane::open(&url).await.unwrap();
+    (tmp, router(hp))
 }
 
 #[tokio::test]
@@ -61,7 +61,10 @@ async fn health_on_initialized_returns_200_current() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["db"]["status"], "current");
-    assert_eq!(json["data"]["db"]["migration_count"], 1);
+    assert_eq!(
+        json["data"]["db"]["migration_count"],
+        voom_store::expected_migrations()
+    );
     assert!(
         json.get("local").is_none(),
         "API must NEVER include local block"
@@ -81,8 +84,8 @@ async fn health_on_too_new_db_returns_503_db_schema_too_new() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let app = router(cp);
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let app = router(hp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
@@ -116,8 +119,8 @@ async fn health_with_dirty_migration_row_returns_503_db_dirty_migration() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let app = router(cp);
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let app = router(hp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await
@@ -156,8 +159,8 @@ async fn health_with_corrupted_schema_meta_returns_503_db_partial_schema() {
             .unwrap();
     }
 
-    let cp = ControlPlane::open(&url).await.unwrap();
-    let app = router(cp);
+    let hp = HealthPlane::open(&url).await.unwrap();
+    let app = router(hp);
     let res = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
         .await

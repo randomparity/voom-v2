@@ -10,8 +10,12 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 directories = "6.0.0"
+rand = { workspace = true }
 serde = { workspace = true }
 thiserror = "2.0.18"
 time = { workspace = true, features = ["serde"] }

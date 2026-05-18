@@ -7,15 +7,70 @@
     )
 )]
 //! App-services layer: wraps voom-store and exposes commands consumed by API/CLI.
+//!
+//! The `cases` submodule hosts the M1 use-case methods. Every method that
+//! mutates durable state composes the matching repo `_in_tx` call with
+//! `EventRepo::append_in_tx` inside one `pool.begin()` so the row write
+//! and its event row share a transaction.
 
+use std::sync::{Arc, Mutex};
+
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, VoomError};
+use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
+use voom_store::repo::{
+    artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
+    identity::SqliteIdentityRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo,
+    tickets::SqliteTicketRepo, workers::SqliteWorkerRepo,
+};
 use voom_store::{SchemaState, connect, probe_schema};
 
-#[derive(Debug, Clone)]
+pub mod cases;
+
+/// Type alias for the boxed, shared, interior-mutable RNG passed to
+/// `LeaseRepo::fail` (and any future caller that needs full-jitter
+/// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
+/// a `Mutex` to keep the `ControlPlane` itself `Clone`-able and
+/// thread-safe.
+pub type SharedRng = Arc<Mutex<dyn RngCore + Send>>;
+
+#[derive(Clone)]
 pub struct ControlPlane {
     pool: SqlitePool,
+    clock: Arc<dyn Clock>,
+    rng: SharedRng,
+    pub(crate) events: SqliteEventRepo,
+    pub(crate) jobs: SqliteJobRepo,
+    pub(crate) tickets: SqliteTicketRepo,
+    pub(crate) workers: SqliteWorkerRepo,
+    pub(crate) leases: SqliteLeaseRepo,
+    pub(crate) artifacts: SqliteArtifactRepo,
+    pub(crate) identity: SqliteIdentityRepo,
+    pub(crate) bundles: SqliteBundleRepo,
+}
+
+impl std::fmt::Debug for ControlPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn Clock` / `dyn RngCore` do not require Debug; surface a
+        // sentinel rather than widening the trait bound (which would
+        // force every concrete implementor — including test fakes —
+        // to derive Debug).
+        f.debug_struct("ControlPlane")
+            .field("pool", &self.pool)
+            .field("clock", &"<dyn Clock>")
+            .field("rng", &"<dyn RngCore>")
+            .field("events", &self.events)
+            .field("jobs", &self.jobs)
+            .field("tickets", &self.tickets)
+            .field("workers", &self.workers)
+            .field("leases", &self.leases)
+            .field("artifacts", &self.artifacts)
+            .field("identity", &self.identity)
+            .field("bundles", &self.bundles)
+            .finish()
+    }
 }
 
 impl ControlPlane {
@@ -23,40 +78,278 @@ impl ControlPlane {
     /// the DB doesn't exist, returns `DB_UNREACHABLE`. The CLI's `init` command
     /// is the only path that creates databases, and it calls
     /// `voom_store::init(url)` directly without going through `ControlPlane`.
+    ///
+    /// Requires the schema to be at [`SchemaState::Current`] because the
+    /// returned plane exposes the M1 writable use cases. Diagnostic flows
+    /// (`/health` on a non-Current DB) must use [`HealthPlane::open`] instead.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Database` if the pool cannot be opened, or
+    /// `VoomError::Migration` if the schema probe is not `Current`.
+    pub async fn open(database_url: &str) -> Result<Self, VoomError> {
+        let pool = connect(database_url).await?;
+        Self::open_with_pool_and_rng(pool, Arc::new(SystemClock), production_rng()).await
+    }
+
+    /// Wrap an already-connected pool with the supplied clock. The DB MUST
+    /// already be at the current schema (use `voom_store::init` on first boot);
+    /// any other state is rejected with `VoomError::Migration`. Use-case
+    /// methods on `ControlPlane` assume the full M1 schema is present.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
+    /// or whatever error `probe_schema` itself produces.
+    pub async fn open_with_pool(
+        pool: SqlitePool,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, VoomError> {
+        Self::open_with_pool_and_rng(pool, clock, production_rng()).await
+    }
+
+    /// Wrap an already-connected pool with the supplied clock AND RNG.
+    /// Tests inject `FrozenRng` / `SeededRng` from
+    /// `voom_core::rng_test_support`; production callers prefer
+    /// `open_with_pool` which seeds a `StdRng` from OS randomness.
+    ///
+    /// # Errors
+    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
+    /// or whatever error `probe_schema` itself produces.
+    pub async fn open_with_pool_and_rng(
+        pool: SqlitePool,
+        clock: Arc<dyn Clock>,
+        rng: SharedRng,
+    ) -> Result<Self, VoomError> {
+        let probe = probe_schema(&pool).await?;
+        if !matches!(probe, SchemaState::Current { .. }) {
+            return Err(VoomError::Migration(format!(
+                "ControlPlane requires a Current schema; got {probe:?}"
+            )));
+        }
+        Ok(Self::new_unchecked(pool, clock, rng))
+    }
+
+    fn new_unchecked(pool: SqlitePool, clock: Arc<dyn Clock>, rng: SharedRng) -> Self {
+        Self {
+            events: SqliteEventRepo::new(pool.clone()),
+            jobs: SqliteJobRepo::new(pool.clone()),
+            tickets: SqliteTicketRepo::new(pool.clone()),
+            workers: SqliteWorkerRepo::new(pool.clone()),
+            leases: SqliteLeaseRepo::new(pool.clone()),
+            artifacts: SqliteArtifactRepo::new(pool.clone()),
+            identity: SqliteIdentityRepo::new(pool.clone()),
+            bundles: SqliteBundleRepo::new(pool.clone()),
+            pool,
+            clock,
+            rng,
+        }
+    }
+
+    /// Read-only health snapshot.
+    ///
+    /// # Errors
+    /// Propagates `probe_schema` errors.
+    pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
+        health_from_pool(&self.pool).await
+    }
+
+    #[must_use]
+    pub fn clock(&self) -> &dyn Clock {
+        &*self.clock
+    }
+
+    /// Pull a single `u32` from the shared RNG and wrap it in a
+    /// fixed-value RNG. The case handlers use this to thread a
+    /// `&mut (dyn RngCore + Send)` into repo calls without holding the
+    /// std Mutex across the awaits inside the repo (the workspace lint
+    /// `await_holding_lock` forbids that). Each `LeaseRepo::fail` call
+    /// consumes exactly one jitter value via `default_backoff`, so a
+    /// single-shot snapshot is sufficient.
+    pub(crate) fn snapshot_rng(&self) -> SnapshotRng {
+        let mut guard = self
+            .rng
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SnapshotRng {
+            value: guard.next_u32(),
+        }
+    }
+
+    // Writable repo accessors: production builds hide them behind
+    // `pub(crate)` so external callers must route every durable state change
+    // through a case handler (which pairs the repo write with an
+    // `EventRepo::append_in_tx`). The `test-support` feature (also
+    // implicitly enabled under `#[cfg(test)]`) re-exports them as `pub` so
+    // the voom-store integration suite can seed state directly. Each
+    // accessor is declared twice (once per cfg arm) rather than as a single
+    // method, so the visibility shows literally at every call site and the
+    // production build cannot accidentally leak the wider surface.
+    //
+    // The production arm uses `#[expect(dead_code, …)]` because case
+    // handlers currently reach into the repo fields directly (`self.tickets
+    // .…`), not via the accessor. The methods exist so that callers can
+    // switch over without re-changing visibility; the `expect` will fire if
+    // an internal caller is ever added, which is the signal to remove the
+    // attribute.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn events(&self) -> &SqliteEventRepo {
+        &self.events
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.events` directly today")]
+    #[must_use]
+    pub(crate) fn events(&self) -> &SqliteEventRepo {
+        &self.events
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn jobs(&self) -> &SqliteJobRepo {
+        &self.jobs
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.jobs` directly today")]
+    #[must_use]
+    pub(crate) fn jobs(&self) -> &SqliteJobRepo {
+        &self.jobs
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn tickets(&self) -> &SqliteTicketRepo {
+        &self.tickets
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.tickets` directly today")]
+    #[must_use]
+    pub(crate) fn tickets(&self) -> &SqliteTicketRepo {
+        &self.tickets
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn workers(&self) -> &SqliteWorkerRepo {
+        &self.workers
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.workers` directly today")]
+    #[must_use]
+    pub(crate) fn workers(&self) -> &SqliteWorkerRepo {
+        &self.workers
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn leases(&self) -> &SqliteLeaseRepo {
+        &self.leases
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.leases` directly today")]
+    #[must_use]
+    pub(crate) fn leases(&self) -> &SqliteLeaseRepo {
+        &self.leases
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn artifacts(&self) -> &SqliteArtifactRepo {
+        &self.artifacts
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.artifacts` directly today")]
+    #[must_use]
+    pub(crate) fn artifacts(&self) -> &SqliteArtifactRepo {
+        &self.artifacts
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn identity(&self) -> &SqliteIdentityRepo {
+        &self.identity
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.identity` directly today")]
+    #[must_use]
+    pub(crate) fn identity(&self) -> &SqliteIdentityRepo {
+        &self.identity
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn bundles(&self) -> &SqliteBundleRepo {
+        &self.bundles
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.bundles` directly today")]
+    #[must_use]
+    pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
+        &self.bundles
+    }
+}
+
+/// Read-only handle for diagnosing a database's schema state.
+///
+/// Unlike [`ControlPlane`], `HealthPlane::open` does not require the
+/// schema to be at [`SchemaState::Current`]; it is the surface for the
+/// `/health` diagnostic flow. It exposes only `health()` — no writable
+/// use cases — so a non-Current database cannot be mutated through it.
+#[derive(Clone)]
+pub struct HealthPlane {
+    pool: SqlitePool,
+}
+
+impl std::fmt::Debug for HealthPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HealthPlane")
+            .field("pool", &self.pool)
+            .finish()
+    }
+}
+
+impl HealthPlane {
+    /// Open an existing database for read-only diagnostics. Never creates
+    /// files or directories — if the DB doesn't exist, returns
+    /// `DB_UNREACHABLE`.
+    ///
+    /// # Errors
+    /// Propagates `connect` errors.
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
         Ok(Self { pool })
     }
 
     /// Read-only health snapshot.
+    ///
+    /// # Errors
+    /// Propagates `probe_schema` errors.
     pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
-        let schema = probe_schema(&self.pool).await?;
-        Ok(match schema {
-            SchemaState::Uninitialized => HealthSnapshot::Uninitialized,
-            SchemaState::Partial { applied, expected } => {
-                HealthSnapshot::Partial { applied, expected }
-            }
-            SchemaState::Current {
-                migration_count,
-                schema_init_at,
-            } => HealthSnapshot::Current {
-                migration_count,
-                schema_init_at,
-            },
-            SchemaState::TooNew { applied, expected } => {
-                HealthSnapshot::TooNew { applied, expected }
-            }
-            SchemaState::Dirty {
-                failed_version,
-                applied,
-                expected,
-            } => HealthSnapshot::Dirty {
-                failed_version,
-                applied,
-                expected,
-            },
-        })
+        health_from_pool(&self.pool).await
     }
+}
+
+async fn health_from_pool(pool: &SqlitePool) -> Result<HealthSnapshot, VoomError> {
+    let schema = probe_schema(pool).await?;
+    Ok(match schema {
+        SchemaState::Uninitialized => HealthSnapshot::Uninitialized,
+        SchemaState::Partial { applied, expected } => HealthSnapshot::Partial { applied, expected },
+        SchemaState::Current {
+            migration_count,
+            schema_init_at,
+        } => HealthSnapshot::Current {
+            migration_count,
+            schema_init_at,
+        },
+        SchemaState::TooNew { applied, expected } => HealthSnapshot::TooNew { applied, expected },
+        SchemaState::Dirty {
+            failed_version,
+            applied,
+            expected,
+        } => HealthSnapshot::Dirty {
+            failed_version,
+            applied,
+            expected,
+        },
+    })
 }
 
 /// State-tagged health snapshot. The ADT shape replaces the previous
@@ -146,6 +439,42 @@ impl HealthSnapshot {
                         .to_owned(),
                 ),
             }),
+        }
+    }
+}
+
+/// Seed a `SharedRng` from OS randomness. Used by `ControlPlane::open`
+/// and `ControlPlane::open_with_pool`; tests inject `FrozenRng` /
+/// `SeededRng` via `open_with_pool_and_rng`.
+fn production_rng() -> SharedRng {
+    Arc::new(Mutex::new(StdRng::from_os_rng()))
+}
+
+/// Single-shot RNG that returns one fixed `u32` from every call. The
+/// shape lets `ControlPlane::snapshot_rng` lift one jitter value out
+/// of the shared RNG while keeping the std Mutex off the await
+/// boundary — the consumer (`LeaseRepo::fail` → `default_backoff`)
+/// only needs one value per call.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SnapshotRng {
+    value: u32,
+}
+
+impl RngCore for SnapshotRng {
+    fn next_u32(&mut self) -> u32 {
+        self.value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        u64::from(self.value) << 32 | u64::from(self.value)
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        for chunk in dst.chunks_mut(4) {
+            let bytes = self.value.to_le_bytes();
+            for (slot, byte) in chunk.iter_mut().zip(bytes.iter()) {
+                *slot = *byte;
+            }
         }
     }
 }

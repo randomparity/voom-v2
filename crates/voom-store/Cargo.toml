@@ -13,10 +13,14 @@ workspace = true
 [dependencies]
 async-trait = "0.1.89"
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+rand = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "time"] }
 time = { workspace = true, features = ["serde", "parsing"] }
 tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
 voom-core = { workspace = true }
+voom-events = { workspace = true }
 
 [features]
 # Test-only public surface: enables init_on(pool), the test_support module
@@ -33,3 +37,17 @@ test-support = []
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# Test-only voom-core surface: FrozenClock/ManualClock from
+# `clock_test_support` and FrozenRng/SeededRng from `rng_test_support`
+# are gated behind voom-core's `test-support` feature. Enabling it on
+# the dev-dep arm only makes these visible to the unit + integration
+# test builds, not to the production crate graph.
+voom-core = { workspace = true, features = ["test-support"] }
+# Cargo permits dev-dep cycles (voom-control-plane normal-deps voom-store):
+# this dependency is only resolved for test/example builds, not for the
+# library itself, so it does not introduce a real circular build edge.
+# `test-support` re-enables the writable repo accessors that production
+# builds of voom-control-plane lock down to pub(crate); the voom-store
+# integration suite needs them to drive state changes that don't have a
+# dedicated case handler.
+voom-control-plane = { workspace = true, features = ["test-support"] }

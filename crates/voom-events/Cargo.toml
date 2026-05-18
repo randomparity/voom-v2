@@ -7,5 +7,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+voom-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+time = { workspace = true, features = ["serde", "macros", "parsing"] }
+
 [lints]
 workspace = true

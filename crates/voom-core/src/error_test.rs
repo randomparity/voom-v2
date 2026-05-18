@@ -35,6 +35,20 @@ fn dirty_migration_variant_has_dirty_migration_code() {
     assert_eq!(err.code(), "DB_DIRTY_MIGRATION");
 }
 
+#[test]
+fn dependency_cycle_error_code_string() {
+    let e = VoomError::DependencyCycle("ticket 5 -> ticket 2 -> ticket 5".to_owned());
+    assert_eq!(e.code(), "DEPENDENCY_CYCLE");
+    assert_eq!(e.error_code(), ErrorCode::DependencyCycle);
+}
+
+#[test]
+fn conflict_error_code_string() {
+    let e = VoomError::Conflict("ticket 7 epoch mismatch".to_owned());
+    assert_eq!(e.code(), "CONFLICT");
+    assert_eq!(e.error_code(), ErrorCode::Conflict);
+}
+
 /// Adding a variant to `ErrorCode` must force a wire-string decision in
 /// `as_str()`. This test is intentionally an exhaustive match so a new
 /// variant fails compilation here too — both halves of the round trip
@@ -51,6 +65,25 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::NotFound,
         ErrorCode::Internal,
         ErrorCode::BadArgs,
+        ErrorCode::DependencyCycle,
+        ErrorCode::Conflict,
+        ErrorCode::WorkerTimeout,
+        ErrorCode::WorkerCrash,
+        ErrorCode::NoEligibleWorker,
+        ErrorCode::ArtifactUnavailable,
+        ErrorCode::ArtifactChecksumMismatch,
+        ErrorCode::ExternalSystemUnavailable,
+        ErrorCode::ExternalSystemRateLimited,
+        ErrorCode::VerificationFailure,
+        ErrorCode::BackupFailure,
+        ErrorCode::CommitFailure,
+        ErrorCode::PolicyParseError,
+        ErrorCode::PolicyValidationError,
+        ErrorCode::MissingCapability,
+        ErrorCode::MalformedWorkerResult,
+        ErrorCode::UserCancellation,
+        ErrorCode::ApprovalRequired,
+        ErrorCode::PriorityPolicyConflict,
     ] {
         // Confirm the exhaustive match in `as_str()` produces a
         // SCREAMING_SNAKE_CASE token; format isn't load-bearing beyond

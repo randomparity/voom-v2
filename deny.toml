@@ -29,6 +29,12 @@ skip = [
     # simultaneously; the 0.15 → 0.17 API break prevents unification until
     # upstream realigns. Revisit on sqlx bumps.
     { crate = "hashbrown", reason = "transitive duplication via sqlx-core" },
+    # `directories` (transitively via redox_users → dirs-sys) pulls
+    # `getrandom 0.2`, while `rand 0.9 → rand_core` pulls `getrandom 0.3`.
+    # Both upstreams have not yet realigned; the duplication is two thin
+    # OS-randomness wrappers, not a security exposure. Revisit when
+    # `directories` bumps its `dirs-sys` dep.
+    { crate = "getrandom", reason = "transitive duplication: directories@6 still on getrandom 0.2, rand@0.9 on 0.3" },
 ]
 skip-tree = []
 
