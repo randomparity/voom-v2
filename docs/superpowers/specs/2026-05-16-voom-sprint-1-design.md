@@ -123,8 +123,8 @@ Implements:
 - the ancillary registries (external systems, issues, quality scores) as
   CRUD repos
 - the terminal-failure → `IssueRepo` auto-open wiring on
-  `ControlPlane::handle_lease_fail` /
-  `ControlPlane::expire_due_leases` (§10.2 / S3): every
+  `ControlPlane::fail_lease` /
+  `ControlPlane::expire_due` (§10.2 / S3): every
   `ticket.failed_terminal` transition opens exactly one new
   `terminal_failure` issue linked to the ticket and last lease in the
   same transaction. This is the architectural DLQ analogue (arch spec
@@ -705,7 +705,7 @@ The `clock` and `rng` parameters mirror the existing `Clock`-injection
 seam used by §12.3 — `RngCore` is injected through a small
 `voom-core::rng_test_support` module that exposes a deterministic
 `FrozenRng` (returns a single configured value) and a `SeededRng` for
-property-style tests. `ControlPlane::handle_lease_fail` constructs the
+property-style tests. `ControlPlane::fail_lease` constructs the
 RNG from its injected `Arc<dyn Rng>` and passes it through to
 `LeaseRepo::fail`, which forwards to `TicketRepo::default_backoff`.
 The architectural retry-policy parameters (`base`, `cap`) are owned by
@@ -2601,8 +2601,8 @@ research-note §11.2 DLQ analogue).** Whenever a ticket transitions to
   event payload, not on the issue itself)
 
 — the corresponding control-plane use case
-(`ControlPlane::handle_lease_fail` /
-`ControlPlane::expire_due_leases` /
+(`ControlPlane::fail_lease` /
+`ControlPlane::expire_due` /
 `ControlPlane::force_release_lease`) calls, **in the same transaction
 that writes `ticket.failed_terminal` and the matching
 `lease.released` / `lease.expired` / `lease.force_released` event**:
@@ -2658,8 +2658,8 @@ auto-open is a use-case-layer composition of `_in_tx` calls on
 methods, not a new repo method on `LeaseRepo` or `TicketRepo`. The M3
 migration that introduces the `issues` / `issue_links` tables is the
 same migration that flips the use-case wiring on; before that
-migration runs, `ControlPlane::handle_lease_fail` /
-`ControlPlane::expire_due_leases` follow the M1 path and write the
+migration runs, `ControlPlane::fail_lease` /
+`ControlPlane::expire_due` follow the M1 path and write the
 `ticket.failed_terminal` event with `issue_id = null`.
 
 ### 10.3 Quality scores

@@ -231,8 +231,9 @@ are parallelizable but ordered here for clarity:
    `open` and `link` (the auto-open path needs `_in_tx`).
 
 4. **Terminal-failure auto-open wiring** (parent §10.2). Modify the
-   existing M1 control-plane use cases `handle_lease_fail`,
-   `expire_due_leases`, `force_release_lease` to, in the same
+   existing M1 control-plane use cases `fail_lease`,
+   `expire_due`, `force_release_lease` (live method names in
+   `crates/voom-control-plane/src/cases/leases.rs`) to, in the same
    transaction that writes `ticket.failed_terminal` and the matching
    `lease.*` event, call `IssueRepo::open_in_tx` + `link_in_tx` for
    the `terminal_failure` issue. `IssueSeverity` / `IssuePriority`
@@ -362,8 +363,8 @@ round-trip tests in `kind_test.rs` / `payload_test.rs` green.
 
 ### 4.4 Touch-back into M1 code (Phase 3)
 
-- **`ControlPlane::handle_lease_fail`,
-  `ControlPlane::expire_due_leases`,
+- **`ControlPlane::fail_lease`,
+  `ControlPlane::expire_due`,
   `ControlPlane::force_release_lease`** — in the same transaction
   that writes the terminal event, call `IssueRepo::open_in_tx` +
   `link_in_tx` and populate `TicketFailedTerminal.issue_id`.
