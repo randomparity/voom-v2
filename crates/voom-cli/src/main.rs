@@ -7,7 +7,7 @@ use voom_cli::cli::{Cli, Command};
 use voom_cli::commands::{health, init, version};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
-use voom_control_plane::ControlPlane;
+use voom_control_plane::HealthPlane;
 use voom_core::{Config, ErrorCode, VoomError};
 
 /// Process exit codes used by the `voom` binary. The numeric values are
@@ -135,8 +135,8 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
                 db_url: cfg.database_url.clone(),
                 config_path: cfg.config_path.display().to_string(),
             };
-            match ControlPlane::open(&cfg.database_url).await {
-                Ok(cp) => Ok(Exit::from_run_code(health::run(&cp, local).await?)),
+            match HealthPlane::open(&cfg.database_url).await {
+                Ok(hp) => Ok(Exit::from_run_code(health::run(&hp, local).await?)),
                 Err(err) => {
                     // Share the hint mapper with `health::run` so the two
                     // open-failure paths cannot give different operator

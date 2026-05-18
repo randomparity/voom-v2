@@ -79,15 +79,21 @@ impl ControlPlane {
     /// is the only path that creates databases, and it calls
     /// `voom_store::init(url)` directly without going through `ControlPlane`.
     ///
-    /// This Sprint 0 surface intentionally does NOT gate on `SchemaState::Current`
-    /// so the diagnostic flow (`health()` on a non-Current DB) continues to
-    /// work. Callers that intend to invoke use-case writes must use
-    /// `open_with_pool`, which enforces the Current invariant.
+    /// Requires the schema to be at [`SchemaState::Current`] because the
+    /// returned plane exposes the M1 writable use cases. Diagnostic flows
+    /// (`/health` on a non-Current DB) must use [`HealthPlane::open`] instead.
     ///
     /// # Errors
-    /// Returns `VoomError::Database` if the pool cannot be opened.
+    /// Returns `VoomError::Database` if the pool cannot be opened, or
+    /// `VoomError::Migration` if the schema probe is not `Current`.
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
+        let probe = probe_schema(&pool).await?;
+        if !matches!(probe, SchemaState::Current { .. }) {
+            return Err(VoomError::Migration(format!(
+                "ControlPlane requires a Current schema; got {probe:?}"
+            )));
+        }
         Ok(Self::new_unchecked(
             pool,
             Arc::new(SystemClock),
@@ -149,33 +155,11 @@ impl ControlPlane {
     }
 
     /// Read-only health snapshot.
+    ///
+    /// # Errors
+    /// Propagates `probe_schema` errors.
     pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
-        let schema = probe_schema(&self.pool).await?;
-        Ok(match schema {
-            SchemaState::Uninitialized => HealthSnapshot::Uninitialized,
-            SchemaState::Partial { applied, expected } => {
-                HealthSnapshot::Partial { applied, expected }
-            }
-            SchemaState::Current {
-                migration_count,
-                schema_init_at,
-            } => HealthSnapshot::Current {
-                migration_count,
-                schema_init_at,
-            },
-            SchemaState::TooNew { applied, expected } => {
-                HealthSnapshot::TooNew { applied, expected }
-            }
-            SchemaState::Dirty {
-                failed_version,
-                applied,
-                expected,
-            } => HealthSnapshot::Dirty {
-                failed_version,
-                applied,
-                expected,
-            },
-        })
+        health_from_pool(&self.pool).await
     }
 
     #[must_use]
@@ -311,6 +295,79 @@ impl ControlPlane {
     pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
         &self.bundles
     }
+}
+
+/// Read-only handle for diagnosing a database's schema state.
+///
+/// Unlike [`ControlPlane`], `HealthPlane::open` does not require the
+/// schema to be at [`SchemaState::Current`]; it is the surface for the
+/// `/health` diagnostic flow. It exposes only `health()` — no writable
+/// use cases — so a non-Current database cannot be mutated through it.
+#[derive(Clone)]
+pub struct HealthPlane {
+    pool: SqlitePool,
+}
+
+impl std::fmt::Debug for HealthPlane {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HealthPlane")
+            .field("pool", &self.pool)
+            .finish()
+    }
+}
+
+impl HealthPlane {
+    /// Open an existing database for read-only diagnostics. Never creates
+    /// files or directories — if the DB doesn't exist, returns
+    /// `DB_UNREACHABLE`.
+    ///
+    /// # Errors
+    /// Propagates `connect` errors.
+    pub async fn open(database_url: &str) -> Result<Self, VoomError> {
+        let pool = connect(database_url).await?;
+        Ok(Self { pool })
+    }
+
+    /// Wrap an already-connected pool without probing the schema. Tests
+    /// that need to assert diagnostic behavior against a synthesized
+    /// non-Current state pass an existing pool.
+    #[must_use]
+    pub fn from_pool(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Read-only health snapshot.
+    ///
+    /// # Errors
+    /// Propagates `probe_schema` errors.
+    pub async fn health(&self) -> Result<HealthSnapshot, VoomError> {
+        health_from_pool(&self.pool).await
+    }
+}
+
+async fn health_from_pool(pool: &SqlitePool) -> Result<HealthSnapshot, VoomError> {
+    let schema = probe_schema(pool).await?;
+    Ok(match schema {
+        SchemaState::Uninitialized => HealthSnapshot::Uninitialized,
+        SchemaState::Partial { applied, expected } => HealthSnapshot::Partial { applied, expected },
+        SchemaState::Current {
+            migration_count,
+            schema_init_at,
+        } => HealthSnapshot::Current {
+            migration_count,
+            schema_init_at,
+        },
+        SchemaState::TooNew { applied, expected } => HealthSnapshot::TooNew { applied, expected },
+        SchemaState::Dirty {
+            failed_version,
+            applied,
+            expected,
+        } => HealthSnapshot::Dirty {
+            failed_version,
+            applied,
+            expected,
+        },
+    })
 }
 
 /// State-tagged health snapshot. The ADT shape replaces the previous
