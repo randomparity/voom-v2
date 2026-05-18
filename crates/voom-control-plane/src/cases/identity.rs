@@ -55,7 +55,7 @@ impl ControlPlane {
                 file_asset_id,
                 file_version_id,
                 file_location_id,
-                hash_match_evidence_for,
+                hash_match_evidence,
                 path_rule_evidence,
             } => {
                 append_event(
@@ -117,42 +117,17 @@ impl ControlPlane {
                     }),
                 )
                 .await?;
-                // Hash-match evidence already written by the repo —
-                // surface it through identity_evidence.recorded.
-                if let Some(matched_against) = hash_match_evidence_for {
-                    // The repo wrote exactly one path_rule or hash_match
-                    // evidence row when populating these Option fields;
-                    // the event-payload values come from the live list.
-                    let evidence_rows = self
-                        .identity
-                        .list_identity_evidence_by_target_in_tx(
-                            &mut tx,
-                            IdentityEvidenceTarget::FileVersion,
-                            file_version_id.0,
-                        )
-                        .await?;
-                    for e in &evidence_rows {
-                        append_event(
-                            &self.events,
-                            &mut tx,
-                            SubjectType::IdentityEvidence,
-                            Some(e.id.0),
-                            e.observed_at,
-                            Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
-                                evidence_id: e.id.0,
-                                target_type: e.target_type.as_str().to_owned(),
-                                target_id: e.target_id,
-                                assertion_type: e.assertion_type.as_str().to_owned(),
-                                provider: e.provider.clone(),
-                                provider_version: e.provider_version.clone(),
-                                confidence: e.confidence,
-                                observed_at: e.observed_at,
-                            }),
-                        )
-                        .await?;
-                    }
-                    let _ = matched_against;
-                } else if let Some(ev_id) = path_rule_evidence {
+                // Both evidence kinds can fire on the same call (per
+                // spec §8.7: an alias-proof mismatch produces a
+                // path_rule_match row, and if the hash also matches an
+                // existing version, a separate hash_match row is
+                // written against that prior asset). Emit one event
+                // per Some, in insertion order so the events table
+                // mirrors the repo write order.
+                for ev_id in [hash_match_evidence, path_rule_evidence]
+                    .into_iter()
+                    .flatten()
+                {
                     let e = self
                         .identity
                         .get_identity_evidence_in_tx(&mut tx, *ev_id)

@@ -1,7 +1,9 @@
 #![expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     clippy::panic,
-    reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
+    reason = "integration tests favor unwrap/expect/panic over plumbing Result<()> through every \
+              assertion"
 )]
 //! M2 ingest-path coverage. Drives every named outcome of spec §13.2
 //! through `ControlPlane::record_discovered_file` and asserts the
@@ -307,26 +309,49 @@ async fn object_store_key_match_without_version_id_falls_back_to_new_asset() {
 #[tokio::test]
 async fn hash_match_without_alias_proof_stamps_hash_match_evidence() {
     let (cp, _tmp) = cp().await;
-    let _ = cp
+    let first = cp
         .record_discovered_file(new_local("/srv/a.mkv", "shared-hash", 50), None)
         .await
         .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_asset_id: existing_asset_id,
+        ..
+    } = first
+    else {
+        panic!();
+    };
     let second = cp
         .record_discovered_file(new_local("/srv/b.mkv", "shared-hash", 50), None)
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        hash_match_evidence_for,
+        file_asset_id: new_asset_id,
+        file_version_id: new_version_id,
+        hash_match_evidence,
         ..
     } = second
     else {
         panic!();
     };
-    assert!(hash_match_evidence_for.is_some());
+    assert_ne!(
+        existing_asset_id, new_asset_id,
+        "hash match never collapses identity"
+    );
+    let ev_id = hash_match_evidence.expect("hash match should be detected");
     assert_eq!(
         count_kind(&cp, EventKind::IdentityEvidenceRecorded).await,
         1
     );
+    // Per spec §8.7: target is the *existing* asset, candidate is the *new* version.
+    let ev = cp
+        .identity()
+        .get_identity_evidence(ev_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ev.target_type, IdentityEvidenceTarget::FileAsset);
+    assert_eq!(ev.target_id, existing_asset_id.0);
+    assert_eq!(ev.candidate_id, Some(new_version_id.0));
 }
 
 #[tokio::test]
@@ -363,13 +388,13 @@ async fn etag_match_is_the_same_path_as_hash_match() {
         .await
         .unwrap();
     let IngestOutcome::NewFileAsset {
-        hash_match_evidence_for,
+        hash_match_evidence,
         ..
     } = second
     else {
         panic!();
     };
-    assert!(hash_match_evidence_for.is_some());
+    assert!(hash_match_evidence.is_some());
 }
 
 // --- §13.2 DiscoveredFile.proof persistence sub-tests --------------------

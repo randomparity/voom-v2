@@ -350,7 +350,7 @@ async fn discovered_file_with_no_alias_proof_creates_new_asset() {
         .unwrap();
     tx.commit().await.unwrap();
     let IngestOutcome::NewFileAsset {
-        hash_match_evidence_for,
+        hash_match_evidence,
         path_rule_evidence,
         ..
     } = outcome
@@ -358,7 +358,7 @@ async fn discovered_file_with_no_alias_proof_creates_new_asset() {
         panic!("expected NewFileAsset");
     };
     assert!(
-        hash_match_evidence_for.is_none(),
+        hash_match_evidence.is_none(),
         "no prior hash → no hash-match evidence"
     );
     assert!(
@@ -368,11 +368,18 @@ async fn discovered_file_with_no_alias_proof_creates_new_asset() {
 }
 
 #[tokio::test]
-async fn discovered_file_hash_match_stamps_evidence() {
+async fn discovered_file_hash_match_stamps_evidence_against_existing_asset() {
+    // Spec §8.7: a hash match writes an evidence row "against the
+    // existing FileAsset referencing the new FileVersion". The row's
+    // target is the *existing* asset (so the existing logical asset
+    // accumulates candidates), and the candidate id is the *new*
+    // FileVersion (the bytes that just arrived). Hash matches never
+    // collapse identity — there are two distinct FileAssets after this
+    // call.
     let (repo, _tmp) = fresh().await;
-    // First file: creates asset A with hash "h-dup".
+    // First file: creates asset A with version V_A under hash "h-dup".
     let mut tx = repo.pool.begin().await.unwrap();
-    let _ = repo
+    let first = repo
         .record_discovered_file_in_tx(
             &mut tx,
             DiscoveredFile {
@@ -388,8 +395,16 @@ async fn discovered_file_hash_match_stamps_evidence() {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-    // Second file: same hash, different path. Must create a new asset
-    // AND record hash_match evidence on the new file_version.
+    let IngestOutcome::NewFileAsset {
+        file_asset_id: existing_asset_id,
+        ..
+    } = first
+    else {
+        panic!("expected NewFileAsset on first discovery");
+    };
+    // Second file: same hash, different path. Creates a SECOND asset
+    // (B) with version V_B, then writes hash_match evidence whose
+    // target is asset A and whose candidate is V_B.
     let mut tx = repo.pool.begin().await.unwrap();
     let outcome = repo
         .record_discovered_file_in_tx(
@@ -408,24 +423,44 @@ async fn discovered_file_hash_match_stamps_evidence() {
         .unwrap();
     tx.commit().await.unwrap();
     let IngestOutcome::NewFileAsset {
-        file_version_id,
-        hash_match_evidence_for,
+        file_asset_id: new_asset_id,
+        file_version_id: new_version_id,
+        hash_match_evidence,
         ..
     } = outcome
     else {
-        panic!("expected NewFileAsset");
+        panic!("expected NewFileAsset on second discovery");
     };
-    let other_version = hash_match_evidence_for.expect("hash match should be detected");
-    let evidence = repo
-        .list_identity_evidence_by_target(IdentityEvidenceTarget::FileVersion, file_version_id.0)
+    assert_ne!(
+        existing_asset_id, new_asset_id,
+        "hash match must NOT collapse identity"
+    );
+    let ev_id = hash_match_evidence.expect("hash match should be detected");
+    // Evidence is on the EXISTING asset, not the new file_version.
+    let on_existing_asset = repo
+        .list_identity_evidence_by_target(IdentityEvidenceTarget::FileAsset, existing_asset_id.0)
         .await
         .unwrap();
-    assert_eq!(evidence.len(), 1);
+    assert_eq!(on_existing_asset.len(), 1);
+    assert_eq!(on_existing_asset[0].id, ev_id);
     assert_eq!(
-        evidence[0].assertion_type,
+        on_existing_asset[0].assertion_type,
         voom_events::AssertionKind::HashMatch
     );
-    assert_eq!(evidence[0].candidate_id, Some(other_version.0));
+    assert_eq!(
+        on_existing_asset[0].candidate_id,
+        Some(new_version_id.0),
+        "candidate is the NEW FileVersion that just arrived"
+    );
+    // No evidence on the new file_version (the old, wrong target).
+    let on_new_version = repo
+        .list_identity_evidence_by_target(IdentityEvidenceTarget::FileVersion, new_version_id.0)
+        .await
+        .unwrap();
+    assert!(
+        on_new_version.is_empty(),
+        "evidence must not be on the new FileVersion"
+    );
 }
 
 // ---- reconcile_rename: conflict on absent prior_path_missing flag ------

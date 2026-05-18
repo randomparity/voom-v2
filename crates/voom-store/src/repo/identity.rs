@@ -288,13 +288,18 @@ pub enum IngestOutcome {
         file_asset_id: FileAssetId,
         file_version_id: FileVersionId,
         file_location_id: FileLocationId,
-        /// `Some(version_id)` if the new bytes' hash matches an existing
-        /// `FileVersion`'s hash; the repo also wrote an
-        /// `identity_evidence(hash_match)` row pointing at that version.
-        hash_match_evidence_for: Option<FileVersionId>,
-        /// `Some(_)` when the caller supplied an `AliasProof` that failed
-        /// validation: the repo recorded a `path_rule_match` evidence row
-        /// alongside the new asset.
+        /// `Some(evidence_id)` when the new bytes' hash matched some
+        /// existing `FileVersion`. The repo wrote an
+        /// `identity_evidence(hash_match)` row whose `target` is the
+        /// *existing* `FileAsset` (not the new one) and whose
+        /// `candidate_id` is the new `FileVersion` — per spec §8.7,
+        /// hash matches surface the new bytes as a candidate against
+        /// the existing logical asset without collapsing identity.
+        hash_match_evidence: Option<EvidenceId>,
+        /// `Some(evidence_id)` when the caller supplied an
+        /// `AliasProof` that failed validation: the repo recorded a
+        /// `path_rule_match` evidence row against the new
+        /// `FileVersion` alongside the new asset.
         path_rule_evidence: Option<EvidenceId>,
     },
     AliasAttached {
@@ -1680,38 +1685,48 @@ async fn ingest_new_file_asset(
     )
     .await?;
 
-    // Hash-match evidence: if any pre-existing FileVersion shares the
-    // content hash (other than the one we just inserted), stamp it.
-    let other_hash_match: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM file_versions WHERE content_hash = ? AND id <> ? LIMIT 1",
+    // Hash-match evidence: if any pre-existing FileVersion (on a
+    // different FileAsset — we just inserted version_id into asset_id)
+    // shares the content hash, stamp a `hash_match` row.
+    //
+    // Per spec §8.7 the row's target is the *existing* `FileAsset`
+    // (so the existing logical asset accumulates candidates) and the
+    // candidate is the *new* `FileVersion` (the bytes that just
+    // arrived). Hash matches never collapse identity — they surface
+    // the candidate without merging assets.
+    let prior: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT id, file_asset_id FROM file_versions \
+         WHERE content_hash = ? AND id <> ? LIMIT 1",
     )
     .bind(&discovered.content_hash)
     .bind(i64_from_u64(version_id.0))
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("file_versions hash-match probe: {e}")))?;
-    let hash_match_evidence_for = if let Some(other_id) = other_hash_match {
-        let other_version = FileVersionId(u64_from_i64(other_id));
-        insert_identity_evidence(
+    let hash_match_evidence = if let Some((prior_version_i, prior_asset_i)) = prior {
+        let prior_version_id = FileVersionId(u64_from_i64(prior_version_i));
+        let prior_asset_id = FileAssetId(u64_from_i64(prior_asset_i));
+        let ev = insert_identity_evidence(
             tx,
             &NewIdentityEvidence {
-                target_type: IdentityEvidenceTarget::FileVersion,
-                target_id: version_id.0,
+                target_type: IdentityEvidenceTarget::FileAsset,
+                target_id: prior_asset_id.0,
                 assertion_type: AssertionKind::HashMatch,
-                candidate_id: Some(other_version.0),
+                candidate_id: Some(version_id.0),
                 candidate_value: None,
                 provider: "voom.ingest".to_owned(),
                 provider_version: "1".to_owned(),
                 confidence: 1.0,
                 provenance: serde_json::json!({
                     "discovered_path": discovered.location_value,
-                    "matched_file_version_id": other_version.0,
+                    "new_file_version_id": version_id.0,
+                    "matched_prior_file_version_id": prior_version_id.0,
                 }),
                 observed_at: discovered.observed_at,
             },
         )
         .await?;
-        Some(other_version)
+        Some(ev)
     } else {
         None
     };
@@ -1749,7 +1764,7 @@ async fn ingest_new_file_asset(
         file_asset_id: asset_id,
         file_version_id: version_id,
         file_location_id: location_id,
-        hash_match_evidence_for,
+        hash_match_evidence,
         path_rule_evidence,
     })
 }
