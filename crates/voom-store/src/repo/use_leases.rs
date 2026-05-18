@@ -203,6 +203,12 @@ pub struct NewUseLease {
     pub acquired_at: OffsetDateTime,
 }
 
+/// Read-side view of an `asset_use_leases` row.
+///
+/// `clock_source` is intentionally omitted from this struct: Sprint 1
+/// only writes the literal `'control_plane'` value (sprint-1 design §9.2),
+/// so there is nothing for callers to vary. Future sprints that add
+/// non-`'control_plane'` clocks can add a `ClockSource` field then.
 #[derive(Debug, Clone)]
 pub struct UseLease {
     pub id: UseLeaseId,
@@ -498,6 +504,8 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
 
     async fn list_for_scope(&self, scope: LeaseScope) -> Result<Vec<UseLease>, VoomError> {
         let (a, b, v, l) = scope_bind_columns(scope);
+        // Each scope value is bound twice (IS NOT NULL probe + equality match) — keep
+        // the WHERE arms and the .bind() sequence in sync if you edit this.
         let rows = sqlx::query(
             "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
                     scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
