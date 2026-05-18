@@ -1,8 +1,10 @@
 //! Repository pattern: trait per storage area, Sqlite impl per trait.
 
 pub mod artifacts;
+pub mod bundles;
 pub(crate) mod common;
 pub mod events;
+pub mod identity;
 pub mod jobs;
 pub mod leases;
 pub mod schema_meta;

@@ -37,6 +37,12 @@ test-support = []
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# Test-only voom-core surface: FrozenClock/ManualClock from
+# `clock_test_support` and FrozenRng/SeededRng from `rng_test_support`
+# are gated behind voom-core's `test-support` feature. Enabling it on
+# the dev-dep arm only makes these visible to the unit + integration
+# test builds, not to the production crate graph.
+voom-core = { workspace = true, features = ["test-support"] }
 # Cargo permits dev-dep cycles (voom-control-plane normal-deps voom-store):
 # this dependency is only resolved for test/example builds, not for the
 # library itself, so it does not introduce a real circular build edge.
