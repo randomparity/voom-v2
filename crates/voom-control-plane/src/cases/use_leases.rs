@@ -21,6 +21,19 @@ use crate::ControlPlane;
 
 use super::{append_event, begin_tx, commit_tx};
 
+/// Reject empty or whitespace-only audit strings. The `force_release` and
+/// `recover_stale_issuer` paths exist specifically to record operator intent
+/// (sprint-1 design §9.2) — a blank actor or reason would terminate a lease
+/// and leave an audit row that carries no operator information.
+fn require_audit_field(name: &str, value: &str) -> Result<(), VoomError> {
+    if value.trim().is_empty() {
+        return Err(VoomError::Config(format!(
+            "{name} must not be empty or whitespace"
+        )));
+    }
+    Ok(())
+}
+
 impl ControlPlane {
     /// Acquire an `AssetUseLease`. Emits `use_lease.acquired`.
     ///
@@ -119,6 +132,8 @@ impl ControlPlane {
         reason: String,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
+        require_audit_field("actor", &actor)?;
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let lease = self
             .use_leases
@@ -186,6 +201,8 @@ impl ControlPlane {
         reason: String,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
+        require_audit_field("actor", &actor)?;
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let lease = self
             .use_leases

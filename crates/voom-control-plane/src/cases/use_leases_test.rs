@@ -1,9 +1,11 @@
 use time::{Duration, OffsetDateTime};
+use voom_core::VoomError;
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{FileLocationKind, NewFileLocation, NewFileVersion, ProducedBy};
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
+    UseLeaseRepo,
 };
 
 use crate::cases::cp;
@@ -178,6 +180,110 @@ async fn force_release_use_lease_emits_force_released_with_actor() {
     assert_eq!(payload.lease_id, lease.id.0);
     assert_eq!(payload.actor, "admin");
     assert_eq!(payload.reason, "maintenance");
+}
+
+#[tokio::test]
+async fn force_release_use_lease_rejects_empty_actor() {
+    let (cp, _tmp) = cp().await;
+    let asset = cp.create_file_asset(T0).await.unwrap();
+    let lease = cp
+        .acquire_use_lease(ttl_input(LeaseScope::Asset(asset.id)))
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::UseLeaseForceReleased).await;
+    let err = cp
+        .force_release_use_lease(
+            lease.id,
+            String::new(),
+            "maintenance".to_owned(),
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    // Validation runs before the tx — no event row should have been written.
+    assert_eq!(count(&cp, EventKind::UseLeaseForceReleased).await, before);
+    // And the lease is still live.
+    let still = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert!(still.is_live());
+}
+
+#[tokio::test]
+async fn force_release_use_lease_rejects_whitespace_reason() {
+    let (cp, _tmp) = cp().await;
+    let asset = cp.create_file_asset(T0).await.unwrap();
+    let lease = cp
+        .acquire_use_lease(ttl_input(LeaseScope::Asset(asset.id)))
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::UseLeaseForceReleased).await;
+    let err = cp
+        .force_release_use_lease(
+            lease.id,
+            "admin".to_owned(),
+            "   \t\n".to_owned(),
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    assert_eq!(count(&cp, EventKind::UseLeaseForceReleased).await, before);
+    let still = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert!(still.is_live());
+}
+
+#[tokio::test]
+async fn recover_use_lease_stale_issuer_rejects_empty_actor() {
+    let (cp, _tmp) = cp().await;
+    let asset = cp.create_file_asset(T0).await.unwrap();
+    let lease = cp
+        .acquire_use_lease(manual_input(LeaseScope::Asset(asset.id)))
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::UseLeaseRecoveredStaleIssuer).await;
+    let err = cp
+        .recover_use_lease_stale_issuer(
+            lease.id,
+            String::new(),
+            "issuer gone".to_owned(),
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    assert_eq!(
+        count(&cp, EventKind::UseLeaseRecoveredStaleIssuer).await,
+        before
+    );
+    let still = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert!(still.is_live());
+}
+
+#[tokio::test]
+async fn recover_use_lease_stale_issuer_rejects_whitespace_reason() {
+    let (cp, _tmp) = cp().await;
+    let asset = cp.create_file_asset(T0).await.unwrap();
+    let lease = cp
+        .acquire_use_lease(manual_input(LeaseScope::Asset(asset.id)))
+        .await
+        .unwrap();
+    let before = count(&cp, EventKind::UseLeaseRecoveredStaleIssuer).await;
+    let err = cp
+        .recover_use_lease_stale_issuer(
+            lease.id,
+            "ops-bot".to_owned(),
+            "  ".to_owned(),
+            T0 + Duration::seconds(10),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Config(_)), "got {err:?}");
+    assert_eq!(
+        count(&cp, EventKind::UseLeaseRecoveredStaleIssuer).await,
+        before
+    );
+    let still = cp.use_leases().get(lease.id).await.unwrap().unwrap();
+    assert!(still.is_live());
 }
 
 #[tokio::test]
