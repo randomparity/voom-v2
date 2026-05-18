@@ -481,8 +481,6 @@ const fn scope_bind_columns(
 
 #[async_trait]
 impl UseLeaseRepo for SqliteUseLeaseRepo {
-    // Read methods (implemented in this task) ---------------------------------
-
     async fn get(&self, id: UseLeaseId) -> Result<Option<UseLease>, VoomError> {
         let row = sqlx::query(
             "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \

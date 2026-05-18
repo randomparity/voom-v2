@@ -4,6 +4,7 @@ use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, UseLeaseId};
 
 use super::*;
+use crate::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Spin up a fresh pool with migration 0004 applied, plus a single
@@ -11,16 +12,11 @@ use crate::test_support::{T0, fresh_initialized_pool_at};
 async fn pool_with_asset() -> (SqlitePool, NamedTempFile, FileAssetId) {
     let tmp = NamedTempFile::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
-    let asset_id = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
-        .bind(
-            T0.format(&time::format_description::well_known::Iso8601::DEFAULT)
-                .unwrap(),
-        )
-        .execute(&pool)
+    let asset = SqliteIdentityRepo::new(pool.clone())
+        .create_file_asset(T0)
         .await
-        .unwrap()
-        .last_insert_rowid();
-    (pool, tmp, FileAssetId(u64::try_from(asset_id).unwrap()))
+        .unwrap();
+    (pool, tmp, asset.id)
 }
 
 #[tokio::test]
