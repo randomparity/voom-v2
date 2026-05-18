@@ -304,7 +304,7 @@ async fn expire_due_requeues_overdue_leases() {
     let report = lrepo.expire_due(T0 + Duration::seconds(11)).await.unwrap();
     assert_eq!(report.expired_leases, vec![l.id]);
     assert_eq!(report.requeued_tickets, vec![tid]);
-    assert!(report.failed_tickets.is_empty());
+    assert!(report.failed_expiries.is_empty());
     let t = trepo.get(tid).await.unwrap().unwrap();
     assert_eq!(t.state, TicketState::Ready);
 }

@@ -118,21 +118,38 @@ pub struct ForceReleaseOutcome {
     pub max_attempts: u32,
 }
 
+/// Per-row outcome for a lease whose ticket exhausted its retry budget
+/// during `expire_due_in_tx`. Carries the `attempt` / `max_attempts`
+/// the repo already had in scope when it decided the ticket's fate,
+/// so the case handler can build the `TicketFailedTerminal` payload
+/// without a redundant `tickets.get_in_tx` round-trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedExpiry {
+    pub lease_id: LeaseId,
+    pub ticket_id: TicketId,
+    pub attempt: u32,
+    pub max_attempts: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpireReport {
     /// All expired leases, in id-order.
     pub expired_leases: Vec<LeaseId>,
     /// Tickets whose lease expired and were requeued for retry.
     pub requeued_tickets: Vec<TicketId>,
-    /// Tickets whose lease expired and exhausted all attempts.
-    pub failed_tickets: Vec<TicketId>,
+    /// Per-row outcomes for leases whose ticket exhausted its retry
+    /// budget. Carries the `attempt` / `max_attempts` snapshot the
+    /// repo already had in scope at the decision point so the case
+    /// handler can build `TicketFailedTerminal` payloads without a
+    /// second `tickets.get_in_tx` round-trip.
+    pub failed_expiries: Vec<FailedExpiry>,
     /// Per-row (`lease_id`, `ticket_id`) pairs in the order they were processed.
     /// Lets the `ControlPlane` emit `lease.expired` events whose payload
     /// carries the matching `ticket_id`, and
     /// `ticket.requeued_after_lease_expiry` / `ticket.failed_terminal`
     /// whose payload carries the matching `lease_id`. Each pair classifies
     /// as requeued or failed depending on which of `requeued_tickets` /
-    /// `failed_tickets` the `ticket_id` appears in.
+    /// `failed_expiries` the `ticket_id` appears in.
     pub pairs: Vec<(LeaseId, TicketId)>,
 }
 
@@ -608,7 +625,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         let mut report = ExpireReport {
             expired_leases: Vec::new(),
             requeued_tickets: Vec::new(),
-            failed_tickets: Vec::new(),
+            failed_expiries: Vec::new(),
             pairs: Vec::new(),
         };
         // Pre-fetch every candidate ticket's (attempt, max_attempts) in
@@ -619,85 +636,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         let ticket_attempts =
             fetch_ticket_attempts(tx, rows.iter().map(extract_ticket_id_i)).await?;
         for row in &rows {
-            let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
-            let ticket_id_i: i64 = row
-                .try_get("ticket_id")
-                .map_err(|e| map_row_err("leases", &e))?;
-            let lease_id = LeaseId(u64_from_i64(lease_id_i));
-            let ticket_id = TicketId(u64_from_i64(ticket_id_i));
-            // Mark lease expired.
-            let lease_res = sqlx::query(
-                "UPDATE leases SET state = 'expired', release_reason = ?, \
-                 released_at = ?, epoch = epoch + 1 \
-                 WHERE id = ? AND state = 'held'",
-            )
-            .bind(ReleaseReason::IssuerLost.as_str())
-            .bind(&now_str)
-            .bind(lease_id_i)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| VoomError::Database(format!("lease expire: {e}")))?;
-            if lease_res.rows_affected() != 1 {
-                tracing::warn!(
-                    lease_id = lease_id_i,
-                    ticket_id = ticket_id_i,
-                    "expire_due aborting: lease no longer held"
-                );
-                return Err(VoomError::Conflict(format!(
-                    "expire_due aborted: lease {lease_id} no longer held"
-                )));
-            }
-            // Decide ticket fate from the pre-fetched batch.
-            let &(attempt, max_attempts) = ticket_attempts.get(&ticket_id_i).ok_or_else(|| {
-                VoomError::Internal(format!(
-                    "expire_due: ticket {ticket_id} missing from pre-fetch"
-                ))
-            })?;
-            if attempt < max_attempts {
-                let ticket_res = sqlx::query(
-                    "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
-                     epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
-                )
-                .bind(&now_str)
-                .bind(ticket_id_i)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("ticket requeue: {e}")))?;
-                if ticket_res.rows_affected() != 1 {
-                    tracing::warn!(
-                        lease_id = lease_id_i,
-                        ticket_id = ticket_id_i,
-                        "expire_due aborting: ticket not leased on requeue"
-                    );
-                    return Err(VoomError::Conflict(format!(
-                        "expire_due aborted: ticket {ticket_id} not leased on requeue"
-                    )));
-                }
-                report.requeued_tickets.push(ticket_id);
-            } else {
-                let ticket_res = sqlx::query(
-                    "UPDATE tickets SET state = 'failed', state_changed_at = ?, \
-                     epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
-                )
-                .bind(&now_str)
-                .bind(ticket_id_i)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| VoomError::Database(format!("ticket fail: {e}")))?;
-                if ticket_res.rows_affected() != 1 {
-                    tracing::warn!(
-                        lease_id = lease_id_i,
-                        ticket_id = ticket_id_i,
-                        "expire_due aborting: ticket not leased on terminal fail"
-                    );
-                    return Err(VoomError::Conflict(format!(
-                        "expire_due aborted: ticket {ticket_id} not leased on fail"
-                    )));
-                }
-                report.failed_tickets.push(ticket_id);
-            }
-            report.expired_leases.push(lease_id);
-            report.pairs.push((lease_id, ticket_id));
+            process_expired_lease(tx, row, &ticket_attempts, &now_str, &mut report).await?;
         }
         Ok(report)
     }
@@ -906,6 +845,103 @@ where
         out.insert(id, (attempt, max_attempts));
     }
     Ok(out)
+}
+
+/// Process one expired-lease row from `expire_due_in_tx`: mark the
+/// lease `expired`, transition the matching ticket to `ready` or
+/// `failed`, and push the per-row outcome onto `report`. The
+/// `ticket_attempts` map must already contain an entry for the
+/// row's `ticket_id` (populated by `fetch_ticket_attempts`).
+async fn process_expired_lease(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    row: &sqlx::sqlite::SqliteRow,
+    ticket_attempts: &std::collections::HashMap<i64, (i64, i64)>,
+    now_str: &str,
+    report: &mut ExpireReport,
+) -> Result<(), VoomError> {
+    let lease_id_i: i64 = row.try_get("id").map_err(|e| map_row_err("leases", &e))?;
+    let ticket_id_i: i64 = row
+        .try_get("ticket_id")
+        .map_err(|e| map_row_err("leases", &e))?;
+    let lease_id = LeaseId(u64_from_i64(lease_id_i));
+    let ticket_id = TicketId(u64_from_i64(ticket_id_i));
+    let lease_res = sqlx::query(
+        "UPDATE leases SET state = 'expired', release_reason = ?, \
+         released_at = ?, epoch = epoch + 1 \
+         WHERE id = ? AND state = 'held'",
+    )
+    .bind(ReleaseReason::IssuerLost.as_str())
+    .bind(now_str)
+    .bind(lease_id_i)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("lease expire: {e}")))?;
+    if lease_res.rows_affected() != 1 {
+        tracing::warn!(
+            lease_id = lease_id_i,
+            ticket_id = ticket_id_i,
+            "expire_due aborting: lease no longer held"
+        );
+        return Err(VoomError::Conflict(format!(
+            "expire_due aborted: lease {lease_id} no longer held"
+        )));
+    }
+    let &(attempt, max_attempts) = ticket_attempts.get(&ticket_id_i).ok_or_else(|| {
+        VoomError::Internal(format!(
+            "expire_due: ticket {ticket_id} missing from pre-fetch"
+        ))
+    })?;
+    if attempt < max_attempts {
+        let ticket_res = sqlx::query(
+            "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
+             epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
+        )
+        .bind(now_str)
+        .bind(ticket_id_i)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("ticket requeue: {e}")))?;
+        if ticket_res.rows_affected() != 1 {
+            tracing::warn!(
+                lease_id = lease_id_i,
+                ticket_id = ticket_id_i,
+                "expire_due aborting: ticket not leased on requeue"
+            );
+            return Err(VoomError::Conflict(format!(
+                "expire_due aborted: ticket {ticket_id} not leased on requeue"
+            )));
+        }
+        report.requeued_tickets.push(ticket_id);
+    } else {
+        let ticket_res = sqlx::query(
+            "UPDATE tickets SET state = 'failed', state_changed_at = ?, \
+             epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
+        )
+        .bind(now_str)
+        .bind(ticket_id_i)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("ticket fail: {e}")))?;
+        if ticket_res.rows_affected() != 1 {
+            tracing::warn!(
+                lease_id = lease_id_i,
+                ticket_id = ticket_id_i,
+                "expire_due aborting: ticket not leased on terminal fail"
+            );
+            return Err(VoomError::Conflict(format!(
+                "expire_due aborted: ticket {ticket_id} not leased on fail"
+            )));
+        }
+        report.failed_expiries.push(FailedExpiry {
+            lease_id,
+            ticket_id,
+            attempt: u32_from_i64(attempt)?,
+            max_attempts: u32_from_i64(max_attempts)?,
+        });
+    }
+    report.expired_leases.push(lease_id);
+    report.pairs.push((lease_id, ticket_id));
+    Ok(())
 }
 
 async fn get_lease_in_tx(

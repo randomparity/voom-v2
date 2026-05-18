@@ -76,7 +76,7 @@ async fn expire_due_handles_bulk_overdue_leases() {
     assert_eq!(report.expired_leases.len(), N);
     assert_eq!(report.requeued_tickets.len(), N);
     assert!(
-        report.failed_tickets.is_empty(),
+        report.failed_expiries.is_empty(),
         "with max_attempts=3 and attempt=1, all should requeue"
     );
 
@@ -84,7 +84,7 @@ async fn expire_due_handles_bulk_overdue_leases() {
     let second = cp.expire_due(T0 + Duration::seconds(11)).await.unwrap();
     assert!(second.expired_leases.is_empty());
     assert!(second.requeued_tickets.is_empty());
-    assert!(second.failed_tickets.is_empty());
+    assert!(second.failed_expiries.is_empty());
 
     // One lease.expired + one ticket.requeued_after_lease_expiry per row.
     let expired = cp
