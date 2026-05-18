@@ -290,31 +290,39 @@ impl ControlPlane {
         // attached to the retired `FileLocation` must be re-anchored to
         // its replacement inside the same transaction as the rename, so
         // a destructive commit targeting the new location still sees the
-        // protecting lease.
-        let reanchor = self
-            .use_leases
-            .reanchor_on_move_in_tx(
-                &mut tx,
-                outcome.retired_location_id,
-                outcome.new_file_location_id,
-                observed_at,
-            )
-            .await?;
-        for &lease_id in &reanchor.reanchored {
-            append_event(
-                &self.events,
-                &mut tx,
-                SubjectType::AssetUseLease,
-                Some(lease_id.0),
-                observed_at,
-                Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
-                    lease_id: lease_id.0,
-                    retired_location_id: outcome.retired_location_id.0,
-                    new_location_id: outcome.new_file_location_id.0,
-                    reanchored_at: observed_at,
-                }),
-            )
-            .await?;
+        // protecting lease. `reanchor_on_move_in_tx` caps each call at
+        // `USE_LEASE_BATCH_LIMIT`; drain the loop here so renames with
+        // more than that many live Location-scoped leases still move
+        // atomically with the replacement location.
+        loop {
+            let batch = self
+                .use_leases
+                .reanchor_on_move_in_tx(
+                    &mut tx,
+                    outcome.retired_location_id,
+                    outcome.new_file_location_id,
+                    observed_at,
+                )
+                .await?;
+            if batch.reanchored.is_empty() {
+                break;
+            }
+            for &lease_id in &batch.reanchored {
+                append_event(
+                    &self.events,
+                    &mut tx,
+                    SubjectType::AssetUseLease,
+                    Some(lease_id.0),
+                    observed_at,
+                    Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
+                        lease_id: lease_id.0,
+                        retired_location_id: outcome.retired_location_id.0,
+                        new_location_id: outcome.new_file_location_id.0,
+                        reanchored_at: observed_at,
+                    }),
+                )
+                .await?;
+            }
         }
         commit_tx(tx).await?;
         Ok(outcome)

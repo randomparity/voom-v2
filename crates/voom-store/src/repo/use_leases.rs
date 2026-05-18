@@ -1008,6 +1008,17 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         new: FileLocationId,
         _now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
+        // `retired == new` is a contractual no-op. Skip the SQL so
+        // drain-loop callers don't spin forever: the candidate scan
+        // matches `scope_location_id = retired`, and an update that
+        // sets `scope_location_id = retired` leaves every row still
+        // matching the filter, so each iteration would re-pick the
+        // same batch.
+        if retired == new {
+            return Ok(ReanchorReport {
+                reanchored: Vec::new(),
+            });
+        }
         // Bounded batch: see `expire_due_in_tx` for the rationale. The
         // Sprint 6+ daemon spec is responsible for looping until the
         // report is empty.

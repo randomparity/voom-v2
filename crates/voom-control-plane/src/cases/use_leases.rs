@@ -219,6 +219,14 @@ impl ControlPlane {
     /// `use_lease.reanchored_by_move` per re-anchored lease, all inside the
     /// same transaction as the bulk update.
     ///
+    /// `UseLeaseRepo::reanchor_on_move_in_tx` caps each call at
+    /// `USE_LEASE_BATCH_LIMIT` rows so the in-memory `RETURNING` set
+    /// and the `SQLite` write-lock window stay bounded. This handler
+    /// owns the drain loop: it re-invokes the repo until the report
+    /// comes back empty so the rename invariant (every live
+    /// `Location`-scoped lease moves atomically with the replacement
+    /// location) holds regardless of how many leases were attached.
+    ///
     /// # Errors
     /// Propagates repo and event-append errors. The transaction aborts on any
     /// error and no events are persisted.
@@ -229,28 +237,37 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<ReanchorReport, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        let report = self
-            .use_leases
-            .reanchor_on_move_in_tx(&mut tx, retired, new, now)
-            .await?;
-        for &lease_id in &report.reanchored {
-            append_event(
-                &self.events,
-                &mut tx,
-                SubjectType::AssetUseLease,
-                Some(lease_id.0),
-                now,
-                Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
-                    lease_id: lease_id.0,
-                    retired_location_id: retired.0,
-                    new_location_id: new.0,
-                    reanchored_at: now,
-                }),
-            )
-            .await?;
+        let mut total_reanchored: Vec<UseLeaseId> = Vec::new();
+        loop {
+            let batch = self
+                .use_leases
+                .reanchor_on_move_in_tx(&mut tx, retired, new, now)
+                .await?;
+            if batch.reanchored.is_empty() {
+                break;
+            }
+            for &lease_id in &batch.reanchored {
+                append_event(
+                    &self.events,
+                    &mut tx,
+                    SubjectType::AssetUseLease,
+                    Some(lease_id.0),
+                    now,
+                    Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
+                        lease_id: lease_id.0,
+                        retired_location_id: retired.0,
+                        new_location_id: new.0,
+                        reanchored_at: now,
+                    }),
+                )
+                .await?;
+            }
+            total_reanchored.extend(batch.reanchored);
         }
         commit_tx(tx).await?;
-        Ok(report)
+        Ok(ReanchorReport {
+            reanchored: total_reanchored,
+        })
     }
 }
 

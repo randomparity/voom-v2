@@ -18,8 +18,10 @@ use voom_events::{EventKind, SubjectType};
 use voom_store::init;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
+use voom_store::repo::use_leases::UseLeaseRepo;
 use voom_store::repo::use_leases::{
-    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, USE_LEASE_BATCH_LIMIT, UseLeaseKind,
+    UseLeaseReleaseReason,
 };
 use voom_store::test_support::{T0, sqlite_url_for};
 
@@ -268,4 +270,83 @@ async fn reanchor_on_move_emits_one_event_per_lease() {
         }
         other => panic!("expected UseLeaseReanchoredByMove, got {other:?}"),
     }
+}
+
+/// Regression for the unbounded-reanchor bug: a rename targeting a
+/// location with more than `USE_LEASE_BATCH_LIMIT` live `Location`-scoped
+/// use leases must move every one of them atomically, not silently cap
+/// at the per-call batch size. Drives `reanchor_use_leases_on_move`
+/// directly (fewer setup ceremonies than `reconcile_rename`, but the
+/// drain loop under test is the same one `reconcile_rename` runs).
+#[tokio::test]
+async fn reanchor_on_move_drains_past_batch_limit() {
+    let (cp, _tmp) = open_disk_plane().await;
+    let (_v, loc_old) = seed_location(&cp, "/srv/bulk-old.mkv").await;
+    let (_v2, loc_new) = seed_location(&cp, "/srv/bulk-new.mkv").await;
+
+    let target = usize::try_from(USE_LEASE_BATCH_LIMIT).unwrap() + 1;
+    let mut seeded: Vec<voom_core::UseLeaseId> = Vec::with_capacity(target);
+    for i in 0..target {
+        let l = cp
+            .acquire_use_lease(NewUseLease {
+                kind: UseLeaseKind::Playback,
+                scope: LeaseScope::Location(loc_old),
+                issuer_kind: IssuerKind::User,
+                issuer_ref: format!("u-{i}"),
+                blocking_mode: BlockingMode::Blocking,
+                ttl: Some(Duration::seconds(60)),
+                acquired_at: T0,
+            })
+            .await
+            .unwrap();
+        seeded.push(l.id);
+    }
+
+    let report = cp
+        .reanchor_use_leases_on_move(loc_old, loc_new, T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.reanchored.len(),
+        target,
+        "drain loop must reanchor every live Location-scoped lease, not cap at USE_LEASE_BATCH_LIMIT"
+    );
+
+    // Verify the durable state: zero live leases on the retired location,
+    // exactly `target` live leases on the new location.
+    let still_on_old = cp
+        .use_leases()
+        .list_for_scope(LeaseScope::Location(loc_old))
+        .await
+        .unwrap();
+    assert!(
+        still_on_old.iter().all(|l| !l.is_live()),
+        "no live leases must remain on retired location"
+    );
+    let on_new = cp
+        .use_leases()
+        .list_for_scope(LeaseScope::Location(loc_new))
+        .await
+        .unwrap();
+    let live_on_new = on_new.iter().filter(|l| l.is_live()).count();
+    assert_eq!(live_on_new, target);
+
+    // One UseLeaseReanchoredByMove event per lease must be in the journal.
+    // Fetch by filter-kind so we don't pay an event-per-subject scan.
+    let events = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::UseLeaseReanchoredByMove),
+                subject_type: None,
+                subject_id: None,
+            },
+            Page {
+                limit: u32::try_from(target).unwrap() + 16,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.items.len(), target);
 }

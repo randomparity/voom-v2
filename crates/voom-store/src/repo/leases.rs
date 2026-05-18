@@ -808,10 +808,20 @@ fn extract_ticket_id_i(row: &sqlx::sqlite::SqliteRow) -> Result<i64, VoomError> 
         .map_err(|e| map_row_err("leases", &e))
 }
 
+/// Chunk size for the `IN (?, …, ?)` clause built by
+/// `fetch_ticket_attempts`. Sits well below `SQLite`'s historical
+/// 999-variable floor and the bundled 32,766 default, so the prefetch
+/// never exceeds `SQLITE_MAX_VARIABLE_NUMBER` regardless of which
+/// `SQLite` the binary is linked against. Internal — not a tuning knob.
+const TICKET_ATTEMPT_CHUNK: usize = 500;
+
 /// Pre-fetch every distinct ticket's (`attempt`, `max_attempts`) in
-/// one SELECT. Used by `expire_due_in_tx` to replace what was a
+/// chunked SELECTs. Used by `expire_due_in_tx` to replace what was a
 /// per-row `SELECT ... FROM tickets WHERE id = ?` (N+1 over the
-/// scanned lease batch) with a single bulk query.
+/// scanned lease batch) with one bulk query per `TICKET_ATTEMPT_CHUNK`
+/// rows. Chunking keeps the bind count safely below the `SQLite`
+/// variable limit even on restart backlogs that exceed the historical
+/// 999-variable floor.
 async fn fetch_ticket_attempts<I>(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ticket_ids: I,
@@ -821,28 +831,31 @@ where
 {
     let ids: Vec<i64> = ticket_ids.into_iter().collect::<Result<_, _>>()?;
     let mut out = std::collections::HashMap::with_capacity(ids.len());
-    if ids.is_empty() {
-        return Ok(out);
-    }
-    let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!("SELECT id, attempt, max_attempts FROM tickets WHERE id IN ({placeholders})");
-    let mut q = sqlx::query(&sql);
-    for id in &ids {
-        q = q.bind(id);
-    }
-    let rows = q
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("ticket attempts batch: {e}")))?;
-    for row in &rows {
-        let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
-        let attempt: i64 = row
-            .try_get("attempt")
-            .map_err(|e| map_row_err("tickets", &e))?;
-        let max_attempts: i64 = row
-            .try_get("max_attempts")
-            .map_err(|e| map_row_err("tickets", &e))?;
-        out.insert(id, (attempt, max_attempts));
+    for chunk in ids.chunks(TICKET_ATTEMPT_CHUNK) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql =
+            format!("SELECT id, attempt, max_attempts FROM tickets WHERE id IN ({placeholders})");
+        let mut q = sqlx::query(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        let rows = q
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("ticket attempts batch: {e}")))?;
+        for row in &rows {
+            let id: i64 = row.try_get("id").map_err(|e| map_row_err("tickets", &e))?;
+            let attempt: i64 = row
+                .try_get("attempt")
+                .map_err(|e| map_row_err("tickets", &e))?;
+            let max_attempts: i64 = row
+                .try_get("max_attempts")
+                .map_err(|e| map_row_err("tickets", &e))?;
+            out.insert(id, (attempt, max_attempts));
+        }
     }
     Ok(out)
 }
