@@ -386,7 +386,7 @@ pub struct FileVersion {
     pub epoch: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFileLocation {
     pub file_version_id: FileVersionId,
     pub kind: FileLocationKind,

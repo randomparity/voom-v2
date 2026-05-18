@@ -2,6 +2,7 @@
 
 pub mod artifacts;
 pub mod bundles;
+pub mod commit_safety_gate;
 pub(crate) mod common;
 pub mod events;
 pub mod identity;
@@ -15,6 +16,13 @@ pub mod workers;
 pub use artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, ArtifactRepo, NewArtifactHandle,
     NewArtifactLineage, NewArtifactLocation, SqliteArtifactRepo,
+};
+pub use commit_safety_gate::{
+    AbortReason, AffectedScopeClosure, BlockedByClosureGrewDetail, BlockedByPendingCommitDetail,
+    BypassKind, ClosureFailure, ClosureWarning, CommitGateOutcome, CommitGateResult, CommitIntent,
+    CommitIntentState, CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift,
+    EvidenceRevalidationResult, FileLocationProposal, ForcePathToken, MutationOutcome,
+    PendingCommitIntent, TargetEpochDrift, TargetMemberKind,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};

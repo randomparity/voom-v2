@@ -142,13 +142,13 @@ impl FailureClass {
             Self::MissingCapability => ErrorCode::MissingCapability,
             Self::MalformedWorkerResult => ErrorCode::MalformedWorkerResult,
             Self::UserCancellation => ErrorCode::UserCancellation,
-            // Operator-required classes don't carry a 1:1 ErrorCode of
-            // their own outside the issue auto-open path; reuse the
-            // closest CLI surface code.
-            Self::StaleIdentityEvidence
-            | Self::ClosureResolutionIncomplete
-            | Self::BlockedByActiveUseLease
-            | Self::ApprovalRequired => ErrorCode::ApprovalRequired,
+            // Operator-required classes each carry their own ErrorCode.
+            // Names diverge where the FailureClass predates the code:
+            // `BlockedByActiveUseLease` maps to `ErrorCode::BlockedByUseLease`.
+            Self::StaleIdentityEvidence => ErrorCode::StaleIdentityEvidence,
+            Self::ClosureResolutionIncomplete => ErrorCode::ClosureResolutionIncomplete,
+            Self::BlockedByActiveUseLease => ErrorCode::BlockedByUseLease,
+            Self::ApprovalRequired => ErrorCode::ApprovalRequired,
             Self::PriorityPolicyConflict => ErrorCode::PriorityPolicyConflict,
         }
     }

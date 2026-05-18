@@ -178,7 +178,13 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::MalformedWorkerResult
         | ErrorCode::UserCancellation
         | ErrorCode::ApprovalRequired
-        | ErrorCode::PriorityPolicyConflict => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::PriorityPolicyConflict
+        // Commit-safety-gate codes — not on the connect/probe_schema path.
+        | ErrorCode::BlockedByUseLease
+        | ErrorCode::BlockedByPendingCommit
+        | ErrorCode::BlockedByClosureGrew
+        | ErrorCode::StaleIdentityEvidence
+        | ErrorCode::ClosureResolutionIncomplete => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, err.code(), err.to_string(), hint)
 }

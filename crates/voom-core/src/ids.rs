@@ -48,6 +48,9 @@ define_id!(IssueId);
 // --- M3 (use leases) ---
 define_id!(UseLeaseId);
 
+// --- M3 Phase 2 (commit safety gate) ---
+define_id!(CommitId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;

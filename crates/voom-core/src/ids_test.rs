@@ -71,3 +71,17 @@ fn media_snapshot_id_displays_inner_u64() {
 fn use_lease_id_displays_inner_u64() {
     assert_eq!(UseLeaseId(42).to_string(), "42");
 }
+
+#[test]
+fn commit_id_displays_inner_u64() {
+    assert_eq!(CommitId(9).to_string(), "9");
+}
+
+#[test]
+fn commit_id_round_trips_through_json() {
+    let id = CommitId(42);
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "42");
+    let back: CommitId = serde_json::from_str(&json).unwrap();
+    assert_eq!(id, back);
+}

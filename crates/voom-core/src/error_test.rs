@@ -49,6 +49,43 @@ fn conflict_error_code_string() {
     assert_eq!(e.error_code(), ErrorCode::Conflict);
 }
 
+#[test]
+fn blocked_by_use_lease_error_code_string() {
+    let e = VoomError::BlockedByUseLease("lease 17 owns scope".to_owned());
+    assert_eq!(e.code(), "BLOCKED_BY_USE_LEASE");
+    assert_eq!(e.error_code(), ErrorCode::BlockedByUseLease);
+}
+
+#[test]
+fn blocked_by_pending_commit_error_code_string() {
+    let e = VoomError::BlockedByPendingCommit("commit 4 already pending on scope".to_owned());
+    assert_eq!(e.code(), "BLOCKED_BY_PENDING_COMMIT");
+    assert_eq!(e.error_code(), ErrorCode::BlockedByPendingCommit);
+}
+
+#[test]
+fn blocked_by_closure_grew_error_code_string() {
+    let e =
+        VoomError::BlockedByClosureGrew("closure shifted between prepare and authorize".to_owned());
+    assert_eq!(e.code(), "BLOCKED_BY_CLOSURE_GREW");
+    assert_eq!(e.error_code(), ErrorCode::BlockedByClosureGrew);
+}
+
+#[test]
+fn stale_identity_evidence_error_code_string() {
+    let e = VoomError::StaleIdentityEvidence("pinned version retired".to_owned());
+    assert_eq!(e.code(), "STALE_IDENTITY_EVIDENCE");
+    assert_eq!(e.error_code(), ErrorCode::StaleIdentityEvidence);
+}
+
+#[test]
+fn closure_resolution_incomplete_error_code_string() {
+    let e =
+        VoomError::ClosureResolutionIncomplete("alias resolver returned Unreachable".to_owned());
+    assert_eq!(e.code(), "CLOSURE_RESOLUTION_INCOMPLETE");
+    assert_eq!(e.error_code(), ErrorCode::ClosureResolutionIncomplete);
+}
+
 /// Adding a variant to `ErrorCode` must force a wire-string decision in
 /// `as_str()`. This test is intentionally an exhaustive match so a new
 /// variant fails compilation here too — both halves of the round trip
@@ -67,6 +104,11 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::BadArgs,
         ErrorCode::DependencyCycle,
         ErrorCode::Conflict,
+        ErrorCode::BlockedByUseLease,
+        ErrorCode::BlockedByPendingCommit,
+        ErrorCode::BlockedByClosureGrew,
+        ErrorCode::StaleIdentityEvidence,
+        ErrorCode::ClosureResolutionIncomplete,
         ErrorCode::WorkerTimeout,
         ErrorCode::WorkerCrash,
         ErrorCode::NoEligibleWorker,

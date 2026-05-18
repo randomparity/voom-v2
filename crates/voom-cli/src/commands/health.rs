@@ -91,7 +91,13 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::MalformedWorkerResult
         | ErrorCode::UserCancellation
         | ErrorCode::ApprovalRequired
-        | ErrorCode::PriorityPolicyConflict => None,
+        | ErrorCode::PriorityPolicyConflict
+        // Commit-safety-gate codes — health command never reaches these.
+        | ErrorCode::BlockedByUseLease
+        | ErrorCode::BlockedByPendingCommit
+        | ErrorCode::BlockedByClosureGrew
+        | ErrorCode::StaleIdentityEvidence
+        | ErrorCode::ClosureResolutionIncomplete => None,
     }
 }
 

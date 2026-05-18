@@ -29,6 +29,26 @@ pub enum ErrorCode {
     DependencyCycle,
     /// Optimistic-locking conflict; caller should re-read and retry.
     Conflict,
+    // --- Commit safety gate (M3 Phase 2 / §9.3) -------------------
+    /// A blocking use-lease overlaps the commit's affected scope.
+    BlockedByUseLease,
+    /// Another in-flight commit-intent owns one of the scopes in the
+    /// affected closure; the caller must wait or take it over.
+    BlockedByPendingCommit,
+    /// Between `prepare` and `authorize` (or between `authorize` and
+    /// `finalize`'s defensive trip-wire), the affected-scope closure
+    /// changed — typically because an alias resolver discovered a new
+    /// location or an external rename reconciliation retired one
+    /// location and recorded another.
+    BlockedByClosureGrew,
+    /// One or more accepted-evidence pins (file-version IDs, hashes,
+    /// locations) no longer match current state; the commit cannot
+    /// proceed without operator re-evaluation.
+    StaleIdentityEvidence,
+    /// The alias resolver could not enumerate the full closure for the
+    /// affected `FileVersion`(s); the commit cannot proceed without
+    /// operator action (or a sanctioned `closure_incomplete` bypass).
+    ClosureResolutionIncomplete,
     // --- FailureClass-derived (§12.1 / §12.5). One ErrorCode per
     // FailureClass that the CLI surface can name. -----------------
     /// Worker lease expired without a heartbeat or release.
@@ -83,6 +103,11 @@ impl ErrorCode {
             Self::BadArgs => "BAD_ARGS",
             Self::DependencyCycle => "DEPENDENCY_CYCLE",
             Self::Conflict => "CONFLICT",
+            Self::BlockedByUseLease => "BLOCKED_BY_USE_LEASE",
+            Self::BlockedByPendingCommit => "BLOCKED_BY_PENDING_COMMIT",
+            Self::BlockedByClosureGrew => "BLOCKED_BY_CLOSURE_GREW",
+            Self::StaleIdentityEvidence => "STALE_IDENTITY_EVIDENCE",
+            Self::ClosureResolutionIncomplete => "CLOSURE_RESOLUTION_INCOMPLETE",
             Self::WorkerTimeout => "WORKER_TIMEOUT",
             Self::WorkerCrash => "WORKER_CRASH",
             Self::NoEligibleWorker => "NO_ELIGIBLE_WORKER",
@@ -124,6 +149,17 @@ pub enum VoomError {
     DependencyCycle(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    // --- Commit safety gate (M3 Phase 2 / §9.3) -----------------------
+    #[error("blocked by use lease: {0}")]
+    BlockedByUseLease(String),
+    #[error("blocked by pending commit: {0}")]
+    BlockedByPendingCommit(String),
+    #[error("blocked by closure grew: {0}")]
+    BlockedByClosureGrew(String),
+    #[error("stale identity evidence: {0}")]
+    StaleIdentityEvidence(String),
+    #[error("closure resolution incomplete: {0}")]
+    ClosureResolutionIncomplete(String),
     // --- FailureClass-derived (§12.1 / §12.5) -------------------------
     #[error("worker timeout: {0}")]
     WorkerTimeout(String),
@@ -176,6 +212,11 @@ impl VoomError {
             Self::Internal(_) => ErrorCode::Internal,
             Self::DependencyCycle(_) => ErrorCode::DependencyCycle,
             Self::Conflict(_) => ErrorCode::Conflict,
+            Self::BlockedByUseLease(_) => ErrorCode::BlockedByUseLease,
+            Self::BlockedByPendingCommit(_) => ErrorCode::BlockedByPendingCommit,
+            Self::BlockedByClosureGrew(_) => ErrorCode::BlockedByClosureGrew,
+            Self::StaleIdentityEvidence(_) => ErrorCode::StaleIdentityEvidence,
+            Self::ClosureResolutionIncomplete(_) => ErrorCode::ClosureResolutionIncomplete,
             Self::WorkerTimeout(_) => ErrorCode::WorkerTimeout,
             Self::WorkerCrash(_) => ErrorCode::WorkerCrash,
             Self::NoEligibleWorker(_) => ErrorCode::NoEligibleWorker,
