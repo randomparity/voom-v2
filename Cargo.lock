@@ -2527,6 +2527,10 @@ version = "0.1.0-dev"
 [[package]]
 name = "voom-scheduler"
 version = "0.1.0-dev"
+dependencies = [
+ "voom-core",
+ "voom-worker-protocol",
+]
 
 [[package]]
 name = "voom-store"

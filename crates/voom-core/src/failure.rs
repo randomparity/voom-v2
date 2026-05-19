@@ -43,6 +43,14 @@ pub enum FailureClass {
     BlockedByActiveUseLease,
     ApprovalRequired,
     PriorityPolicyConflict,
+    // Sprint 2 Phase 2 — supervisor-introduced classes. A worker that
+    // keeps heartbeating but stops emitting progress for the lease's
+    // progress_idle_deadline is `ProgressTimeout` (distinct from
+    // `WorkerTimeout`, which fires on missed heartbeats). A dispatch
+    // for which the `WorkerSelector` finds more than one eligible
+    // worker and no override is set is `AmbiguousWorkerSelection`.
+    ProgressTimeout,
+    AmbiguousWorkerSelection,
 }
 
 /// Coarse-grained retriability class. Used by the terminal-failure
@@ -72,7 +80,8 @@ impl FailureClass {
             | Self::ExternalSystemRateLimited
             | Self::VerificationFailure
             | Self::BackupFailure
-            | Self::CommitFailure => FailureRetryClass::Retriable,
+            | Self::CommitFailure
+            | Self::ProgressTimeout => FailureRetryClass::Retriable,
             Self::PolicyParseError
             | Self::PolicyValidationError
             | Self::MissingCapability
@@ -82,7 +91,8 @@ impl FailureClass {
             | Self::ClosureResolutionIncomplete
             | Self::BlockedByActiveUseLease
             | Self::ApprovalRequired
-            | Self::PriorityPolicyConflict => FailureRetryClass::OperatorRequired,
+            | Self::PriorityPolicyConflict
+            | Self::AmbiguousWorkerSelection => FailureRetryClass::OperatorRequired,
         }
     }
 
@@ -127,7 +137,7 @@ impl FailureClass {
     #[must_use]
     pub const fn into_error_code(self) -> ErrorCode {
         match self {
-            Self::WorkerTimeout => ErrorCode::WorkerTimeout,
+            Self::WorkerTimeout | Self::ProgressTimeout => ErrorCode::WorkerTimeout,
             Self::WorkerCrash => ErrorCode::WorkerCrash,
             Self::NoEligibleWorker => ErrorCode::NoEligibleWorker,
             Self::ArtifactUnavailable => ErrorCode::ArtifactUnavailable,
@@ -150,6 +160,7 @@ impl FailureClass {
             Self::BlockedByActiveUseLease => ErrorCode::BlockedByUseLease,
             Self::ApprovalRequired => ErrorCode::ApprovalRequired,
             Self::PriorityPolicyConflict => ErrorCode::PriorityPolicyConflict,
+            Self::AmbiguousWorkerSelection => ErrorCode::AmbiguousWorkerSelection,
         }
     }
 }
