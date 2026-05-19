@@ -14,6 +14,7 @@ workspace = true
 async-trait = "0.1.89"
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 rand = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "time"] }
 time = { workspace = true, features = ["serde", "parsing"] }

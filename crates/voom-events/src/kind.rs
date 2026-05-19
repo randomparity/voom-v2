@@ -61,6 +61,21 @@ pub enum EventKind {
     UseLeaseForceReleased,
     UseLeaseRecoveredStaleIssuer,
     UseLeaseReanchoredByMove,
+    // M3 Phase 2 — commit safety gate (Phase A subset).
+    CommitIntentRecorded,
+    CommitAbortedByUseLease,
+    CommitAbortedByStaleEvidence,
+    CommitAbortedByClosureIncomplete,
+    CommitAbortedByPendingCommit,
+    // M3 Phase 2 — commit safety gate (Phase B).
+    CommitAuthorized,
+    CommitAbortedByClosureGrew,
+    // M3 Phase 2 — commit safety gate (Phase C).
+    CommitCompleted,
+    CommitAbortedPostMutation,
+    CommitAbortedPreMutation,
+    CommitRecoveryRequired,
+    CommitForcedOverride,
 }
 
 impl EventKind {
@@ -113,6 +128,18 @@ impl EventKind {
             Self::UseLeaseForceReleased => "use_lease.force_released",
             Self::UseLeaseRecoveredStaleIssuer => "use_lease.recovered_stale_issuer",
             Self::UseLeaseReanchoredByMove => "use_lease.reanchored_by_move",
+            Self::CommitIntentRecorded => "commit.intent_recorded",
+            Self::CommitAbortedByUseLease => "commit.aborted_by_use_lease",
+            Self::CommitAbortedByStaleEvidence => "commit.aborted_by_stale_evidence",
+            Self::CommitAbortedByClosureIncomplete => "commit.aborted_by_closure_incomplete",
+            Self::CommitAbortedByPendingCommit => "commit.aborted_by_pending_commit",
+            Self::CommitAuthorized => "commit.authorized",
+            Self::CommitAbortedByClosureGrew => "commit.aborted_by_closure_grew",
+            Self::CommitCompleted => "commit.completed",
+            Self::CommitAbortedPostMutation => "commit.aborted_post_mutation",
+            Self::CommitAbortedPreMutation => "commit.aborted_pre_mutation",
+            Self::CommitRecoveryRequired => "commit.recovery_required",
+            Self::CommitForcedOverride => "commit.forced_override",
         }
     }
 
@@ -175,6 +202,18 @@ impl EventKind {
             "use_lease.force_released" => Self::UseLeaseForceReleased,
             "use_lease.recovered_stale_issuer" => Self::UseLeaseRecoveredStaleIssuer,
             "use_lease.reanchored_by_move" => Self::UseLeaseReanchoredByMove,
+            "commit.intent_recorded" => Self::CommitIntentRecorded,
+            "commit.aborted_by_use_lease" => Self::CommitAbortedByUseLease,
+            "commit.aborted_by_stale_evidence" => Self::CommitAbortedByStaleEvidence,
+            "commit.aborted_by_closure_incomplete" => Self::CommitAbortedByClosureIncomplete,
+            "commit.aborted_by_pending_commit" => Self::CommitAbortedByPendingCommit,
+            "commit.authorized" => Self::CommitAuthorized,
+            "commit.aborted_by_closure_grew" => Self::CommitAbortedByClosureGrew,
+            "commit.completed" => Self::CommitCompleted,
+            "commit.aborted_post_mutation" => Self::CommitAbortedPostMutation,
+            "commit.aborted_pre_mutation" => Self::CommitAbortedPreMutation,
+            "commit.recovery_required" => Self::CommitRecoveryRequired,
+            "commit.forced_override" => Self::CommitForcedOverride,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"

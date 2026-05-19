@@ -29,6 +29,8 @@ pub enum SubjectType {
     MediaSnapshot,
     // M3 — use leases.
     AssetUseLease,
+    // M3 Phase 2 — commit safety gate.
+    CommitIntent,
 }
 
 impl SubjectType {
@@ -51,6 +53,7 @@ impl SubjectType {
             Self::IdentityEvidence => "identity_evidence",
             Self::MediaSnapshot => "media_snapshot",
             Self::AssetUseLease => "asset_use_lease",
+            Self::CommitIntent => "commit_intent",
         }
     }
 
@@ -83,6 +86,7 @@ impl SubjectType {
             "identity_evidence" => Self::IdentityEvidence,
             "media_snapshot" => Self::MediaSnapshot,
             "asset_use_lease" => Self::AssetUseLease,
+            "commit_intent" => Self::CommitIntent,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.subject_type {other:?} not in SubjectType vocab"

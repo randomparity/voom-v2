@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 macro_rules! define_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(pub u64);
 
@@ -47,6 +49,9 @@ define_id!(IssueId);
 
 // --- M3 (use leases) ---
 define_id!(UseLeaseId);
+
+// --- M3 Phase 2 (commit safety gate) ---
+define_id!(CommitId);
 
 #[cfg(test)]
 #[path = "ids_test.rs"]

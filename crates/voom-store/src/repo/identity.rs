@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId, MediaVariantId,
@@ -19,9 +19,11 @@ use voom_core::{
 use voom_events::AssertionKind;
 
 use super::Repository;
+use super::commit_safety_gate::consult_pending_commit_lock_in_tx;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use super::use_leases::LeaseScope;
 
 // ---------- value-type vocabularies ----------------------------------------
 
@@ -80,7 +82,7 @@ impl FileLocationKind {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "local_path" => Ok(Self::LocalPath),
             "shared_mount" => Ok(Self::SharedMount),
@@ -386,7 +388,7 @@ pub struct FileVersion {
     pub epoch: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewFileLocation {
     pub file_version_id: FileVersionId,
     pub kind: FileLocationKind,
@@ -615,6 +617,19 @@ pub trait IdentityRepo: Repository {
         &self,
         version_id: FileVersionId,
     ) -> Result<Vec<FileLocation>, VoomError>;
+    /// In-tx variant of `list_live_file_locations_by_version`.
+    /// Required by the commit-safety-gate closure walker (commit 4 /
+    /// Phase A): the walker runs inside an IMMEDIATE tx and must see
+    /// writes from the same tx, which the pool-reading variant
+    /// cannot do (sqlx-on-SQLite isolates pool reads from open
+    /// transactions). Returns IDs only — the closure walker folds
+    /// them into a `BTreeSet<FileLocationId>` and does not consume
+    /// the full row body.
+    async fn list_live_file_locations_by_version_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, VoomError>;
     async fn retire_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -622,6 +637,38 @@ pub trait IdentityRepo: Repository {
         retired_at: OffsetDateTime,
         expected_epoch: u64,
     ) -> Result<FileLocation, VoomError>;
+    /// Atomically retire `retired_id` under its `expected_epoch` guard
+    /// and insert a new `FileLocation` on the same `FileVersion`. Two
+    /// defense-in-depth guards layered inside this method (Codex
+    /// round-6):
+    ///
+    /// 1. **Cross-version pre-check.** The retired row is fetched in
+    ///    the caller's transaction and rejected with
+    ///    `VoomError::Conflict` if `new_location.file_version_id`
+    ///    differs from the retired row's version. The gate boundary
+    ///    (`FileLocationProposal` has no `file_version_id`) is the
+    ///    outer ring; this is the inner ring that catches the case
+    ///    where a buggy caller bypasses the proposal conversion.
+    ///
+    /// 2. **SAVEPOINT atomicity.** The retire UPDATE and the insert
+    ///    INSERT run inside a SAVEPOINT. On any insert failure the
+    ///    savepoint rolls back; a caller that catches the `Err` and
+    ///    commits the outer transaction observes the old row still
+    ///    live. Without the savepoint, the caller would have to drop
+    ///    the outer transaction to avoid data loss.
+    ///
+    /// `Conflict` is returned on: row not found, row already retired,
+    /// stale `expected_epoch` on a live row, or cross-version mismatch.
+    /// In every `Conflict` case the old row stays live; in every
+    /// insert-failure case the savepoint guarantees the same.
+    async fn replace_file_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        retired_id: FileLocationId,
+        retired_expected_epoch: u64,
+        new_location: NewFileLocation,
+        retired_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError>;
 
     // identity_evidence CRUD.
     async fn record_identity_evidence_in_tx<'tx>(
@@ -729,6 +776,27 @@ impl IdentityRepo for SqliteIdentityRepo {
                         // proof bytes to match the alias_proof bytes
                         // (spec §8.7: "proof drift on alias attach").
                         verify_discovered_proof_matches_alias_proof(&discovered, &proof)?;
+                        // Pending-commit lock (M3 Phase 2 commit 5,
+                        // sprint-1 design §8.7): reject if any in-flight
+                        // `commit_intents` row covers this FileVersion
+                        // so the alias attach cannot race past the
+                        // commit safety gate's authorized closure.
+                        // `reconcile_rename_in_tx` is the deliberate
+                        // exemption (arch spec lines 697–708).
+                        if let Some((commit_id, offending_scope)) =
+                            consult_pending_commit_lock_in_tx(
+                                tx,
+                                &LeaseScope::Version(file_version_id),
+                            )
+                            .await?
+                        {
+                            return Err(VoomError::Conflict(format!(
+                                "alias attach on file_version {file_version_id} blocked \
+                                 by in-flight commit {commit_id} on offending scope {} {}",
+                                offending_scope.type_str(),
+                                offending_scope.id_u64(),
+                            )));
+                        }
                         let new_location_id = insert_file_location(
                             tx,
                             file_version_id,
@@ -1258,6 +1326,29 @@ impl IdentityRepo for SqliteIdentityRepo {
         rows.iter().map(row_to_file_location).collect()
     }
 
+    async fn list_live_file_locations_by_version_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM file_locations \
+             WHERE file_version_id = ? AND retired_at IS NULL \
+             ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(version_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations list live in_tx: {e}")))?;
+        rows.into_iter()
+            .map(|id| {
+                u64::try_from(id)
+                    .map(FileLocationId)
+                    .map_err(|e| VoomError::Internal(format!("file_locations id signedness: {e}")))
+            })
+            .collect()
+    }
+
     async fn retire_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1284,6 +1375,78 @@ impl IdentityRepo for SqliteIdentityRepo {
         get_file_location_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("file_locations post-retire get vanished: {id}"))
         })
+    }
+
+    async fn replace_file_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        retired_id: FileLocationId,
+        retired_expected_epoch: u64,
+        new_location: NewFileLocation,
+        retired_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError> {
+        // Round-6 finding #1: cross-version pre-check inside identity.
+        // The method is a public IdentityRepo trait method, so the
+        // "Phase C is the sole caller" assumption is not enforceable.
+        // Fetch the retired row in-tx; reject mismatches with Conflict
+        // before the retire UPDATE runs.
+        let retired_row = get_file_location_in_tx(tx, retired_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!("file_locations replace: id={retired_id} not found"))
+            })?;
+        if retired_row.retired_at.is_some() {
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} already retired"
+            )));
+        }
+        if retired_row.file_version_id != new_location.file_version_id {
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} on version={} but \
+                 new_location targets version={}",
+                retired_row.file_version_id, new_location.file_version_id
+            )));
+        }
+
+        // Round-6 finding #2: SAVEPOINT around UPDATE retire + INSERT
+        // new. ROLLBACK TO on any inner Err restores the outer tx to
+        // pre-UPDATE state, so a caller that commits the outer tx
+        // after the inner failure observes the old row still live.
+        let mut sp = tx.begin().await.map_err(|e| {
+            VoomError::Database(format!("file_locations replace savepoint begin: {e}"))
+        })?;
+
+        let ts = iso8601(retired_at)?;
+        let res = sqlx::query(
+            "UPDATE file_locations SET retired_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND epoch = ? AND retired_at IS NULL",
+        )
+        .bind(&ts)
+        .bind(i64_from_u64(retired_id.0))
+        .bind(i64_from_u64(retired_expected_epoch))
+        .execute(&mut *sp)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations replace-retire: {e}")))?;
+        if res.rows_affected() != 1 {
+            // Dropping sp here ROLLBACKs TO the savepoint; outer tx restored.
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} expected_epoch={retired_expected_epoch} or already retired"
+            )));
+        }
+        let new_id = insert_file_location(
+            &mut sp,
+            new_location.file_version_id,
+            new_location.kind,
+            &new_location.value,
+            new_location.proof.as_ref(),
+            new_location.observed_at,
+        )
+        .await?;
+
+        sp.commit().await.map_err(|e| {
+            VoomError::Database(format!("file_locations replace savepoint release: {e}"))
+        })?;
+        Ok(new_id)
     }
 
     async fn record_identity_evidence_in_tx<'tx>(

@@ -97,3 +97,35 @@ fn serde_round_trips_wire_format() {
     let back: FailureClass = serde_json::from_str(&s).unwrap();
     assert_eq!(back, FailureClass::WorkerTimeout);
 }
+
+#[test]
+fn stale_identity_evidence_maps_to_its_own_error_code() {
+    assert_eq!(
+        FailureClass::StaleIdentityEvidence.into_error_code(),
+        ErrorCode::StaleIdentityEvidence,
+    );
+}
+
+#[test]
+fn closure_resolution_incomplete_maps_to_its_own_error_code() {
+    assert_eq!(
+        FailureClass::ClosureResolutionIncomplete.into_error_code(),
+        ErrorCode::ClosureResolutionIncomplete,
+    );
+}
+
+#[test]
+fn blocked_by_active_use_lease_maps_to_blocked_by_use_lease_error_code() {
+    assert_eq!(
+        FailureClass::BlockedByActiveUseLease.into_error_code(),
+        ErrorCode::BlockedByUseLease,
+    );
+}
+
+#[test]
+fn approval_required_still_maps_to_approval_required_error_code() {
+    assert_eq!(
+        FailureClass::ApprovalRequired.into_error_code(),
+        ErrorCode::ApprovalRequired,
+    );
+}

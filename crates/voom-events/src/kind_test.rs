@@ -34,6 +34,18 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::UseLeaseForceReleased,
         EventKind::UseLeaseRecoveredStaleIssuer,
         EventKind::UseLeaseReanchoredByMove,
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAbortedByPendingCommit,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
+        EventKind::CommitForcedOverride,
     ];
     let mut seen = std::collections::HashSet::new();
     for k in kinds {
@@ -90,6 +102,18 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::UseLeaseForceReleased,
         EventKind::UseLeaseRecoveredStaleIssuer,
         EventKind::UseLeaseReanchoredByMove,
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAbortedByPendingCommit,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
+        EventKind::CommitForcedOverride,
     ];
     for k in kinds {
         let s = k.as_str();
@@ -211,4 +235,72 @@ fn identity_layer_event_kinds_use_dotted_wire_format() {
         EventKind::UseLeaseReanchoredByMove.as_str(),
         "use_lease.reanchored_by_move"
     );
+}
+
+#[test]
+fn commit_safety_gate_event_kinds_use_dotted_wire_format() {
+    assert_eq!(
+        EventKind::CommitIntentRecorded.as_str(),
+        "commit.intent_recorded"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByUseLease.as_str(),
+        "commit.aborted_by_use_lease"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByStaleEvidence.as_str(),
+        "commit.aborted_by_stale_evidence"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByClosureIncomplete.as_str(),
+        "commit.aborted_by_closure_incomplete"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByPendingCommit.as_str(),
+        "commit.aborted_by_pending_commit"
+    );
+    assert_eq!(EventKind::CommitAuthorized.as_str(), "commit.authorized");
+    assert_eq!(
+        EventKind::CommitAbortedByClosureGrew.as_str(),
+        "commit.aborted_by_closure_grew"
+    );
+    assert_eq!(EventKind::CommitCompleted.as_str(), "commit.completed");
+    assert_eq!(
+        EventKind::CommitAbortedPostMutation.as_str(),
+        "commit.aborted_post_mutation"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedPreMutation.as_str(),
+        "commit.aborted_pre_mutation"
+    );
+    assert_eq!(
+        EventKind::CommitRecoveryRequired.as_str(),
+        "commit.recovery_required"
+    );
+    assert_eq!(
+        EventKind::CommitForcedOverride.as_str(),
+        "commit.forced_override"
+    );
+}
+
+#[test]
+fn commit_safety_gate_event_kinds_round_trip() {
+    for k in [
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAbortedByPendingCommit,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
+        EventKind::CommitForcedOverride,
+    ] {
+        let wire = k.as_str();
+        let back = EventKind::from_str(wire).unwrap();
+        assert_eq!(k, back, "round-trip failed for {wire}");
+    }
 }
