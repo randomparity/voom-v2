@@ -25,5 +25,10 @@ pub mod transport;
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};
+pub use http::{
+    HttpClient, HttpServer, OperationDispatch, OperationFuture, OperationHandler, RoutePolicy,
+    route_policy,
+};
 pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
 pub use operation_kind::OperationKind;
+pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};

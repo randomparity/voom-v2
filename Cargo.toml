@@ -56,7 +56,7 @@ http = "1.1"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1.5", features = ["http1", "client", "server"] }
-hyper-util = { version = "0.1.10", features = ["client-legacy", "tokio", "server"] }
+hyper-util = { version = "0.1.10", features = ["client-legacy", "tokio", "server", "server-auto", "http1"] }
 secrecy = "0.10"
 thiserror = "2"
 tokio-util = { version = "0.7.13", features = ["io"] }
