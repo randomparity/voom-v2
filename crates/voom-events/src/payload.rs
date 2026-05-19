@@ -538,6 +538,139 @@ pub struct CommitAbortedByClosureGrewPayload {
     pub aborted_at: OffsetDateTime,
 }
 
+// --- M3 Phase 2 — commit safety gate (Phase C) ------------------------------
+//
+// Sprint 1 §9.3.2 Phase C. The four payload shapes below correspond to
+// `finalize_destructive_commit`'s exit branches:
+//   - `commit.completed` — silent dispatch fired, durable mutation landed.
+//   - `commit.aborted_pre_mutation` — `MutationOutcome::NotPerformed`
+//     (`prior_state='authorized'`) or `abort_destructive_commit`
+//     (`prior_state='pending'`).
+//   - `commit.aborted_post_mutation` — Phase C defensive trip-wire
+//     (`closure_grew` | `fresh_lease` | `closure_grew_and_fresh_lease` |
+//     `stale_target_epoch`).
+//   - `commit.recovery_required` — emitted alongside the
+//     `aborted_post_mutation` payload to flag the durable row for the
+//     Sprint 5+ recovery worker. Mirrors the trip-wire fields so the
+//     recovery worker can decode the reason from a single row.
+
+/// One drifted target row from the Phase C `stale_target_epoch`
+/// trip-wire. Wire-format mirror of the in-memory `TargetEpochDrift`
+/// struct that lives in `voom-store` so the on-disk JSON shape is the
+/// single source of truth.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetEpochDriftWire {
+    /// One of `"file_asset" | "file_version" | "file_location" |
+    /// "bundle"` — mirrors `TargetMemberKind`'s `snake_case` serde tag.
+    pub kind: String,
+    pub id: u64,
+    pub expected: u64,
+    pub observed: u64,
+}
+
+/// `commit.completed` — Phase C success. The durable identity mutation
+/// has been applied to the matching `IdentityRepo` in the same tx the
+/// `commit_intents` row transitioned to `completed`. Carries the
+/// granularity-bucketed member counts of `closure_final` so an audit
+/// reader can size the silent-path closure without re-deserializing
+/// the JSON column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitCompletedPayload {
+    pub commit_id: CommitId,
+    /// Wire-format tag identifying the `CommitTarget` variant the gate
+    /// dispatched (one of `"delete_file_location"`,
+    /// `"replace_file_location"`, `"move_file_location"`).
+    pub target_kind: String,
+    pub closure_asset_count: u32,
+    pub closure_bundle_count: u32,
+    pub closure_version_count: u32,
+    pub closure_location_count: u32,
+    #[serde(with = "time::serde::iso8601")]
+    pub finalized_at: OffsetDateTime,
+}
+
+/// `commit.aborted_pre_mutation` — emitted when a `commit_intents` row
+/// is durably transitioned to `aborted` BEFORE any filesystem mutation
+/// applied. Two emission sites: `abort_destructive_commit`
+/// (`prior_state='pending'`) and `finalize_destructive_commit` called
+/// with `MutationOutcome::NotPerformed` (`prior_state='authorized'`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedPreMutationPayload {
+    pub commit_id: CommitId,
+    /// One of `"pending" | "authorized"` — the durable state the row
+    /// was in immediately before this transition. Distinguishes
+    /// "operator aborted before authorize" from "operator obtained a
+    /// permit and chose not to mutate".
+    pub prior_state: String,
+    /// `AbortReason` `snake_case` tag — one of `"operator_cancel" |
+    /// "mutation_failed" | "other"` in Sprint 1 (the other variants
+    /// are reserved for gate-driven aborts that route through their
+    /// dedicated event kinds).
+    pub reason: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
+/// `commit.aborted_post_mutation` — Phase C defensive trip-wire.
+/// Sprint spec §9.3.2 unified schema: carries the closure delta
+/// (vs. `closure_authorized`), the fresh-lease IDs, and (when the
+/// `stale_target_epoch` trip-wire fires) the drifted target-row
+/// triples. Empty arrays for dimensions that did not fire. The
+/// `reason` tag names the dominant trip-wire so audit/recovery tools
+/// can route without re-deriving from the array shapes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedPostMutationPayload {
+    pub commit_id: CommitId,
+    /// One of `"closure_grew" | "fresh_lease" |
+    /// "closure_grew_and_fresh_lease" | "stale_target_epoch"`. Single
+    /// source of truth for the trip-wire signal; the durable row's
+    /// `recovery_reason` column carries the same value.
+    pub reason: String,
+    pub added_asset_count: u32,
+    pub added_bundle_count: u32,
+    pub added_version_count: u32,
+    pub added_location_count: u32,
+    pub removed_asset_count: u32,
+    pub removed_bundle_count: u32,
+    pub removed_version_count: u32,
+    pub removed_location_count: u32,
+    /// `UseLeaseId.0` values for every fresh blocking lease the Phase C
+    /// recheck saw against `closure_final`. Possibly empty.
+    pub fresh_lease_ids: Vec<u64>,
+    /// Drifted `(kind, id, expected, observed)` triples from the
+    /// `stale_target_epoch` recheck. Possibly empty (only populated
+    /// when `reason='stale_target_epoch'`).
+    pub target_epoch_drift: Vec<TargetEpochDriftWire>,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
+/// `commit.recovery_required` — emitted alongside
+/// `commit.aborted_post_mutation` to flag the durable row for the
+/// Sprint 5+ recovery worker. Mirrors the trip-wire payload's
+/// `reason` / drift fields so the recovery worker can decode the
+/// signal from a single row without joining back to the
+/// post-mutation event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitRecoveryRequiredPayload {
+    pub commit_id: CommitId,
+    /// Mirror of `commit_intents.recovery_reason`. Same vocabulary as
+    /// `CommitAbortedPostMutationPayload.reason`.
+    pub recovery_reason: String,
+    pub added_asset_count: u32,
+    pub added_bundle_count: u32,
+    pub added_version_count: u32,
+    pub added_location_count: u32,
+    pub removed_asset_count: u32,
+    pub removed_bundle_count: u32,
+    pub removed_version_count: u32,
+    pub removed_location_count: u32,
+    pub fresh_lease_ids: Vec<u64>,
+    pub target_epoch_drift: Vec<TargetEpochDriftWire>,
+    #[serde(with = "time::serde::iso8601")]
+    pub recorded_at: OffsetDateTime,
+}
+
 // --- sum type --------------------------------------------------------------
 
 /// Sum type pairing each `EventKind` with its typed payload.
@@ -658,6 +791,14 @@ pub enum Event {
     CommitAuthorized(CommitAuthorizedPayload),
     #[serde(rename = "commit.aborted_by_closure_grew")]
     CommitAbortedByClosureGrew(CommitAbortedByClosureGrewPayload),
+    #[serde(rename = "commit.completed")]
+    CommitCompleted(CommitCompletedPayload),
+    #[serde(rename = "commit.aborted_pre_mutation")]
+    CommitAbortedPreMutation(CommitAbortedPreMutationPayload),
+    #[serde(rename = "commit.aborted_post_mutation")]
+    CommitAbortedPostMutation(CommitAbortedPostMutationPayload),
+    #[serde(rename = "commit.recovery_required")]
+    CommitRecoveryRequired(CommitRecoveryRequiredPayload),
 }
 
 impl Event {
@@ -721,6 +862,10 @@ impl Event {
             }
             Self::CommitAuthorized(_) => EventKind::CommitAuthorized,
             Self::CommitAbortedByClosureGrew(_) => EventKind::CommitAbortedByClosureGrew,
+            Self::CommitCompleted(_) => EventKind::CommitCompleted,
+            Self::CommitAbortedPreMutation(_) => EventKind::CommitAbortedPreMutation,
+            Self::CommitAbortedPostMutation(_) => EventKind::CommitAbortedPostMutation,
+            Self::CommitRecoveryRequired(_) => EventKind::CommitRecoveryRequired,
         }
     }
 }

@@ -69,6 +69,11 @@ pub enum EventKind {
     // M3 Phase 2 — commit safety gate (Phase B).
     CommitAuthorized,
     CommitAbortedByClosureGrew,
+    // M3 Phase 2 — commit safety gate (Phase C).
+    CommitCompleted,
+    CommitAbortedPostMutation,
+    CommitAbortedPreMutation,
+    CommitRecoveryRequired,
 }
 
 impl EventKind {
@@ -127,6 +132,10 @@ impl EventKind {
             Self::CommitAbortedByClosureIncomplete => "commit.aborted_by_closure_incomplete",
             Self::CommitAuthorized => "commit.authorized",
             Self::CommitAbortedByClosureGrew => "commit.aborted_by_closure_grew",
+            Self::CommitCompleted => "commit.completed",
+            Self::CommitAbortedPostMutation => "commit.aborted_post_mutation",
+            Self::CommitAbortedPreMutation => "commit.aborted_pre_mutation",
+            Self::CommitRecoveryRequired => "commit.recovery_required",
         }
     }
 
@@ -195,6 +204,10 @@ impl EventKind {
             "commit.aborted_by_closure_incomplete" => Self::CommitAbortedByClosureIncomplete,
             "commit.authorized" => Self::CommitAuthorized,
             "commit.aborted_by_closure_grew" => Self::CommitAbortedByClosureGrew,
+            "commit.completed" => Self::CommitCompleted,
+            "commit.aborted_post_mutation" => Self::CommitAbortedPostMutation,
+            "commit.aborted_pre_mutation" => Self::CommitAbortedPreMutation,
+            "commit.recovery_required" => Self::CommitRecoveryRequired,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"

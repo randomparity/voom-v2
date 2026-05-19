@@ -40,6 +40,10 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::CommitAbortedByClosureIncomplete,
         EventKind::CommitAuthorized,
         EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
     ];
     let mut seen = std::collections::HashSet::new();
     for k in kinds {
@@ -102,6 +106,10 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::CommitAbortedByClosureIncomplete,
         EventKind::CommitAuthorized,
         EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
     ];
     for k in kinds {
         let s = k.as_str();
@@ -248,6 +256,19 @@ fn commit_safety_gate_event_kinds_use_dotted_wire_format() {
         EventKind::CommitAbortedByClosureGrew.as_str(),
         "commit.aborted_by_closure_grew"
     );
+    assert_eq!(EventKind::CommitCompleted.as_str(), "commit.completed");
+    assert_eq!(
+        EventKind::CommitAbortedPostMutation.as_str(),
+        "commit.aborted_post_mutation"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedPreMutation.as_str(),
+        "commit.aborted_pre_mutation"
+    );
+    assert_eq!(
+        EventKind::CommitRecoveryRequired.as_str(),
+        "commit.recovery_required"
+    );
 }
 
 #[test]
@@ -259,6 +280,10 @@ fn commit_safety_gate_event_kinds_round_trip() {
         EventKind::CommitAbortedByClosureIncomplete,
         EventKind::CommitAuthorized,
         EventKind::CommitAbortedByClosureGrew,
+        EventKind::CommitCompleted,
+        EventKind::CommitAbortedPostMutation,
+        EventKind::CommitAbortedPreMutation,
+        EventKind::CommitRecoveryRequired,
     ] {
         let wire = k.as_str();
         let back = EventKind::from_str(wire).unwrap();
