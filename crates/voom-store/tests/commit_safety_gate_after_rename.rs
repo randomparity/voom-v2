@@ -159,6 +159,7 @@ async fn authorize_after_external_rename_blocks_with_closure_grew_and_reanchors_
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(prior_location_id),
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0 + Duration::seconds(1),
     )

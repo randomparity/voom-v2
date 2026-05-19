@@ -645,6 +645,30 @@ pub struct CommitAbortedPostMutationPayload {
     pub aborted_at: OffsetDateTime,
 }
 
+/// `commit.forced_override` — emitted by `prepare_destructive_commit`
+/// when the caller threads a non-`None` `ForcePathToken` through
+/// `DestructiveCommit.override_token`. Recorded once at prepare time,
+/// after `validate_bypass` accepts the token and atomically with the
+/// `commit.intent_recorded` insert / `commit_intents.override_token`
+/// column write. Authorize does not re-emit — the audit signal is
+/// single-shot per commit.
+///
+/// `bypass` is the canonical `snake_case` rendering of every
+/// `BypassKind` bit in the token's set (sorted ascending; the on-disk
+/// `BTreeSet` ordering carries over directly).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitForcedOverridePayload {
+    pub commit_id: CommitId,
+    pub actor: String,
+    pub reason: String,
+    /// `snake_case` tags for every `BypassKind` bit set on the token —
+    /// `"closure_incomplete"` in Sprint 1; the array shape leaves room
+    /// for future bypass kinds without a payload schema change.
+    pub bypass: Vec<String>,
+    #[serde(with = "time::serde::iso8601")]
+    pub recorded_at: OffsetDateTime,
+}
+
 /// `commit.recovery_required` — emitted alongside
 /// `commit.aborted_post_mutation` to flag the durable row for the
 /// Sprint 5+ recovery worker. Mirrors the trip-wire payload's
@@ -799,6 +823,8 @@ pub enum Event {
     CommitAbortedPostMutation(CommitAbortedPostMutationPayload),
     #[serde(rename = "commit.recovery_required")]
     CommitRecoveryRequired(CommitRecoveryRequiredPayload),
+    #[serde(rename = "commit.forced_override")]
+    CommitForcedOverride(CommitForcedOverridePayload),
 }
 
 impl Event {
@@ -866,6 +892,7 @@ impl Event {
             Self::CommitAbortedPreMutation(_) => EventKind::CommitAbortedPreMutation,
             Self::CommitAbortedPostMutation(_) => EventKind::CommitAbortedPostMutation,
             Self::CommitRecoveryRequired(_) => EventKind::CommitRecoveryRequired,
+            Self::CommitForcedOverride(_) => EventKind::CommitForcedOverride,
         }
     }
 }

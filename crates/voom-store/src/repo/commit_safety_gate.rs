@@ -18,8 +18,8 @@ use voom_events::payload::{
     CommitAbortedByClosureGrewPayload, CommitAbortedByClosureIncompletePayload,
     CommitAbortedByStaleEvidencePayload, CommitAbortedByUseLeasePayload,
     CommitAbortedPostMutationPayload, CommitAbortedPreMutationPayload, CommitAuthorizedPayload,
-    CommitCompletedPayload, CommitIntentRecordedPayload, CommitRecoveryRequiredPayload,
-    TargetEpochDriftWire,
+    CommitCompletedPayload, CommitForcedOverridePayload, CommitIntentRecordedPayload,
+    CommitRecoveryRequiredPayload, TargetEpochDriftWire,
 };
 use voom_events::{Event, EventEnvelope, SubjectType};
 
@@ -424,14 +424,20 @@ pub enum CommitGateResult {
     BlockedByStaleTargetEpoch { drift: Vec<TargetEpochDrift> },
 }
 
-/// Input to `prepare_destructive_commit`. The current shape has no
-/// `override_token` field; the force-path slice extends this struct
-/// with `pub override_token: Option<ForcePathToken>` and adjusts the
-/// `prepare` / `authorize` signatures together.
+/// Input to `prepare_destructive_commit`. `override_token` carries the
+/// optional force-path bypass token (commit 10); `None` is the default
+/// gate-respecting path that aborts on any closure-walk
+/// `AliasResolutionError::Unreachable`. `Some(token)` after
+/// `validate_bypass` passes drives the closure-incomplete bypass branch
+/// (see `prepare_destructive_commit` / `authorize_destructive_commit`).
+/// The token JSON is persisted to `commit_intents.override_token`
+/// atomically with the `commit.intent_recorded` insert so Phase B can
+/// re-read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestructiveCommit {
     pub target: CommitTarget,
     pub accepted_evidence_ids: Vec<EvidenceId>,
+    pub override_token: Option<ForcePathToken>,
 }
 
 /// Per-pin result of accepted-evidence revalidation. Phase A and Phase
@@ -484,6 +490,42 @@ pub struct ForcePathToken {
     pub actor: String,
     pub reason: String,
     pub bypass: BTreeSet<BypassKind>,
+}
+
+/// Validate a force-path token's bypass set before any state change.
+/// Sprint 1 ships exactly one sanctioned `BypassKind` variant
+/// (`ClosureIncomplete`); any other bit is rejected with
+/// `VoomError::Config("force-path bypass not supported: <name>")`.
+///
+/// The single-variant `BypassKind` enum makes "any other bit" currently
+/// unrepresentable at the type level, so this function is presently a
+/// no-op for every constructible token. It exists as the forward-compat
+/// gate: when Sprint 5+ adds new bypass kinds, the new variants flow
+/// through here and the validator decides which ones the gate accepts.
+/// Wiring it into `prepare_destructive_commit` ahead of the new variants
+/// (rather than alongside them) avoids a parallel review burden.
+///
+/// # Errors
+///
+/// `VoomError::Config` with a descriptive message naming the
+/// unsupported `BypassKind` tag.
+pub fn validate_bypass(token: &ForcePathToken) -> Result<(), VoomError> {
+    for kind in &token.bypass {
+        match kind {
+            BypassKind::ClosureIncomplete => {}
+        }
+    }
+    Ok(())
+}
+
+/// `snake_case` wire-format tag for one `BypassKind`. Matches the
+/// `#[serde(rename_all = "snake_case")]` on the enum so the
+/// `commit.forced_override` payload's `bypass` array shape carries
+/// the same vocabulary the JSON column write does.
+fn bypass_kind_str(k: BypassKind) -> &'static str {
+    match k {
+        BypassKind::ClosureIncomplete => "closure_incomplete",
+    }
 }
 
 /// Error returned by an `AliasResolver` when it cannot enumerate the
@@ -998,6 +1040,27 @@ fn encode_evidence_ids(ids: &[EvidenceId]) -> Result<String, VoomError> {
     serde_json::to_string(ids).map_err(|e| VoomError::Internal(format!("encode evidence_ids: {e}")))
 }
 
+/// JSON-encode a `ForcePathToken` for the
+/// `commit_intents.override_token` column. Uses the struct's derived
+/// serde — `actor` / `reason` are plain strings; `bypass: BTreeSet<BypassKind>`
+/// serializes as an ordered JSON array of `snake_case` tags
+/// (`["closure_incomplete"]` in Sprint 1). The decoder
+/// (`decode_force_path_token`) is the inverse.
+fn encode_force_path_token(token: &ForcePathToken) -> Result<String, VoomError> {
+    serde_json::to_string(token)
+        .map_err(|e| VoomError::Internal(format!("encode override_token: {e}")))
+}
+
+/// Inverse of `encode_force_path_token`. The
+/// `commit_intents.override_token` column is written exclusively by
+/// `prepare_destructive_commit` (commit 10) and never mutated; a parse
+/// failure is `VoomError::Database` because that's the on-disk
+/// corruption case.
+fn decode_force_path_token(json: &str) -> Result<ForcePathToken, VoomError> {
+    serde_json::from_str(json)
+        .map_err(|e| VoomError::Database(format!("decode override_token: {e}")))
+}
+
 // ----- inverse wire-format decoders (commit 6) ------------------------------
 //
 // Phase B reads back the JSON columns that Phase A wrote (`target`,
@@ -1154,18 +1217,29 @@ fn encode_target_row_epochs(triples: &[TargetRowEpochTriple]) -> Result<String, 
 /// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
 /// gate's tx handle (round-5 fix).
 ///
-/// Sprint 1 ships no `override_token` parameter — commit 10 retrofits
-/// `DestructiveCommit` and this signature together. Calls that hit
-/// `AliasResolutionError::Unreachable` abort unconditionally for Phase A
-/// in Sprint 1 through commit 9.
+/// `input.override_token` is the sanctioned force-path bypass (commit
+/// 10). `None` (the default) routes any `AliasResolutionError::Unreachable`
+/// from the closure walker straight to `BlockedByClosureIncomplete`.
+/// `Some(token)` after `validate_bypass` accepts the token funnels the
+/// matching `Unreachable` into the bypass branch (the closure walk
+/// proceeds with whatever DB-internal aliases were already enumerated;
+/// the external resolver's contribution is lost). The token JSON is
+/// persisted to `commit_intents.override_token` atomically with the
+/// `commit.intent_recorded` insert; `commit.forced_override` is emitted
+/// once at prepare time (authorize does not re-emit). The audit signal
+/// and the bypass logic ship together in this same tx — no in-tree
+/// caller has access to a bypass branch without the matching audit row.
 ///
 /// # Errors
 ///
-/// `VoomError::Database` / `VoomError::Internal` on storage failures
-/// (including `AliasResolutionError::Database` from an external alias
-/// source). Gate-check failures return `Ok(PrepareOutcome::Blocked)`
-/// rather than `Err` — `Err` is reserved for genuine storage failures
-/// that the caller cannot reason about.
+/// `VoomError::Config` if `input.override_token = Some(token)` and the
+/// token's bypass set contains an unsupported `BypassKind` (validation
+/// runs before any tx opens; no row materializes). `VoomError::Database`
+/// / `VoomError::Internal` on storage failures (including
+/// `AliasResolutionError::Database` from an external alias source).
+/// Gate-check failures return `Ok(PrepareOutcome::Blocked)` rather than
+/// `Err` — `Err` is reserved for genuine storage failures that the
+/// caller cannot reason about.
 pub async fn prepare_destructive_commit(
     pool: &SqlitePool,
     identity_repo: &dyn IdentityRepo,
@@ -1177,9 +1251,25 @@ pub async fn prepare_destructive_commit(
     let DestructiveCommit {
         target,
         accepted_evidence_ids,
+        override_token,
     } = input;
+
+    // Validate the token before opening any tx — an invalid bypass bit
+    // never lands a commit_intents row.
+    if let Some(token) = &override_token {
+        validate_bypass(token)?;
+    }
+
     let target_json = encode_target(&target)?;
     let accepted_evidence_ids_json = encode_evidence_ids(&accepted_evidence_ids)?;
+    let override_token_json = match &override_token {
+        None => None,
+        Some(token) => Some(encode_force_path_token(token)?),
+    };
+    let bypass_set: BTreeSet<BypassKind> = override_token
+        .as_ref()
+        .map(|t| t.bypass.clone())
+        .unwrap_or_default();
 
     let mut tx = pool
         .begin()
@@ -1192,6 +1282,7 @@ pub async fn prepare_destructive_commit(
         alias_resolver,
         &target,
         &accepted_evidence_ids,
+        &bypass_set,
     )
     .await;
     let walk = match walk_outcome {
@@ -1229,6 +1320,7 @@ pub async fn prepare_destructive_commit(
         &target_json,
         &closure_initial_json,
         &accepted_evidence_ids_json,
+        override_token_json.as_deref(),
         now,
     )
     .await?;
@@ -1243,6 +1335,9 @@ pub async fn prepare_destructive_commit(
         now,
     )
     .await?;
+    if let Some(token) = &override_token {
+        emit_forced_override(event_repo, &mut tx, commit_id, token, now).await?;
+    }
     tx.commit()
         .await
         .map_err(|e| VoomError::Database(format!("prepare: commit: {e}")))?;
@@ -1282,13 +1377,17 @@ struct GateWalkAbort {
 /// Returns `Ok(Ok(_))` on a passing walk (caller proceeds to insert
 /// the `pending` row); `Ok(Err(_))` on a gate-check abort (caller
 /// rolls back and runs the two-tx abort helper); `Err(_)` on a storage
-/// failure the caller cannot reason about.
+/// failure the caller cannot reason about. `bypass` carries the
+/// caller's sanctioned `BypassKind` set — `ClosureIncomplete` here
+/// silences the `Unreachable` abort path and lets the walk proceed
+/// with the DB-internal closure (commit 10).
 async fn run_phase_a_gate_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
     alias_resolver: &dyn AliasResolver,
     target: &CommitTarget,
     accepted_evidence_ids: &[EvidenceId],
+    bypass: &BTreeSet<BypassKind>,
 ) -> Result<Result<GateWalkOk, GateWalkAbort>, VoomError> {
     // Step 1: closure walk on the gate's IMMEDIATE tx.
     let closure = match build_closure(
@@ -1297,6 +1396,7 @@ async fn run_phase_a_gate_in_tx(
         alias_resolver,
         target,
         GatePhase::Prepare,
+        bypass,
     )
     .await?
     {
@@ -1346,22 +1446,64 @@ async fn insert_pending_intent(
     target_json: &str,
     closure_initial_json: &str,
     accepted_evidence_ids_json: &str,
+    override_token_json: Option<&str>,
     started_at: OffsetDateTime,
 ) -> Result<CommitId, VoomError> {
     let started_iso = iso8601(started_at)?;
     let res = sqlx::query(
         "INSERT INTO commit_intents \
-         (target, closure_initial, accepted_evidence_ids, state, started_at) \
-         VALUES (?, ?, ?, 'pending', ?)",
+         (target, closure_initial, accepted_evidence_ids, override_token, state, started_at) \
+         VALUES (?, ?, ?, ?, 'pending', ?)",
     )
     .bind(target_json)
     .bind(closure_initial_json)
     .bind(accepted_evidence_ids_json)
+    .bind(override_token_json)
     .bind(&started_iso)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("commit_intents pending insert: {e}")))?;
     Ok(CommitId(u64_from_i64(res.last_insert_rowid())))
+}
+
+/// Emit `commit.forced_override` once at prepare time, atomically
+/// with the `commit.intent_recorded` insert and the
+/// `commit_intents.override_token` column write. Authorize does not
+/// re-emit — the audit signal is single-shot per commit. The payload
+/// carries every `BypassKind` bit the operator supplied as
+/// `snake_case` strings; Sprint 1 ships exactly `"closure_incomplete"`.
+async fn emit_forced_override(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    token: &ForcePathToken,
+    recorded_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let bypass: Vec<String> = token
+        .bypass
+        .iter()
+        .map(|k| bypass_kind_str(*k).to_owned())
+        .collect();
+    let payload = Event::CommitForcedOverride(CommitForcedOverridePayload {
+        commit_id,
+        actor: token.actor.clone(),
+        reason: token.reason.clone(),
+        bypass,
+        recorded_at,
+    });
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: recorded_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
 }
 
 async fn emit_intent_recorded(
@@ -1403,12 +1545,24 @@ async fn emit_intent_recorded(
 /// row is missing or already terminal — Phase C will trip the epoch
 /// guard regardless, but Phase A surfaces it eagerly as a closure-walk
 /// failure so the operator does not wait for the round trip.
+///
+/// `bypass` is the active force-path bypass set (commit 10). When it
+/// contains `BypassKind::ClosureIncomplete`, an
+/// `AliasResolutionError::Unreachable` from the external resolver is
+/// swallowed: the walk proceeds with whatever DB-internal aliases were
+/// already enumerated rather than aborting. Phase C does not pipe this
+/// flag through (the bypass is consumed once at prepare and re-applied
+/// at authorize; Phase C's `Authorize` walker never receives it because
+/// the closure walker only surfaces `Unreachable` when a fresh
+/// `AliasResolutionError::Unreachable` fires — see `run_phase_c_trip_wires_in_tx`'s
+/// internal-error escape on closure-incomplete at finalize).
 async fn build_closure(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
     alias_resolver: &dyn AliasResolver,
     target: &CommitTarget,
     phase: GatePhase,
+    bypass: &BTreeSet<BypassKind>,
 ) -> Result<Result<(AffectedScopeClosure, Vec<FileLocationId>), PhaseAAbort>, VoomError> {
     let retired_location_id = match target {
         CommitTarget::DeleteFileLocation(id) => *id,
@@ -1468,7 +1622,22 @@ async fn build_closure(
             }
         }
         Err(AliasResolutionError::Unreachable { message }) => {
-            return Ok(Err(PhaseAAbort::ClosureIncomplete { message }));
+            // Force-path bypass: a token carrying
+            // `BypassKind::ClosureIncomplete` suppresses the abort.
+            // The walk continues with the partial closure (the
+            // external resolver's contribution is lost; the
+            // DB-internal `live_locations` already in hand are the
+            // best evidence the gate has). The bypass is recorded
+            // separately via `commit.forced_override` — the absence
+            // of `commit.aborted_by_closure_incomplete` is the
+            // visible difference in the audit trail.
+            if bypass.contains(&BypassKind::ClosureIncomplete) {
+                alias_warnings.push(ClosureWarning {
+                    message: format!("force-path bypass honored: {message}"),
+                });
+            } else {
+                return Ok(Err(PhaseAAbort::ClosureIncomplete { message }));
+            }
         }
         Err(AliasResolutionError::Database(msg)) => {
             return Err(VoomError::Database(format!("alias resolver: {msg}")));
@@ -1509,13 +1678,18 @@ async fn build_closure(
     let mut file_assets: BTreeSet<FileAssetId> = BTreeSet::new();
     file_assets.insert(version.file_asset_id);
 
-    let _ = std::mem::take(&mut alias_warnings); // warnings stay empty in Sprint 1; placeholder for FS resolvers.
+    // Warnings stay empty unless the force-path bypass swallowed an
+    // `Unreachable` (commit 10) — in which case the dropped resolver
+    // message rides along on the closure as a non-fatal annotation.
+    // Round-3 invariant: warnings do NOT contribute to closure drift
+    // (`id_member_delta` ignores them), so the bypass-introduced
+    // warning cannot mask the Phase B closure-grew trip-wire.
     let closure = AffectedScopeClosure {
         file_assets,
         file_versions,
         file_locations: file_locations.clone(),
         bundles,
-        resolution_warnings: Vec::new(),
+        resolution_warnings: std::mem::take(&mut alias_warnings),
     };
     let target_locations: Vec<FileLocationId> = file_locations.into_iter().collect();
     Ok(Ok((closure, target_locations)))
@@ -1992,12 +2166,23 @@ async fn run_phase_b_gate_in_tx(
     row: &PendingIntentRow,
     now: OffsetDateTime,
 ) -> Result<Result<PhaseBGatePass, CommitGateResult>, VoomError> {
+    // Re-apply the prepare-side bypass set. The token JSON was
+    // validated at prepare time; we trust the persisted value here
+    // (the column write was atomic with the `pending` insert and the
+    // intervening row state cannot mutate it — only prepare writes
+    // this column).
+    let bypass: BTreeSet<BypassKind> = row
+        .override_token
+        .as_ref()
+        .map(|t| t.bypass.clone())
+        .unwrap_or_default();
     let closure_authorized = match build_closure(
         tx,
         identity_repo,
         alias_resolver,
         &row.target,
         GatePhase::Authorize,
+        &bypass,
     )
     .await?
     {
@@ -2131,6 +2316,15 @@ struct PendingIntentRow {
     target: CommitTarget,
     closure_initial: AffectedScopeClosure,
     accepted_evidence_ids: Vec<EvidenceId>,
+    /// Decoded `commit_intents.override_token` JSON column. `None`
+    /// when the column is NULL (default path); `Some(token)` when
+    /// `prepare_destructive_commit` persisted a force-path token.
+    /// Phase B re-applies the same `BypassKind` set the prepare-side
+    /// walk used so the closure-incomplete bypass is honored
+    /// identically across phases. Phase B does NOT re-emit
+    /// `commit.forced_override` — the audit signal is single-shot per
+    /// commit (recorded once at prepare).
+    override_token: Option<ForcePathToken>,
     epoch: u64,
 }
 
@@ -2143,7 +2337,7 @@ async fn read_pending_intent_in_tx(
     commit_id: CommitId,
 ) -> Result<PendingIntentRow, VoomError> {
     let row = sqlx::query(
-        "SELECT state, target, closure_initial, accepted_evidence_ids, epoch \
+        "SELECT state, target, closure_initial, accepted_evidence_ids, override_token, epoch \
          FROM commit_intents WHERE id = ?",
     )
     .bind(i64_from_u64(commit_id.0))
@@ -2172,6 +2366,9 @@ async fn read_pending_intent_in_tx(
     let accepted_evidence_ids_json: String = row
         .try_get("accepted_evidence_ids")
         .map_err(|e| VoomError::Database(format!("authorize: read accepted_evidence_ids: {e}")))?;
+    let override_token_json: Option<String> = row
+        .try_get("override_token")
+        .map_err(|e| VoomError::Database(format!("authorize: read override_token: {e}")))?;
     let epoch_raw: i64 = row
         .try_get("epoch")
         .map_err(|e| VoomError::Database(format!("authorize: read epoch: {e}")))?;
@@ -2181,11 +2378,16 @@ async fn read_pending_intent_in_tx(
         .map_err(|e| {
             VoomError::Database(format!("authorize: decode accepted_evidence_ids: {e}"))
         })?;
+    let override_token = match override_token_json {
+        None => None,
+        Some(json) => Some(decode_force_path_token(&json)?),
+    };
     Ok(PendingIntentRow {
         commit_id,
         target,
         closure_initial,
         accepted_evidence_ids,
+        override_token,
         epoch: u64_from_i64(epoch_raw),
     })
 }
@@ -3357,13 +3559,19 @@ async fn run_phase_c_trip_wires_in_tx(
     snapshot: &[TargetRowEpochTriple],
 ) -> Result<PhaseCRecheck, VoomError> {
     // Step 1: recompute closure. A retired target now appears as
-    // closure drift (Phase B walker semantics).
+    // closure drift (Phase B walker semantics). The force-path bypass
+    // (commit 10) is NOT piped through Phase C — the persisted token
+    // was consumed at prepare + authorize, and a Phase C
+    // closure-incomplete abort surfaces as the internal-error escape
+    // below rather than honoring the bypass a second time. The
+    // closure walker therefore receives an empty bypass set.
     let closure_final = match build_closure(
         tx,
         identity_repo,
         alias_resolver,
         &row.target,
         GatePhase::Authorize,
+        &BTreeSet::new(),
     )
     .await?
     {

@@ -633,6 +633,27 @@ fn commit_aborted_post_mutation_stale_target_epoch_carries_drift_array() {
 }
 
 #[test]
+fn commit_forced_override_round_trip() {
+    let p = CommitForcedOverridePayload {
+        commit_id: voom_core::CommitId(40),
+        actor: "ops@example.com".to_owned(),
+        reason: "fs mount offline; out-of-band confirmed".to_owned(),
+        bypass: vec!["closure_incomplete".to_owned()],
+        recorded_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitForcedOverride(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.forced_override");
+    assert_eq!(json["payload"]["actor"], "ops@example.com");
+    assert_eq!(json["payload"]["bypass"][0], "closure_incomplete");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitForcedOverride(q) if q == p));
+    assert_eq!(
+        Event::CommitForcedOverride(p).kind(),
+        EventKind::CommitForcedOverride
+    );
+}
+
+#[test]
 fn commit_recovery_required_round_trip_mirrors_post_mutation_fields() {
     let p = CommitRecoveryRequiredPayload {
         commit_id: voom_core::CommitId(36),

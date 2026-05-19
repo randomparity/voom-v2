@@ -110,6 +110,7 @@ fn delete_target(location_id: FileLocationId) -> DestructiveCommit {
     DestructiveCommit {
         target: CommitTarget::DeleteFileLocation(location_id),
         accepted_evidence_ids: Vec::new(),
+        override_token: None,
     }
 }
 
@@ -275,6 +276,7 @@ async fn phase_a_blocked_by_stale_evidence_lands_aborted_intent_plus_event() {
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
+            override_token: None,
         },
         T0 + Duration::seconds(2),
     )

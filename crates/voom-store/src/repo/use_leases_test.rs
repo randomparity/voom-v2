@@ -1045,6 +1045,7 @@ async fn seed_pending_intent(pool: &SqlitePool, location_id: FileLocationId) {
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )

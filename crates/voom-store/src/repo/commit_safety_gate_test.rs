@@ -218,14 +218,33 @@ fn commit_gate_result_every_sprint_1_variant_constructs() {
 }
 
 #[test]
-fn destructive_commit_constructs_without_override_token() {
-    // `DestructiveCommit` currently carries no `override_token` field;
-    // the force-path slice adds it. This test will need an update once
-    // that lands.
-    let _ = DestructiveCommit {
+fn destructive_commit_constructs_with_and_without_override_token() {
+    // Default path: `override_token = None`. The pre-commit-10 abort
+    // semantics (closure-incomplete on `Unreachable`) apply.
+    let none = DestructiveCommit {
         target: CommitTarget::DeleteFileLocation(FileLocationId(1)),
         accepted_evidence_ids: Vec::new(),
+        override_token: None,
     };
+    assert!(none.override_token.is_none());
+
+    // Force path: `override_token = Some(_)`. Validation runs in
+    // `prepare_destructive_commit` before any tx opens; an invalid
+    // bypass bit surfaces as `VoomError::Config` without materializing
+    // a row.
+    let mut bypass = std::collections::BTreeSet::new();
+    bypass.insert(BypassKind::ClosureIncomplete);
+    let some = DestructiveCommit {
+        target: CommitTarget::DeleteFileLocation(FileLocationId(2)),
+        accepted_evidence_ids: Vec::new(),
+        override_token: Some(ForcePathToken {
+            actor: "ops@example.com".to_owned(),
+            reason: "fs offline".to_owned(),
+            bypass,
+        }),
+    };
+    let token = some.override_token.as_ref().unwrap();
+    assert_eq!(token.actor, "ops@example.com");
 }
 
 #[test]
@@ -347,6 +366,57 @@ fn force_path_token_serde_round_trips_through_json() {
     let json = serde_json::to_string(&t).unwrap();
     let back: ForcePathToken = serde_json::from_str(&json).unwrap();
     assert_eq!(t, back);
+}
+
+#[test]
+fn force_path_token_serde_renders_bypass_as_snake_case_array() {
+    // Pin the on-disk wire shape: `bypass: BTreeSet<BypassKind>` is
+    // a JSON array of `snake_case` tags, matching the
+    // `#[serde(rename_all = "snake_case")]` on `BypassKind`. The
+    // `commit_intents.override_token` column and the
+    // `commit.forced_override` payload's `bypass` field share this
+    // vocabulary.
+    let mut bypass = std::collections::BTreeSet::new();
+    bypass.insert(BypassKind::ClosureIncomplete);
+    let t = ForcePathToken {
+        actor: "ops@example.com".to_owned(),
+        reason: "fs offline".to_owned(),
+        bypass,
+    };
+    let v = serde_json::to_value(&t).unwrap();
+    assert_eq!(v["actor"], "ops@example.com");
+    assert_eq!(v["reason"], "fs offline");
+    let arr = v["bypass"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0], "closure_incomplete");
+}
+
+#[test]
+fn validate_bypass_accepts_sprint_1_kinds() {
+    // Sprint 1 ships exactly `ClosureIncomplete`. The validator's
+    // forward-compat role means there is nothing currently
+    // constructible at the type level that the validator rejects;
+    // the smoke test pins the accept-path so the forward-compat
+    // helper stays wired (a future bypass kind that needs rejection
+    // adds a sibling negative test alongside its `BypassKind` variant).
+    let mut bypass = std::collections::BTreeSet::new();
+    bypass.insert(BypassKind::ClosureIncomplete);
+    let t = ForcePathToken {
+        actor: "ops@example.com".to_owned(),
+        reason: "fs offline".to_owned(),
+        bypass,
+    };
+    validate_bypass(&t).unwrap();
+
+    // Empty bypass set is also accepted — the token carries audit
+    // metadata even when no bypass bit is requested. The closure
+    // walker will treat this exactly like `override_token = None`.
+    let t_empty = ForcePathToken {
+        actor: "ops@example.com".to_owned(),
+        reason: "no-op token".to_owned(),
+        bypass: std::collections::BTreeSet::new(),
+    };
+    validate_bypass(&t_empty).unwrap();
 }
 
 #[test]
@@ -642,6 +712,7 @@ fn delete_target_for(location_id: FileLocationId) -> DestructiveCommit {
     DestructiveCommit {
         target: CommitTarget::DeleteFileLocation(location_id),
         accepted_evidence_ids: Vec::new(),
+        override_token: None,
     }
 }
 
@@ -879,6 +950,7 @@ async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event(
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
+            override_token: None,
         },
         T0 + time::Duration::seconds(2),
     )
@@ -1315,6 +1387,7 @@ async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_even
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
+            override_token: None,
         },
         T0,
     )
@@ -1716,6 +1789,7 @@ async fn finalize_phase_c_silent_replace_dispatches_replace() {
                 },
             },
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )
@@ -1785,6 +1859,7 @@ async fn finalize_phase_c_silent_move_dispatches_replace() {
                 },
             },
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )

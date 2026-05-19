@@ -100,6 +100,7 @@ async fn run_prepare_and_authorize(pool: &SqlitePool, location_id: FileLocationI
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )

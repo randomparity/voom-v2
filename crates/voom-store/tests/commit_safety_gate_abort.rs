@@ -90,6 +90,7 @@ async fn abort_authorized_row_rejects_with_conflict_encoding_recovery_contract()
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )
@@ -189,6 +190,7 @@ async fn abort_pending_succeeds_end_to_end_with_event_payload() {
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
+            override_token: None,
         },
         T0,
     )

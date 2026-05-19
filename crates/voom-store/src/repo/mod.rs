@@ -23,7 +23,7 @@ pub use commit_safety_gate::{
     CommitIntent, CommitIntentState, CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift,
     EvidenceRevalidationResult, FileLocationProposal, ForcePathToken, MutationOutcome,
     PendingCommitIntent, PrepareOutcome, TargetEpochDrift, TargetMemberKind,
-    prepare_destructive_commit,
+    prepare_destructive_commit, validate_bypass,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};

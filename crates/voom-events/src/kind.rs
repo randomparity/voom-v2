@@ -74,6 +74,7 @@ pub enum EventKind {
     CommitAbortedPostMutation,
     CommitAbortedPreMutation,
     CommitRecoveryRequired,
+    CommitForcedOverride,
 }
 
 impl EventKind {
@@ -136,6 +137,7 @@ impl EventKind {
             Self::CommitAbortedPostMutation => "commit.aborted_post_mutation",
             Self::CommitAbortedPreMutation => "commit.aborted_pre_mutation",
             Self::CommitRecoveryRequired => "commit.recovery_required",
+            Self::CommitForcedOverride => "commit.forced_override",
         }
     }
 
@@ -208,6 +210,7 @@ impl EventKind {
             "commit.aborted_post_mutation" => Self::CommitAbortedPostMutation,
             "commit.aborted_pre_mutation" => Self::CommitAbortedPreMutation,
             "commit.recovery_required" => Self::CommitRecoveryRequired,
+            "commit.forced_override" => Self::CommitForcedOverride,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"
