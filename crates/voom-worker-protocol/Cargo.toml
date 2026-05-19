@@ -7,5 +7,31 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+voom-core.workspace = true
+
+async-trait.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+constant_time_eq.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+lru.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "sync"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+trybuild.workspace = true
+
 [lints]
 workspace = true

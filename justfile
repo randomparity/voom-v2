@@ -41,7 +41,10 @@ doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
 audit:
-    cargo audit --deny warnings
+    # RUSTSEC-2026-0002: lru@0.13 IterMut Stacked-Borrows unsoundness.
+    # We only use put/get/contains; IterMut is not called anywhere in the
+    # workspace. Revisit when lru ships a patched version.
+    cargo audit --deny warnings --ignore RUSTSEC-2026-0002
 
 deny:
     cargo deny check
