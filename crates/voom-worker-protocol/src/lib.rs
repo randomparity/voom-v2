@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "tests favor unwrap over plumbing Result<()> through every assertion"
+    )
+)]
 //! Versioned HTTP/JSON worker protocol for VOOM Sprint 2.
 //!
 //! Public API surface is fixed in `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`.
@@ -14,3 +21,5 @@ pub mod low_level;
 pub mod ndjson;
 pub mod operation_kind;
 pub mod transport;
+
+pub use operation_kind::OperationKind;
