@@ -1207,3 +1207,228 @@ async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
         .await
         .unwrap();
 }
+
+// ---- M3 Phase 2 commit 5: pending-commit lock retrofit on AliasAttached ----
+//
+// `record_discovered_file_in_tx::AliasAttached` consults the helper
+// before persisting the new alias FileLocation. A live `commit_intents`
+// row covering the affected FileVersion rejects the attach with
+// `VoomError::Conflict`. No new `file_locations` row is inserted.
+//
+// `reconcile_rename_in_tx` deliberately does NOT consult the lock
+// (arch spec lines 697–708; sprint spec §8.7). The rename must be
+// allowed to land against an in-flight commit so external moves never
+// deadlock the gate.
+
+use crate::repo::commit_safety_gate::{
+    CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
+};
+use crate::repo::events::SqliteEventRepo;
+use crate::test_support::FailingAliasResolver;
+
+/// Seed a single live `file_location` with a `file_id_generation` proof
+/// and return the prior location id + the `FileVersion` id it lives under.
+async fn seed_local_proof_location(repo: &SqliteIdentityRepo) -> (FileLocationId, FileVersionId) {
+    let mut tx = repo.pool.begin().await.unwrap();
+    let outcome = repo
+        .record_discovered_file_in_tx(
+            &mut tx,
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/old.mkv".to_owned(),
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+                observed_at: T0,
+                proof: Some(LocationProof::LocalFileIdGeneration {
+                    file_id: 42,
+                    generation: 1,
+                }),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    match outcome {
+        IngestOutcome::NewFileAsset {
+            file_version_id,
+            file_location_id,
+            ..
+        } => (file_location_id, file_version_id),
+        IngestOutcome::AliasAttached { .. } => {
+            panic!("seed must produce a fresh NewFileAsset");
+        }
+    }
+}
+
+/// Land a `state = 'pending'` commit intent against `location_id`.
+async fn seed_pending_intent_on_location(repo: &SqliteIdentityRepo, location_id: FileLocationId) {
+    let events = SqliteEventRepo::new(repo.pool.clone());
+    let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        &repo.pool,
+        repo,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(location_id),
+            accepted_evidence_ids: Vec::new(),
+        },
+        T0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        PrepareOutcome::Pending(_) => {}
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("seed_pending_intent: expected Pending, got Blocked({result:?})")
+        }
+    }
+}
+
+#[tokio::test]
+async fn alias_attached_rejects_when_pending_commit_covers_file_version() {
+    let (repo, _tmp) = fresh().await;
+    let (prior_id, version_id) = seed_local_proof_location(&repo).await;
+    seed_pending_intent_on_location(&repo, prior_id).await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .record_discovered_file_in_tx(
+            &mut tx,
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/alias.mkv".to_owned(),
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+                observed_at: T0 + Duration::seconds(2),
+                proof: Some(LocationProof::LocalFileIdGeneration {
+                    file_id: 42,
+                    generation: 1,
+                }),
+            },
+            Some(AliasProof::LocalFileIdGeneration {
+                file_id: 42,
+                generation: 1,
+                prior_location_id: prior_id,
+            }),
+        )
+        .await
+        .unwrap_err();
+    // The tx is poisoned by the rejected mutation path; drop it to
+    // release the connection before further pool reads.
+    drop(tx);
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // No additional file_location row landed under the version.
+    let live = repo
+        .list_live_file_locations_by_version(version_id)
+        .await
+        .unwrap();
+    assert_eq!(live.len(), 1, "no alias attach should have persisted");
+    assert_eq!(live[0].id, prior_id);
+}
+
+#[tokio::test]
+async fn alias_attached_succeeds_when_no_in_flight_commit_exists() {
+    // No `commit_intents` row in 'pending'/'authorized' → the helper
+    // returns None and `AliasAttached` runs to completion unchanged.
+    let (repo, _tmp) = fresh().await;
+    let (prior_id, version_id) = seed_local_proof_location(&repo).await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let outcome = repo
+        .record_discovered_file_in_tx(
+            &mut tx,
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/alias.mkv".to_owned(),
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+                observed_at: T0 + Duration::seconds(2),
+                proof: Some(LocationProof::LocalFileIdGeneration {
+                    file_id: 42,
+                    generation: 1,
+                }),
+            },
+            Some(AliasProof::LocalFileIdGeneration {
+                file_id: 42,
+                generation: 1,
+                prior_location_id: prior_id,
+            }),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let IngestOutcome::AliasAttached {
+        file_version_id: attached_version,
+        new_file_location_id,
+    } = outcome
+    else {
+        panic!("expected AliasAttached, got {outcome:?}");
+    };
+    assert_eq!(attached_version, version_id);
+    let live = repo
+        .list_live_file_locations_by_version(version_id)
+        .await
+        .unwrap();
+    assert_eq!(live.len(), 2, "both prior and new alias locations live");
+    assert!(live.iter().any(|l| l.id == prior_id));
+    assert!(live.iter().any(|l| l.id == new_file_location_id));
+}
+
+#[tokio::test]
+async fn reconcile_rename_in_tx_proceeds_against_in_flight_commit() {
+    // Architectural exemption (arch spec lines 697–708; sprint §8.7):
+    // rename does NOT consult the pending-commit lock. A rename against
+    // an in-flight commit on the same FileVersion must succeed. The
+    // intent row stays exactly as it was — the rename is a separate
+    // ingest-side reconciliation and the gate handles drift at
+    // authorize/finalize time via closure-grew + re-anchoring.
+    let (repo, _tmp) = fresh().await;
+    let (prior_id, version_id) = seed_local_proof_location(&repo).await;
+    seed_pending_intent_on_location(&repo, prior_id).await;
+
+    // Verify the commit intent is durable in 'pending' so the
+    // assertion below ("rename did not touch the intent") is load-bearing.
+    let before_state: String = sqlx::query_scalar(
+        "SELECT state FROM commit_intents WHERE id = (SELECT MAX(id) FROM commit_intents)",
+    )
+    .fetch_one(&repo.pool)
+    .await
+    .unwrap();
+    assert_eq!(before_state, "pending");
+
+    let outcome = repo
+        .reconcile_rename(
+            RenameProof::LocalFileIdGeneration {
+                prior_location_id: prior_id,
+                new_kind: FileLocationKind::LocalPath,
+                new_value: "/srv/new.mkv".to_owned(),
+                file_id: 42,
+                generation: 1,
+                prior_path_missing: true,
+            },
+            ObservedBytes {
+                content_hash: "h".to_owned(),
+                size_bytes: 1,
+            },
+            T0 + Duration::seconds(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.file_version_id, version_id);
+    assert_eq!(outcome.retired_location_id, prior_id);
+
+    // Intent row still 'pending'; rename did NOT mutate it. The
+    // gate's authorize / finalize phases handle the resulting closure
+    // delta — that's not this test's contract.
+    let after_state: String = sqlx::query_scalar(
+        "SELECT state FROM commit_intents WHERE id = (SELECT MAX(id) FROM commit_intents)",
+    )
+    .fetch_one(&repo.pool)
+    .await
+    .unwrap();
+    assert_eq!(after_state, "pending");
+}

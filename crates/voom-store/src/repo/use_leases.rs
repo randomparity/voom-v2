@@ -15,6 +15,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId, VoomError};
 
 use super::Repository;
+use super::commit_safety_gate::consult_pending_commit_lock_in_tx;
 use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_i64};
 
 // ============================================================================
@@ -646,10 +647,24 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
             }
         }
 
-        // TODO(m3-phase-2): consult `commit_intent_scope_members` here
-        // before the insert — sprint-1 design §9.2. Phase 2 lands the
-        // shared helper in `voom-store::repo::commit_safety_gate`. Until
-        // then the lock is a no-op (no in-flight commits exist yet).
+        // Pending-commit lock (sprint-1 design §9.2, M3 Phase 2 commit 5):
+        // reject if any in-flight `commit_intents` row (state IN
+        // ('pending','authorized')) covers `input.scope`. Helper lives in
+        // `commit_safety_gate` as the single source of truth so the
+        // `AliasAttached` retrofit and the gate itself read against the
+        // same column-driven query (M3 sequencing doc §5.1).
+        if let Some((commit_id, offending_scope)) =
+            consult_pending_commit_lock_in_tx(tx, &input.scope).await?
+        {
+            return Err(VoomError::Conflict(format!(
+                "use_lease scope {} {} blocked by in-flight commit {} on offending scope {} {}",
+                input.scope.type_str(),
+                input.scope.id_u64(),
+                commit_id,
+                offending_scope.type_str(),
+                offending_scope.id_u64(),
+            )));
+        }
 
         // 3) Insert. `clock_source = 'control_plane'` is the only Sprint 1
         //    value. Manual locks have NULL `expires_at`.

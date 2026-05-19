@@ -19,9 +19,11 @@ use voom_core::{
 use voom_events::AssertionKind;
 
 use super::Repository;
+use super::commit_safety_gate::consult_pending_commit_lock_in_tx;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use super::use_leases::LeaseScope;
 
 // ---------- value-type vocabularies ----------------------------------------
 
@@ -774,6 +776,27 @@ impl IdentityRepo for SqliteIdentityRepo {
                         // proof bytes to match the alias_proof bytes
                         // (spec §8.7: "proof drift on alias attach").
                         verify_discovered_proof_matches_alias_proof(&discovered, &proof)?;
+                        // Pending-commit lock (M3 Phase 2 commit 5,
+                        // sprint-1 design §8.7): reject if any in-flight
+                        // `commit_intents` row covers this FileVersion
+                        // so the alias attach cannot race past the
+                        // commit safety gate's authorized closure.
+                        // `reconcile_rename_in_tx` is the deliberate
+                        // exemption (arch spec lines 697–708).
+                        if let Some((commit_id, offending_scope)) =
+                            consult_pending_commit_lock_in_tx(
+                                tx,
+                                &LeaseScope::Version(file_version_id),
+                            )
+                            .await?
+                        {
+                            return Err(VoomError::Conflict(format!(
+                                "alias attach on file_version {file_version_id} blocked \
+                                 by in-flight commit {commit_id} on offending scope {} {}",
+                                offending_scope.type_str(),
+                                offending_scope.id_u64(),
+                            )));
+                        }
                         let new_location_id = insert_file_location(
                             tx,
                             file_version_id,

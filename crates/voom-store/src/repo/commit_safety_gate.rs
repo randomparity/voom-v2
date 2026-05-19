@@ -546,6 +546,87 @@ pub trait AliasResolver: Send + Sync {
 }
 
 // ============================================================================
+// Pending-commit lock helper (sub-slice 5)
+// ============================================================================
+
+/// Single source of truth for the "any in-flight commit covers this
+/// scope?" question (M3 sequencing doc §5.1). Reads `commit_intents`
+/// rows in `state IN ('pending', 'authorized')` that have at least one
+/// `commit_intent_scope_members` row matching the supplied scope, and
+/// returns the first hit as `(commit_id, offending_scope)` — or `None`
+/// if no in-flight commit covers it.
+///
+/// Each `LeaseScope` variant consults exactly one `scope_*_id` column
+/// of `commit_intent_scope_members`:
+/// `Asset` → `scope_asset_id`, `Bundle` → `scope_bundle_id`,
+/// `Version` → `scope_version_id`, `Location` → `scope_location_id`.
+/// The migration-level CHECK constraint guarantees exactly one
+/// `scope_*_id` is non-NULL per row, so a single-column lookup is
+/// sufficient.
+///
+/// Callers translate a hit into the lock's caller-facing error variant
+/// (`VoomError::Conflict(...)` for `UseLeaseRepo::acquire_in_tx` and
+/// the `IdentityRepo::record_discovered_file_in_tx::AliasAttached`
+/// branch, per sprint spec §9.2 / §8.7). `IdentityRepo::reconcile_rename_in_tx`
+/// deliberately does NOT consult this helper (arch spec lines 697–708;
+/// sprint spec §8.7 architectural exemption — renames must be allowed
+/// to land against an in-flight commit so external moves never deadlock
+/// the gate).
+///
+/// # Errors
+///
+/// `VoomError::Database` on storage failures from the underlying
+/// `commit_intents` / `commit_intent_scope_members` join.
+pub(crate) async fn consult_pending_commit_lock_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    scope: &LeaseScope,
+) -> Result<Option<(CommitId, LeaseScope)>, VoomError> {
+    // Column-driven query: each variant queries exactly one column.
+    // The CHECK constraint on commit_intent_scope_members ensures
+    // the same row cannot collide across granularities.
+    let (sql, bind_id): (&str, i64) = match scope {
+        LeaseScope::Asset(id) => (
+            "SELECT ci.id FROM commit_intents ci \
+             JOIN commit_intent_scope_members m ON m.commit_intent_id = ci.id \
+             WHERE ci.state IN ('pending', 'authorized') \
+               AND m.scope_asset_id = ? \
+             ORDER BY ci.id ASC LIMIT 1",
+            i64_from_u64(id.0),
+        ),
+        LeaseScope::Bundle(id) => (
+            "SELECT ci.id FROM commit_intents ci \
+             JOIN commit_intent_scope_members m ON m.commit_intent_id = ci.id \
+             WHERE ci.state IN ('pending', 'authorized') \
+               AND m.scope_bundle_id = ? \
+             ORDER BY ci.id ASC LIMIT 1",
+            i64_from_u64(id.0),
+        ),
+        LeaseScope::Version(id) => (
+            "SELECT ci.id FROM commit_intents ci \
+             JOIN commit_intent_scope_members m ON m.commit_intent_id = ci.id \
+             WHERE ci.state IN ('pending', 'authorized') \
+               AND m.scope_version_id = ? \
+             ORDER BY ci.id ASC LIMIT 1",
+            i64_from_u64(id.0),
+        ),
+        LeaseScope::Location(id) => (
+            "SELECT ci.id FROM commit_intents ci \
+             JOIN commit_intent_scope_members m ON m.commit_intent_id = ci.id \
+             WHERE ci.state IN ('pending', 'authorized') \
+               AND m.scope_location_id = ? \
+             ORDER BY ci.id ASC LIMIT 1",
+            i64_from_u64(id.0),
+        ),
+    };
+    let row: Option<i64> = sqlx::query_scalar(sql)
+        .bind(bind_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("consult_pending_commit_lock: {e}")))?;
+    Ok(row.map(|raw| (CommitId(u64_from_i64(raw)), *scope)))
+}
+
+// ============================================================================
 // Phase A entry point — `prepare_destructive_commit` + abort helper
 // ============================================================================
 

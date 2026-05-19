@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 use tempfile::NamedTempFile;
 use time::Duration;
-use voom_core::{FileAssetId, FileLocationId, UseLeaseId};
+use voom_core::{FileAssetId, FileLocationId, FileVersionId, UseLeaseId};
 
 use super::*;
 use crate::repo::identity::{IdentityRepo, SqliteIdentityRepo};
@@ -969,4 +969,186 @@ async fn reanchor_on_move_with_same_location_is_noop() {
     let after = repo.get(lease.id).await.unwrap().unwrap();
     assert_eq!(after.scope, LeaseScope::Location(loc));
     assert_eq!(after.epoch, lease.epoch);
+}
+
+// --- M3 Phase 2 commit 5: pending-commit lock retrofit ---
+//
+// `acquire_in_tx` consults `consult_pending_commit_lock_in_tx` after the
+// scope-liveness probe. A live `commit_intents` row in
+// state IN ('pending','authorized') whose `commit_intent_scope_members`
+// row covers the requested `LeaseScope` rejects with `Conflict`. Tests
+// here both pin the new rejection and verify the no-in-flight-commit
+// path is unchanged.
+
+use crate::repo::commit_safety_gate::{
+    CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
+};
+use crate::repo::events::SqliteEventRepo;
+use crate::repo::identity::{NewFileLocation, NewFileVersion, ProducedBy};
+use crate::test_support::FailingAliasResolver;
+
+/// Seed an `(asset, version, location)` chain so a `DeleteFileLocation`
+/// commit intent has a concrete closure to populate.
+async fn seed_pool_with_location() -> (
+    SqlitePool,
+    NamedTempFile,
+    FileAssetId,
+    FileVersionId,
+    FileLocationId,
+) {
+    use crate::repo::identity::{FileLocationKind, IdentityRepo};
+    let tmp = NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let asset = identity.create_file_asset(T0).await.unwrap();
+    let version = identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "h".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let location = identity
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/x".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (pool, tmp, asset.id, version.id, location.id)
+}
+
+/// Land a `state = 'pending'` `commit_intents` row plus its
+/// `commit_intent_scope_members` rows by running Phase A against the
+/// supplied location.
+async fn seed_pending_intent(pool: &SqlitePool, location_id: FileLocationId) {
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(location_id),
+            accepted_evidence_ids: Vec::new(),
+        },
+        T0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        PrepareOutcome::Pending(_) => {}
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("seed_pending_intent: expected Pending, got Blocked({result:?})")
+        }
+    }
+}
+
+#[tokio::test]
+async fn acquire_blocking_lease_rejects_when_pending_commit_covers_scope() {
+    // In-flight commit on a FileLocation puts its asset / version /
+    // location into commit_intent_scope_members. A `Version`-scoped
+    // blocking lease overlaps the version row → Conflict.
+    let (pool, _tmp, _asset, version_id, location_id) = seed_pool_with_location().await;
+    seed_pending_intent(&pool, location_id).await;
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_advisory_lease_rejects_when_pending_commit_covers_scope() {
+    // Advisory leases also consult the pending-commit lock — the lock
+    // protects identity invariants, not just blocking-mode arbitration.
+    let (pool, _tmp, _asset, _version, location_id) = seed_pool_with_location().await;
+    seed_pending_intent(&pool, location_id).await;
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let err = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Scan,
+            scope: LeaseScope::Location(location_id),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "scanner".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn acquire_succeeds_when_no_in_flight_commit_covers_scope() {
+    // With no `commit_intents` row in 'pending'/'authorized', the lock
+    // helper returns None and acquire's pre-lock behavior is unchanged.
+    let (pool, _tmp, _asset, _version, location_id) = seed_pool_with_location().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Location(location_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.scope, LeaseScope::Location(location_id));
+    assert!(lease.is_live());
+}
+
+#[tokio::test]
+async fn acquire_succeeds_on_unrelated_scope_when_pending_commit_exists() {
+    // The lock is scoped: a pending commit on location A does not
+    // block acquire on an unrelated file_asset.
+    let (pool, _tmp, _asset_a, _ver_a, loc_a) = seed_pool_with_location().await;
+    seed_pending_intent(&pool, loc_a).await;
+    // Seed a second, unrelated asset.
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let other = identity.create_file_asset(T0).await.unwrap();
+
+    let repo = SqliteUseLeaseRepo::new(pool);
+    let lease = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Asset(other.id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(lease.scope, LeaseScope::Asset(other.id));
 }
