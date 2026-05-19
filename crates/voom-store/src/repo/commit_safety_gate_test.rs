@@ -2099,3 +2099,341 @@ async fn finalize_phase_c_stale_target_epoch_drives_recovery_required() {
             .unwrap();
     assert!(retired_at.is_none());
 }
+
+// -- abort_destructive_commit sibling tests (commit 8) ---------------------
+
+/// Read the first `commit.aborted_pre_mutation` event for `commit_id`
+/// and return `(prior_state, reason)` from the payload. Sibling tests
+/// use this to assert the caller-initiated abort entry writes
+/// `prior_state = 'pending'` (distinguishing it from the Phase C
+/// `NotPerformed` branch, which shares the event kind but writes
+/// `prior_state = 'authorized'`).
+async fn first_aborted_pre_mutation_payload(
+    pool: &SqlitePool,
+    commit_id: CommitId,
+) -> (String, String) {
+    let events = SqliteEventRepo::new(pool.clone());
+    let page = events
+        .list(
+            EventFilter {
+                kind: Some(EventKind::CommitAbortedPreMutation),
+                subject_type: Some(voom_events::SubjectType::CommitIntent),
+                subject_id: Some(commit_id.0),
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let row = page
+        .items
+        .first()
+        .expect("expected one CommitAbortedPreMutation event");
+    match &row.envelope.payload {
+        voom_events::Event::CommitAbortedPreMutation(p) => {
+            (p.prior_state.clone(), p.reason.clone())
+        }
+        other => panic!("expected CommitAbortedPreMutation payload, got {other:?}"),
+    }
+}
+
+async fn commit_intent_state_and_epoch(
+    pool: &SqlitePool,
+    commit_id: CommitId,
+) -> (String, Option<String>, Option<String>, u64) {
+    let row = sqlx::query(
+        "SELECT state, abort_reason, aborted_at, epoch FROM commit_intents WHERE id = ?",
+    )
+    .bind(commit_id.0.cast_signed())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let state: String = row.try_get("state").unwrap();
+    let abort_reason: Option<String> = row.try_get("abort_reason").unwrap();
+    let aborted_at: Option<String> = row.try_get("aborted_at").unwrap();
+    let epoch_raw: i64 = row.try_get("epoch").unwrap();
+    (state, abort_reason, aborted_at, u64_from_i64(epoch_raw))
+}
+
+#[tokio::test]
+async fn abort_pending_transitions_to_aborted_and_emits_pre_mutation_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let (_, _, _, epoch_before) = commit_intent_state_and_epoch(&pool, commit_id).await;
+
+    let events = SqliteEventRepo::new(pool.clone());
+    let outcome = abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let new_epoch = match outcome {
+        AbortOutcome::Aborted {
+            commit_id: c,
+            epoch,
+        } => {
+            assert_eq!(c, commit_id);
+            epoch
+        }
+    };
+
+    let (state, abort_reason, aborted_at, epoch_after) =
+        commit_intent_state_and_epoch(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(abort_reason.as_deref(), Some("operator_cancel"));
+    assert!(aborted_at.is_some(), "aborted_at must be populated");
+    assert_eq!(
+        epoch_after,
+        epoch_before + 1,
+        "epoch must bump exactly once"
+    );
+    assert_eq!(epoch_after, new_epoch, "outcome epoch must match row epoch");
+
+    let (prior_state, reason) = first_aborted_pre_mutation_payload(&pool, commit_id).await;
+    assert_eq!(prior_state, "pending");
+    assert_eq!(reason, "operator_cancel");
+}
+
+#[tokio::test]
+async fn abort_authorized_row_rejects_with_conflict() {
+    // Recovery contract: the only sanctioned post-authorize termination
+    // is finalize(_, NotPerformed). abort_destructive_commit must not
+    // accept an authorized row.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let _permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+    let (_, _, _, epoch_before) = commit_intent_state_and_epoch(&pool, commit_id).await;
+
+    let events = SqliteEventRepo::new(pool.clone());
+    let err = abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+
+    // Row state and epoch must be untouched.
+    let (state, abort_reason, _, epoch_after) =
+        commit_intent_state_and_epoch(&pool, commit_id).await;
+    assert_eq!(state, "authorized");
+    assert!(abort_reason.is_none());
+    assert_eq!(epoch_after, epoch_before);
+}
+
+#[tokio::test]
+async fn abort_already_aborted_row_rejects_with_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let events = SqliteEventRepo::new(pool.clone());
+    abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    // Row is now in `aborted` — second call must reject.
+    let err = abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn abort_completed_row_rejects_with_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    // Row is now in `completed` — terminal state, must reject.
+    let err = abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(3),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn abort_recovery_required_row_rejects_with_conflict() {
+    // Drive a row into `recovery_required` via the Phase C
+    // stale-target-epoch trip-wire, then assert abort rejects.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
+        .bind(seeded.location_id.0.cast_signed())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    // Row is now in `recovery_required` — terminal-for-abort, must reject.
+    let err = abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(3),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn abort_missing_row_rejects_with_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let events = SqliteEventRepo::new(pool.clone());
+    let err = abort_destructive_commit(
+        &pool,
+        &events,
+        CommitId(9_999),
+        AbortReason::OperatorCancel,
+        T0,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn abort_rejects_gate_driven_reason_variants_without_touching_row() {
+    // Caller-initiated abort accepts only pre-mutation variants the
+    // gate does not itself drive. Passing a gate-driven variant
+    // (FreshLease, ClosureGrew, ...) or the post-mutation-only
+    // StaleTargetEpoch must surface VoomError::Config without writing.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let (_, _, _, epoch_before) = commit_intent_state_and_epoch(&pool, commit_id).await;
+    let events = SqliteEventRepo::new(pool.clone());
+
+    for reason in [
+        AbortReason::FreshLease,
+        AbortReason::ClosureGrew,
+        AbortReason::ClosureIncomplete,
+        AbortReason::StaleEvidence,
+        AbortReason::StaleTargetEpoch,
+    ] {
+        let err = abort_destructive_commit(
+            &pool,
+            &events,
+            commit_id,
+            reason.clone(),
+            T0 + time::Duration::seconds(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, VoomError::Config(_)),
+            "reason {reason:?}: got {err:?}"
+        );
+    }
+
+    // Row must still be `pending` and epoch untouched after the rejections.
+    let (state, abort_reason, _, epoch_after) =
+        commit_intent_state_and_epoch(&pool, commit_id).await;
+    assert_eq!(state, "pending");
+    assert!(abort_reason.is_none());
+    assert_eq!(epoch_after, epoch_before);
+}
+
+#[tokio::test]
+async fn abort_accepts_mutation_failed_and_other_variants() {
+    // Sanctioned non-OperatorCancel pre-mutation variants must succeed
+    // and round-trip their snake_case tag into both the durable
+    // abort_reason column and the event payload's `reason` field.
+    let (pool, _tmp) = fresh_pool().await;
+    let events = SqliteEventRepo::new(pool.clone());
+
+    let seeded_a = seed_location(&pool, "/srv/a").await;
+    let commit_a = prepare_pending_intent(&pool, seeded_a.location_id).await;
+    abort_destructive_commit(
+        &pool,
+        &events,
+        commit_a,
+        AbortReason::MutationFailed,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let (state_a, reason_a, _, _) = commit_intent_state_and_epoch(&pool, commit_a).await;
+    assert_eq!(state_a, "aborted");
+    assert_eq!(reason_a.as_deref(), Some("mutation_failed"));
+    let (prior_a, payload_reason_a) = first_aborted_pre_mutation_payload(&pool, commit_a).await;
+    assert_eq!(prior_a, "pending");
+    assert_eq!(payload_reason_a, "mutation_failed");
+
+    let seeded_b = seed_location(&pool, "/srv/b").await;
+    let commit_b = prepare_pending_intent(&pool, seeded_b.location_id).await;
+    abort_destructive_commit(
+        &pool,
+        &events,
+        commit_b,
+        AbortReason::Other("custom note".to_owned()),
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let (state_b, reason_b, _, _) = commit_intent_state_and_epoch(&pool, commit_b).await;
+    assert_eq!(state_b, "aborted");
+    assert_eq!(reason_b.as_deref(), Some("other"));
+    let (prior_b, payload_reason_b) = first_aborted_pre_mutation_payload(&pool, commit_b).await;
+    assert_eq!(prior_b, "pending");
+    assert_eq!(payload_reason_b, "other");
+}

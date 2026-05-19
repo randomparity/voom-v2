@@ -2801,6 +2801,122 @@ pub async fn finalize_destructive_commit(
     }
 }
 
+/// Outcome of `abort_destructive_commit`. Carries the now-aborted
+/// `commit_id` and the post-update `epoch` for callers that want to
+/// confirm the durable transition. The function never returns
+/// "no-op" — a row that cannot be aborted surfaces as
+/// `VoomError::Conflict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbortOutcome {
+    Aborted { commit_id: CommitId, epoch: u64 },
+}
+
+/// Caller-initiated abort of a `pending` `commit_intents` row — sub-slice
+/// 8 of the M3 Phase 2 plan. The only sanctioned entry point for the
+/// "operator changed their mind between `prepare` and `authorize`"
+/// transition. One IMMEDIATE tx:
+/// 1. Read the `commit_intents` row by `commit_id`. Require
+///    `state = 'pending'`. Missing, `authorized`, or any terminal state
+///    surfaces as `VoomError::Conflict` — `authorized` rows are not
+///    abortable through this entry; the only sanctioned post-authorize
+///    termination is `finalize_destructive_commit(_,
+///    MutationOutcome::NotPerformed, _)` (recovery contract).
+/// 2. UPDATE the row to `state = 'aborted'`, set `aborted_at = now`,
+///    write `reason`'s `snake_case` tag into `abort_reason`, bump the
+///    `epoch`.
+/// 3. Emit `commit.aborted_pre_mutation` with `prior_state = 'pending'`
+///    and the reason tag. (The event kind is shared with the
+///    `NotPerformed` branch of `finalize_destructive_commit`, which
+///    emits with `prior_state = 'authorized'` — commit 7.)
+///
+/// `reason` must be one of the pre-mutation `AbortReason` variants:
+/// `OperatorCancel`, `MutationFailed`, or `Other(_)`. Gate-driven
+/// variants (`ClosureGrew`, `FreshLease`, `ClosureIncomplete`,
+/// `StaleEvidence`) route through their dedicated `commit.aborted_by_*`
+/// event kinds inside the gate itself; `StaleTargetEpoch` is Phase-C
+/// only and writes to `recovery_reason`, not `abort_reason`. Passing
+/// any of these returns `VoomError::Config` without touching the row.
+///
+/// # Errors
+///
+/// - `VoomError::Config` if `reason` is not a sanctioned caller-supplied
+///   variant for this entry point.
+/// - `VoomError::Conflict` if the row does not exist or is in a state
+///   other than `pending` (including `authorized` — recovery contract).
+/// - `VoomError::Database` / `VoomError::Internal` on storage failures.
+pub async fn abort_destructive_commit(
+    pool: &SqlitePool,
+    event_repo: &dyn EventRepo,
+    commit_id: CommitId,
+    reason: AbortReason,
+    now: OffsetDateTime,
+) -> Result<AbortOutcome, VoomError> {
+    let reason_str = caller_abort_reason_str(&reason)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("abort: tx begin: {e}")))?;
+
+    let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
+
+    let aborted_iso = iso8601(now)?;
+    let new_epoch = row.epoch + 1;
+    let res = sqlx::query(
+        "UPDATE commit_intents SET state = 'aborted', aborted_at = ?, \
+            abort_reason = ?, epoch = ? \
+         WHERE id = ? AND state = 'pending' AND epoch = ?",
+    )
+    .bind(&aborted_iso)
+    .bind(reason_str)
+    .bind(i64_from_u64(new_epoch))
+    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(row.epoch))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("abort: UPDATE: {e}")))?;
+    if res.rows_affected() != 1 {
+        return Err(VoomError::Conflict(format!(
+            "abort: UPDATE on {commit_id} affected {} rows; concurrent state mutation",
+            res.rows_affected()
+        )));
+    }
+
+    emit_aborted_pre_mutation_event(event_repo, &mut tx, commit_id, "pending", reason_str, now)
+        .await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("abort: commit: {e}")))?;
+
+    Ok(AbortOutcome::Aborted {
+        commit_id,
+        epoch: new_epoch,
+    })
+}
+
+/// Validate that `reason` is a sanctioned caller-supplied
+/// `AbortReason` for the pending-only abort entry point and return its
+/// `snake_case` tag for the durable `abort_reason` column and the
+/// `commit.aborted_pre_mutation` event payload. Gate-driven and
+/// post-mutation variants are rejected with `VoomError::Config`
+/// before any tx opens.
+fn caller_abort_reason_str(reason: &AbortReason) -> Result<&'static str, VoomError> {
+    match reason {
+        AbortReason::OperatorCancel => Ok("operator_cancel"),
+        AbortReason::MutationFailed => Ok("mutation_failed"),
+        AbortReason::Other(_) => Ok("other"),
+        AbortReason::ClosureGrew
+        | AbortReason::FreshLease
+        | AbortReason::ClosureIncomplete
+        | AbortReason::StaleEvidence
+        | AbortReason::StaleTargetEpoch => Err(VoomError::Config(format!(
+            "abort: {reason:?} is a gate-driven or post-mutation variant; \
+             callers may only pass OperatorCancel, MutationFailed, or Other(_)"
+        ))),
+    }
+}
+
 /// Snapshot of the durable `commit_intents` row body Phase C carries
 /// across in-tx steps. Loaded once at the head of the finalize tx so
 /// every branch binds the same column values.
