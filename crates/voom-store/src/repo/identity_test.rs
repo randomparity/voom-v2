@@ -717,3 +717,405 @@ async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
 
     tx.commit().await.unwrap();
 }
+
+// ---- retire_file_location_in_tx (M2 method; sibling-test gap plug) ------
+
+async fn fresh_with_one_live_location()
+-> (SqliteIdentityRepo, FileLocation, tempfile::NamedTempFile) {
+    let (repo, tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "deadbeef".to_owned(),
+            size_bytes: 1024,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let loc = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/a.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (repo, loc, tmp)
+}
+
+#[tokio::test]
+async fn retire_file_location_happy_path_sets_retired_at_and_bumps_epoch() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+    assert!(loc.retired_at.is_none());
+    assert_eq!(loc.epoch, 0);
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let retired = repo
+        .retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(7), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(retired.retired_at.is_some());
+    assert_eq!(retired.epoch, 1);
+}
+
+#[tokio::test]
+async fn retire_file_location_already_terminal_is_conflict() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Second retire must reject — the row is already terminal.
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(2), 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn retire_file_location_stale_epoch_on_live_row_is_conflict() {
+    // Phase C trip-wire: a member of `closure_authorized` has a
+    // different `epoch` than the value the caller passes as
+    // `expected_epoch`. The retire UPDATE matches zero rows and the
+    // method returns Conflict. The row stays live — no partial write.
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+    assert_eq!(loc.epoch, 0);
+
+    // Simulate a concurrent epoch bump (e.g. another commit-gate path
+    // touched the row). Direct UPDATE, no API call, so the row remains
+    // live (retired_at IS NULL) but its epoch is now 1.
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
+        .bind(i64::try_from(loc.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // Row stays live — no partial write.
+    let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert!(still.retired_at.is_none());
+    assert_eq!(still.epoch, 1);
+}
+
+// ---- retire_file_version_in_tx (M2 method; sibling-test gap plug) -------
+
+async fn fresh_with_one_live_version() -> (SqliteIdentityRepo, FileVersion, tempfile::NamedTempFile)
+{
+    let (repo, tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "cafef00d".to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    (repo, version, tmp)
+}
+
+#[tokio::test]
+async fn retire_file_version_happy_path_sets_retired_at_and_bumps_epoch() {
+    let (repo, version, _tmp) = fresh_with_one_live_version().await;
+    assert!(version.retired_at.is_none());
+    assert_eq!(version.epoch, 0);
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let retired = repo
+        .retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(3), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(retired.retired_at.is_some());
+    assert_eq!(retired.epoch, 1);
+}
+
+#[tokio::test]
+async fn retire_file_version_already_terminal_is_conflict() {
+    let (repo, version, _tmp) = fresh_with_one_live_version().await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(2), 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn retire_file_version_stale_epoch_on_live_row_is_conflict() {
+    // Same Phase C trip-wire as the file_locations counterpart.
+    let (repo, version, _tmp) = fresh_with_one_live_version().await;
+    assert_eq!(version.epoch, 0);
+
+    sqlx::query("UPDATE file_versions SET epoch = epoch + 1 WHERE id = ?")
+        .bind(i64::try_from(version.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .retire_file_version_in_tx(&mut tx, version.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    let still = repo.get_file_version(version.id).await.unwrap().unwrap();
+    assert!(still.retired_at.is_none());
+    assert_eq!(still.epoch, 1);
+}
+
+// ---- replace_file_location_in_tx (new) ----------------------------------
+
+#[tokio::test]
+async fn replace_file_location_happy_path_retires_old_and_inserts_new() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+    assert_eq!(loc.epoch, 0);
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let new_id = repo
+        .replace_file_location_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            NewFileLocation {
+                file_version_id: loc.file_version_id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/a.renamed.mkv".to_owned(),
+                proof: None,
+                observed_at: T0 + Duration::seconds(2),
+            },
+            T0 + Duration::seconds(2),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Old row: terminal, epoch bumped.
+    let old = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert!(old.retired_at.is_some());
+    assert_eq!(old.epoch, 1);
+
+    // New row: live, on the same version.
+    let inserted = repo.get_file_location(new_id).await.unwrap().unwrap();
+    assert!(inserted.retired_at.is_none());
+    assert_eq!(inserted.file_version_id, loc.file_version_id);
+    assert_eq!(inserted.value, "/srv/media/a.renamed.mkv");
+}
+
+#[tokio::test]
+async fn replace_file_location_already_terminal_is_conflict_and_no_insert() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    // Retire it first.
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let before: usize = repo
+        .list_file_locations_by_version(loc.file_version_id)
+        .await
+        .unwrap()
+        .len();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .replace_file_location_in_tx(
+            &mut tx,
+            loc.id,
+            1,
+            NewFileLocation {
+                file_version_id: loc.file_version_id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/should-not-land.mkv".to_owned(),
+                proof: None,
+                observed_at: T0 + Duration::seconds(3),
+            },
+            T0 + Duration::seconds(3),
+        )
+        .await
+        .unwrap_err();
+    drop(tx);
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // Atomicity: failed replace must not have inserted the new row.
+    let after: usize = repo
+        .list_file_locations_by_version(loc.file_version_id)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after, before, "no new row inserted on Conflict");
+}
+
+#[tokio::test]
+async fn replace_file_location_stale_epoch_on_live_row_is_conflict_and_no_insert() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    // Concurrent epoch bump without going through the API.
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
+        .bind(i64::try_from(loc.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let before: usize = repo
+        .list_file_locations_by_version(loc.file_version_id)
+        .await
+        .unwrap()
+        .len();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .replace_file_location_in_tx(
+            &mut tx,
+            loc.id,
+            0, // caller's snapshot — now stale
+            NewFileLocation {
+                file_version_id: loc.file_version_id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/should-not-land.mkv".to_owned(),
+                proof: None,
+                observed_at: T0 + Duration::seconds(2),
+            },
+            T0 + Duration::seconds(2),
+        )
+        .await
+        .unwrap_err();
+    drop(tx);
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    let after: usize = repo
+        .list_file_locations_by_version(loc.file_version_id)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after, before, "no new row inserted on Conflict");
+
+    let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert!(
+        still.retired_at.is_none(),
+        "live row stays live on Conflict"
+    );
+}
+
+#[tokio::test]
+async fn replace_file_location_trusts_caller_supplied_version_id_by_design() {
+    // The round-2 cross-version invariant ("the new location must be
+    // on the same FileVersion as the retired one") is enforced at the
+    // gate boundary (commit 7 / Phase C), not inside this identity
+    // method. `FileLocationProposal` (the gate-level type) has no
+    // `file_version_id` field, so Phase C can only source it by
+    // reading the retired row's current version — meaning the only
+    // way to call this method with a "wrong" version_id is to bypass
+    // Phase C entirely.
+    //
+    // This test calls the method directly with a different version_id
+    // and asserts that the method does NOT reject the call. If a
+    // future change adds a defensive check inside this method, this
+    // test must be updated alongside that change so the design
+    // decision is re-examined explicitly, not silently weakened.
+    let (repo, tmp) = fresh().await;
+    let _tmp = tmp; // keep the temp file alive
+
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version_a = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "aaa".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let version_b = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "bbb".to_owned(),
+            size_bytes: 2,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let loc_on_a = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version_a.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/on-a.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Replace under version_a's id but supply NewFileLocation with
+    // version_b's id. Method does not reject by design.
+    let mut tx = repo.pool.begin().await.unwrap();
+    let new_id = repo
+        .replace_file_location_in_tx(
+            &mut tx,
+            loc_on_a.id,
+            0,
+            NewFileLocation {
+                file_version_id: version_b.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/now-on-b.mkv".to_owned(),
+                proof: None,
+                observed_at: T0 + Duration::seconds(1),
+            },
+            T0 + Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // The new row landed on version_b — proving the method did not
+    // re-anchor or reject.
+    let inserted = repo.get_file_location(new_id).await.unwrap().unwrap();
+    assert_eq!(inserted.file_version_id, version_b.id);
+}

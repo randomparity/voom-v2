@@ -635,6 +635,27 @@ pub trait IdentityRepo: Repository {
         retired_at: OffsetDateTime,
         expected_epoch: u64,
     ) -> Result<FileLocation, VoomError>;
+    /// Atomically retire `retired_id` under its `expected_epoch` guard
+    /// and insert a new `FileLocation` on the same `FileVersion`. Both
+    /// steps run in the caller's transaction; either both land or
+    /// neither. `Conflict` is returned if the retire UPDATE fails to
+    /// match a live row (already terminal or stale epoch); in that case
+    /// the insert is skipped.
+    ///
+    /// Phase C is the sole caller (commit 7). The caller is responsible
+    /// for sourcing `new_location.file_version_id` from the retired
+    /// row's current version — this method does not defensively
+    /// re-check, by design (the round-2 cross-version invariant lives
+    /// at the gate boundary, where `FileLocationProposal` has no
+    /// `file_version_id` field).
+    async fn replace_file_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        retired_id: FileLocationId,
+        retired_expected_epoch: u64,
+        new_location: NewFileLocation,
+        retired_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError>;
 
     // identity_evidence CRUD.
     async fn record_identity_evidence_in_tx<'tx>(
@@ -1320,6 +1341,42 @@ impl IdentityRepo for SqliteIdentityRepo {
         get_file_location_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("file_locations post-retire get vanished: {id}"))
         })
+    }
+
+    async fn replace_file_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        retired_id: FileLocationId,
+        retired_expected_epoch: u64,
+        new_location: NewFileLocation,
+        retired_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError> {
+        let ts = iso8601(retired_at)?;
+        let res = sqlx::query(
+            "UPDATE file_locations SET retired_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND epoch = ? AND retired_at IS NULL",
+        )
+        .bind(&ts)
+        .bind(i64_from_u64(retired_id.0))
+        .bind(i64_from_u64(retired_expected_epoch))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations replace-retire: {e}")))?;
+        if res.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} expected_epoch={retired_expected_epoch} or already retired"
+            )));
+        }
+        let new_id = insert_file_location(
+            tx,
+            new_location.file_version_id,
+            new_location.kind,
+            &new_location.value,
+            new_location.proof.as_ref(),
+            new_location.observed_at,
+        )
+        .await?;
+        Ok(new_id)
     }
 
     async fn record_identity_evidence_in_tx<'tx>(

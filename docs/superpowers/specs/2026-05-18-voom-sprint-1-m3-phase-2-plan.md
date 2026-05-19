@@ -101,17 +101,23 @@ Retroactive description after the round-5 fix: commit 2 (`ae4be4b`) originally a
 
 ### Commit 3 — `IdentityRepo` destructive `_in_tx` mutations (sub-slice 3)
 
-Three new methods on `IdentityRepo` trait + `SqliteIdentityRepo` impl. Pure additions — no callers yet. Every signature takes `expected_epoch: u64` to match the existing M2 retire-method convention (`identity.rs:557–624`):
+One new method on `IdentityRepo` trait + `SqliteIdentityRepo` impl, plus sibling-test gap plug for two existing M2 methods. Pure additions — no callers yet. No M2 method bodies are touched (see §7).
 
-- `retire_file_location_in_tx(tx, location_id, retired_at, expected_epoch) -> Result<(), VoomError>` — guarded UPDATE on `file_locations` (`WHERE id = ? AND epoch = ?`); sets `retired_at`, bumps `epoch`. Returns `VoomError::Conflict` on a row already terminal **or** on `expected_epoch` mismatch (matching M2 soft-delete semantics; not idempotent).
-- `retire_file_version_in_tx(tx, version_id, retired_at, expected_epoch) -> Result<(), VoomError>` — guarded UPDATE on `file_versions`; sets `retired_at`, bumps `epoch`. Live `FileLocation` rows under the version remain (Phase C's caller decides whether to cascade-retire via `replace_file_location_in_tx`).
-- `replace_file_location_in_tx(tx, retired_id, retired_expected_epoch, new_proposal, retired_at) -> Result<FileLocationId, VoomError>` — atomically retires `retired_id` under its `expected_epoch` guard and inserts a new `FileLocation` on the same `FileVersion`. Single tx; either both steps land or neither.
+**Already in M2 (used as-is):**
+- `retire_file_location_in_tx(tx, id, retired_at, expected_epoch) -> Result<FileLocation, VoomError>` (`identity.rs:618` / impl `:1261`) — guarded UPDATE on `file_locations` (`WHERE id = ? AND epoch = ? AND retired_at IS NULL`); sets `retired_at`, bumps `epoch`; returns the row. `rows_affected != 1` → `VoomError::Conflict` covers both already-terminal AND stale-epoch.
+- `retire_file_version_in_tx(tx, id, retired_at, expected_epoch) -> Result<FileVersion, VoomError>` (`identity.rs:586`) — same shape against `file_versions`. No Phase C dispatch consumes `retire_file_version_in_tx` in Sprint 1 (`DeleteFileVersion` deferred per Phase 2 plan §3 round-5 fix; see Phase 2 plan §9 follow-up). The sibling-test gap plug remains independently valuable because the method exists in M2 and the epoch-guard contract had zero coverage; covering it pins the contract for the eventual Sprint 5+ caller.
 
-(`ArchiveFileVersion` was previously a fourth method; removed because the schema has no `archived_at` column. See §3 deferral and §9 follow-up.)
+The Phase C call sites that DO exist (`retire_file_location_in_tx` + `replace_file_location_in_tx`) consume the row return value as `let _ = id_repo.retire_..._in_tx(...).await?;`. The earlier plan draft specified `Result<(), VoomError>` here; that draft was wrong about the M2 convention and is corrected by this row.
 
-**Sibling tests** in `identity_test.rs`: each method asserts the column shape, epoch bump, and the Conflict path on a row already in the target state. **Additionally**, each method gets a dedicated sibling-test row asserting the `expected_epoch` mismatch path returns `Conflict` — including the case where the row is live (not terminal) but the caller's snapshot epoch is stale. This is the guard Phase C will rely on.
+**New in this commit:**
+- `replace_file_location_in_tx(tx, retired_id, retired_expected_epoch, new_location: NewFileLocation, retired_at) -> Result<FileLocationId, VoomError>` — atomically retires `retired_id` under its `expected_epoch` guard and inserts a new `FileLocation` on the same `FileVersion`. Single tx (caller's tx); either both steps land or neither. Takes `NewFileLocation` (identity's own type) — not `FileLocationProposal` (a `commit_safety_gate` type) — so identity does not import from the gate layer above it. The round-2 type-level cross-version invariant survives at the gate boundary: `FileLocationProposal` has no `file_version_id`, so Phase C (commit 7) can only source it by reading the retired row, then build `NewFileLocation` from `proposal + that version_id`.
 
-**Exit:** `just ci` green; mutations sibling-tested for both terminal-row and stale-epoch Conflict paths; no integration test (no caller yet).
+**Sibling tests** in `identity_test.rs` plug the existing M2 gap and cover the new method:
+- `retire_file_location_in_tx` (zero coverage in M2 today): happy path; `Conflict` on already-terminal row; **`Conflict` on stale-epoch live row** (the guard Phase C will rely on).
+- `retire_file_version_in_tx` (zero coverage in M2 today): same three rows.
+- `replace_file_location_in_tx` (new): happy path; `Conflict` on already-terminal retired row with atomicity check (no new row inserted); `Conflict` on stale-epoch live retired row with atomicity check; cross-version isolation note — caller-supplied `NewFileLocation.file_version_id` is trusted (Phase C is the conversion site that enforces the invariant). The atomicity assertions read `list_file_locations_by_version` after the failed call to assert the new row was rolled back.
+
+**Exit:** `just ci` green; ten new sibling-test rows; `replace_file_location_in_tx` covered for both terminal-row and stale-epoch `Conflict` paths plus the atomicity guarantee; no integration test (no caller yet).
 
 ### Commit 4 — `prepare_destructive_commit` (Phase A) (sub-slice 4)
 
@@ -265,7 +271,7 @@ After commit 10:
 |---|---|---|---|---|
 | 1 | `CommitId`; 5 `ErrorCode` + `VoomError` variants; `FailureClass` remap | — | `commit_safety_gate` module + type stubs incl. opaque `CommitPermit` (accessors only) and `CommitGateResult::BlockedByStaleTargetEpoch`. **Migration 0005** (commit-intent persistent permit + `recovery_reason` column) folded into this commit's round-4 fix; see §3. | sibling smoke + extended `failure_test.rs` |
 | 2 | — | — | `AliasResolver` trait (scoped to external sources only — round-5 retroactive narrowing) + `FailingAliasResolver` test fixture. `SqliteAliasResolver` was shipped here in `ae4be4b` then deleted by the round-5 fix; DB-internal alias enumeration moves to `IdentityRepo::list_live_file_locations_by_version_in_tx` (round-5 fix commit). | sibling for `FailingAliasResolver` |
-| 3 | — | — | 3 new `IdentityRepo` `_in_tx` mutations, all guarded by `expected_epoch` | sibling for each (incl. dedicated `expected_epoch` mismatch row) |
+| 3 | — | — | 1 new `IdentityRepo` mutation (`replace_file_location_in_tx`); 2 existing M2 retire methods (location, version) used as-is and get sibling-test coverage they lacked. `retire_file_version_in_tx` has no Phase C dispatch in Sprint 1 (`DeleteFileVersion` deferred per §3 round-5); the gap plug pins the epoch-guard contract for the eventual Sprint 5+ caller. | sibling for `replace` + gap-plug rows for both existing retire methods (each incl. dedicated `expected_epoch` mismatch on a live row) |
 | 4 | — | `SubjectType::CommitIntent`; `commit.intent_recorded`, `.aborted_by_use_lease`, `.aborted_by_stale_evidence`, `.aborted_by_closure_incomplete` | `prepare_destructive_commit` + `phase_a_gate_abort_with_event` | sibling + integration `commit_safety_gate.rs` (Phase A) |
 | 5 | — | — | `consult_pending_commit_lock_in_tx` + 2 callers retrofitted | extended M2 sibling + integration `commit_safety_gate_pending_lock.rs` |
 | 6 | — | `commit.authorized`, `.aborted_by_closure_grew` | `authorize_destructive_commit` (Phase B persists `target_row_epochs` JSON into `commit_intents` atomically with `state = 'authorized'`) | sibling + integration `commit_safety_gate_after_rename.rs` |
