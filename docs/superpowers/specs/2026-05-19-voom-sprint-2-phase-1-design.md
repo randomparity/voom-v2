@@ -91,48 +91,86 @@ Every `_test.rs` is linked from its source with `#[path]` per ADR-0004.
 /// stream of `ProgressFrame`s terminated by exactly one `Result` or
 /// `Error` frame.
 ///
+/// `lease_id` is the sole work-identity authority on the wire.
+/// `ticket_id` is intentionally absent — the supervisor knows the
+/// ticket from its durable `leases` row; embedding it on the wire
+/// would create a second source of truth a malicious worker could
+/// claim against. The wire stays narrow: bind the lease, derive
+/// everything else from durable state.
+///
 /// Idempotency is carried ONLY in the `X-Voom-Idempotency-Key`
 /// request header (§3.8). It is intentionally NOT present in the
-/// body, so header and body cannot disagree; the middleware checks
-/// the header once, and the handler trusts it. A raw-wire mutation
+/// body. The middleware applies request-hash-keyed replay semantics:
+/// same key + same body → replay original outcome; same key +
+/// different body → `DuplicateIdempotencyKey`. A raw-wire mutation
 /// test pins that a body field named `idempotency_key` is rejected
-/// as `InvalidPayload`.
+/// as `HeaderBodyKeyMismatch` regardless of value.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationRequest {
-    pub protocol_version: u32,            // voom-core::PROTOCOL_VERSION
-    pub lease_id: LeaseId,
-    pub ticket_id: TicketId,
     pub operation: OperationKind,
-    pub payload: serde_json::Value,       // operation-specific
+    pub lease_id: LeaseId,
+    pub payload: serde_json::Value,       // operation-specific; deny_unknown_fields applies recursively only to typed sub-shapes the worker decodes
     pub heartbeat_deadline_ms: u32,
     pub progress_idle_deadline_ms: u32,
 }
 
 /// Worker → supervisor response for the immediate ack on
 /// `/v1/operations`. The supervisor verifies it before consuming
-/// the NDJSON body. The idempotency key is echoed in the response
-/// header (`X-Voom-Idempotency-Key`), not the body.
+/// the NDJSON body. The idempotency key and protocol version are
+/// echoed in response headers (`X-Voom-Idempotency-Key`,
+/// `X-Voom-Protocol-Version`), not in the body.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationResponse {
-    pub protocol_version: u32,
     pub lease_id: LeaseId,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// 0..=10000 basis points so `Eq` is derivable and on-wire JSON is
 /// integer (no NaN, no float-equality foot-guns). 0 → 0%, 10000 → 100%.
+///
+/// Field is private; only `TryFrom<u16>` and `Deserialize` can
+/// construct one, so the `0..=10000` invariant is enforced at every
+/// boundary (typed callers and deserialized JSON alike). A direct
+/// `PercentBps(65535)` literal does not compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct PercentBps(pub u16);
+#[serde(transparent, try_from = "u16", into = "u16")]
+pub struct PercentBps {
+    bps: u16,
+}
 
 impl PercentBps {
-    pub const ZERO: Self = Self(0);
-    pub const FULL: Self = Self(10_000);
-    pub fn new(bps: u16) -> Result<Self, ProtocolError> {
-        if bps > 10_000 { Err(ProtocolError::InvalidPayload { detail: format!("percent_bps={bps} > 10000") }) } else { Ok(Self(bps)) }
+    pub const ZERO: Self = Self { bps: 0 };
+    pub const FULL: Self = Self { bps: 10_000 };
+    pub fn bps(self) -> u16 { self.bps }
+}
+
+impl TryFrom<u16> for PercentBps {
+    type Error = ProtocolError;
+    fn try_from(bps: u16) -> Result<Self, Self::Error> {
+        if bps > 10_000 {
+            Err(ProtocolError::InvalidPayload { detail: format!("percent_bps={bps} > 10000") })
+        } else {
+            Ok(Self { bps })
+        }
     }
 }
 
+impl From<PercentBps> for u16 {
+    fn from(p: PercentBps) -> u16 { p.bps }
+}
+```
+
+Tests pin:
+- `PercentBps::try_from(0)` and `try_from(10_000)` succeed.
+- `try_from(10_001)` and `try_from(65_535)` reject with `InvalidPayload`.
+- Deserializing `10001` from JSON via `serde_json::from_str` returns
+  the same error.
+- A direct `PercentBps { bps: 65535 }` does not compile from outside
+  the module (compile-fail trybuild test).
+
+```rust
 /// One frame on the NDJSON progress stream.
 ///
 /// Every frame includes `lease_id` and `seq`. Per §4.2: `seq` is
@@ -426,7 +464,12 @@ the routes:
 - `POST /v1/operations` — accept operation, return
   `OperationResponse` immediately, then stream NDJSON progress
   frames on the response body.
-- `GET /v1/handshake` — return `HandshakeResponse`.
+- `POST /v1/handshake` — accept `HandshakeRequest`, return
+  `HandshakeResponse`. This route is exempt from version, auth,
+  and idempotency middleware (see the matrix below); the
+  handshake handler returns
+  `ProtocolError::UnsupportedProtocolVersion` directly when
+  `offered` is outside `[SUPPORTED_MIN, SUPPORTED_MAX]`.
 - `POST /v1/leases/{id}/heartbeat` — accept heartbeat (worker → supervisor
   direction; the supervisor's server hosts this. The worker side does
   not implement it.).
@@ -435,18 +478,52 @@ the routes:
   responds, then drains current operation. Phase 1 ships the route;
   Phase 2's supervisor wires its use.
 
-Every request goes through one middleware:
+Every request goes through one middleware. The middleware checks
+exemption flags per route:
 
-1. If the route is version-gated (`is_version_gated_route` —
-   everything except `POST /v1/handshake`), parse `protocol_version`
-   header; reject mismatches with `ProtocolError::UnsupportedProtocolVersion`.
-2. Parse `Authorization: Bearer ...`, `X-Voom-Worker-Id`,
-   `X-Voom-Worker-Epoch`. Validate via `validate_credentials`.
-3. Parse `X-Voom-Idempotency-Key` (canonical idempotency location).
-   Reject collisions against the worker's recent-key LRU; the request
-   body MUST NOT carry an `idempotency_key` field — a body that does
-   is rejected as `HeaderBodyKeyMismatch` (this guards against a
-   client that puts the key in two places where they could disagree).
+| Route | Version-gated? | Auth-gated? | Idempotency-gated? |
+|---|---|---|---|
+| `POST /v1/handshake` | no | no | no |
+| `POST /v1/operations` | yes | yes | yes |
+| `POST /v1/leases/{id}/heartbeat` | yes | yes | no |
+| `POST /v1/leases/{id}/progress` | yes | yes | no |
+| `POST /v1/leases/{id}/cancel` | yes | yes | no |
+
+The middleware code is one helper `route_policy(path, method) ->
+RoutePolicy { version, auth, idempotency }` consulted by every
+request; tests pin the matrix exhaustively. The handshake exemption
+covers all three gates because the supervisor does not yet hold
+credentials when it issues handshake (in Sprint 4's authenticated
+transport, handshake will gain its own TLS client-cert gate).
+
+For gated routes:
+
+1. **Version (if gated).** Parse `X-Voom-Protocol-Version` header;
+   reject mismatches with `ProtocolError::UnsupportedProtocolVersion`.
+2. **Auth (if gated).** Parse `Authorization: Bearer ...`,
+   `X-Voom-Worker-Id`, `X-Voom-Worker-Epoch`. Validate via
+   `validate_credentials`.
+3. **Idempotency (if gated).** Parse `X-Voom-Idempotency-Key`
+   (canonical idempotency location). Apply **request-hash-keyed
+   replay semantics**:
+   - Compute `body_hash = blake3(request_body_bytes)`.
+   - Look up `(idempotency_key, body_hash)` in the worker's recent-key
+     LRU. If found, the prior outcome is replayed (cached
+     `OperationResponse` headers + replayed NDJSON stream) without
+     re-executing. This is what makes the dispatch outbox retry
+     after a crash safe.
+   - If `idempotency_key` is found but `body_hash` differs, the
+     middleware rejects with `ProtocolError::DuplicateIdempotencyKey {
+     key, original_status }` (the original request is in flight or
+     completed with a different body; a retry with mismatching body
+     is unambiguously a bug).
+   - The request body MUST NOT carry an `idempotency_key` field — a
+     body that does is rejected as `HeaderBodyKeyMismatch`. The
+     middleware uses pre-typed JSON inspection (`serde_json::Value`)
+     to detect the field before deserializing into `OperationRequest`
+     itself; combined with `#[serde(deny_unknown_fields)]` on
+     `OperationRequest`, this catches both same-value and
+     different-value body collisions.
 
 Phase 1 does NOT ship the supervisor's HTTP server (Phase 2 work),
 but it DOES ship a tiny embedded server inside `voom-conformance` so
@@ -543,7 +620,7 @@ vocabulary so failures point at the right concept:
 - `handshake_rejects_below_supported_min`
 - `handshake_rejects_above_supported_max`
 - `operation_accept_returns_response_envelope`
-- `operation_noop_emits_one_terminal_result`
+- `operation_probe_file_emits_one_progress_and_one_terminal_result`
 - `operation_unknown_returns_unknown_operation`
 - `operation_invalid_payload_returns_invalid_payload`
 - `progress_frame_seq_starts_at_zero`
@@ -666,7 +743,7 @@ Every commit ends `just ci` green. Sprint 1 tests stay passing.
 - §3.7 traits.
 - §3.8 `HttpClient` and `HttpServer`.
 - Round-trip test: spawn `HttpServer` with a handler that returns
-  one `Noop` operation result; `HttpClient::dispatch` succeeds and
+  one `ProbeFile` result; `HttpClient::dispatch` succeeds and
   yields the expected NDJSON sequence.
 
 ### Commit 9 — `low_level` raw-wire module
@@ -683,7 +760,8 @@ Every commit ends `just ci` green. Sprint 1 tests stay passing.
 ### Commit 11 — `echo-worker` binary + parent-death watchdog
 - `voom-conformance/src/bin/echo_worker.rs` per §4.5.
 - Smoke test in `voom-conformance/tests/` that spawns it, lets it
-  bind, sends one `Noop` over the typed API, asserts the result.
+  bind, sends one `ProbeFile { path: "/tmp/x" }` over the typed API,
+  asserts the result echoes the path.
 - Tests for stdin-EOF causing exit within 100 ms.
 
 ### Commit 12 — Typed conformance suite + raw-wire suite
@@ -722,7 +800,7 @@ The phase is complete and Phase 2 may begin when:
 - `worker_incarnations` table and migration 0005.
 - Dispatch outbox (`lease_dispatch_intents`).
 - Watchdog state machine.
-- Any real worker logic beyond `echo-worker`'s noop.
+- Any real worker logic beyond `echo-worker`'s `ProbeFile` echo.
 - TLS, remote-node authentication (Sprint 4).
 - Cancellation that does actual work (Phase 1 ships the route; Phase 2
   wires the supervisor's call).
