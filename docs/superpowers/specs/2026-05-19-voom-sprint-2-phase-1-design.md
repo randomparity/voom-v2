@@ -393,18 +393,24 @@ pub struct HandshakeResponse {
 
 Worker exposes `POST /v1/handshake` accepting `HandshakeRequest` and
 returning `HandshakeResponse` (or a `ProtocolError` body on
-mismatch). **The handshake route is explicitly exempt from the
-version middleware** — that exemption lives in one place in
-`http.rs` (`is_version_gated_route(path: &str) -> bool` returns
-`false` for `/v1/handshake`). This lets the handshake handler return
-a structured `ProtocolError::UnsupportedProtocolVersion { offered,
-supported_min, supported_max }` instead of a generic middleware
-rejection, so the test for "version skew" is positive-shape rather
-than "did middleware return some error".
+mismatch). The handshake route is exempt from version, auth, and
+idempotency middleware — that exemption is encoded in the single
+`route_policy(method, path) -> Option<RoutePolicy>` lookup defined
+in §3.8 (no separate `is_version_gated_route` helper exists). The
+lookup is exact-match on `(method, path)`; unknown routes return
+`None` and the server replies `404 Not Found` before any handler
+runs. This lets the handshake handler return a structured
+`ProtocolError::UnsupportedProtocolVersion { offered, supported_min,
+supported_max }` instead of a generic middleware rejection, so the
+"version skew" test is positive-shape rather than "did middleware
+return some error".
 
 A `POST` (not `GET`) carries the offered version in a JSON body
 where serde validation gives a clean negative test for malformed
 content. The supervisor calls handshake before issuing any operation.
+
+Test pins: `GET /v1/handshake` → 404, `POST /v1/handshake/` (trailing
+slash) → 404, `POST /v1/unknown` → 404, `DELETE /v1/operations` → 404.
 
 ### 3.7 Transport traits (transport.rs)
 
@@ -478,10 +484,11 @@ the routes:
   responds, then drains current operation. Phase 1 ships the route;
   Phase 2's supervisor wires its use.
 
-Every request goes through one middleware. The middleware checks
-exemption flags per route:
+Every request goes through one middleware. The middleware looks up
+the route policy via `route_policy(method, path) -> Option<RoutePolicy>`
+(exact match, fail-closed on unknown routes via 404):
 
-| Route | Version-gated? | Auth-gated? | Idempotency-gated? |
+| Method + Path | Version-gated? | Auth-gated? | Idempotency-gated? |
 |---|---|---|---|
 | `POST /v1/handshake` | no | no | no |
 | `POST /v1/operations` | yes | yes | yes |
@@ -489,12 +496,20 @@ exemption flags per route:
 | `POST /v1/leases/{id}/progress` | yes | yes | no |
 | `POST /v1/leases/{id}/cancel` | yes | yes | no |
 
-The middleware code is one helper `route_policy(path, method) ->
-RoutePolicy { version, auth, idempotency }` consulted by every
-request; tests pin the matrix exhaustively. The handshake exemption
-covers all three gates because the supervisor does not yet hold
-credentials when it issues handshake (in Sprint 4's authenticated
-transport, handshake will gain its own TLS client-cert gate).
+`route_policy` is exact-match on the literal pattern — path
+parameters like `{id}` use a small router that matches the
+parameter segment and rejects mismatching shapes (trailing slash,
+double slash, missing segment). Unknown method+path pairs return
+`None` from `route_policy` and the server responds with
+`404 Not Found` before any handler or middleware runs. Tests pin
+the matrix exhaustively, including: `GET /v1/handshake`,
+`POST /v1/handshake/`, `POST /v1/unknown`, `DELETE /v1/operations`,
+`POST /v1/leases//heartbeat` (empty id) — all 404.
+
+The handshake exemption covers all three gates because the
+supervisor does not yet hold credentials when it issues handshake
+(in Sprint 4's authenticated transport, handshake will gain its own
+TLS client-cert gate).
 
 For gated routes:
 
@@ -504,26 +519,41 @@ For gated routes:
    `X-Voom-Worker-Id`, `X-Voom-Worker-Epoch`. Validate via
    `validate_credentials`.
 3. **Idempotency (if gated).** Parse `X-Voom-Idempotency-Key`
-   (canonical idempotency location). Apply **request-hash-keyed
-   replay semantics**:
-   - Compute `body_hash = blake3(request_body_bytes)`.
-   - Look up `(idempotency_key, body_hash)` in the worker's recent-key
-     LRU. If found, the prior outcome is replayed (cached
-     `OperationResponse` headers + replayed NDJSON stream) without
-     re-executing. This is what makes the dispatch outbox retry
-     after a crash safe.
-   - If `idempotency_key` is found but `body_hash` differs, the
-     middleware rejects with `ProtocolError::DuplicateIdempotencyKey {
-     key, original_status }` (the original request is in flight or
-     completed with a different body; a retry with mismatching body
-     is unambiguously a bug).
-   - The request body MUST NOT carry an `idempotency_key` field — a
-     body that does is rejected as `HeaderBodyKeyMismatch`. The
-     middleware uses pre-typed JSON inspection (`serde_json::Value`)
-     to detect the field before deserializing into `OperationRequest`
-     itself; combined with `#[serde(deny_unknown_fields)]` on
-     `OperationRequest`, this catches both same-value and
-     different-value body collisions.
+   (canonical idempotency location). Apply **explicit byte-replay
+   semantics** keyed on the supervisor's persisted request bytes:
+   - The supervisor's `lease_dispatch_intents` row (overview §4.8)
+     persists `request_body_bytes: BLOB` alongside the
+     `idempotency_key` at dispatch time. On retry after crash, the
+     supervisor sends those exact persisted bytes — not a freshly
+     reserialized `OperationRequest`. This is documented as a
+     contract requirement on the supervisor side and pinned by a
+     test in Phase 2.
+   - The worker computes `body_hash = blake3(request_body_bytes)`
+     on the raw bytes it received over the wire and stores
+     `(idempotency_key, body_hash)` in its recent-key LRU. Replay
+     succeeds iff both the key AND the hash match.
+   - JSON canonicalization (key ordering, whitespace) is
+     deliberately NOT relied on. The contract is "same bytes →
+     same outcome"; the supervisor guarantees same bytes via the
+     persisted blob. A test pins that a same-key, byte-reordered
+     JSON retry (same logical request, different serialization)
+     fails with `DuplicateIdempotencyKey` so the contract is
+     enforced; another test pins that exact-byte replay succeeds.
+   - The request body MUST NOT carry an `idempotency_key` field —
+     not at the top level, not in any nested object, not in any
+     array element. Enforcement: middleware parses the body once as
+     `serde_json::Value` and recursively walks every object/array
+     before any typed deserialization, rejecting on any field
+     named `idempotency_key` with `HeaderBodyKeyMismatch`. The
+     name `idempotency_key` is reserved across all operation
+     payload schemas (documented constraint, not a serde
+     enforcement, because `payload` is `serde_json::Value`).
+   - Combined with `#[serde(deny_unknown_fields)]` on
+     `OperationRequest`, this catches: same-value and
+     different-value body collisions at the top level, the
+     `{"payload": {"idempotency_key": ...}}` nested case, and the
+     `{"payload": [{"idempotency_key": ...}]}` array case.
+     Three paired raw-wire mutation tests cover the three shapes.
 
 Phase 1 does NOT ship the supervisor's HTTP server (Phase 2 work),
 but it DOES ship a tiny embedded server inside `voom-conformance` so
@@ -712,7 +742,15 @@ Every commit ends `just ci` green. Sprint 1 tests stay passing.
 
 ### Commit 2 — Empty `voom-worker-protocol` shell
 - Replace placeholder with real module layout (per §3.1).
-- Add `secrecy` and `constant_time_eq` deps (via workspace dependencies).
+- Add workspace dependencies in `[workspace.dependencies]`:
+  `secrecy = "0.10"` (used by `credentials.rs` in commit 6),
+  `constant_time_eq = "0.4"` (also commit 6),
+  `blake3 = "1"` (used by HTTP idempotency middleware in commit 8),
+  `trybuild = "1"` as a dev-dependency on `voom-worker-protocol`
+  (used by the PercentBps compile-fail test in commit 4),
+  `serde_json = { version = "1", features = ["preserve_order"] }`
+  on `voom-worker-protocol` (used by recursive idempotency-key scan
+  in commit 8).
 - All modules empty stubs; lib.rs re-exports nothing yet.
 - Sprint 1 tests still green; clippy/rustfmt happy.
 
