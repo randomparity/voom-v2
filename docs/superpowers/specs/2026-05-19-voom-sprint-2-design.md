@@ -444,76 +444,148 @@ runtime trusts the wire contract. A future sprint may add a runtime
 self-check to `voom-cli worker verify`; that verb is out of scope for
 Sprint 2.
 
-### 4.8 Worker incarnation persistence and restart reconciliation
+### 4.8 Worker incarnation persistence, dispatch outbox, and restart reconciliation
 
-Bearer-token identity (§4.1) is per-spawn and lives only in the
-supervisor's memory. If the supervisor crashes after dispatch, a live
-child still holds the only copy of the token and the supervisor has
-no port, pid, or epoch to retire or kill it cleanly. To make restart
-safe, Phase 2 ships migration `0005_worker_incarnations.sql`:
+Bearer-token identity (§4.1) is per-spawn. The HTTP dispatch is a
+side effect outside any DB transaction, so the durable state needs a
+**two-step outbox pattern** that survives every supervisor-crash
+point. Phase 2 ships migration `0005_worker_incarnations.sql`:
 
 ```sql
 CREATE TABLE worker_incarnations (
-    incarnation_id  INTEGER PRIMARY KEY,
-    worker_id       INTEGER NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
-    epoch           INTEGER NOT NULL,
-    pid             INTEGER NOT NULL,
-    pgid            INTEGER NOT NULL,         -- process group; supervisor spawns in its own pgrp so kill(-pgid) reaps stragglers
-    endpoint        TEXT NOT NULL,             -- e.g. "127.0.0.1:54321"
-    secret_hash     TEXT NOT NULL,             -- argon2id(secret); plaintext never persists
-    started_at      TEXT NOT NULL,
-    retired_at      TEXT,
-    retire_reason   TEXT,                      -- 'graceful' | 'orphan_reaped' | 'crash_detected' | 'epoch_bumped'
-    UNIQUE(worker_id, epoch)
+    incarnation_id    INTEGER PRIMARY KEY,
+    worker_id         INTEGER NOT NULL REFERENCES workers(id) ON DELETE RESTRICT,
+    epoch             INTEGER NOT NULL,
+    state             TEXT NOT NULL,            -- 'spawning' | 'live' | 'retired'
+    pid               INTEGER NOT NULL,
+    pgid              INTEGER NOT NULL,
+    endpoint          TEXT,                     -- NULL until state = 'live'
+    secret_hash       TEXT NOT NULL,            -- argon2id(secret); plaintext never persists
+    binary_path       TEXT NOT NULL,            -- absolute path; verified before kill
+    process_birth_id  TEXT NOT NULL,            -- portable process identity proof (see below)
+    started_at        TEXT NOT NULL,
+    retired_at        TEXT,
+    retire_reason     TEXT,                     -- 'graceful' | 'orphan_reaped' | 'crash_detected' | 'epoch_bumped' | 'kill_skipped_identity_mismatch'
+    UNIQUE(worker_id, epoch),
+    CHECK (state IN ('spawning', 'live', 'retired')),
+    CHECK ((state = 'live') = (endpoint IS NOT NULL)),
+    CHECK ((state = 'retired') = (retired_at IS NOT NULL))
+) STRICT;
+
+CREATE TABLE lease_dispatch_intents (
+    intent_id        INTEGER PRIMARY KEY,
+    lease_id         INTEGER NOT NULL REFERENCES leases(id) ON DELETE RESTRICT,
+    incarnation_id   INTEGER NOT NULL REFERENCES worker_incarnations(incarnation_id),
+    idempotency_key  TEXT NOT NULL,             -- ULID; presented as X-Voom-Idempotency-Key
+    state            TEXT NOT NULL,             -- 'pending' | 'dispatched' | 'completed' | 'failed' | 'abandoned'
+    created_at       TEXT NOT NULL,
+    dispatched_at    TEXT,
+    completed_at     TEXT,
+    UNIQUE(lease_id, incarnation_id),
+    UNIQUE(idempotency_key),
+    CHECK (state IN ('pending', 'dispatched', 'completed', 'failed', 'abandoned'))
 ) STRICT;
 ```
 
-The supervisor uses `WorkerIncarnationRepo` (new in `voom-store`) to
-INSERT a row inside the same transaction that bumps the
-`worker.epoch` in Sprint 1's existing `workers` table and dispatches
-the operation. Every callback validates against the live row (epoch
-matches, retired_at IS NULL, secret_hash matches argon2 of the
-presented bearer token). A retired incarnation's callback returns
-`WORKER_INCARNATION_STALE` and is recorded as an audit event without
-mutating any lease.
+The supervisor's dispatch flow is a strict outbox sequence —
+**HTTP dispatch never happens inside a DB transaction**:
 
-**Startup reconciliation** runs as the first step of
+1. **Pre-spawn commit.** INSERT `worker_incarnations` row with
+   `state = 'spawning'`, pid = 0 placeholder. Commit. (Reserves the
+   epoch durably so two supervisors cannot reuse it.)
+2. **Spawn.** `tokio::process::Command::spawn`, capture child handle,
+   wait for stdout port line, compute `process_birth_id`.
+3. **Live commit.** UPDATE the row to `state = 'live'` with `pid`,
+   `pgid`, `endpoint`, `binary_path`, `process_birth_id`. Commit.
+4. **Intent commit.** INSERT `lease_dispatch_intents` row with
+   `state = 'pending'` and a fresh ULID `idempotency_key`. Commit.
+5. **Dispatch.** HTTP POST to the worker's endpoint carrying the
+   `idempotency_key` header. The worker MUST reject a duplicate
+   `idempotency_key` for the same lease/incarnation pair — this
+   makes the dispatch retryable from the supervisor side without
+   risking double execution.
+6. **Dispatched commit.** On the HTTP request's first byte response,
+   UPDATE the intent to `state = 'dispatched'`. (If the supervisor
+   crashes between step 5 and step 6, the worker may have started
+   work but the intent still says `pending`. Restart reconciliation
+   handles this — see below.)
+7. **Result commit.** When the watchdog accepts a terminal result,
+   UPDATE the intent to `state = 'completed'` (or `'failed'`) in the
+   same transaction that closes the lease.
+
+**Restart reconciliation** runs as the first step of
 `LocalWorkerSupervisor::start`:
 
-1. Open a `BEGIN IMMEDIATE` transaction.
-2. `SELECT * FROM worker_incarnations WHERE retired_at IS NULL` —
-   these are orphans from the previous supervisor.
-3. For each orphan: `kill(-pgid, SIGTERM)` (best effort); after a
-   short grace period, `kill(-pgid, SIGKILL)`.
-4. Mark every orphan's row `retired_at = NOW, retire_reason =
-   'orphan_reaped'` in the same transaction.
-5. For every non-terminal lease whose `worker_id` matches an orphan
-   incarnation, call `LeaseRepo::fail_lease_in_tx` with
-   `FailureClass::WorkerCrash` and the appropriate retry policy.
-   Commit.
+1. Open `BEGIN IMMEDIATE`.
+2. `SELECT * FROM worker_incarnations WHERE state != 'retired'`.
+3. For each non-retired incarnation, verify process identity by
+   inspecting the OS:
+   - On macOS: `libproc::proc_pidpath(pid)` plus
+     `proc_pidinfo(PROC_PIDBSDINFO)` start time.
+   - On Linux: `/proc/<pid>/exe` symlink plus
+     `/proc/<pid>/stat` start time (field 22 — clock ticks since
+     boot).
+   - Both compared against the stored `binary_path` and
+     `process_birth_id`. Mismatch (including pid no longer exists)
+     means the original process is gone; signal-then-kill is
+     **skipped** and the row is retired with
+     `retire_reason = 'kill_skipped_identity_mismatch'`. The
+     identity check is the load-bearing invariant that prevents
+     `kill(-pgid)` from signaling an unrelated process group after
+     PID/PGID reuse.
+   - Match means the original process is still alive: send
+     `kill(-pgid, SIGTERM)`, wait a short grace period, send
+     `kill(-pgid, SIGKILL)`. Retire the row with
+     `retire_reason = 'orphan_reaped'`.
+4. For every non-terminal lease whose `lease_dispatch_intents` row
+   references a retired incarnation, decide based on intent state:
+   - `pending` → no HTTP request was confirmed; mark intent
+     `abandoned`, mark lease `ready` again with attempt count
+     bumped. No `FailureClass` is recorded because no work was
+     observed; the next dispatch is a clean retry against a fresh
+     incarnation.
+   - `dispatched` → work may have run; record
+     `FailureClass::WorkerCrash` (treat as failure for retry-policy
+     purposes) and mark intent `failed`.
+   - `completed` / `failed` → terminal already; no action.
+5. Commit.
 
-If `kill(-pgid, ...)` fails (process already exited or pgid reused),
-the reconciliation still marks the incarnation retired and proceeds;
-the spurious-kill failure is a non-fatal warning event. There is no
-PID-reuse race because the secret_hash mismatch from any callback
-through a reused PID's network endpoint will be rejected on its first
-header check.
+Idempotency keys + the worker-side dedupe make retries from `pending`
+safe even if the original HTTP dispatch did reach the worker — the
+worker recognizes the duplicate key and either no-ops or returns the
+cached prior result.
+
+The parent-death belt-and-suspenders is upgraded from "later
+optimization" to **required for Sprint 2 correctness on long-running
+operations**: every spawned worker inherits a parent-death watchdog
+implemented via a stdin pipe held open by the supervisor. The worker
+reads stdin in a background task; when the supervisor exits, the
+pipe closes, the read returns EOF, and the worker performs its own
+graceful shutdown (cancel in-flight operation, exit). This means
+even if startup reconciliation cannot prove process identity (the
+edge case where the orphan exited and a new process happens to reuse
+the PID + binary path), the original orphan has already exited
+voluntarily because its supervisor parent did. The stdin-pipe
+mechanism is portable across macOS and Linux without platform
+`#[cfg]`.
 
 Phase 2 ships disk-backed restart tests:
 
-- supervisor crashes after `dispatch` but before any progress frame;
-- supervisor crashes mid-progress-stream;
+- supervisor crashes between step 1 and step 2 (no `live` row);
+- supervisor crashes between step 3 and step 4 (live row, no
+  intent);
+- supervisor crashes between step 4 and step 5 (intent pending, no
+  HTTP issued);
+- supervisor crashes after dispatch but before step 6 (intent
+  pending, but HTTP did reach worker — idempotency-key test);
+- supervisor crashes mid-progress-stream (intent dispatched);
 - supervisor crashes after the result was written but before lease
-  release event;
-- supervisor crashes during reconciliation itself (idempotency on
-  retry).
-
-Sprint 5's real workers will reuse this same incarnation model
-without changes; the `parent-death` Linux-only optimization
-(`PR_SET_PDEATHSIG`) and the macOS `kqueue(EVFILT_PROC)` equivalents
-are belt-and-suspenders additions reserved for a later sprint —
-Sprint 2's correctness depends only on the durable incarnation rows
-and pgid kill.
+  release event (intent dispatched, result already in DB);
+- supervisor crashes during reconciliation itself (re-run is
+  idempotent);
+- PID-reuse case: orphan exits, unrelated process is given the same
+  pid before reconciliation runs; identity check refuses to signal,
+  row retired as `kill_skipped_identity_mismatch`.
 
 ### 4.9 Supervisor watchdog state machine and timeout precedence
 
@@ -527,18 +599,32 @@ deadlines and an exit observer:
 | Last progress frame older than `progress_idle_deadline` | NDJSON reader plus an in-memory timer | `ProgressTimeout` (new `FailureClass` variant) |
 | Terminal `ProgressFrame::Result` / `ProgressFrame::Error` | NDJSON reader | `Succeeded` or worker-supplied failure class |
 
-The watchdog evaluates these in this strict precedence on every
-event, and only one terminal state ever wins per lease:
+The watchdog runs as a **single arbiter task** per lease — the
+NDJSON stream reader and the process-exit observer feed the arbiter
+through one `tokio::sync::mpsc` channel. This guarantees ordering:
+exit-observed cannot preempt a terminal frame that was emitted
+earlier on the wire.
+
+The arbiter evaluates events in this strict precedence, and only one
+terminal state ever wins per lease:
 
 1. If a terminal result has been accepted, ignore later signals
    (lease is already `succeeded` / `failed`).
-2. Else if process exit has been observed, classify `WorkerCrash`
+2. Else if a terminal `ProgressFrame::Result` / `ProgressFrame::Error`
+   has been received and parses cleanly, accept it (even if a
+   process-exit observation is queued behind it). Terminal frames
+   always take precedence over a subsequent exit observation,
+   provided they were emitted before the exit on the same FIFO.
+3. Else if process exit has been observed AND the stream reader has
+   drained all remaining bytes from the connection through EOF, and
+   no complete terminal frame is buffered, classify `WorkerCrash`
+   and fail the lease. The arbiter MUST NOT classify `WorkerCrash`
+   on exit observation alone — it MUST drain first.
+4. Else if heartbeat deadline has passed, classify `WorkerTimeout`
    and fail the lease.
-3. Else if heartbeat deadline has passed, classify `WorkerTimeout`
-   and fail the lease.
-4. Else if progress idle deadline has passed, classify
+5. Else if progress idle deadline has passed, classify
    `ProgressTimeout` and fail the lease.
-5. Otherwise, keep waiting.
+6. Otherwise, keep waiting.
 
 Every classification calls a single `ControlPlane` use-case
 (`fail_lease_with_class`) which composes
@@ -564,11 +650,16 @@ The precedence table is pinned by paired tests in
 - heartbeat-only, no progress, no exit → `WorkerTimeout`
 - progress-only, no heartbeat, no exit → `ProgressTimeout`
 - heartbeat-and-progress, sudden exit → `WorkerCrash` (overrides
-  not-yet-fired deadlines)
+  not-yet-fired deadlines, only after drain confirms no buffered
+  terminal frame)
 - terminal result at deadline boundary → `Succeeded` (race won by
   result; deadline miss observed and recorded as audit only)
+- **terminal result flushed, process exits, supervisor accepts after
+  observing exit** → `Succeeded` (drain-before-classify guarantees
+  the wire-emitted result wins; this is the load-bearing test for
+  the race round 3 surfaced)
 - two deadlines fire simultaneously → exit > heartbeat > progress
-  precedence
+  precedence (after drain)
 - watchdog terminated lease and `expire_due` fires later → no
   double-fail; safety-net is a no-op on terminal leases
 
