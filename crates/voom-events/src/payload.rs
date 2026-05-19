@@ -496,6 +496,48 @@ pub struct CommitAbortedByClosureIncompletePayload {
     pub aborted_at: OffsetDateTime,
 }
 
+/// `commit.authorized` — Phase B success. The intent transitioned from
+/// `pending` to `authorized`; the gate's recomputed `closure_authorized`
+/// + per-member epoch snapshot are durably persisted on the row.
+///
+/// Carries the granularity-bucketed member counts so an audit reader
+/// can size the authorized closure without re-deserializing the JSON
+/// column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAuthorizedPayload {
+    pub commit_id: CommitId,
+    pub closure_asset_count: u32,
+    pub closure_bundle_count: u32,
+    pub closure_version_count: u32,
+    pub closure_location_count: u32,
+    /// Number of `[kind, row_id, epoch]` triples written to the
+    /// `commit_intents.target_row_epochs` JSON column.
+    pub target_row_epoch_count: u32,
+    #[serde(with = "time::serde::iso8601")]
+    pub authorized_at: OffsetDateTime,
+}
+
+/// `commit.aborted_by_closure_grew` — Phase B trip-wire: the closure
+/// walker found a non-empty `ClosureMemberDelta` between Phase A
+/// (`closure_initial`) and Phase B (`closure_authorized`). Carries the
+/// per-granularity add/remove counts so an audit reader can characterize
+/// the drift without re-deserializing the closure JSON columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedByClosureGrewPayload {
+    pub commit_id: CommitId,
+    pub added_asset_count: u32,
+    pub added_bundle_count: u32,
+    pub added_version_count: u32,
+    pub added_location_count: u32,
+    pub removed_asset_count: u32,
+    pub removed_bundle_count: u32,
+    pub removed_version_count: u32,
+    pub removed_location_count: u32,
+    pub phase: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
 // --- sum type --------------------------------------------------------------
 
 /// Sum type pairing each `EventKind` with its typed payload.
@@ -612,6 +654,10 @@ pub enum Event {
     CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload),
     #[serde(rename = "commit.aborted_by_closure_incomplete")]
     CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload),
+    #[serde(rename = "commit.authorized")]
+    CommitAuthorized(CommitAuthorizedPayload),
+    #[serde(rename = "commit.aborted_by_closure_grew")]
+    CommitAbortedByClosureGrew(CommitAbortedByClosureGrewPayload),
 }
 
 impl Event {
@@ -673,6 +719,8 @@ impl Event {
             Self::CommitAbortedByClosureIncomplete(_) => {
                 EventKind::CommitAbortedByClosureIncomplete
             }
+            Self::CommitAuthorized(_) => EventKind::CommitAuthorized,
+            Self::CommitAbortedByClosureGrew(_) => EventKind::CommitAbortedByClosureGrew,
         }
     }
 }

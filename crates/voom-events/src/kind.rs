@@ -66,6 +66,9 @@ pub enum EventKind {
     CommitAbortedByUseLease,
     CommitAbortedByStaleEvidence,
     CommitAbortedByClosureIncomplete,
+    // M3 Phase 2 — commit safety gate (Phase B).
+    CommitAuthorized,
+    CommitAbortedByClosureGrew,
 }
 
 impl EventKind {
@@ -122,6 +125,8 @@ impl EventKind {
             Self::CommitAbortedByUseLease => "commit.aborted_by_use_lease",
             Self::CommitAbortedByStaleEvidence => "commit.aborted_by_stale_evidence",
             Self::CommitAbortedByClosureIncomplete => "commit.aborted_by_closure_incomplete",
+            Self::CommitAuthorized => "commit.authorized",
+            Self::CommitAbortedByClosureGrew => "commit.aborted_by_closure_grew",
         }
     }
 
@@ -188,6 +193,8 @@ impl EventKind {
             "commit.aborted_by_use_lease" => Self::CommitAbortedByUseLease,
             "commit.aborted_by_stale_evidence" => Self::CommitAbortedByStaleEvidence,
             "commit.aborted_by_closure_incomplete" => Self::CommitAbortedByClosureIncomplete,
+            "commit.authorized" => Self::CommitAuthorized,
+            "commit.aborted_by_closure_grew" => Self::CommitAbortedByClosureGrew,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"

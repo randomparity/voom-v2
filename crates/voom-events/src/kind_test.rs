@@ -38,6 +38,8 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::CommitAbortedByUseLease,
         EventKind::CommitAbortedByStaleEvidence,
         EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
     ];
     let mut seen = std::collections::HashSet::new();
     for k in kinds {
@@ -98,6 +100,8 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::CommitAbortedByUseLease,
         EventKind::CommitAbortedByStaleEvidence,
         EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
     ];
     for k in kinds {
         let s = k.as_str();
@@ -239,6 +243,11 @@ fn commit_safety_gate_event_kinds_use_dotted_wire_format() {
         EventKind::CommitAbortedByClosureIncomplete.as_str(),
         "commit.aborted_by_closure_incomplete"
     );
+    assert_eq!(EventKind::CommitAuthorized.as_str(), "commit.authorized");
+    assert_eq!(
+        EventKind::CommitAbortedByClosureGrew.as_str(),
+        "commit.aborted_by_closure_grew"
+    );
 }
 
 #[test]
@@ -248,6 +257,8 @@ fn commit_safety_gate_event_kinds_round_trip() {
         EventKind::CommitAbortedByUseLease,
         EventKind::CommitAbortedByStaleEvidence,
         EventKind::CommitAbortedByClosureIncomplete,
+        EventKind::CommitAuthorized,
+        EventKind::CommitAbortedByClosureGrew,
     ] {
         let wire = k.as_str();
         let back = EventKind::from_str(wire).unwrap();

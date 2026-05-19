@@ -978,6 +978,479 @@ async fn prepare_phase_a_missing_target_location_aborts_as_closure_incomplete() 
     assert_eq!(reason, "closure_incomplete");
 }
 
+// -- authorize_destructive_commit sibling tests (commit 6) -----------------
+
+async fn prepare_pending_intent(pool: &SqlitePool, location_id: FileLocationId) -> CommitId {
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(location_id),
+        T0,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        PrepareOutcome::Pending(intent) => intent.commit_id,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending after seed, got Blocked({result:?})")
+        }
+    }
+}
+
+async fn authorized_commit_intent_row(
+    pool: &SqlitePool,
+    commit_id: CommitId,
+) -> (String, Option<String>, Option<String>) {
+    let row = sqlx::query(
+        "SELECT state, closure_authorized, target_row_epochs \
+         FROM commit_intents WHERE id = ?",
+    )
+    .bind(commit_id.0.cast_signed())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let state: String = row.try_get("state").unwrap();
+    let closure_authorized: Option<String> = row.try_get("closure_authorized").unwrap();
+    let target_row_epochs: Option<String> = row.try_get("target_row_epochs").unwrap();
+    (state, closure_authorized, target_row_epochs)
+}
+
+#[tokio::test]
+async fn authorize_phase_b_success_lands_authorized_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let permit = match outcome {
+        AuthorizeOutcome::Authorized(p) => p,
+        AuthorizeOutcome::Blocked { result, .. } => {
+            panic!("expected Authorized, got Blocked({result:?})")
+        }
+    };
+    // Permit carries the authorized closure mirroring the seed chain.
+    assert_eq!(permit.commit_id(), commit_id);
+    assert!(
+        permit
+            .closure_authorized()
+            .file_locations
+            .contains(&seeded.location_id)
+    );
+    assert!(
+        permit
+            .closure_authorized()
+            .file_versions
+            .contains(&seeded.version_id)
+    );
+    assert!(
+        permit
+            .closure_authorized()
+            .file_assets
+            .contains(&seeded.asset_id)
+    );
+    // Durable row state.
+    let (state, closure_json, epochs_json) = authorized_commit_intent_row(&pool, commit_id).await;
+    assert_eq!(state, "authorized");
+    let closure_json = closure_json.expect("authorized row has closure_authorized");
+    // FileLocationId is a transparent newtype over u64 — serialized as a
+    // bare number, not a string.
+    assert!(
+        closure_json.contains(&format!("{}", seeded.location_id.0)),
+        "closure_json does not mention {}: {closure_json}",
+        seeded.location_id.0,
+    );
+    // target_row_epochs populated with one [kind, id, epoch] triple per
+    // member of the authorized closure. asset (1) + version (1) +
+    // location (1) = 3 triples for this seed (no bundle membership).
+    let epochs_json = epochs_json.expect("authorized row has target_row_epochs");
+    let triples: serde_json::Value = serde_json::from_str(&epochs_json).unwrap();
+    let arr = triples.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        permit.closure_authorized().file_assets.len()
+            + permit.closure_authorized().file_versions.len()
+            + permit.closure_authorized().file_locations.len()
+            + permit.closure_authorized().bundles.len()
+    );
+    // Event emitted on the same tx.
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAuthorized),
+        "expected CommitAuthorized in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_phase_b_blocked_by_closure_incomplete_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    // Configure the resolver to fail for this version on the Phase B
+    // recomputation. The prepare step seeded a Pending intent against a
+    // healthy resolver; the same call site with a degraded resolver
+    // surfaces the closure-incomplete trip-wire at Phase B.
+    let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let result = match outcome {
+        AuthorizeOutcome::Blocked { result, .. } => result,
+        AuthorizeOutcome::Authorized(p) => panic!("expected Blocked, got Authorized({p:?})"),
+    };
+    assert!(matches!(
+        result,
+        CommitGateResult::BlockedByClosureIncomplete { .. }
+    ));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "closure_incomplete");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByClosureIncomplete),
+        "expected CommitAbortedByClosureIncomplete in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_phase_b_blocked_by_closure_grew_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    // Add a second live location on the same FileVersion out-of-band
+    // between prepare and authorize. Phase B's closure walker enumerates
+    // live locations on the version; the recomputed closure now carries
+    // an `added_location` the Phase A snapshot did not.
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let _extra = identity
+        .create_file_location_in_tx(
+            &mut tx,
+            IdentityNewFileLocation {
+                file_version_id: seeded.version_id,
+                kind: IdentityFileLocationKind::LocalPath,
+                value: "/srv/x-alias".to_owned(),
+                proof: None,
+                observed_at: T0 + time::Duration::seconds(2),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+    let result = match outcome {
+        AuthorizeOutcome::Blocked { result, .. } => result,
+        AuthorizeOutcome::Authorized(p) => panic!("expected Blocked, got Authorized({p:?})"),
+    };
+    let delta = match result {
+        CommitGateResult::BlockedByClosureGrew { delta } => delta,
+        other => panic!("expected BlockedByClosureGrew, got {other:?}"),
+    };
+    assert!(!delta.added_locations.is_empty());
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "closure_grew");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByClosureGrew),
+        "expected CommitAbortedByClosureGrew in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_phase_b_blocked_by_use_lease_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    // Fresh blocking lease appears between prepare and authorize. The
+    // architectural exemption only excuses `reconcile_rename_in_tx`;
+    // direct acquire-against-version is still legal, and the lock
+    // helper at acquire_in_tx is permissive when no in-flight commit
+    // covers the scope — that is the case here for an unrelated scope.
+    // For the test we use `acquire_in_tx` directly against the version
+    // scope; the pending lock IS armed but the test exercises the
+    // post-lock world (the lease landed during a window where the lock
+    // was disarmed). We bypass `acquire` and INSERT the lease directly
+    // so the test surfaces only the Phase B trip-wire, not the lock.
+    sqlx::query(
+        "INSERT INTO asset_use_leases \
+         (kind, scope_version_id, issuer_kind, issuer_ref, blocking_mode, \
+          ttl_bound, clock_source, acquired_at, expires_at) \
+         VALUES ('playback', ?, 'user', 'alice', 'blocking', 1, 'control_plane', ?, ?)",
+    )
+    .bind(seeded.version_id.0.cast_signed())
+    .bind("2026-05-18T00:00:00Z")
+    .bind("2026-05-19T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(4),
+    )
+    .await
+    .unwrap();
+    let result = match outcome {
+        AuthorizeOutcome::Blocked { result, .. } => result,
+        AuthorizeOutcome::Authorized(p) => panic!("expected Blocked, got Authorized({p:?})"),
+    };
+    assert!(matches!(result, CommitGateResult::BlockedByUseLease { .. }));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "fresh_lease");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByUseLease),
+        "expected CommitAbortedByUseLease in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+
+    // Accept evidence pinning the live hash, then prepare carrying
+    // that evidence id (so Phase A's revalidation passes).
+    let mut tx = pool.begin().await.unwrap();
+    let recorded = identity
+        .record_identity_evidence_in_tx(
+            &mut tx,
+            NewIdentityEvidence {
+                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_id: seeded.version_id.0,
+                assertion_type: voom_events::AssertionKind::HashMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "0".to_owned(),
+                confidence: 1.0,
+                provenance: serde_json::json!({}),
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    identity
+        .accept_identity_evidence_in_tx(
+            &mut tx,
+            recorded.id,
+            Some("alice".to_owned()),
+            T0,
+            AcceptedPin {
+                file_version_ids: None,
+                hashes: Some(serde_json::json!([[seeded.version_id.0, "hash-/srv/x"]])),
+                locations: None,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location_id),
+            accepted_evidence_ids: vec![recorded.id],
+        },
+        T0,
+    )
+    .await
+    .unwrap();
+    let commit_id = match outcome {
+        PrepareOutcome::Pending(i) => i.commit_id,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending after seed, got Blocked({result:?})")
+        }
+    };
+
+    // Drift the hash between prepare and authorize.
+    sqlx::query("UPDATE file_versions SET content_hash = 'drifted' WHERE id = ?")
+        .bind(seeded.version_id.0.cast_signed())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(5),
+    )
+    .await
+    .unwrap();
+    let result = match outcome {
+        AuthorizeOutcome::Blocked { result, .. } => result,
+        AuthorizeOutcome::Authorized(p) => panic!("expected Blocked, got Authorized({p:?})"),
+    };
+    assert!(matches!(
+        result,
+        CommitGateResult::BlockedByStaleEvidence {
+            drift: EvidenceDrift::PinnedHashDiffers,
+            ..
+        }
+    ));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "stale_evidence");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByStaleEvidence),
+        "expected CommitAbortedByStaleEvidence in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn authorize_phase_b_already_authorized_row_returns_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    // First authorize lands `authorized`.
+    let _ok = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    // Second authorize on the same commit_id is `Conflict`.
+    let err = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn authorize_phase_b_missing_row_returns_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let err =
+        authorize_destructive_commit(&pool, &identity, &events, &resolver, CommitId(99_999), T0)
+            .await
+            .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn authorize_phase_b_aborted_row_returns_conflict() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    // Force a Phase A abort by configuring the resolver to fail.
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(seeded.location_id),
+        T0,
+    )
+    .await
+    .unwrap();
+    let commit_id = match outcome {
+        PrepareOutcome::Blocked { commit_id, .. } => commit_id,
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    // Second authorize on the same aborted commit_id is `Conflict`.
+    let resolver2 =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let err = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver2,
+        commit_id,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
+}
+
 #[tokio::test]
 async fn commit_intents_check_accepts_authorized_with_closure_authorized_set() {
     // Positive control: the same row shape with closure_authorized

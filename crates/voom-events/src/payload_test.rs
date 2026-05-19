@@ -470,6 +470,52 @@ fn commit_aborted_by_closure_incomplete_round_trip() {
 }
 
 #[test]
+fn commit_authorized_round_trip() {
+    let p = CommitAuthorizedPayload {
+        commit_id: voom_core::CommitId(21),
+        closure_asset_count: 1,
+        closure_bundle_count: 0,
+        closure_version_count: 1,
+        closure_location_count: 2,
+        target_row_epoch_count: 4,
+        authorized_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAuthorized(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.authorized");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAuthorized(q) if q == p));
+    assert_eq!(
+        Event::CommitAuthorized(p).kind(),
+        EventKind::CommitAuthorized
+    );
+}
+
+#[test]
+fn commit_aborted_by_closure_grew_round_trip() {
+    let p = CommitAbortedByClosureGrewPayload {
+        commit_id: voom_core::CommitId(22),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 1,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 1,
+        phase: "authorize".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAbortedByClosureGrew(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.aborted_by_closure_grew");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAbortedByClosureGrew(q) if q == p));
+    assert_eq!(
+        Event::CommitAbortedByClosureGrew(p).kind(),
+        EventKind::CommitAbortedByClosureGrew
+    );
+}
+
+#[test]
 fn use_lease_reanchored_by_move_round_trip() {
     let p = UseLeaseReanchoredByMovePayload {
         lease_id: 7,

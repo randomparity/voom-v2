@@ -15,8 +15,9 @@ use voom_core::ids::{
     BundleId, CommitId, EvidenceId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId,
 };
 use voom_events::payload::{
-    CommitAbortedByClosureIncompletePayload, CommitAbortedByStaleEvidencePayload,
-    CommitAbortedByUseLeasePayload, CommitIntentRecordedPayload,
+    CommitAbortedByClosureGrewPayload, CommitAbortedByClosureIncompletePayload,
+    CommitAbortedByStaleEvidencePayload, CommitAbortedByUseLeasePayload, CommitAuthorizedPayload,
+    CommitIntentRecordedPayload,
 };
 use voom_events::{Event, EventEnvelope, SubjectType};
 
@@ -995,6 +996,140 @@ fn encode_evidence_ids(ids: &[EvidenceId]) -> Result<String, VoomError> {
     serde_json::to_string(ids).map_err(|e| VoomError::Internal(format!("encode evidence_ids: {e}")))
 }
 
+// ----- inverse wire-format decoders (commit 6) ------------------------------
+//
+// Phase B reads back the JSON columns that Phase A wrote (`target`,
+// `closure_initial`) so it can re-emit closure-grew payloads and surface
+// state through `PendingCommitIntent`. The decoders mirror the encoder
+// shapes exactly — they are deliberately module-private so the on-disk
+// JSON contract has a single owning module.
+
+fn decode_target(json: &str) -> Result<CommitTarget, VoomError> {
+    let wire: CommitTargetWire = serde_json::from_str(json)
+        .map_err(|e| VoomError::Database(format!("decode commit_target: {e}")))?;
+    commit_target_from_wire(wire)
+}
+
+fn decode_closure(json: &str) -> Result<AffectedScopeClosure, VoomError> {
+    let wire: AffectedScopeClosureWire = serde_json::from_str(json)
+        .map_err(|e| VoomError::Database(format!("decode closure: {e}")))?;
+    Ok(closure_from_wire(wire))
+}
+
+fn commit_target_from_wire(w: CommitTargetWire) -> Result<CommitTarget, VoomError> {
+    Ok(match w {
+        CommitTargetWire::Delete { retired } => CommitTarget::DeleteFileLocation(retired),
+        CommitTargetWire::Replace { retired, new } => CommitTarget::ReplaceFileLocation {
+            retired,
+            new: file_location_proposal_from_wire(new)?,
+        },
+        CommitTargetWire::Move { retired, new } => CommitTarget::MoveFileLocation {
+            retired,
+            new: file_location_proposal_from_wire(new)?,
+        },
+    })
+}
+
+fn file_location_proposal_from_wire(
+    w: FileLocationProposalWire,
+) -> Result<FileLocationProposal, VoomError> {
+    let proof = decode_proof(w.proof_kind.as_deref(), w.proof_value.as_deref())?;
+    Ok(FileLocationProposal {
+        kind: FileLocationKind::parse(&w.kind)?,
+        value: w.value,
+        proof,
+        observed_at: w.observed_at,
+    })
+}
+
+fn decode_proof(
+    kind: Option<&str>,
+    value: Option<&str>,
+) -> Result<Option<LocationProof>, VoomError> {
+    let (Some(kind), Some(value)) = (kind, value) else {
+        return Ok(None);
+    };
+    let parsed: JsonValue = serde_json::from_str(value)
+        .map_err(|e| VoomError::Database(format!("decode proof_value: {e}")))?;
+    match kind {
+        "file_id_generation" => {
+            let file_id = parsed
+                .get("file_id")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| VoomError::Database("decode proof: missing file_id".to_owned()))?
+                .parse::<u128>()
+                .map_err(|e| VoomError::Database(format!("decode proof: file_id u128: {e}")))?;
+            let generation = parsed
+                .get("generation")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| {
+                    VoomError::Database("decode proof: missing generation".to_owned())
+                })?;
+            Ok(Some(LocationProof::LocalFileIdGeneration {
+                file_id,
+                generation,
+            }))
+        }
+        "object_version_id" => {
+            let bucket = parsed
+                .get("bucket")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| VoomError::Database("decode proof: missing bucket".to_owned()))?
+                .to_owned();
+            let key = parsed
+                .get("key")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| VoomError::Database("decode proof: missing key".to_owned()))?
+                .to_owned();
+            let version_id = parsed
+                .get("version_id")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| VoomError::Database("decode proof: missing version_id".to_owned()))?
+                .to_owned();
+            Ok(Some(LocationProof::ObjectStoreVersion {
+                bucket,
+                key,
+                version_id,
+            }))
+        }
+        other => Err(VoomError::Database(format!(
+            "decode proof: unknown kind {other:?}"
+        ))),
+    }
+}
+
+fn closure_from_wire(w: AffectedScopeClosureWire) -> AffectedScopeClosure {
+    AffectedScopeClosure {
+        file_assets: w.file_assets,
+        file_versions: w.file_versions,
+        file_locations: w.file_locations,
+        bundles: w.bundles,
+        resolution_warnings: w
+            .resolution_warnings
+            .into_iter()
+            .map(|w| ClosureWarning { message: w.message })
+            .collect(),
+    }
+}
+
+// ----- per-member epoch snapshot wire format (commit 6) ---------------------
+//
+// `commit_intents.target_row_epochs` is a JSON array of [kind, row_id,
+// epoch] triples (sprint plan §3 "Per-member epoch guard"). Phase B
+// writes it atomically with `state='authorized'`; Phase C re-reads it
+// (commit 7) and uses each `epoch` as the `expected_epoch` argument to
+// the matching `IdentityRepo` destructive mutation. `kind` round-trips
+// through `TargetMemberKind`'s `Serialize/Deserialize` impl
+// (`#[serde(rename_all = "snake_case")]`).
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TargetRowEpochTriple(TargetMemberKind, u64, u64);
+
+fn encode_target_row_epochs(triples: &[TargetRowEpochTriple]) -> Result<String, VoomError> {
+    serde_json::to_string(triples)
+        .map_err(|e| VoomError::Internal(format!("encode target_row_epochs: {e}")))
+}
+
 // ----- Phase A main entry point --------------------------------------------
 
 /// Phase A of the destructive-commit gate — sub-slice 4 of the M3 Phase 2
@@ -1119,6 +1254,17 @@ pub async fn prepare_destructive_commit(
     }))
 }
 
+/// Which gate phase is driving the closure walk. The walker's
+/// precondition checks differ between Phase A (which surfaces
+/// stale-target handles as `ClosureIncomplete`) and Phase B (which
+/// treats the same condition as drift and lets the recompute fall
+/// through to the closure-grew trip-wire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatePhase {
+    Prepare,
+    Authorize,
+}
+
 struct GateWalkOk {
     closure: AffectedScopeClosure,
     evaluated_lease_ids: Vec<UseLeaseId>,
@@ -1143,7 +1289,15 @@ async fn run_phase_a_gate_in_tx(
     accepted_evidence_ids: &[EvidenceId],
 ) -> Result<Result<GateWalkOk, GateWalkAbort>, VoomError> {
     // Step 1: closure walk on the gate's IMMEDIATE tx.
-    let closure = match build_closure(tx, identity_repo, alias_resolver, target).await? {
+    let closure = match build_closure(
+        tx,
+        identity_repo,
+        alias_resolver,
+        target,
+        GatePhase::Prepare,
+    )
+    .await?
+    {
         Ok((c, _)) => c,
         Err(abort) => {
             return Ok(Err(GateWalkAbort {
@@ -1252,6 +1406,7 @@ async fn build_closure(
     identity_repo: &dyn IdentityRepo,
     alias_resolver: &dyn AliasResolver,
     target: &CommitTarget,
+    phase: GatePhase,
 ) -> Result<Result<(AffectedScopeClosure, Vec<FileLocationId>), PhaseAAbort>, VoomError> {
     let retired_location_id = match target {
         CommitTarget::DeleteFileLocation(id) => *id,
@@ -1267,7 +1422,17 @@ async fn build_closure(
             message: format!("target file_location {retired_location_id} not found"),
         }));
     };
-    if location.retired_at.is_some() {
+    // Phase A surfaces an already-retired target as
+    // closure-incomplete (operator handed a stale handle; abort
+    // eagerly so the audit row records the precondition trip). Phase B
+    // is structurally different: a target that became retired between
+    // prepare and authorize is closure drift, not closure-incomplete —
+    // the recomputed closure simply loses the retired row and (often)
+    // gains the rename-introduced replacement, surfacing as
+    // `BlockedByClosureGrew` further down. The Phase-A trip-wire would
+    // mask the drift signal e2e callers depend on, so it stays
+    // Phase-A-gated.
+    if phase == GatePhase::Prepare && location.retired_at.is_some() {
         return Ok(Err(PhaseAAbort::ClosureIncomplete {
             message: format!("target file_location {retired_location_id} already retired"),
         }));
@@ -1312,12 +1477,17 @@ async fn build_closure(
     for id in external_locations {
         file_locations.insert(id);
     }
-    // The retired target itself is always part of the closure even if
-    // the live-listing query already excluded retired rows: Phase A
-    // guards against the target already being terminal upstream, so
-    // a non-terminal target is always live and already present, but a
-    // defense-in-depth insert here keeps the invariant explicit.
-    file_locations.insert(retired_location_id);
+    // Phase A guards against the target already being terminal upstream,
+    // so a non-terminal target is always live and already present in
+    // `live_locations`; the defense-in-depth insert here keeps the
+    // invariant explicit (no-op if the row is live; pins the target
+    // member when the live-listing query and the target's row state
+    // diverge mid-walk). Phase B is structurally different: a retired
+    // target should fall OUT of the closure (closure drift signal), so
+    // re-adding it here would mask the trip-wire.
+    if phase == GatePhase::Prepare {
+        file_locations.insert(retired_location_id);
+    }
 
     // Bundle membership for the owning FileAsset.
     let mut bundles: BTreeSet<BundleId> = BTreeSet::new();
@@ -1683,6 +1853,803 @@ async fn expand_scope_members(
         .await
         .map_err(|e| VoomError::Database(format!("scope_members location insert: {e}")))?;
     }
+    Ok(())
+}
+
+// ============================================================================
+// Phase B entry point — `authorize_destructive_commit`
+// ============================================================================
+
+/// Disposition of an `authorize_destructive_commit` call.
+///
+/// `Authorized` carries the opaque `CommitPermit` — the intent row landed
+/// in `state = 'authorized'` with `closure_authorized` and
+/// `target_row_epochs` persisted atomically. `Blocked` carries the
+/// Phase B abort outcome — a `commit_intents` row was transitioned to
+/// `aborted` with `commit_id` referring to that row, and the matching
+/// `commit.aborted_by_*` event row sits alongside it in `events`. Phase B
+/// commits the abort in-tx (no two-tx pattern; that pattern is reserved
+/// for Phase A gate-check aborts only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizeOutcome {
+    Authorized(CommitPermit),
+    Blocked {
+        commit_id: CommitId,
+        result: CommitGateResult,
+    },
+}
+
+/// Phase B of the destructive-commit gate — sub-slice 6 of the M3
+/// Phase 2 plan. Reads the `commit_intents` row in `state = 'pending'`,
+/// recomputes the affected-scope closure against current DB state,
+/// runs the three Phase B trip-wires (closure drift, fresh blocking
+/// lease, accepted-evidence drift), snapshots per-member epochs into
+/// the `target_row_epochs` JSON column, and transitions the row to
+/// `state = 'authorized'`. All work runs inside one IMMEDIATE tx —
+/// Phase B aborts in-tx (no two-tx pattern; sequencing doc §5.2).
+///
+/// `alias_resolver` covers **external** (non-DB) alias sources only.
+/// DB-internal alias enumeration goes through
+/// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
+/// gate's tx handle (round-5 fix).
+///
+/// On success the durable row state is:
+/// - `state = 'authorized'`
+/// - `closure_authorized` = JSON-encoded recomputed closure
+/// - `target_row_epochs` = JSON array of `[kind, row_id, epoch]`
+///   triples covering every member of the authorized closure
+/// - `authorized_at` = `now`, `epoch` bumped
+///
+/// The returned `CommitPermit` carries the same `commit_id`, the
+/// authorized closure, the lease IDs evaluated against it, the
+/// evidence revalidation results, and the row's post-update `epoch`.
+/// The per-member epoch snapshot is NOT carried on the permit — Phase C
+/// re-reads it from `commit_intents.target_row_epochs` (commit 7).
+///
+/// # Errors
+///
+/// - `VoomError::Database` / `VoomError::Internal` on storage failures
+///   (including `AliasResolutionError::Database` from an external
+///   alias source).
+/// - `VoomError::Conflict` if the row does not exist, is in a state
+///   other than `pending`, or has had its `epoch` bumped between
+///   `prepare` and `authorize` (race against a concurrent operator
+///   action). Phase B trip-wires return `Ok(Blocked)` rather than
+///   `Err` — `Err` is reserved for genuine storage failures and
+///   precondition violations the caller cannot reason about.
+pub async fn authorize_destructive_commit(
+    pool: &SqlitePool,
+    identity_repo: &dyn IdentityRepo,
+    event_repo: &dyn EventRepo,
+    alias_resolver: &dyn AliasResolver,
+    commit_id: CommitId,
+    now: OffsetDateTime,
+) -> Result<AuthorizeOutcome, VoomError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("authorize: tx begin: {e}")))?;
+
+    let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
+    let walk_outcome = run_phase_b_gate_in_tx(
+        &mut tx,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+        &row,
+        now,
+    )
+    .await?;
+    let walk = match walk_outcome {
+        Ok(w) => w,
+        Err(result) => {
+            tx.commit()
+                .await
+                .map_err(|e| VoomError::Database(format!("authorize: commit abort: {e}")))?;
+            return Ok(AuthorizeOutcome::Blocked { commit_id, result });
+        }
+    };
+
+    let permit = finalize_phase_b_authorize_in_tx(
+        &mut tx,
+        event_repo,
+        commit_id,
+        row.epoch,
+        &row.closure_initial,
+        walk,
+        now,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("authorize: commit success: {e}")))?;
+    Ok(AuthorizeOutcome::Authorized(permit))
+}
+
+/// Phase B success-path state carried out of the trip-wire gate into
+/// `finalize_phase_b_authorize_in_tx`. Holds the recomputed closure
+/// plus the lease IDs and evidence revalidation results evaluated
+/// against it (both for `CommitPermit` construction on success).
+struct PhaseBGatePass {
+    closure_authorized: AffectedScopeClosure,
+    evaluated_lease_ids: Vec<UseLeaseId>,
+    revalidated_evidence: Vec<EvidenceRevalidationResult>,
+}
+
+/// Run the three Phase B trip-wires (closure recompute / drift,
+/// blocking-lease re-evaluation, accepted-evidence revalidation)
+/// inside the open tx. `Ok(Ok(_))` on a passing walk (caller proceeds
+/// to write the authorized row); `Ok(Err(_))` on a trip-wire abort
+/// (the helper UPDATEs the row to `aborted` + emits the event in-tx;
+/// caller commits the tx); `Err(_)` on a genuine storage failure.
+async fn run_phase_b_gate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    event_repo: &dyn EventRepo,
+    alias_resolver: &dyn AliasResolver,
+    row: &PendingIntentRow,
+    now: OffsetDateTime,
+) -> Result<Result<PhaseBGatePass, CommitGateResult>, VoomError> {
+    let closure_authorized = match build_closure(
+        tx,
+        identity_repo,
+        alias_resolver,
+        &row.target,
+        GatePhase::Authorize,
+    )
+    .await?
+    {
+        Ok((closure, _)) => closure,
+        Err(PhaseAAbort::ClosureIncomplete { message }) => {
+            let result = abort_pending_intent_in_tx(
+                tx,
+                event_repo,
+                row,
+                now,
+                PhaseBAbort::ClosureIncomplete { message },
+            )
+            .await?;
+            return Ok(Err(result));
+        }
+        Err(other) => {
+            return Err(VoomError::Internal(format!(
+                "authorize: unexpected closure-walk abort kind: {other:?}"
+            )));
+        }
+    };
+
+    let delta = row.closure_initial.id_member_delta(&closure_authorized);
+    if !delta.is_empty() {
+        let result = abort_pending_intent_in_tx(
+            tx,
+            event_repo,
+            row,
+            now,
+            PhaseBAbort::ClosureGrew { delta },
+        )
+        .await?;
+        return Ok(Err(result));
+    }
+
+    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure_authorized).await?;
+    if let Some((lease_id, lease_scope)) =
+        first_blocking_overlap_in_tx(tx, &closure_authorized).await?
+    {
+        let result = abort_pending_intent_in_tx(
+            tx,
+            event_repo,
+            row,
+            now,
+            PhaseBAbort::UseLease {
+                lease_id,
+                lease_scope,
+            },
+        )
+        .await?;
+        return Ok(Err(result));
+    }
+
+    let revalidated_evidence =
+        revalidate_evidence_in_tx(tx, identity_repo, &row.accepted_evidence_ids).await?;
+    if let Some((evidence_id, drift)) = first_evidence_drift(&revalidated_evidence) {
+        let drift = drift.clone();
+        let result = abort_pending_intent_in_tx(
+            tx,
+            event_repo,
+            row,
+            now,
+            PhaseBAbort::StaleEvidence { evidence_id, drift },
+        )
+        .await?;
+        return Ok(Err(result));
+    }
+
+    Ok(Ok(PhaseBGatePass {
+        closure_authorized,
+        evaluated_lease_ids,
+        revalidated_evidence,
+    }))
+}
+
+/// Phase B success path inside the open tx: snapshot per-member
+/// epochs, reconcile `scope_members`, transition the row to
+/// `authorized`, and emit the `commit.authorized` event. Returns the
+/// `CommitPermit` the caller surfaces on `AuthorizeOutcome::Authorized`.
+async fn finalize_phase_b_authorize_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_repo: &dyn EventRepo,
+    commit_id: CommitId,
+    expected_epoch: u64,
+    closure_initial: &AffectedScopeClosure,
+    walk: PhaseBGatePass,
+    now: OffsetDateTime,
+) -> Result<CommitPermit, VoomError> {
+    let PhaseBGatePass {
+        closure_authorized,
+        evaluated_lease_ids,
+        revalidated_evidence,
+    } = walk;
+    let triples = snapshot_target_row_epochs_in_tx(tx, &closure_authorized).await?;
+    let target_row_epochs_json = encode_target_row_epochs(&triples)?;
+    let closure_authorized_json = encode_closure(&closure_authorized)?;
+    reconcile_scope_members(tx, commit_id, closure_initial, &closure_authorized).await?;
+    let new_epoch = transition_pending_to_authorized_in_tx(
+        tx,
+        commit_id,
+        expected_epoch,
+        &closure_authorized_json,
+        &target_row_epochs_json,
+        now,
+    )
+    .await?;
+    emit_authorized_event(
+        event_repo,
+        tx,
+        commit_id,
+        &closure_authorized,
+        u32::try_from(triples.len()).unwrap_or(u32::MAX),
+        now,
+    )
+    .await?;
+    Ok(CommitPermit {
+        commit_id,
+        authorized_at: now,
+        closure_authorized,
+        evaluated_lease_ids,
+        revalidated_evidence,
+        epoch: new_epoch,
+    })
+}
+
+/// Snapshot of the durable `commit_intents` row body Phase B carries
+/// across in-tx steps. Loaded once before the closure recompute so the
+/// trip-wire branches all bind the same column values.
+struct PendingIntentRow {
+    commit_id: CommitId,
+    target: CommitTarget,
+    closure_initial: AffectedScopeClosure,
+    accepted_evidence_ids: Vec<EvidenceId>,
+    epoch: u64,
+}
+
+/// Read the `commit_intents` row for `commit_id`, require `state =
+/// 'pending'`, decode the JSON columns, and return the in-memory shape
+/// Phase B operates on. Any state other than `pending` is `Conflict` —
+/// callers must `prepare` first.
+async fn read_pending_intent_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+) -> Result<PendingIntentRow, VoomError> {
+    let row = sqlx::query(
+        "SELECT state, target, closure_initial, accepted_evidence_ids, epoch \
+         FROM commit_intents WHERE id = ?",
+    )
+    .bind(i64_from_u64(commit_id.0))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("authorize: read intent: {e}")))?;
+    let row = row.ok_or_else(|| {
+        VoomError::Conflict(format!(
+            "authorize: commit_intents row {commit_id} not found"
+        ))
+    })?;
+    let state: String = row
+        .try_get("state")
+        .map_err(|e| VoomError::Database(format!("authorize: read state: {e}")))?;
+    if state != "pending" {
+        return Err(VoomError::Conflict(format!(
+            "authorize: commit_intents row {commit_id} is in state {state:?}, expected 'pending'"
+        )));
+    }
+    let target_json: String = row
+        .try_get("target")
+        .map_err(|e| VoomError::Database(format!("authorize: read target: {e}")))?;
+    let closure_initial_json: String = row
+        .try_get("closure_initial")
+        .map_err(|e| VoomError::Database(format!("authorize: read closure_initial: {e}")))?;
+    let accepted_evidence_ids_json: String = row
+        .try_get("accepted_evidence_ids")
+        .map_err(|e| VoomError::Database(format!("authorize: read accepted_evidence_ids: {e}")))?;
+    let epoch_raw: i64 = row
+        .try_get("epoch")
+        .map_err(|e| VoomError::Database(format!("authorize: read epoch: {e}")))?;
+    let target = decode_target(&target_json)?;
+    let closure_initial = decode_closure(&closure_initial_json)?;
+    let accepted_evidence_ids: Vec<EvidenceId> = serde_json::from_str(&accepted_evidence_ids_json)
+        .map_err(|e| {
+            VoomError::Database(format!("authorize: decode accepted_evidence_ids: {e}"))
+        })?;
+    Ok(PendingIntentRow {
+        commit_id,
+        target,
+        closure_initial,
+        accepted_evidence_ids,
+        epoch: u64_from_i64(epoch_raw),
+    })
+}
+
+/// Phase B trip-wire bundle. Each variant carries the data needed to
+/// drive both the durable row transition (`abort_reason` column) and
+/// the matching `commit.aborted_by_*` event payload.
+#[derive(Debug, Clone)]
+enum PhaseBAbort {
+    UseLease {
+        lease_id: UseLeaseId,
+        lease_scope: LeaseScope,
+    },
+    StaleEvidence {
+        evidence_id: EvidenceId,
+        drift: EvidenceDrift,
+    },
+    ClosureIncomplete {
+        message: String,
+    },
+    ClosureGrew {
+        delta: ClosureMemberDelta,
+    },
+}
+
+impl PhaseBAbort {
+    fn abort_reason_str(&self) -> &'static str {
+        match self {
+            Self::UseLease { .. } => "fresh_lease",
+            Self::StaleEvidence { .. } => "stale_evidence",
+            Self::ClosureIncomplete { .. } => "closure_incomplete",
+            Self::ClosureGrew { .. } => "closure_grew",
+        }
+    }
+
+    fn into_gate_result(self) -> CommitGateResult {
+        match self {
+            Self::UseLease {
+                lease_id,
+                lease_scope,
+            } => CommitGateResult::BlockedByUseLease {
+                lease_id,
+                lease_scope,
+            },
+            Self::StaleEvidence { evidence_id, drift } => {
+                CommitGateResult::BlockedByStaleEvidence { evidence_id, drift }
+            }
+            Self::ClosureIncomplete { message } => CommitGateResult::BlockedByClosureIncomplete {
+                reason: ClosureFailure::AliasUnreachable {
+                    message: message.clone(),
+                },
+                unreachable: vec![ClosureWarning { message }],
+            },
+            Self::ClosureGrew { delta } => CommitGateResult::BlockedByClosureGrew { delta },
+        }
+    }
+}
+
+/// Abort a `pending` intent in-tx: UPDATE to `state='aborted'` +
+/// `abort_reason`, emit the matching event, and return the
+/// `CommitGateResult` the caller surfaces to its consumer. Does NOT
+/// commit — the caller commits the tx once. Phase B's in-tx abort
+/// pattern is deliberately distinct from Phase A's two-tx helper
+/// (sequencing doc §5.2: the two-tx pattern is reserved for Phase A
+/// gate-check aborts that fire BEFORE a `pending` row would have
+/// landed).
+async fn abort_pending_intent_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_repo: &dyn EventRepo,
+    row: &PendingIntentRow,
+    aborted_at: OffsetDateTime,
+    abort: PhaseBAbort,
+) -> Result<CommitGateResult, VoomError> {
+    let aborted_iso = iso8601(aborted_at)?;
+    let reason_str = abort.abort_reason_str();
+    let commit_id = row.commit_id;
+    let res = sqlx::query(
+        "UPDATE commit_intents SET state = 'aborted', aborted_at = ?, \
+            abort_reason = ?, epoch = epoch + 1 \
+         WHERE id = ? AND state = 'pending' AND epoch = ?",
+    )
+    .bind(&aborted_iso)
+    .bind(reason_str)
+    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(row.epoch))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("authorize: abort UPDATE: {e}")))?;
+    if res.rows_affected() != 1 {
+        return Err(VoomError::Conflict(format!(
+            "authorize: abort UPDATE on {commit_id} affected {} rows; concurrent state mutation",
+            res.rows_affected()
+        )));
+    }
+
+    emit_phase_b_abort_event(event_repo, tx, commit_id, &abort, aborted_at).await?;
+    Ok(abort.into_gate_result())
+}
+
+fn phase_b_abort_event(
+    commit_id: CommitId,
+    aborted_at: OffsetDateTime,
+    abort: &PhaseBAbort,
+) -> Event {
+    match abort {
+        PhaseBAbort::UseLease {
+            lease_id,
+            lease_scope,
+        } => Event::CommitAbortedByUseLease(CommitAbortedByUseLeasePayload {
+            commit_id,
+            lease_id: *lease_id,
+            lease_scope_type: lease_scope.type_str().to_owned(),
+            lease_scope_id: lease_scope.id_u64(),
+            phase: "authorize".to_owned(),
+            aborted_at,
+        }),
+        PhaseBAbort::StaleEvidence { evidence_id, drift } => {
+            Event::CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload {
+                commit_id,
+                evidence_id: *evidence_id,
+                drift_kind: evidence_drift_str(drift).to_owned(),
+                phase: "authorize".to_owned(),
+                aborted_at,
+            })
+        }
+        PhaseBAbort::ClosureIncomplete { message } => {
+            Event::CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload {
+                commit_id,
+                phase: "authorize".to_owned(),
+                message: message.clone(),
+                aborted_at,
+            })
+        }
+        PhaseBAbort::ClosureGrew { delta } => {
+            Event::CommitAbortedByClosureGrew(CommitAbortedByClosureGrewPayload {
+                commit_id,
+                added_asset_count: u32::try_from(delta.added_assets.len()).unwrap_or(u32::MAX),
+                added_bundle_count: u32::try_from(delta.added_bundles.len()).unwrap_or(u32::MAX),
+                added_version_count: u32::try_from(delta.added_versions.len()).unwrap_or(u32::MAX),
+                added_location_count: u32::try_from(delta.added_locations.len())
+                    .unwrap_or(u32::MAX),
+                removed_asset_count: u32::try_from(delta.removed_assets.len()).unwrap_or(u32::MAX),
+                removed_bundle_count: u32::try_from(delta.removed_bundles.len())
+                    .unwrap_or(u32::MAX),
+                removed_version_count: u32::try_from(delta.removed_versions.len())
+                    .unwrap_or(u32::MAX),
+                removed_location_count: u32::try_from(delta.removed_locations.len())
+                    .unwrap_or(u32::MAX),
+                phase: "authorize".to_owned(),
+                aborted_at,
+            })
+        }
+    }
+}
+
+async fn emit_phase_b_abort_event(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    abort: &PhaseBAbort,
+    aborted_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let payload = phase_b_abort_event(commit_id, aborted_at, abort);
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: aborted_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Snapshot per-member epochs for every member of `closure` inside the
+/// gate's IMMEDIATE tx. Returns the `[kind, row_id, epoch]` triples
+/// Phase B writes atomically to `commit_intents.target_row_epochs`.
+/// One SELECT per granularity; the granularity-tagged result is the
+/// authoritative source Phase C re-reads (commit 7).
+async fn snapshot_target_row_epochs_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    closure: &AffectedScopeClosure,
+) -> Result<Vec<TargetRowEpochTriple>, VoomError> {
+    let mut triples: Vec<TargetRowEpochTriple> = Vec::new();
+    let asset_ids: Vec<i64> = closure
+        .file_assets
+        .iter()
+        .map(|id| i64_from_u64(id.0))
+        .collect();
+    snapshot_one_granularity_in_tx(
+        tx,
+        "file_assets",
+        TargetMemberKind::FileAsset,
+        &asset_ids,
+        &mut triples,
+    )
+    .await?;
+    let version_ids: Vec<i64> = closure
+        .file_versions
+        .iter()
+        .map(|id| i64_from_u64(id.0))
+        .collect();
+    snapshot_one_granularity_in_tx(
+        tx,
+        "file_versions",
+        TargetMemberKind::FileVersion,
+        &version_ids,
+        &mut triples,
+    )
+    .await?;
+    let location_ids: Vec<i64> = closure
+        .file_locations
+        .iter()
+        .map(|id| i64_from_u64(id.0))
+        .collect();
+    snapshot_one_granularity_in_tx(
+        tx,
+        "file_locations",
+        TargetMemberKind::FileLocation,
+        &location_ids,
+        &mut triples,
+    )
+    .await?;
+    let bundle_ids: Vec<i64> = closure
+        .bundles
+        .iter()
+        .map(|id| i64_from_u64(id.0))
+        .collect();
+    snapshot_one_granularity_in_tx(
+        tx,
+        "asset_bundles",
+        TargetMemberKind::Bundle,
+        &bundle_ids,
+        &mut triples,
+    )
+    .await?;
+    Ok(triples)
+}
+
+async fn snapshot_one_granularity_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &'static str,
+    kind: TargetMemberKind,
+    ids: &[i64],
+    out: &mut Vec<TargetRowEpochTriple>,
+) -> Result<(), VoomError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let ids_json = serde_json::to_string(ids)
+        .map_err(|e| VoomError::Internal(format!("encode {table} id snapshot: {e}")))?;
+    // `table` is a static internal string — never caller-supplied — so
+    // a `format!` SQL stitch is safe here (sqlx does not expose runtime
+    // table-name binding).
+    let sql = format!("SELECT id, epoch FROM {table} WHERE id IN (SELECT value FROM json_each(?))");
+    let rows = sqlx::query(&sql)
+        .bind(&ids_json)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("snapshot {table}: {e}")))?;
+    for row in &rows {
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| VoomError::Database(format!("snapshot {table} row id: {e}")))?;
+        let epoch: i64 = row
+            .try_get("epoch")
+            .map_err(|e| VoomError::Database(format!("snapshot {table} row epoch: {e}")))?;
+        out.push(TargetRowEpochTriple(
+            kind,
+            u64_from_i64(id),
+            u64_from_i64(epoch),
+        ));
+    }
+    Ok(())
+}
+
+/// Reconcile `commit_intent_scope_members` with the recomputed closure:
+/// DELETE rows whose scope_*_id is no longer in the authorized closure,
+/// INSERT new rows for added members. Compares the Phase A
+/// `closure_initial` against the Phase B `closure_authorized` to derive
+/// the delta — the row deletes and inserts are keyed off the four
+/// granularity-specific delta sets so a no-op closure produces zero
+/// writes.
+async fn reconcile_scope_members(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    initial: &AffectedScopeClosure,
+    authorized: &AffectedScopeClosure,
+) -> Result<(), VoomError> {
+    let cid = i64_from_u64(commit_id.0);
+    // Removed members → DELETE matching scope_*_id rows.
+    for asset in initial.file_assets.difference(&authorized.file_assets) {
+        sqlx::query(
+            "DELETE FROM commit_intent_scope_members \
+             WHERE commit_intent_id = ? AND scope_asset_id = ?",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(asset.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members asset delete: {e}")))?;
+    }
+    for bundle in initial.bundles.difference(&authorized.bundles) {
+        sqlx::query(
+            "DELETE FROM commit_intent_scope_members \
+             WHERE commit_intent_id = ? AND scope_bundle_id = ?",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(bundle.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members bundle delete: {e}")))?;
+    }
+    for version in initial.file_versions.difference(&authorized.file_versions) {
+        sqlx::query(
+            "DELETE FROM commit_intent_scope_members \
+             WHERE commit_intent_id = ? AND scope_version_id = ?",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(version.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members version delete: {e}")))?;
+    }
+    for location in initial
+        .file_locations
+        .difference(&authorized.file_locations)
+    {
+        sqlx::query(
+            "DELETE FROM commit_intent_scope_members \
+             WHERE commit_intent_id = ? AND scope_location_id = ?",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(location.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members location delete: {e}")))?;
+    }
+
+    // Added members → INSERT new rows.
+    for asset in authorized.file_assets.difference(&initial.file_assets) {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_asset_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(asset.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members asset insert: {e}")))?;
+    }
+    for bundle in authorized.bundles.difference(&initial.bundles) {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_bundle_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(bundle.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members bundle insert: {e}")))?;
+    }
+    for version in authorized.file_versions.difference(&initial.file_versions) {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_version_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(version.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members version insert: {e}")))?;
+    }
+    for location in authorized
+        .file_locations
+        .difference(&initial.file_locations)
+    {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_location_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(location.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members location insert: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Transition the `pending` row to `authorized`. Guards on
+/// `(id, state='pending', epoch=row.epoch)` so a concurrent operator
+/// action (abort, racing authorize) cannot land a half-written row.
+/// Bumps the epoch and returns the new value the caller carries in
+/// the returned `CommitPermit`.
+async fn transition_pending_to_authorized_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    expected_epoch: u64,
+    closure_authorized_json: &str,
+    target_row_epochs_json: &str,
+    authorized_at: OffsetDateTime,
+) -> Result<u64, VoomError> {
+    let authorized_iso = iso8601(authorized_at)?;
+    let new_epoch = expected_epoch + 1;
+    let res = sqlx::query(
+        "UPDATE commit_intents SET \
+            state = 'authorized', \
+            closure_authorized = ?, \
+            target_row_epochs = ?, \
+            authorized_at = ?, \
+            epoch = ? \
+         WHERE id = ? AND state = 'pending' AND epoch = ?",
+    )
+    .bind(closure_authorized_json)
+    .bind(target_row_epochs_json)
+    .bind(&authorized_iso)
+    .bind(i64_from_u64(new_epoch))
+    .bind(i64_from_u64(commit_id.0))
+    .bind(i64_from_u64(expected_epoch))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("authorize: UPDATE to authorized: {e}")))?;
+    if res.rows_affected() != 1 {
+        return Err(VoomError::Conflict(format!(
+            "authorize: UPDATE to authorized on {commit_id} affected {} rows; \
+             concurrent state mutation between read and write",
+            res.rows_affected()
+        )));
+    }
+    Ok(new_epoch)
+}
+
+async fn emit_authorized_event(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    closure: &AffectedScopeClosure,
+    target_row_epoch_count: u32,
+    authorized_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let payload = Event::CommitAuthorized(CommitAuthorizedPayload {
+        commit_id,
+        closure_asset_count: u32::try_from(closure.file_assets.len()).unwrap_or(u32::MAX),
+        closure_bundle_count: u32::try_from(closure.bundles.len()).unwrap_or(u32::MAX),
+        closure_version_count: u32::try_from(closure.file_versions.len()).unwrap_or(u32::MAX),
+        closure_location_count: u32::try_from(closure.file_locations.len()).unwrap_or(u32::MAX),
+        target_row_epoch_count,
+        authorized_at,
+    });
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: authorized_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
     Ok(())
 }
 
