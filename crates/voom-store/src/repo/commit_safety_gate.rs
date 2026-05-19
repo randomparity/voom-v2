@@ -292,8 +292,10 @@ pub struct CommitIntent {
 /// (Phase B's `authorize_destructive_commit` in commit 6, plus the
 /// sibling tests under the `tests` child module) can fabricate or
 /// inspect them. External consumers reach state through the accessor
-/// methods. No `pub(crate) fn new` constructor exists yet; it lands
-/// with Phase B in commit 6 alongside its only production caller.
+/// methods. Phase B builds permits in-module via the struct literal;
+/// no crate-visible constructor is exposed, because exposing one
+/// would re-open the bypass path the module-private fields are there
+/// to close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPermit {
     commit_id: CommitId,
