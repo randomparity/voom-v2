@@ -615,6 +615,19 @@ pub trait IdentityRepo: Repository {
         &self,
         version_id: FileVersionId,
     ) -> Result<Vec<FileLocation>, VoomError>;
+    /// In-tx variant of `list_live_file_locations_by_version`.
+    /// Required by the commit-safety-gate closure walker (commit 4 /
+    /// Phase A): the walker runs inside an IMMEDIATE tx and must see
+    /// writes from the same tx, which the pool-reading variant
+    /// cannot do (sqlx-on-SQLite isolates pool reads from open
+    /// transactions). Returns IDs only — the closure walker folds
+    /// them into a `BTreeSet<FileLocationId>` and does not consume
+    /// the full row body.
+    async fn list_live_file_locations_by_version_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, VoomError>;
     async fn retire_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1256,6 +1269,29 @@ impl IdentityRepo for SqliteIdentityRepo {
         .await
         .map_err(|e| VoomError::Database(format!("file_locations list live: {e}")))?;
         rows.iter().map(row_to_file_location).collect()
+    }
+
+    async fn list_live_file_locations_by_version_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let rows: Vec<i64> = sqlx::query_scalar(
+            "SELECT id FROM file_locations \
+             WHERE file_version_id = ? AND retired_at IS NULL \
+             ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(version_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations list live in_tx: {e}")))?;
+        rows.into_iter()
+            .map(|id| {
+                u64::try_from(id)
+                    .map(FileLocationId)
+                    .map_err(|e| VoomError::Internal(format!("file_locations id signedness: {e}")))
+            })
+            .collect()
     }
 
     async fn retire_file_location_in_tx<'tx>(

@@ -32,14 +32,22 @@ pub struct FileLocationProposal {
 }
 
 /// The destructive operation a commit-safety-gate caller is asking
-/// the gate to authorize. Sprint 1 ships four variants; the parent
-/// spec's `ArchiveFileVersion` is deferred (the `file_versions`
-/// schema carries no `archived_at` column). `ArchiveBundle` and
-/// `DeleteBundle` are likewise deferred.
+/// the gate to authorize. Sprint 1 ships three variants —
+/// `DeleteFileLocation`, `ReplaceFileLocation`, `MoveFileLocation` —
+/// all operating on `file_locations` rows. Targets that mutate
+/// `file_versions` or `asset_bundles` are deferred to Sprint 5+
+/// because the schema and the cascade semantics needed to retire
+/// those rows safely are not yet defined:
+/// - `DeleteFileVersion`: retiring a version leaves live
+///   `FileLocation` rows pointing at it (Codex round-5). The safe
+///   cascade — atomically retire every location under the version
+///   using the snapshotted epochs — needs its own design pass.
+/// - `ArchiveFileVersion`: `file_versions` schema (migration 0003)
+///   has no `archived_at` column.
+/// - `ArchiveBundle` / `DeleteBundle`: same schema-column gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitTarget {
     DeleteFileLocation(FileLocationId),
-    DeleteFileVersion(FileVersionId),
     ReplaceFileLocation {
         retired: FileLocationId,
         new: FileLocationProposal,
@@ -484,17 +492,29 @@ pub enum AliasResolutionError {
     Database(String),
 }
 
-/// Closure-walk input: enumerates every live `FileLocation` ID that
-/// represents the same physical bytes as the supplied `FileVersion`.
-/// Sprint 1 ships `SqliteAliasResolver` (returns live DB rows on the
-/// version). Sprint 4 + 5 will layer FS / object-store-aware
-/// resolvers behind the same trait so the closure walk can pick up
-/// hardlinks, bind mounts, and shared mounts without changing the
-/// gate's call sites. Fail-closed semantics: on `Unreachable`, the
-/// gate aborts with `BlockedByClosureIncomplete` (commits 4 and 6).
+/// Resolver for **external** (non-database) alias sources — e.g.
+/// filesystem mounts that expose hardlinks/bind mounts, object
+/// stores that mirror live `FileLocation` rows under a different
+/// URL scheme. Sprint 1 ships no production resolver; Sprint 4 and
+/// Sprint 5 introduce filesystem-aware and object-store-aware
+/// resolvers behind this trait.
+///
+/// **DB-internal alias enumeration does NOT use this trait.** The
+/// gate's closure walker (commit 4 / Phase A) reads live
+/// `file_locations` rows directly via
+/// `IdentityRepo::list_live_file_locations_by_version_in_tx`,
+/// inside the same IMMEDIATE transaction the gate's safety checks
+/// run under. Mixing DB-internal enumeration with this trait
+/// (which has no transaction parameter) would either observe
+/// rows outside the gate's tx snapshot or, on single-connection
+/// pools, deadlock waiting for the connection already held by the
+/// open tx. Codex round-5 review surfaced this hazard; the
+/// previously-shipped `SqliteAliasResolver` (commit 2) was deleted
+/// as part of the round-5 fix.
 ///
 /// Object-safe by construction: no generics, no associated types.
-/// Callers in Phase A / B / C hold a `&dyn AliasResolver`.
+/// Callers in Phase A / B / C hold a `&dyn AliasResolver` for
+/// external sources only.
 #[async_trait::async_trait]
 pub trait AliasResolver: Send + Sync {
     /// Return the IDs of every live `FileLocation` on `file_version_id`.
@@ -512,50 +532,6 @@ pub trait AliasResolver: Send + Sync {
         &self,
         file_version_id: FileVersionId,
     ) -> Result<Vec<FileLocationId>, AliasResolutionError>;
-}
-
-/// Production `AliasResolver` backed by the live `file_locations`
-/// table. Returns every `FileLocation` row where `file_version_id`
-/// matches the supplied version and `retired_at IS NULL`. Order is
-/// unspecified at the trait level — see `AliasResolver`.
-#[derive(Debug, Clone)]
-pub struct SqliteAliasResolver {
-    pool: sqlx::SqlitePool,
-}
-
-impl SqliteAliasResolver {
-    #[must_use]
-    pub fn new(pool: sqlx::SqlitePool) -> Self {
-        Self { pool }
-    }
-}
-
-#[async_trait::async_trait]
-impl AliasResolver for SqliteAliasResolver {
-    async fn aliases_for_version(
-        &self,
-        file_version_id: FileVersionId,
-    ) -> Result<Vec<FileLocationId>, AliasResolutionError> {
-        let rows = sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM file_locations \
-             WHERE file_version_id = ? AND retired_at IS NULL \
-             ORDER BY id ASC",
-        )
-        .bind(i64::try_from(file_version_id.0).map_err(|e| {
-            AliasResolutionError::Database(format!("alias resolver: id overflow: {e}"))
-        })?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AliasResolutionError::Database(format!("alias resolver: {e}")))?;
-
-        rows.into_iter()
-            .map(|id| {
-                u64::try_from(id).map(FileLocationId).map_err(|e| {
-                    AliasResolutionError::Database(format!("alias resolver: id signedness: {e}"))
-                })
-            })
-            .collect()
-    }
 }
 
 #[cfg(test)]

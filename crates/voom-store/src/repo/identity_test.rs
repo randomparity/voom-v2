@@ -594,3 +594,126 @@ fn outcome_file_version_id(o: &IngestOutcome) -> FileVersionId {
         } => file_version_id,
     }
 }
+
+// ---- list_live_file_locations_by_version_in_tx (round-5 fix) -----------
+
+#[tokio::test]
+async fn list_live_file_locations_by_version_in_tx_sees_within_tx_inserts() {
+    // Round-5 finding: the gate's closure walker MUST run inside the
+    // gate's IMMEDIATE tx and see writes from that same tx. The
+    // pool-reading `list_live_file_locations_by_version` cannot —
+    // sqlx-on-SQLite isolates pool reads from open transactions. This
+    // test pins the in-tx variant's load-bearing property: a row
+    // inserted inside the tx is visible to the in-tx list before
+    // the tx commits.
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "abc".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let loc = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/in-tx.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+
+    // BEFORE committing: the in-tx list sees the new row.
+    let in_tx = repo
+        .list_live_file_locations_by_version_in_tx(&mut tx, version.id)
+        .await
+        .unwrap();
+    assert!(
+        in_tx.contains(&loc.id),
+        "in-tx list must see within-tx inserts; got {in_tx:?}"
+    );
+
+    tx.commit().await.unwrap();
+
+    // Post-commit, both variants agree.
+    let post = repo
+        .list_live_file_locations_by_version(version.id)
+        .await
+        .unwrap();
+    assert!(post.iter().any(|l| l.id == loc.id));
+}
+
+#[tokio::test]
+async fn list_live_file_locations_by_version_in_tx_excludes_retired() {
+    // Mirror of the pool variant's filtering invariant: retired
+    // locations are excluded. Done inside an open tx to assert the
+    // exclusion works against in-tx state too.
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let version = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "xyz".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let live = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/live.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let to_retire = repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/retired.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    repo.retire_file_location_in_tx(&mut tx, to_retire.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+
+    let in_tx = repo
+        .list_live_file_locations_by_version_in_tx(&mut tx, version.id)
+        .await
+        .unwrap();
+    assert!(in_tx.contains(&live.id));
+    assert!(
+        !in_tx.contains(&to_retire.id),
+        "retired location must be excluded"
+    );
+
+    tx.commit().await.unwrap();
+}
