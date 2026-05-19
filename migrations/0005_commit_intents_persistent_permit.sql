@@ -11,6 +11,15 @@
 -- The tables `commit_intents` and `commit_intent_scope_members` were
 -- introduced in migration 0004 and have no rows in any environment yet
 -- (Phase 2 algorithm code does not exist). Drop-and-recreate is safe.
+--
+-- Codex round-6 review (post commit edba8e4) tightened the CHECK
+-- further: the three post-Phase-B states (authorized, completed,
+-- recovery_required) now require closure_authorized IS NOT NULL.
+-- Before the tightening, a row could satisfy the constraint with the
+-- closure column unset, defeating crash recovery / list / finalize
+-- inspection. The 'aborted' branch is deliberately untouched —
+-- aborted-from-pending has no closure; aborted-from-trip-wire has
+-- mixed shape depending on which wire fired.
 
 DROP INDEX IF EXISTS commit_intent_scope_members_by_location;
 DROP INDEX IF EXISTS commit_intent_scope_members_by_version;
@@ -52,10 +61,10 @@ CREATE TABLE commit_intents (
     -- so contradictory rows are unrepresentable.
     CHECK (
            (state = 'pending'           AND authorized_at IS NULL     AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NULL     AND target_row_epochs IS NULL)
-        OR (state = 'authorized'        AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NULL     AND target_row_epochs IS NOT NULL)
-        OR (state = 'completed'         AND authorized_at IS NOT NULL AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NULL     AND target_row_epochs IS NOT NULL)
+        OR (state = 'authorized'        AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NULL     AND target_row_epochs IS NOT NULL AND closure_authorized IS NOT NULL)
+        OR (state = 'completed'         AND authorized_at IS NOT NULL AND finalized_at IS NOT NULL AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NULL     AND target_row_epochs IS NOT NULL AND closure_authorized IS NOT NULL)
         OR (state = 'aborted'           AND finalized_at IS NULL      AND aborted_at IS NOT NULL   AND abort_reason IS NOT NULL AND recovery_reason IS NULL)
-        OR (state = 'recovery_required' AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NOT NULL AND target_row_epochs IS NOT NULL)
+        OR (state = 'recovery_required' AND authorized_at IS NOT NULL AND finalized_at IS NULL     AND aborted_at IS NULL     AND abort_reason IS NULL     AND recovery_reason IS NOT NULL AND target_row_epochs IS NOT NULL AND closure_authorized IS NOT NULL)
     ),
     CHECK (override_token IS NULL OR json_valid(override_token)),
     CHECK (target_row_epochs IS NULL OR json_valid(target_row_epochs)),

@@ -1035,21 +1035,18 @@ async fn replace_file_location_stale_epoch_on_live_row_is_conflict_and_no_insert
 }
 
 #[tokio::test]
-async fn replace_file_location_trusts_caller_supplied_version_id_by_design() {
-    // The round-2 cross-version invariant ("the new location must be
-    // on the same FileVersion as the retired one") is enforced at the
-    // gate boundary (commit 7 / Phase C), not inside this identity
-    // method. `FileLocationProposal` (the gate-level type) has no
-    // `file_version_id` field, so Phase C can only source it by
-    // reading the retired row's current version — meaning the only
-    // way to call this method with a "wrong" version_id is to bypass
-    // Phase C entirely.
+async fn replace_file_location_rejects_cross_version_supply() {
+    // Round-6 finding #1: the cross-version invariant lives inside the
+    // method, not just at the gate boundary. A caller that supplies
+    // new_location.file_version_id ≠ retired.file_version_id is
+    // rejected with Conflict, and the retire UPDATE never runs — the
+    // old row stays live. Replaces the prior "trusts caller" pin from
+    // edba8e4.
     //
-    // This test calls the method directly with a different version_id
-    // and asserts that the method does NOT reject the call. If a
-    // future change adds a defensive check inside this method, this
-    // test must be updated alongside that change so the design
-    // decision is re-examined explicitly, not silently weakened.
+    // The gate-boundary type-level invariant from round-2 still holds:
+    // FileLocationProposal has no file_version_id, so Phase C can only
+    // convert proposal → NewFileLocation by reading the retired row.
+    // This sibling test is the defense-in-depth layer inside identity.
     let (repo, tmp) = fresh().await;
     let _tmp = tmp; // keep the temp file alive
 
@@ -1093,29 +1090,120 @@ async fn replace_file_location_trusts_caller_supplied_version_id_by_design() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    // Replace under version_a's id but supply NewFileLocation with
-    // version_b's id. Method does not reject by design.
+    // Snapshot the row count BEFORE the failed call so we can assert
+    // no insert leaked through.
+    let before: usize = repo
+        .list_file_locations_by_version(version_a.id)
+        .await
+        .unwrap()
+        .len();
+
+    // Caller bug: supply version_b in NewFileLocation while retiring a
+    // row that lives on version_a.
     let mut tx = repo.pool.begin().await.unwrap();
-    let new_id = repo
+    let err = repo
         .replace_file_location_in_tx(
             &mut tx,
             loc_on_a.id,
             0,
             NewFileLocation {
-                file_version_id: version_b.id,
+                file_version_id: version_b.id, // ← mismatch
                 kind: FileLocationKind::LocalPath,
-                value: "/srv/media/now-on-b.mkv".to_owned(),
+                value: "/srv/media/should-not-land.mkv".to_owned(),
                 proof: None,
                 observed_at: T0 + Duration::seconds(1),
             },
             T0 + Duration::seconds(1),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+    drop(tx);
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // Old row must still be live — no partial write under version_a.
+    let still = repo.get_file_location(loc_on_a.id).await.unwrap().unwrap();
+    assert!(
+        still.retired_at.is_none(),
+        "live row stays live on mismatch"
+    );
+    assert_eq!(still.epoch, 0, "epoch not bumped on mismatch");
+
+    // And no row leaked into version_a OR version_b.
+    let after_a: usize = repo
+        .list_file_locations_by_version(version_a.id)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after_a, before, "no new row inserted under version_a");
+    let after_b: usize = repo
+        .list_file_locations_by_version(version_b.id)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after_b, 0, "no new row inserted under version_b");
+}
+
+#[tokio::test]
+async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
+    // Round-6 finding #2: the retire+insert pair is wrapped in a
+    // SAVEPOINT. If the INSERT fails, ROLLBACK TO restores the outer
+    // tx to pre-UPDATE state, even if the caller subsequently commits
+    // the outer tx (the failure mode Codex called out — a caller that
+    // catches Err to record recovery state and commits would otherwise
+    // persist data loss: retired old row + no replacement).
+    //
+    // We force the INSERT to fail deterministically via a BEFORE
+    // INSERT trigger that RAISE(ABORT)s when value matches a sentinel
+    // string. Real SQLite plumbing — proves the savepoint mechanism
+    // without mocking sqlx internals.
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    // Install the failure trigger.
+    sqlx::query(
+        "CREATE TRIGGER force_replace_insert_failure \
+         BEFORE INSERT ON file_locations \
+         WHEN NEW.value = '__force_failure_marker__' \
+         BEGIN SELECT RAISE(ABORT, 'forced for atomicity test'); END",
+    )
+    .execute(&repo.pool)
+    .await
+    .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .replace_file_location_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            NewFileLocation {
+                file_version_id: loc.file_version_id, // matches → passes round-6 #1 pre-check
+                kind: FileLocationKind::LocalPath,
+                value: "__force_failure_marker__".to_owned(), // ← INSERT trips trigger
+                proof: None,
+                observed_at: T0 + Duration::seconds(2),
+            },
+            T0 + Duration::seconds(2),
+        )
+        .await
+        .unwrap_err();
+    // The load-bearing assertion (Codex round-6 finding #2): caller
+    // catches the Err and commits the outer tx anyway. With a
+    // SAVEPOINT, the retire is undone before the outer commit lands.
     tx.commit().await.unwrap();
 
-    // The new row landed on version_b — proving the method did not
-    // re-anchor or reject.
-    let inserted = repo.get_file_location(new_id).await.unwrap().unwrap();
-    assert_eq!(inserted.file_version_id, version_b.id);
+    assert!(matches!(err, VoomError::Database(_)), "got: {err:?}");
+
+    let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert!(
+        still.retired_at.is_none(),
+        "savepoint must roll back the retire on insert failure",
+    );
+    assert_eq!(still.epoch, 0, "epoch not bumped");
+
+    // Clean up the trigger so it doesn't interfere with anything else
+    // sharing the temp DB. (Temp DB is per-test, but be tidy.)
+    sqlx::query("DROP TRIGGER force_replace_insert_failure")
+        .execute(&repo.pool)
+        .await
+        .unwrap();
 }

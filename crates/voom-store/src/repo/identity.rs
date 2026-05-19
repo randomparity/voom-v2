@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId, MediaVariantId,
@@ -636,18 +636,29 @@ pub trait IdentityRepo: Repository {
         expected_epoch: u64,
     ) -> Result<FileLocation, VoomError>;
     /// Atomically retire `retired_id` under its `expected_epoch` guard
-    /// and insert a new `FileLocation` on the same `FileVersion`. Both
-    /// steps run in the caller's transaction; either both land or
-    /// neither. `Conflict` is returned if the retire UPDATE fails to
-    /// match a live row (already terminal or stale epoch); in that case
-    /// the insert is skipped.
+    /// and insert a new `FileLocation` on the same `FileVersion`. Two
+    /// defense-in-depth guards layered inside this method (Codex
+    /// round-6):
     ///
-    /// Phase C is the sole caller (commit 7). The caller is responsible
-    /// for sourcing `new_location.file_version_id` from the retired
-    /// row's current version — this method does not defensively
-    /// re-check, by design (the round-2 cross-version invariant lives
-    /// at the gate boundary, where `FileLocationProposal` has no
-    /// `file_version_id` field).
+    /// 1. **Cross-version pre-check.** The retired row is fetched in
+    ///    the caller's transaction and rejected with
+    ///    `VoomError::Conflict` if `new_location.file_version_id`
+    ///    differs from the retired row's version. The gate boundary
+    ///    (`FileLocationProposal` has no `file_version_id`) is the
+    ///    outer ring; this is the inner ring that catches the case
+    ///    where a buggy caller bypasses the proposal conversion.
+    ///
+    /// 2. **SAVEPOINT atomicity.** The retire UPDATE and the insert
+    ///    INSERT run inside a SAVEPOINT. On any insert failure the
+    ///    savepoint rolls back; a caller that catches the `Err` and
+    ///    commits the outer transaction observes the old row still
+    ///    live. Without the savepoint, the caller would have to drop
+    ///    the outer transaction to avoid data loss.
+    ///
+    /// `Conflict` is returned on: row not found, row already retired,
+    /// stale `expected_epoch` on a live row, or cross-version mismatch.
+    /// In every `Conflict` case the old row stays live; in every
+    /// insert-failure case the savepoint guarantees the same.
     async fn replace_file_location_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1351,6 +1362,37 @@ impl IdentityRepo for SqliteIdentityRepo {
         new_location: NewFileLocation,
         retired_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError> {
+        // Round-6 finding #1: cross-version pre-check inside identity.
+        // The method is a public IdentityRepo trait method, so the
+        // "Phase C is the sole caller" assumption is not enforceable.
+        // Fetch the retired row in-tx; reject mismatches with Conflict
+        // before the retire UPDATE runs.
+        let retired_row = get_file_location_in_tx(tx, retired_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::Conflict(format!("file_locations replace: id={retired_id} not found"))
+            })?;
+        if retired_row.retired_at.is_some() {
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} already retired"
+            )));
+        }
+        if retired_row.file_version_id != new_location.file_version_id {
+            return Err(VoomError::Conflict(format!(
+                "file_locations replace: id={retired_id} on version={} but \
+                 new_location targets version={}",
+                retired_row.file_version_id, new_location.file_version_id
+            )));
+        }
+
+        // Round-6 finding #2: SAVEPOINT around UPDATE retire + INSERT
+        // new. ROLLBACK TO on any inner Err restores the outer tx to
+        // pre-UPDATE state, so a caller that commits the outer tx
+        // after the inner failure observes the old row still live.
+        let mut sp = tx.begin().await.map_err(|e| {
+            VoomError::Database(format!("file_locations replace savepoint begin: {e}"))
+        })?;
+
         let ts = iso8601(retired_at)?;
         let res = sqlx::query(
             "UPDATE file_locations SET retired_at = ?, epoch = epoch + 1 \
@@ -1359,16 +1401,17 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(&ts)
         .bind(i64_from_u64(retired_id.0))
         .bind(i64_from_u64(retired_expected_epoch))
-        .execute(&mut **tx)
+        .execute(&mut *sp)
         .await
         .map_err(|e| VoomError::Database(format!("file_locations replace-retire: {e}")))?;
         if res.rows_affected() != 1 {
+            // Dropping sp here ROLLBACKs TO the savepoint; outer tx restored.
             return Err(VoomError::Conflict(format!(
                 "file_locations replace: id={retired_id} expected_epoch={retired_expected_epoch} or already retired"
             )));
         }
         let new_id = insert_file_location(
-            tx,
+            &mut sp,
             new_location.file_version_id,
             new_location.kind,
             &new_location.value,
@@ -1376,6 +1419,10 @@ impl IdentityRepo for SqliteIdentityRepo {
             new_location.observed_at,
         )
         .await?;
+
+        sp.commit().await.map_err(|e| {
+            VoomError::Database(format!("file_locations replace savepoint release: {e}"))
+        })?;
         Ok(new_id)
     }
 

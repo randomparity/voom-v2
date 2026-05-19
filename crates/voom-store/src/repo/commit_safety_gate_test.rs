@@ -445,3 +445,104 @@ async fn failing_alias_resolver_empty_set_never_fails() {
         .unwrap();
     assert!(got.is_empty());
 }
+
+// -- Migration 0005 CHECK negative coverage (round-6) ---------------------
+
+use crate::test_support::fresh_initialized_pool_at;
+
+/// Helper: open a fresh pool against a temp DB with all migrations
+/// applied. Returns the pool and the tempfile so the test owns the
+/// lifetime.
+async fn fresh_pool_for_schema_check() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    (pool, tmp)
+}
+
+#[tokio::test]
+async fn commit_intents_check_rejects_authorized_with_null_closure_authorized() {
+    // Round-6 finding #3: a row in state='authorized' that lacks
+    // closure_authorized must be rejected by SQLite at INSERT time.
+    // Before the round-6 tightening, this INSERT would have succeeded
+    // and corrupted crash-recovery / list / finalize inspection.
+    let (pool, _tmp) = fresh_pool_for_schema_check().await;
+    let err = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at, \
+          authorized_at, target_row_epochs) \
+         VALUES ('{}', '{}', '[]', 'authorized', '2026-05-18T00:00:00Z', \
+                 '2026-05-18T00:00:00Z', '[]')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    // SQLite surfaces CHECK violations through sqlx::Error::Database.
+    assert!(
+        format!("{err}").contains("CHECK"),
+        "expected CHECK violation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn commit_intents_check_rejects_completed_with_null_closure_authorized() {
+    let (pool, _tmp) = fresh_pool_for_schema_check().await;
+    let err = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at, \
+          authorized_at, finalized_at, target_row_epochs) \
+         VALUES ('{}', '{}', '[]', 'completed', '2026-05-18T00:00:00Z', \
+                 '2026-05-18T00:00:00Z', '2026-05-18T00:00:01Z', '[]')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err}").contains("CHECK"),
+        "expected CHECK violation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn commit_intents_check_rejects_recovery_required_with_null_closure_authorized() {
+    let (pool, _tmp) = fresh_pool_for_schema_check().await;
+    let err = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at, \
+          authorized_at, recovery_reason, target_row_epochs) \
+         VALUES ('{}', '{}', '[]', 'recovery_required', '2026-05-18T00:00:00Z', \
+                 '2026-05-18T00:00:00Z', 'stale_target_epoch', '[]')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert!(
+        format!("{err}").contains("CHECK"),
+        "expected CHECK violation, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn commit_intents_check_accepts_authorized_with_closure_authorized_set() {
+    // Positive control: the same row shape with closure_authorized
+    // populated MUST be accepted. Without this control, a CHECK that
+    // silently rejects every authorized row would still pass the
+    // three negative tests above.
+    let (pool, _tmp) = fresh_pool_for_schema_check().await;
+    sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, closure_authorized, accepted_evidence_ids, state, \
+          started_at, authorized_at, target_row_epochs) \
+         VALUES ('{}', '{}', '{}', '[]', 'authorized', '2026-05-18T00:00:00Z', \
+                 '2026-05-18T00:00:00Z', '[]')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Confirm the row landed.
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM commit_intents WHERE state = 'authorized'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1);
+}
