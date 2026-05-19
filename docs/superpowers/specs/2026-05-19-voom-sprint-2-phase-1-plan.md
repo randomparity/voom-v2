@@ -96,14 +96,15 @@ the code they cover.
   - `serde_json = { version = "1", features = ["preserve_order"] }`
   - `tokio = { version = "1", features = ["full"] }`
   - `tokio-util = { version = "0.7", features = ["io"] }`   # StreamReader for hyper Body → AsyncRead
-  - `lru = "0.12"`                                          # idempotency LRU
   - `tracing = "0.1"`
+  # Idempotency LRU is hand-rolled (commit 8); the lru crate is
+  # deliberately NOT pulled in (RUSTSEC-2026-0002).
 
 **`crates/voom-worker-protocol/Cargo.toml`**
 - Add the deps from above plus a `dev-dependencies` entry for
   `trybuild = "1"`.
 - Reference `voom-core` via `voom-core.workspace = true`.
-- `tokio-util` and `lru` listed as normal dependencies.
+- `tokio-util` listed as a normal dependency.
 
 **`crates/voom-worker-protocol/src/`**
 - Replace `lib.rs`'s placeholder with empty module declarations per
@@ -297,15 +298,16 @@ client side, `DispatchStream::frames` wraps the response body via
 produce the `Pin<Box<dyn AsyncRead + Send>>` the `NdjsonStream`
 alias requires.
 
-- `IdempotencyCache`: `std::sync::Mutex<lru::LruCache<(String, [u8; 32]), CachedResponse>>`. Capacity is built without `unwrap` via:
-  ```rust
-  // const fn for NonZeroUsize::new is stable from 1.79; if a future toolchain bump removes the const path, switch to a non-panicking match.
-  const CAP: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(1024) {
-      Some(n) => n,
-      None => unreachable!(), // const evaluation rejects this branch at compile time; clippy::unwrap_used does not fire on match.
-  };
-  ```
-  The `unreachable!()` in const context is evaluated at compile time and clippy's `unwrap_used` lint does not match the pattern. A sibling test pins the capacity equals 1024.
+- `IdempotencyCache` is a hand-rolled std-only LRU keyed on
+  `(idempotency_key, body_hash)` with capacity 1024. Backing: a
+  `VecDeque<Key>` for ordering plus a `HashMap<Key, CachedResponse>`
+  for O(1) lookup, both guarded by `std::sync::Mutex`. Rationale for
+  not pulling in a third-party LRU: the `lru` crate's 0.13 release
+  is under an open Stacked-Borrows advisory (RUSTSEC-2026-0002 on
+  `IterMut`), and Sprint 2's cache surface is small enough that a
+  bespoke implementation is simpler than a vendored alternative.
+  A sibling test pins the capacity equals 1024 and exercises the
+  oldest-entry-evicted-when-full path.
 - `CachedResponse { headers: http::HeaderMap, body_frames: Vec<bytes::Bytes> }` — buffered fully in memory; Sprint 2 has no streaming-replay requirement because synthetic results are small.
 
 Integration test in `crates/voom-worker-protocol/tests/`:

@@ -151,13 +151,16 @@ async fn eof_without_terminal_yields_stream_end() {
 }
 
 #[tokio::test]
-async fn eof_mid_frame_yields_stream_end_with_partial_bytes() {
+async fn eof_mid_frame_rejects_as_malformed() {
     let lease = LeaseId(1);
-    // No trailing newline; reader returns StreamEnd carrying byte count.
+    // No trailing newline; reader returns MalformedFrame (truncated stream).
     let bytes = b"{\"kind\":\"progress\",\"lease_id\":1".to_vec();
     let mut reader = NdjsonReader::new(bytes.as_slice(), lease);
-    let out = reader.next_frame().await.unwrap();
-    assert!(matches!(out, NdjsonOutcome::StreamEnd { partial_bytes: n } if n > 0));
+    let err = reader.next_frame().await.unwrap_err();
+    assert!(
+        matches!(err, ProtocolError::MalformedFrame { ref detail } if detail.contains("truncated")),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

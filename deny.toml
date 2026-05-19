@@ -4,13 +4,7 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    # RUSTSEC-2026-0002: lru@0.13 IterMut violates Stacked Borrows. We only
-    # use `LruCache::put` / `LruCache::get` / `LruCache::contains`, never
-    # `IterMut`; the unsound method is not on any code path. Revisit when
-    # lru ships a patched version.
-    "RUSTSEC-2026-0002",
-]
+ignore = []
 
 [licenses]
 version = 2

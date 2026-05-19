@@ -125,11 +125,14 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
         }
 
         if !had_newline {
-            // EOF inside a frame (no trailing newline). If we got JSON
-            // that parses, the contract still says we needed a newline
-            // terminator; classify as MalformedFrame.
-            return Ok(NdjsonOutcome::StreamEnd {
-                partial_bytes: payload_len,
+            // EOF inside a frame without a terminating newline. The Phase 1
+            // design treats this as MalformedFrame (truncated JSON), NOT
+            // StreamEnd — a stream that ends mid-line is by definition
+            // truncated, distinct from a clean close on a frame boundary.
+            return Err(ProtocolError::MalformedFrame {
+                detail: format!(
+                    "stream truncated mid-frame: {payload_len} bytes accumulated without newline"
+                ),
             });
         }
 
