@@ -91,12 +91,15 @@ the code they cover.
   - `serde = { version = "1", features = ["derive"] }`
   - `serde_json = { version = "1", features = ["preserve_order"] }`
   - `tokio = { version = "1", features = ["full"] }`
+  - `tokio-util = { version = "0.7", features = ["io"] }`   # StreamReader for hyper Body → AsyncRead
+  - `lru = "0.12"`                                          # idempotency LRU
   - `tracing = "0.1"`
 
 **`crates/voom-worker-protocol/Cargo.toml`**
 - Add the deps from above plus a `dev-dependencies` entry for
   `trybuild = "1"`.
 - Reference `voom-core` via `voom-core.workspace = true`.
+- `tokio-util` and `lru` listed as normal dependencies.
 
 **`crates/voom-worker-protocol/src/`**
 - Replace `lib.rs`'s placeholder with empty module declarations per
@@ -148,15 +151,25 @@ Implements Phase 1 design §3.2. `OperationRequest`,
   - Round-trip `OperationRequest` / `OperationResponse`.
   - `PercentBps`: 0, 10000 OK; 10001, 65535 reject.
   - Deserialize `10001` from JSON rejects.
-  - Compile-fail trybuild test: a Rust file under
+  - **Compile-fail trybuild test:** a Rust file under
     `crates/voom-worker-protocol/tests/ui/percent_bps_private_field.rs`
-    that tries `PercentBps { bps: 65535 }` and is asserted to fail
-    compilation via `trybuild`.
+    that tries `PercentBps { bps: 65535 }`. The matching expected
+    stderr file `percent_bps_private_field.stderr` MUST also be
+    committed in this commit — `trybuild` compares actual stderr
+    against the committed file and the test fails if either the
+    file is missing or the diff is non-empty. The stderr is
+    generated once via `TRYBUILD=overwrite cargo test
+    -p voom-worker-protocol --test trybuild_percent_bps` against
+    the rustc version pinned in `rust-toolchain.toml` and reviewed
+    by hand for plausibility before commit. If a future rustc
+    bump changes the error wording, the fixture is regenerated in
+    the same commit that bumps the toolchain.
   - `OperationRequest` rejects unknown top-level fields.
 
 Re-export from `lib`.
 
-**Exit:** `just ci` green.
+**Exit:** `just ci` green from a clean tree (no `TRYBUILD=overwrite`
+needed because the `.stderr` fixture is committed).
 
 ### Commit 5 — Handshake + version negotiation (handshake.rs)
 
@@ -246,16 +259,35 @@ Implements Phase 1 design §3.7 and §3.8.
 - `HttpServer` impl of `ServerHandle` over `hyper::server::conn::http1`.
 - `route_policy(method, path) -> Option<RoutePolicy>` exact-match
   router covering the matrix in §3.8 of the design.
-- Middleware stack applied per route policy:
-  1. Version (if gated).
-  2. Auth (if gated).
-  3. Idempotency: parse header, walk body `serde_json::Value`
-     rejecting any `idempotency_key` field at any depth, look up in
-     LRU keyed on `(idempotency_key, blake3(body_bytes))`.
-- `IdempotencyCache`: simple `std::sync::Mutex<LruCache<(String, [u8; 32]), CachedResponse>>` with capacity 1024.
-- `CachedResponse` stores the original `OperationResponse`
-  serialized + the NDJSON body buffered in memory; replay rewrites
-  both back to the new caller.
+
+**Request body handling under hyper 1.x.** `hyper::body::Incoming`
+is a one-shot stream, not cloneable, not `AsyncRead`. The middleware
+buffers the body once into a `Bytes` and then:
+
+  1. Computes `body_hash = blake3::hash(&bytes)`.
+  2. Parses `serde_json::Value` from `&bytes` and recursively walks
+     it rejecting `idempotency_key` at any depth.
+  3. Looks up `(idempotency_key, body_hash)` in the
+     `IdempotencyCache` LRU.
+  4. On miss, deserializes `OperationRequest` from `&bytes` (so the
+     handler sees a typed request, not a re-parsed `Value`) and
+     hands it to the typed handler.
+  5. On hit, replays the cached `OperationResponse` headers AND
+     replays the cached NDJSON body without ever calling the
+     handler.
+
+**Response body handling.** The handler produces an NDJSON stream
+inside an `hyper::body::Body` implementation backed by a `mpsc`
+channel; the cache captures every emitted frame's bytes into a
+`Vec<Bytes>` for later replay. Replay reconstructs a new
+`hyper::Body` from the captured `Vec<Bytes>` via
+`http_body_util::Full` (single body) or `StreamBody` (incremental).
+On the client side, `DispatchStream::frames` wraps the response
+body via `tokio_util::io::StreamReader<...>` to produce the
+`Pin<Box<dyn AsyncRead + Send>>` the `NdjsonStream` alias requires.
+
+- `IdempotencyCache`: `std::sync::Mutex<lru::LruCache<(String, [u8; 32]), CachedResponse>>` with capacity 1024 (`std::num::NonZeroUsize::new(1024).unwrap()`).
+- `CachedResponse { headers: http::HeaderMap, body_frames: Vec<bytes::Bytes> }` — buffered fully in memory; Sprint 2 has no streaming-replay requirement because synthetic results are small.
 
 Integration test in `crates/voom-worker-protocol/tests/`:
 - Spawn `HttpServer` with a one-handler that emits one `Progress`
@@ -265,6 +297,16 @@ Integration test in `crates/voom-worker-protocol/tests/`:
 - `handshake(1)` succeeds; `handshake(0)` rejects.
 - Auth: wrong bearer → 401-equivalent `UnauthorizedBearer`.
 - Routing: GET handshake → 404; POST unknown → 404.
+- **Idempotency exact-byte replay:** dispatch same bytes twice with
+  same idempotency key; second call returns identical response
+  without invoking the handler. Verified via a handler-side counter
+  that asserts it ran exactly once.
+- **Idempotency different-byte same-key:** dispatch with same key
+  but different body bytes; second call returns
+  `DuplicateIdempotencyKey`.
+- **Recursive idempotency_key scan:** body
+  `{"operation":"probe_file","lease_id":1,"payload":{"idempotency_key":"oops"},"heartbeat_deadline_ms":...}`
+  rejects as `HeaderBodyKeyMismatch`.
 
 **Exit:** `just ci` green.
 
@@ -280,20 +322,57 @@ for a known `ProgressFrame`.
 
 ### Commit 10 — `voom-conformance` crate skeleton + Harness
 
-New crate added to `[workspace] members`. Cargo.toml depends on
-`voom-worker-protocol` (workspace) and `voom-core` (workspace) and
-dev-deps `tokio = { features = ["macros"] }`.
+New crate added to `[workspace] members`. `Cargo.toml`:
+
+```toml
+[dependencies]
+voom-core.workspace = true
+voom-worker-protocol.workspace = true
+tokio = { workspace = true }                # full features; process + io + macros + rt-multi-thread + time
+tokio-util.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+
+[lints]
+workspace = true
+```
+
+Tokio is a NORMAL dependency (not dev-dep) because both
+`harness.rs` and the `echo-worker` bin (commit 11) need
+`tokio::process::Child`, stdin handling, and `tokio::task::JoinHandle`
+in non-test code.
 
 `src/lib.rs`:
-- Re-exports `Harness`, `SuiteResult`.
+- Re-exports `Harness`, `SuiteResult`, `WorkerLaunch`.
 
 `src/harness.rs`:
 - `Harness::new`, `Harness::env`.
 - `Harness::run_typed_suite`, `Harness::run_raw_wire_suite`,
   `Harness::run_all` — each returns a `SuiteResult` with
   `passed: vec![]` and `failed: vec![]`. Commits 11–12 fill in.
-- `Harness::spawn_worker` private helper that spawns the worker
-  binary with the env vars and reads the `BOUND addr=...` line.
+- `Harness::launch(&self) -> Result<WorkerLaunch, std::io::Error>` —
+  PUBLIC method. Spawns the worker binary with the env vars,
+  inherits stdin from a pipe the harness holds open, reads
+  `BOUND addr=...` from stdout, and returns:
+  ```rust
+  pub struct WorkerLaunch {
+      pub child: tokio::process::Child,
+      pub bound: std::net::SocketAddr,
+      pub stdin: tokio::process::ChildStdin,    // held open; dropping closes the pipe → worker self-exits
+      pub credentials: voom_worker_protocol::WorkerCredentials,
+  }
+
+  impl WorkerLaunch {
+      /// Drop stdin to trigger graceful shutdown; await child exit
+      /// with a timeout.
+      pub async fn shutdown(mut self, grace: std::time::Duration) -> std::io::Result<std::process::ExitStatus>;
+  }
+  ```
 
 `src/lib_test.rs` and `src/harness_test.rs`: empty placeholders.
 
@@ -312,11 +391,20 @@ dev-deps `tokio = { features = ["macros"] }`.
 - Prints `BOUND addr=...` immediately after `serve()` returns.
 
 Smoke test in `crates/voom-conformance/tests/echo_smoke.rs`:
-- Spawn `echo-worker` via `Harness`.
-- Send one `ProbeFile { path: "/tmp/x" }` via `HttpClient`.
-- Assert result echoes the path.
-- Close stdin; assert child exits within 200 ms (use
-  `tokio::time::timeout` over `Child::wait`).
+- Build `Harness::new(env!("CARGO_BIN_EXE_echo-worker"))` (Cargo
+  exports the binary path as an env var to the test target — this
+  is the canonical way to find a sibling bin in the same crate).
+- Call `Harness::launch()` → `WorkerLaunch`.
+- Construct an `HttpClient` pointing at `launch.bound` with
+  `launch.credentials`.
+- Send one `ProbeFile { path: "/tmp/x" }` via `HttpClient::dispatch`.
+- Assert the result frame echoes the path.
+- Call `launch.shutdown(Duration::from_millis(500))`; assert
+  ExitStatus is success and child exits within the grace period.
+
+Smoke test does NOT depend on `Harness::run_typed_suite` or
+`run_raw_wire_suite` returning anything meaningful — those are
+no-ops until commit 12. Commit 11 stands on its own.
 
 **Exit:** `just ci` green; the smoke test passes.
 
