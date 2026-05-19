@@ -76,7 +76,11 @@ the code they cover.
 ### Commit 2 — `voom-worker-protocol` shell + workspace deps
 
 **Workspace `Cargo.toml`**
-- Add to `[workspace.dependencies]`:
+- Add to `[workspace.dependencies]` the internal-path entries that
+  later crates inherit via `.workspace = true`:
+  - `voom-worker-protocol = { path = "crates/voom-worker-protocol" }`
+  - `voom-conformance = { path = "crates/voom-conformance" }`
+- Add the third-party entries:
   - `hyper = { version = "1", features = ["http1", "client", "server"] }`
   - `hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "server"] }`
   - `http = "1"`
@@ -276,17 +280,32 @@ buffers the body once into a `Bytes` and then:
      replays the cached NDJSON body without ever calling the
      handler.
 
-**Response body handling.** The handler produces an NDJSON stream
-inside an `hyper::body::Body` implementation backed by a `mpsc`
-channel; the cache captures every emitted frame's bytes into a
-`Vec<Bytes>` for later replay. Replay reconstructs a new
-`hyper::Body` from the captured `Vec<Bytes>` via
-`http_body_util::Full` (single body) or `StreamBody` (incremental).
-On the client side, `DispatchStream::frames` wraps the response
-body via `tokio_util::io::StreamReader<...>` to produce the
-`Pin<Box<dyn AsyncRead + Send>>` the `NdjsonStream` alias requires.
+**Response body handling.** The handler returns one concrete body
+type for both the live path and the cached-replay path:
 
-- `IdempotencyCache`: `std::sync::Mutex<lru::LruCache<(String, [u8; 32]), CachedResponse>>` with capacity 1024 (`std::num::NonZeroUsize::new(1024).unwrap()`).
+```rust
+type ResponseBody = http_body_util::combinators::BoxBody<bytes::Bytes, std::convert::Infallible>;
+```
+
+The live path constructs the body from a `mpsc::Receiver<Bytes>`
+turned into a `StreamBody`, then `.boxed()`. The cached-replay
+path constructs the body from a `Vec<Bytes>` via
+`http_body_util::Full` chained per-frame or a single concatenated
+`Full`, then `.boxed()`. Both paths return `ResponseBody`. On the
+client side, `DispatchStream::frames` wraps the response body via
+`tokio_util::io::StreamReader<BodyDataStream<Incoming>, Bytes>` to
+produce the `Pin<Box<dyn AsyncRead + Send>>` the `NdjsonStream`
+alias requires.
+
+- `IdempotencyCache`: `std::sync::Mutex<lru::LruCache<(String, [u8; 32]), CachedResponse>>`. Capacity is built without `unwrap` via:
+  ```rust
+  // const fn for NonZeroUsize::new is stable from 1.79; if a future toolchain bump removes the const path, switch to a non-panicking match.
+  const CAP: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(1024) {
+      Some(n) => n,
+      None => unreachable!(), // const evaluation rejects this branch at compile time; clippy::unwrap_used does not fire on match.
+  };
+  ```
+  The `unreachable!()` in const context is evaluated at compile time and clippy's `unwrap_used` lint does not match the pattern. A sibling test pins the capacity equals 1024.
 - `CachedResponse { headers: http::HeaderMap, body_frames: Vec<bytes::Bytes> }` — buffered fully in memory; Sprint 2 has no streaming-replay requirement because synthetic results are small.
 
 Integration test in `crates/voom-worker-protocol/tests/`:
@@ -325,9 +344,18 @@ for a known `ProgressFrame`.
 New crate added to `[workspace] members`. `Cargo.toml`:
 
 ```toml
+[package]
+name = "voom-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
 [dependencies]
 voom-core.workspace = true
-voom-worker-protocol.workspace = true
+voom-worker-protocol.workspace = true       # inherited from [workspace.dependencies] added in commit 2
 tokio = { workspace = true }                # full features; process + io + macros + rt-multi-thread + time
 tokio-util.workspace = true
 bytes.workspace = true
@@ -337,6 +365,10 @@ async-trait.workspace = true
 http.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+
+[[bin]]
+name = "echo-worker"                         # explicit hyphen so the test env var CARGO_BIN_EXE_echo-worker resolves
+path = "src/bin/echo_worker.rs"
 
 [lints]
 workspace = true
