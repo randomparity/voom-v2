@@ -2175,6 +2175,264 @@ async fn finalize_phase_c_stale_target_epoch_drives_recovery_required() {
     assert!(retired_at.is_none());
 }
 
+// -- round-7 finding #1: silent-path mutation failure recovery ------------
+
+#[tokio::test]
+async fn finalize_phase_c_applied_mutation_failure_drives_recovery_required() {
+    // Round-7 finding #1: SAVEPOINT around the post-trip-wire block.
+    // The caller has already performed the durable filesystem
+    // mutation by the time finalize runs; a post-trip-wire DB failure
+    // must NOT roll back the outer tx and leave the row stuck in
+    // 'authorized'. The savepoint rolls back to pre-dispatch state;
+    // the outer tx transitions the row to recovery_required with
+    // recovery_reason='mutation_failed' and emits both events.
+    //
+    // We force the identity dispatch's UPDATE (retire file_locations)
+    // to fail deterministically via a BEFORE UPDATE trigger that
+    // RAISE(ABORT)s on retire attempts. The trigger fires only on
+    // dispatch — closure walk / trip-wire steps do not write to
+    // file_locations.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+
+    sqlx::query(
+        "CREATE TRIGGER force_dispatch_retire_failure \
+         BEFORE UPDATE OF retired_at ON file_locations \
+         WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL \
+         BEGIN SELECT RAISE(ABORT, 'forced for mutation_failed test'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            gate_outcome.result,
+            CommitGateResult::BlockedByMutationFailed { .. }
+        ),
+        "got {:?}",
+        gate_outcome.result
+    );
+
+    // Read in a fresh tx — the outer tx must have committed despite
+    // the inner mutation failure.
+    let (state, abort_reason, recovery_reason) =
+        finalized_commit_intent_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("mutation_failed"));
+
+    // Both events durably written.
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedPostMutation),
+        "expected CommitAbortedPostMutation in {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&EventKind::CommitRecoveryRequired),
+        "expected CommitRecoveryRequired in {kinds:?}"
+    );
+
+    // The retired_at column on the target row must still be NULL —
+    // the savepoint rolled back the inner UPDATE before the outer tx
+    // committed the recovery_required transition.
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(seeded.location_id.0.cast_signed())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retired_at.is_none());
+
+    sqlx::query("DROP TRIGGER force_dispatch_retire_failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+// -- round-7 finding #2: caller-observed closure merged into Phase C ------
+
+#[tokio::test]
+async fn finalize_phase_c_observed_alias_drives_closure_grew() {
+    // Round-7 finding #2: caller saw aliases the resolver / DB did
+    // not surface. The Applied { observed } payload must factor into
+    // Phase C trip-wires — otherwise the gate silently drops the
+    // caller's observation and proceeds. Merge into closure_final
+    // before delta computation surfaces the extra members as
+    // `added_*` entries; closure-grew trip-wire fires.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+
+    // Supply an `observed` closure carrying an extra location ID that
+    // is NOT in closure_authorized AND is NOT enumerated by the
+    // resolver / DB at Phase C (it doesn't have to be a real live
+    // row — the merge only unions IDs into the set used by the delta
+    // / lease checks).
+    let mut observed = AffectedScopeClosure::default();
+    observed
+        .file_locations
+        .insert(FileLocationId(seeded.location_id.0 + 9_999));
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied {
+            observed: Some(observed),
+        },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    let delta = match gate_outcome.result {
+        CommitGateResult::BlockedByClosureGrew { delta } => delta,
+        other => panic!("expected BlockedByClosureGrew, got {other:?}"),
+    };
+    // The observed-only member surfaces as an added_locations entry.
+    assert!(
+        delta
+            .added_locations
+            .contains(&FileLocationId(seeded.location_id.0 + 9_999)),
+        "expected merged observed member in added_locations: {:?}",
+        delta.added_locations
+    );
+
+    let (state, abort_reason, recovery_reason) =
+        finalized_commit_intent_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("closure_grew"));
+
+    // The post-mutation event's added_location_count must reflect the
+    // merged delta.
+    let post_count = first_post_mutation_added_location_count(&pool, commit_id).await;
+    assert!(
+        post_count >= 1,
+        "expected added_location_count >= 1, got {post_count}"
+    );
+}
+
+async fn first_post_mutation_added_location_count(pool: &SqlitePool, commit_id: CommitId) -> u32 {
+    let events_repo = SqliteEventRepo::new(pool.clone());
+    let page = events_repo
+        .list(
+            EventFilter {
+                kind: Some(EventKind::CommitAbortedPostMutation),
+                subject_type: Some(voom_events::SubjectType::CommitIntent),
+                subject_id: Some(commit_id.0),
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    let row = page
+        .items
+        .first()
+        .expect("expected one CommitAbortedPostMutation event");
+    match &row.envelope.payload {
+        voom_events::Event::CommitAbortedPostMutation(p) => p.added_location_count,
+        other => panic!("expected CommitAbortedPostMutation payload, got {other:?}"),
+    }
+}
+
+// -- round-7 finding #3: overlapping prepare guard ------------------------
+
+#[tokio::test]
+async fn prepare_blocked_by_overlapping_pending_commit_on_location() {
+    // Round-7 finding #3: two operators preparing destructive commits
+    // on overlapping scope (same FileLocation here) used to both end
+    // up in `pending` (and later `authorized`). Phase A now consults
+    // consult_pending_commit_lock_in_tx for every member of
+    // closure_initial before inserting the new intent.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let first = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location_id),
+            accepted_evidence_ids: Vec::new(),
+            override_token: None,
+        },
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let (blocked_commit_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(_) => panic!("expected Blocked, got Pending"),
+    };
+    match result {
+        CommitGateResult::BlockedByPendingCommit {
+            commit_id: existing,
+            offending_scope,
+        } => {
+            assert_eq!(existing, first);
+            assert!(
+                matches!(offending_scope, LeaseScope::Location(id) if id == seeded.location_id),
+                "got {offending_scope:?}"
+            );
+        }
+        other => panic!("expected BlockedByPendingCommit, got {other:?}"),
+    }
+
+    // The blocked row lands as `aborted` with the new abort_reason tag.
+    let (state, abort_reason) = aborted_commit_intent_state(&pool, blocked_commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(abort_reason, "pending_commit");
+
+    // Matching event row sits alongside.
+    let kinds = events_for_commit(&pool, blocked_commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByPendingCommit),
+        "expected CommitAbortedByPendingCommit in {kinds:?}"
+    );
+}
+
 // -- abort_destructive_commit sibling tests (commit 8) ---------------------
 
 /// Read the first `commit.aborted_pre_mutation` event for `commit_id`

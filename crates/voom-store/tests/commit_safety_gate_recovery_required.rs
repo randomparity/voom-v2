@@ -32,9 +32,9 @@ use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AuthorizeOutcome, CommitGateResult, CommitPermit, CommitTarget, DestructiveCommit,
-    FinalizeOutcome, MutationOutcome, PrepareOutcome, authorize_destructive_commit,
-    finalize_destructive_commit, prepare_destructive_commit,
+    AffectedScopeClosure, AuthorizeOutcome, CommitGateResult, CommitPermit, CommitTarget,
+    DestructiveCommit, FinalizeOutcome, MutationOutcome, PrepareOutcome,
+    authorize_destructive_commit, finalize_destructive_commit, prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -440,4 +440,146 @@ async fn phase_c_stale_target_epoch_lands_recovery_required_with_drift_payload()
             .await
             .unwrap();
     assert!(retired_at.is_none());
+}
+
+#[tokio::test]
+async fn phase_c_applied_mutation_failure_lands_recovery_required_with_reason() {
+    // Round-7 finding #1: SAVEPOINT around the post-trip-wire block.
+    // Force the dispatch UPDATE (retire) to fail via a BEFORE UPDATE
+    // trigger; the savepoint rolls back to pre-dispatch state and the
+    // outer tx commits the recovery_required transition with
+    // recovery_reason='mutation_failed' + both events.
+    let (pool, _tmp) = open_pool().await;
+    let seeded = seed_chain(&pool, "/srv/x").await;
+    let permit = run_prepare_and_authorize(&pool, seeded.location_id).await;
+    let commit_id = permit.commit_id();
+
+    sqlx::query(
+        "CREATE TRIGGER force_dispatch_retire_failure_e2e \
+         BEFORE UPDATE OF retired_at ON file_locations \
+         WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL \
+         BEGIN SELECT RAISE(ABORT, 'forced for mutation_failed e2e'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            gate_outcome.result,
+            CommitGateResult::BlockedByMutationFailed { .. }
+        ),
+        "got {:?}",
+        gate_outcome.result
+    );
+
+    let (state, abort_reason, recovery_reason) = recovery_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("mutation_failed"));
+
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitAbortedPostMutation).await,
+        1
+    );
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitRecoveryRequired).await,
+        1
+    );
+
+    // The retired_at column on the target row must still be NULL —
+    // the savepoint rolled back the inner UPDATE.
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(seeded.location_id.0.cast_signed())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retired_at.is_none());
+
+    sqlx::query("DROP TRIGGER force_dispatch_retire_failure_e2e")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn phase_c_applied_with_observed_alias_drives_recovery_required_with_merged_delta() {
+    // Round-7 finding #2: the caller's observed-alias set is merged
+    // into closure_final and surfaces as `added_*` entries on the
+    // closure-grew trip-wire's delta. Without the merge, the
+    // observed-only members would be silently dropped.
+    let (pool, _tmp) = open_pool().await;
+    let seeded = seed_chain(&pool, "/srv/x").await;
+    let permit = run_prepare_and_authorize(&pool, seeded.location_id).await;
+    let commit_id = permit.commit_id();
+
+    let mut observed = AffectedScopeClosure::default();
+    observed
+        .file_locations
+        .insert(FileLocationId(seeded.location_id.0 + 7_777));
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied {
+            observed: Some(observed),
+        },
+        T0 + Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    let delta = match gate_outcome.result {
+        CommitGateResult::BlockedByClosureGrew { delta } => delta,
+        other => panic!("expected BlockedByClosureGrew, got {other:?}"),
+    };
+    assert!(
+        delta
+            .added_locations
+            .contains(&FileLocationId(seeded.location_id.0 + 7_777)),
+        "expected merged observed member in added_locations: {:?}",
+        delta.added_locations
+    );
+
+    let (state, abort_reason, recovery_reason) = recovery_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("closure_grew"));
+
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitAbortedPostMutation).await,
+        1
+    );
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitRecoveryRequired).await,
+        1
+    );
 }

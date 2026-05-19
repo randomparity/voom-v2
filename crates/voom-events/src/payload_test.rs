@@ -470,6 +470,26 @@ fn commit_aborted_by_closure_incomplete_round_trip() {
 }
 
 #[test]
+fn commit_aborted_by_pending_commit_round_trip() {
+    let p = CommitAbortedByPendingCommitPayload {
+        commit_id: voom_core::CommitId(21),
+        pending_commit_id: voom_core::CommitId(20),
+        scope_type: "location".to_owned(),
+        scope_id: 99,
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAbortedByPendingCommit(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.aborted_by_pending_commit");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAbortedByPendingCommit(q) if q == p));
+    assert_eq!(
+        Event::CommitAbortedByPendingCommit(p).kind(),
+        EventKind::CommitAbortedByPendingCommit
+    );
+}
+
+#[test]
 fn commit_authorized_round_trip() {
     let p = CommitAuthorizedPayload {
         commit_id: voom_core::CommitId(21),

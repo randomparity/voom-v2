@@ -496,6 +496,31 @@ pub struct CommitAbortedByClosureIncompletePayload {
     pub aborted_at: OffsetDateTime,
 }
 
+/// `commit.aborted_by_pending_commit` — Phase A trip-wire (round-7).
+/// Another in-flight `commit_intents` row (`state IN ('pending',
+/// 'authorized')`) already covers a scope in the new commit's
+/// `closure_initial`. Carries the offending scope (`scope_type`,
+/// `scope_id`) so an operator can route the wait / takeover decision
+/// without a race-prone re-query. `pending_commit_id` identifies the
+/// existing in-flight row that won the lock; `commit_id` is the newly
+/// landed `aborted` row that recorded the abort.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedByPendingCommitPayload {
+    pub commit_id: CommitId,
+    /// ID of the in-flight commit that already covers `scope_*`.
+    pub pending_commit_id: CommitId,
+    /// One of `"asset" | "bundle" | "version" | "location"` — mirrors
+    /// `LeaseScope::type_str`.
+    pub scope_type: String,
+    pub scope_id: u64,
+    /// `"prepare"` — only Phase A emits this event (Phase B / C cannot
+    /// reach the overlap branch; they operate on a single committed
+    /// intent row).
+    pub phase: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
 /// `commit.authorized` — Phase B success. The intent transitioned from
 /// `pending` to `authorized`; the gate's recomputed `closure_authorized`
 /// + per-member epoch snapshot are durably persisted on the row.
@@ -811,6 +836,8 @@ pub enum Event {
     CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload),
     #[serde(rename = "commit.aborted_by_closure_incomplete")]
     CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload),
+    #[serde(rename = "commit.aborted_by_pending_commit")]
+    CommitAbortedByPendingCommit(CommitAbortedByPendingCommitPayload),
     #[serde(rename = "commit.authorized")]
     CommitAuthorized(CommitAuthorizedPayload),
     #[serde(rename = "commit.aborted_by_closure_grew")]
@@ -886,6 +913,7 @@ impl Event {
             Self::CommitAbortedByClosureIncomplete(_) => {
                 EventKind::CommitAbortedByClosureIncomplete
             }
+            Self::CommitAbortedByPendingCommit(_) => EventKind::CommitAbortedByPendingCommit,
             Self::CommitAuthorized(_) => EventKind::CommitAuthorized,
             Self::CommitAbortedByClosureGrew(_) => EventKind::CommitAbortedByClosureGrew,
             Self::CommitCompleted(_) => EventKind::CommitCompleted,

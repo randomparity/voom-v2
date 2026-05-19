@@ -14,10 +14,12 @@ use sqlx::SqlitePool;
 use tempfile::NamedTempFile;
 use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
+use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AliasResolver, CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
+    AliasResolver, CommitGateResult, CommitTarget, DestructiveCommit, PrepareOutcome,
+    prepare_destructive_commit,
 };
-use voom_store::repo::events::SqliteEventRepo;
+use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
     AliasProof, DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, LocationProof,
     NewFileLocation, NewFileVersion, ObservedBytes, ProducedBy, RenameProof, SqliteIdentityRepo,
@@ -324,4 +326,87 @@ async fn pending_lock_disk_mode_parity_survives_reconnect() {
         .await
         .unwrap_err();
     assert!(matches!(err2, VoomError::Conflict(_)), "got {err2:?}");
+}
+
+#[tokio::test]
+async fn second_prepare_against_overlapping_scope_is_blocked_by_pending_commit() {
+    // Round-7 finding #3: prepare-vs-prepare race. Two operators that
+    // prepare destructive commits on overlapping scope (same location)
+    // both used to receive `pending` intents. Phase A now consults
+    // consult_pending_commit_lock_in_tx for every member of
+    // closure_initial before inserting the new intent — first match
+    // aborts via the two-tx pattern with BlockedByPendingCommit +
+    // commit.aborted_by_pending_commit.
+    let (pool, _tmp) = open_pool().await;
+    let seeded = seed_chain(&pool, "/srv/x").await;
+    land_pending_intent(&pool, seeded.location).await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver: Box<dyn AliasResolver> = Box::new(FailingAliasResolver::new(std::iter::empty::<
+        FileVersionId,
+    >()));
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        resolver.as_ref(),
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location),
+            accepted_evidence_ids: Vec::new(),
+            override_token: None,
+        },
+        T0 + Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let (blocked_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(_) => panic!("expected Blocked, got Pending"),
+    };
+    match result {
+        CommitGateResult::BlockedByPendingCommit {
+            commit_id: _,
+            offending_scope,
+        } => {
+            assert!(
+                matches!(offending_scope, LeaseScope::Location(id) if id == seeded.location),
+                "got {offending_scope:?}"
+            );
+        }
+        other => panic!("expected BlockedByPendingCommit, got {other:?}"),
+    }
+
+    // Durable row landed as `aborted` with the new abort_reason tag.
+    let (state, abort_reason): (String, String) =
+        sqlx::query_as("SELECT state, abort_reason FROM commit_intents WHERE id = ?")
+            .bind(blocked_id.0.cast_signed())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "aborted");
+    assert_eq!(abort_reason, "pending_commit");
+
+    // Matching event row written via the two-tx pattern.
+    let count = pending_commit_event_count(&pool, blocked_id).await;
+    assert_eq!(count, 1, "expected one CommitAbortedByPendingCommit event");
+}
+
+async fn pending_commit_event_count(pool: &SqlitePool, commit_id: voom_core::CommitId) -> usize {
+    let events = SqliteEventRepo::new(pool.clone());
+    let page = events
+        .list(
+            EventFilter {
+                kind: Some(EventKind::CommitAbortedByPendingCommit),
+                subject_type: Some(voom_events::SubjectType::CommitIntent),
+                subject_id: Some(commit_id.0),
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    page.items.len()
 }

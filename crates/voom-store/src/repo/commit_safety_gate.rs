@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_core::ids::{
@@ -16,10 +16,11 @@ use voom_core::ids::{
 };
 use voom_events::payload::{
     CommitAbortedByClosureGrewPayload, CommitAbortedByClosureIncompletePayload,
-    CommitAbortedByStaleEvidencePayload, CommitAbortedByUseLeasePayload,
-    CommitAbortedPostMutationPayload, CommitAbortedPreMutationPayload, CommitAuthorizedPayload,
-    CommitCompletedPayload, CommitForcedOverridePayload, CommitIntentRecordedPayload,
-    CommitRecoveryRequiredPayload, TargetEpochDriftWire,
+    CommitAbortedByPendingCommitPayload, CommitAbortedByStaleEvidencePayload,
+    CommitAbortedByUseLeasePayload, CommitAbortedPostMutationPayload,
+    CommitAbortedPreMutationPayload, CommitAuthorizedPayload, CommitCompletedPayload,
+    CommitForcedOverridePayload, CommitIntentRecordedPayload, CommitRecoveryRequiredPayload,
+    TargetEpochDriftWire,
 };
 use voom_events::{Event, EventEnvelope, SubjectType};
 
@@ -422,6 +423,15 @@ pub enum CommitGateResult {
     /// `commit.aborted_post_mutation` with
     /// `reason = 'stale_target_epoch'`.
     BlockedByStaleTargetEpoch { drift: Vec<TargetEpochDrift> },
+    /// Round-7 finding #1: post-trip-wire DB mutation (identity
+    /// dispatch / intent completion / event append) failed AFTER the
+    /// caller had already performed the durable filesystem mutation.
+    /// Phase C wraps that block in a SAVEPOINT; on Err the savepoint
+    /// rolls back and the outer tx transitions the intent to
+    /// `recovery_required` with `recovery_reason = 'mutation_failed'`.
+    /// `error` carries the inner error's diagnostic string so the
+    /// caller has enough context for the recovery worker / audit.
+    BlockedByMutationFailed { error: String },
 }
 
 /// Input to `prepare_destructive_commit`. `override_token` carries the
@@ -707,6 +717,15 @@ enum PhaseAAbort {
     ClosureIncomplete {
         message: String,
     },
+    /// Round-7 finding #3: another in-flight `commit_intents` row
+    /// (`state IN ('pending','authorized')`) already covers a scope
+    /// member of the new commit's `closure_initial`. Carries the
+    /// existing commit's `commit_id` and the offending scope so the
+    /// blocked caller can wait / take-over without re-querying.
+    PendingCommit {
+        pending_commit_id: CommitId,
+        offending_scope: LeaseScope,
+    },
 }
 
 impl PhaseAAbort {
@@ -715,6 +734,10 @@ impl PhaseAAbort {
             Self::UseLease { .. } => AbortReason::FreshLease,
             Self::StaleEvidence { .. } => AbortReason::StaleEvidence,
             Self::ClosureIncomplete { .. } => AbortReason::ClosureIncomplete,
+            // The new pending-commit abort reuses `AbortReason::Other`
+            // because the existing variant set is closed (round-2 fix);
+            // the `"pending_commit"` string is the durable column value.
+            Self::PendingCommit { .. } => AbortReason::Other("pending_commit".to_owned()),
         }
     }
 
@@ -723,6 +746,7 @@ impl PhaseAAbort {
             Self::UseLease { .. } => "fresh_lease",
             Self::StaleEvidence { .. } => "stale_evidence",
             Self::ClosureIncomplete { .. } => "closure_incomplete",
+            Self::PendingCommit { .. } => "pending_commit",
         }
     }
 
@@ -743,6 +767,13 @@ impl PhaseAAbort {
                     message: message.clone(),
                 },
                 unreachable: vec![ClosureWarning { message }],
+            },
+            Self::PendingCommit {
+                pending_commit_id,
+                offending_scope,
+            } => CommitGateResult::BlockedByPendingCommit {
+                commit_id: pending_commit_id,
+                offending_scope,
             },
         }
     }
@@ -876,6 +907,17 @@ fn phase_a_abort_event(
                 aborted_at,
             })
         }
+        PhaseAAbort::PendingCommit {
+            pending_commit_id,
+            offending_scope,
+        } => Event::CommitAbortedByPendingCommit(CommitAbortedByPendingCommitPayload {
+            commit_id,
+            pending_commit_id: *pending_commit_id,
+            scope_type: offending_scope.type_str().to_owned(),
+            scope_id: offending_scope.id_u64(),
+            phase: "prepare".to_owned(),
+            aborted_at,
+        }),
     }
 }
 
@@ -1434,11 +1476,70 @@ async fn run_phase_a_gate_in_tx(
         }));
     }
 
+    // Step 4 (round-7): overlapping-prepare check. Consult the
+    // pending-commit lock for every scope member of `closure` BEFORE
+    // landing the new `pending` row. Without this, two operators
+    // preparing destructive commits on overlapping scope both end up
+    // with `pending` (and later `authorized`) intents. Iterate from
+    // fine-grained to coarse (location → version → bundle → asset) so
+    // the most specific offending scope wins the report. First match
+    // aborts via the two-tx pattern; the caller turns it into
+    // `BlockedByPendingCommit { commit_id, offending_scope }`.
+    if let Some((pending_commit_id, offending_scope)) =
+        first_pending_commit_overlap_in_tx(tx, &closure).await?
+    {
+        return Ok(Err(GateWalkAbort {
+            closure_initial: closure,
+            abort: PhaseAAbort::PendingCommit {
+                pending_commit_id,
+                offending_scope,
+            },
+        }));
+    }
+
     Ok(Ok(GateWalkOk {
         closure,
         evaluated_lease_ids,
         revalidated_evidence,
     }))
+}
+
+/// First overlap between an in-flight `commit_intents` row
+/// (`state IN ('pending','authorized')`) and `closure`. Probed via
+/// `consult_pending_commit_lock_in_tx` for every member of the closure,
+/// ordered from finest to coarsest granularity so the most specific
+/// offending scope wins the report. Returns the first hit as
+/// `(pending_commit_id, offending_scope)` or `None` if no in-flight
+/// commit covers any member.
+async fn first_pending_commit_overlap_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    closure: &AffectedScopeClosure,
+) -> Result<Option<(CommitId, LeaseScope)>, VoomError> {
+    for id in &closure.file_locations {
+        let scope = LeaseScope::Location(*id);
+        if let Some(hit) = consult_pending_commit_lock_in_tx(tx, &scope).await? {
+            return Ok(Some(hit));
+        }
+    }
+    for id in &closure.file_versions {
+        let scope = LeaseScope::Version(*id);
+        if let Some(hit) = consult_pending_commit_lock_in_tx(tx, &scope).await? {
+            return Ok(Some(hit));
+        }
+    }
+    for id in &closure.bundles {
+        let scope = LeaseScope::Bundle(*id);
+        if let Some(hit) = consult_pending_commit_lock_in_tx(tx, &scope).await? {
+            return Ok(Some(hit));
+        }
+    }
+    for id in &closure.file_assets {
+        let scope = LeaseScope::Asset(*id);
+        if let Some(hit) = consult_pending_commit_lock_in_tx(tx, &scope).await? {
+            return Ok(Some(hit));
+        }
+    }
+    Ok(None)
 }
 
 async fn insert_pending_intent(
@@ -2952,14 +3053,22 @@ pub async fn finalize_destructive_commit(
 
     let row = read_authorized_intent_in_tx(&mut tx, permit.commit_id(), permit.epoch()).await?;
 
-    // NotPerformed branch — no recheck, no dispatch.
-    if matches!(outcome, MutationOutcome::NotPerformed) {
-        let outcome = finalize_not_performed_in_tx(&mut tx, event_repo, &permit, &row, now).await?;
-        tx.commit()
-            .await
-            .map_err(|e| VoomError::Database(format!("finalize: commit NotPerformed: {e}")))?;
-        return Ok(FinalizeOutcome::CancelledAfterAuthorize(outcome));
-    }
+    // Round-7 finding #2: destructure Applied { observed }. The caller's
+    // observed-alias set (if any) is merged with the recomputed
+    // closure_final inside the trip-wire path so members the caller saw
+    // but the resolver/DB did not surface drive `BlockedByClosureGrew`
+    // with the merged delta. NotPerformed never carries observed.
+    let observed = match outcome {
+        MutationOutcome::NotPerformed => {
+            let outcome =
+                finalize_not_performed_in_tx(&mut tx, event_repo, &permit, &row, now).await?;
+            tx.commit()
+                .await
+                .map_err(|e| VoomError::Database(format!("finalize: commit NotPerformed: {e}")))?;
+            return Ok(FinalizeOutcome::CancelledAfterAuthorize(outcome));
+        }
+        MutationOutcome::Applied { observed } => observed,
+    };
 
     // Applied branch — decode the durable per-member epoch snapshot
     // Phase B wrote, then run the defensive trip-wires.
@@ -2971,26 +3080,59 @@ pub async fn finalize_destructive_commit(
         &row,
         permit.closure_authorized(),
         &snapshot,
+        observed.as_ref(),
     )
     .await?;
 
     match trip_wire {
         PhaseCRecheck::Pass { closure_final } => {
-            let outcome = finalize_silent_path_in_tx(
+            // Round-7 finding #1: SAVEPOINT around identity dispatch +
+            // intent completion + event append. The caller has already
+            // performed the durable filesystem mutation by the time we
+            // get here; a post-trip-wire DB failure must not roll back
+            // the whole outer tx and leave the row stuck in
+            // 'authorized'. On Err inside the savepoint, drop it
+            // (ROLLBACK TO) and transition the intent to
+            // recovery_required with reason='mutation_failed' on the
+            // outer tx, emit commit.aborted_post_mutation +
+            // commit.recovery_required, then COMMIT.
+            match finalize_silent_path_in_savepoint(
                 &mut tx,
                 identity_repo,
                 event_repo,
                 &permit,
                 &row,
                 &snapshot,
-                closure_final,
+                closure_final.clone(),
                 now,
             )
-            .await?;
-            tx.commit()
-                .await
-                .map_err(|e| VoomError::Database(format!("finalize: commit success: {e}")))?;
-            Ok(FinalizeOutcome::Completed(outcome))
+            .await
+            {
+                Ok(outcome) => {
+                    tx.commit().await.map_err(|e| {
+                        VoomError::Database(format!("finalize: commit success: {e}"))
+                    })?;
+                    Ok(FinalizeOutcome::Completed(outcome))
+                }
+                Err(inner) => {
+                    let outcome = finalize_mutation_failed_in_tx(
+                        &mut tx,
+                        event_repo,
+                        &permit,
+                        &row,
+                        closure_final,
+                        inner,
+                        now,
+                    )
+                    .await?;
+                    tx.commit().await.map_err(|e| {
+                        VoomError::Database(format!(
+                            "finalize: commit mutation_failed recovery: {e}"
+                        ))
+                    })?;
+                    Ok(FinalizeOutcome::Blocked(outcome))
+                }
+            }
         }
         PhaseCRecheck::Trip(trip) => {
             let outcome =
@@ -3557,6 +3699,7 @@ async fn run_phase_c_trip_wires_in_tx(
     row: &AuthorizedIntentRow,
     closure_authorized: &AffectedScopeClosure,
     snapshot: &[TargetRowEpochTriple],
+    observed: Option<&AffectedScopeClosure>,
 ) -> Result<PhaseCRecheck, VoomError> {
     // Step 1: recompute closure. A retired target now appears as
     // closure drift (Phase B walker semantics). The force-path bypass
@@ -3565,7 +3708,7 @@ async fn run_phase_c_trip_wires_in_tx(
     // closure-incomplete abort surfaces as the internal-error escape
     // below rather than honoring the bypass a second time. The
     // closure walker therefore receives an empty bypass set.
-    let closure_final = match build_closure(
+    let closure_final_walked = match build_closure(
         tx,
         identity_repo,
         alias_resolver,
@@ -3592,13 +3735,24 @@ async fn run_phase_c_trip_wires_in_tx(
         }
     };
 
+    // Round-7 finding #2: merge any caller-observed closure with the
+    // recomputed one. Members the caller saw but the resolver/DB
+    // didn't enumerate must contribute to the drift signal — otherwise
+    // the trip-wire silently drops aliases the caller already touched.
+    // The union is the authoritative `closure_final` for the recheck.
+    let closure_final = merge_observed_into_closure(&closure_final_walked, observed);
+
     // Step 2: per-member epoch comparison against the snapshot.
     let target_epoch_drift = per_member_epoch_drift_in_tx(tx, closure_authorized, snapshot).await?;
 
-    // Step 3: closure delta vs. authorized.
+    // Step 3: closure delta vs. authorized. Computed against the
+    // merged closure so caller-observed-only members surface as
+    // `added_*` entries on the delta and on the post-mutation event.
     let delta = closure_authorized.id_member_delta(&closure_final);
 
-    // Step 4: blocking-lease re-evaluation.
+    // Step 4: blocking-lease re-evaluation. Evaluated against the
+    // merged closure so a lease scoped to a caller-observed-only alias
+    // still counts as a fresh blocking lease.
     let evaluated_at_finalize = list_blocking_leases_in_tx(tx, &closure_final).await?;
     let first_fresh_lease = first_blocking_overlap_in_tx(tx, &closure_final).await?;
     let fresh_lease_ids = evaluated_at_finalize;
@@ -3754,17 +3908,19 @@ async fn push_drift_if_mismatch(
     Ok(())
 }
 
-/// Silent-path success branch. Reads the retired location's current
-/// row inside the tx (the conversion of `FileLocationProposal` →
-/// `NewFileLocation` happens here so a cross-version target is
-/// unrepresentable at the boundary), dispatches the durable identity
-/// mutation with the snapshotted `expected_epoch`, transitions the
-/// commit-intent row to `completed`, and emits `commit.completed`.
+/// Silent-path success branch. Wraps identity dispatch + intent
+/// completion + completed-event append in a SAVEPOINT (round-7 finding
+/// #1). The caller has already performed the durable filesystem
+/// mutation; if any post-trip-wire DB step fails, the savepoint is
+/// rolled back and the outer caller transitions the intent to
+/// `recovery_required` with `recovery_reason = 'mutation_failed'`.
+/// Mirrors the round-6 SAVEPOINT pattern in
+/// `IdentityRepo::replace_file_location_in_tx`.
 #[expect(
     clippy::too_many_arguments,
     reason = "Phase C silent path needs the full execution context; splitting would scatter the §9.3.2 step 4-5 invariants under one helper"
 )]
-async fn finalize_silent_path_in_tx(
+async fn finalize_silent_path_in_savepoint(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
     event_repo: &dyn EventRepo,
@@ -3774,7 +3930,16 @@ async fn finalize_silent_path_in_tx(
     closure_final: AffectedScopeClosure,
     now: OffsetDateTime,
 ) -> Result<CommitGateOutcome, VoomError> {
-    dispatch_durable_mutation_in_tx(tx, identity_repo, &row.target, snapshot, now).await?;
+    // Round-7 finding #1: SAVEPOINT around the post-trip-wire block.
+    // Dropping `sp` on the early-return Err paths rolls back to the
+    // savepoint and leaves the outer tx restored to pre-dispatch state;
+    // the caller then writes the recovery_required transition on the
+    // outer tx and commits.
+    let mut sp = tx
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("finalize: silent-path savepoint begin: {e}")))?;
+    dispatch_durable_mutation_in_tx(&mut sp, identity_repo, &row.target, snapshot, now).await?;
     let new_epoch = row.epoch + 1;
     let finalized_iso = iso8601(now)?;
     let res = sqlx::query(
@@ -3785,7 +3950,7 @@ async fn finalize_silent_path_in_tx(
     .bind(i64_from_u64(new_epoch))
     .bind(i64_from_u64(row.commit_id.0))
     .bind(i64_from_u64(row.epoch))
-    .execute(&mut **tx)
+    .execute(&mut *sp)
     .await
     .map_err(|e| VoomError::Database(format!("finalize: completed UPDATE: {e}")))?;
     if res.rows_affected() != 1 {
@@ -3797,13 +3962,16 @@ async fn finalize_silent_path_in_tx(
     }
     emit_completed_event(
         event_repo,
-        tx,
+        &mut sp,
         row.commit_id,
         &row.target,
         &closure_final,
         now,
     )
     .await?;
+    sp.commit().await.map_err(|e| {
+        VoomError::Database(format!("finalize: silent-path savepoint release: {e}"))
+    })?;
     Ok(CommitGateOutcome {
         commit_id: row.commit_id,
         closure_initial: row.closure_initial.clone(),
@@ -3812,6 +3980,60 @@ async fn finalize_silent_path_in_tx(
         evaluated_lease_ids: permit.evaluated_lease_ids().to_vec(),
         revalidated_evidence: permit.revalidated_evidence().to_vec(),
         result: CommitGateResult::Allowed,
+    })
+}
+
+/// Round-7 finding #1 recovery branch. After the silent-path savepoint
+/// rolls back on an inner Err, transition the commit-intent row to
+/// `recovery_required` with `recovery_reason = 'mutation_failed'`,
+/// emit `commit.aborted_post_mutation` (`reason='mutation_failed'`)
+/// plus `commit.recovery_required`, and return a `CommitGateOutcome`
+/// carrying `BlockedByMutationFailed { error }`. The caller commits the
+/// outer tx. The closure delta / fresh-lease arrays on the post-
+/// mutation event are empty because no trip-wire fired; the
+/// mutation-failure path is distinct from the four §9.3.2 trip-wires.
+async fn finalize_mutation_failed_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event_repo: &dyn EventRepo,
+    permit: &CommitPermit,
+    row: &AuthorizedIntentRow,
+    closure_final: AffectedScopeClosure,
+    inner: VoomError,
+    now: OffsetDateTime,
+) -> Result<CommitGateOutcome, VoomError> {
+    let new_epoch = row.epoch + 1;
+    let res = sqlx::query(
+        "UPDATE commit_intents SET state = 'recovery_required', recovery_reason = ?, \
+            epoch = ? \
+         WHERE id = ? AND state = 'authorized' AND epoch = ?",
+    )
+    .bind("mutation_failed")
+    .bind(i64_from_u64(new_epoch))
+    .bind(i64_from_u64(row.commit_id.0))
+    .bind(i64_from_u64(row.epoch))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("finalize: mutation_failed recovery UPDATE: {e}")))?;
+    if res.rows_affected() != 1 {
+        return Err(VoomError::Conflict(format!(
+            "finalize: mutation_failed recovery UPDATE on {} affected {} rows; concurrent state mutation",
+            row.commit_id,
+            res.rows_affected()
+        )));
+    }
+    let error_string = format!("{inner:?}");
+    emit_mutation_failed_post_mutation_event(event_repo, tx, row.commit_id, now).await?;
+    emit_mutation_failed_recovery_required_event(event_repo, tx, row.commit_id, now).await?;
+    Ok(CommitGateOutcome {
+        commit_id: row.commit_id,
+        closure_initial: row.closure_initial.clone(),
+        closure_authorized: row.closure_authorized.clone(),
+        closure_final,
+        evaluated_lease_ids: permit.evaluated_lease_ids().to_vec(),
+        revalidated_evidence: permit.revalidated_evidence().to_vec(),
+        result: CommitGateResult::BlockedByMutationFailed {
+            error: error_string,
+        },
     })
 }
 
@@ -4120,6 +4342,114 @@ async fn emit_recovery_required_event(
         )
         .await?;
     Ok(())
+}
+
+/// Round-7 finding #1: emit `commit.aborted_post_mutation` with
+/// `reason='mutation_failed'`. The delta / lease / drift arrays are
+/// empty — the mutation-failure path is orthogonal to the four §9.3.2
+/// trip-wires. Audit consumers route on the `reason` tag.
+async fn emit_mutation_failed_post_mutation_event(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    aborted_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let payload = Event::CommitAbortedPostMutation(CommitAbortedPostMutationPayload {
+        commit_id,
+        reason: "mutation_failed".to_owned(),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 0,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 0,
+        fresh_lease_ids: Vec::new(),
+        target_epoch_drift: Vec::new(),
+        aborted_at,
+    });
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: aborted_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Round-7 finding #1: emit `commit.recovery_required` with
+/// `recovery_reason='mutation_failed'` alongside the post-mutation
+/// event so recovery tooling can decode the signal from a single row
+/// without joining back to the post-mutation event.
+async fn emit_mutation_failed_recovery_required_event(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    recorded_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let payload = Event::CommitRecoveryRequired(CommitRecoveryRequiredPayload {
+        commit_id,
+        recovery_reason: "mutation_failed".to_owned(),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 0,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 0,
+        fresh_lease_ids: Vec::new(),
+        target_epoch_drift: Vec::new(),
+        recorded_at,
+    });
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: recorded_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Round-7 finding #2: merge the caller-observed closure (when
+/// `Some(_)`) with the recomputed `closure_final`. Members the caller
+/// saw but the resolver / DB-internal listing didn't surface end up in
+/// the merged set; the closure-grew trip-wire then sees them as
+/// `added_*` entries on the delta. The four ID sets are unioned;
+/// `resolution_warnings` is intentionally NOT carried over from
+/// `observed` (warnings do not contribute to drift — see
+/// `AffectedScopeClosure::id_member_delta` doc). Returns `walked`
+/// unchanged when `observed` is `None`.
+fn merge_observed_into_closure(
+    walked: &AffectedScopeClosure,
+    observed: Option<&AffectedScopeClosure>,
+) -> AffectedScopeClosure {
+    let Some(obs) = observed else {
+        return walked.clone();
+    };
+    let mut merged = walked.clone();
+    merged.file_assets.extend(obs.file_assets.iter().copied());
+    merged
+        .file_versions
+        .extend(obs.file_versions.iter().copied());
+    merged
+        .file_locations
+        .extend(obs.file_locations.iter().copied());
+    merged.bundles.extend(obs.bundles.iter().copied());
+    merged
 }
 
 #[cfg(test)]

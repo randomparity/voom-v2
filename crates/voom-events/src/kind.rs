@@ -66,6 +66,7 @@ pub enum EventKind {
     CommitAbortedByUseLease,
     CommitAbortedByStaleEvidence,
     CommitAbortedByClosureIncomplete,
+    CommitAbortedByPendingCommit,
     // M3 Phase 2 — commit safety gate (Phase B).
     CommitAuthorized,
     CommitAbortedByClosureGrew,
@@ -131,6 +132,7 @@ impl EventKind {
             Self::CommitAbortedByUseLease => "commit.aborted_by_use_lease",
             Self::CommitAbortedByStaleEvidence => "commit.aborted_by_stale_evidence",
             Self::CommitAbortedByClosureIncomplete => "commit.aborted_by_closure_incomplete",
+            Self::CommitAbortedByPendingCommit => "commit.aborted_by_pending_commit",
             Self::CommitAuthorized => "commit.authorized",
             Self::CommitAbortedByClosureGrew => "commit.aborted_by_closure_grew",
             Self::CommitCompleted => "commit.completed",
@@ -204,6 +206,7 @@ impl EventKind {
             "commit.aborted_by_use_lease" => Self::CommitAbortedByUseLease,
             "commit.aborted_by_stale_evidence" => Self::CommitAbortedByStaleEvidence,
             "commit.aborted_by_closure_incomplete" => Self::CommitAbortedByClosureIncomplete,
+            "commit.aborted_by_pending_commit" => Self::CommitAbortedByPendingCommit,
             "commit.authorized" => Self::CommitAuthorized,
             "commit.aborted_by_closure_grew" => Self::CommitAbortedByClosureGrew,
             "commit.completed" => Self::CommitCompleted,
