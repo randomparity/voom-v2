@@ -12,6 +12,7 @@ members = [
     "crates/voom-control-plane",
     "crates/voom-api",
     "crates/voom-cli",
+    "crates/voom-conformance",
 ]
 
 [workspace.package]
@@ -32,7 +33,7 @@ voom-events = { version = "0.1.0-dev", path = "crates/voom-events" }
 voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
 voom-worker-protocol = { version = "0.1.0-dev", path = "crates/voom-worker-protocol" }
-# voom-conformance added in commit 10 of the Phase 1 plan.
+voom-conformance = { version = "0.1.0-dev", path = "crates/voom-conformance" }
 
 # Shared third-party crates. Workspace declarations carry the union of
 # features common to every consumer; member crates add crate-specific
