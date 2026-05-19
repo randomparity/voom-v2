@@ -4,7 +4,8 @@ use thiserror::Error;
 /// (exhaustively) instead of comparing against `&'static str` codes, so a
 /// renamed or newly-added variant becomes a compile-time error in every
 /// surface rather than a silent string-mismatch at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     /// Database file is missing or unreachable from this host.
     DbUnreachable,

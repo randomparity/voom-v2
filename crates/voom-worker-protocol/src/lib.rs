@@ -22,4 +22,5 @@ pub mod ndjson;
 pub mod operation_kind;
 pub mod transport;
 
+pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use operation_kind::OperationKind;
