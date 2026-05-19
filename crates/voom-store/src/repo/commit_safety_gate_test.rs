@@ -385,3 +385,167 @@ fn id_member_delta_reports_added_and_removed_ids() {
     assert!(delta.added_bundles.contains(&BundleId(11)));
     assert!(delta.removed_bundles.is_empty());
 }
+
+#[test]
+fn alias_resolution_error_variants_construct() {
+    let _ = AliasResolutionError::Unreachable {
+        message: "fs offline".to_owned(),
+    };
+    let _ = AliasResolutionError::Database("connect refused".to_owned());
+}
+
+#[test]
+fn alias_resolution_error_debug_round_trips() {
+    let e = AliasResolutionError::Unreachable {
+        message: "mount /srv/media offline".to_owned(),
+    };
+    let debug = format!("{e:?}");
+    assert!(debug.contains("mount /srv/media offline"));
+}
+
+// -- SqliteAliasResolver --------------------------------------------------
+
+use sqlx::SqlitePool;
+
+use crate::repo::identity::{
+    FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
+};
+use crate::test_support::{T0, fresh_initialized_pool_at};
+
+async fn fresh_pool_and_identity() -> (SqlitePool, SqliteIdentityRepo, tempfile::NamedTempFile) {
+    // Bind the pool at the test level rather than reaching into
+    // `SqliteIdentityRepo.pool` — that field is module-private to
+    // `identity.rs`, and `commit_safety_gate_test.rs` cannot see it.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    let repo = SqliteIdentityRepo::new(pool.clone());
+    (pool, repo, tmp)
+}
+
+#[tokio::test]
+async fn sqlite_alias_resolver_returns_live_locations_only() {
+    let (pool, id_repo, _tmp) = fresh_pool_and_identity().await;
+
+    let asset = id_repo.create_file_asset(T0).await.unwrap();
+    let version = id_repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "deadbeef".to_owned(),
+            size_bytes: 1024,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let loc_a = id_repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/a.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let loc_b = id_repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/b.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    let loc_retired = id_repo
+        .create_file_location_in_tx(
+            &mut tx,
+            NewFileLocation {
+                file_version_id: version.id,
+                kind: FileLocationKind::LocalPath,
+                value: "/srv/media/retired.mkv".to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    id_repo
+        .retire_file_location_in_tx(&mut tx, loc_retired.id, T0, 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let resolver = SqliteAliasResolver::new(pool);
+    let got = resolver.aliases_for_version(version.id).await.unwrap();
+
+    let got_set: std::collections::BTreeSet<FileLocationId> = got.into_iter().collect();
+    let want_set: std::collections::BTreeSet<FileLocationId> =
+        [loc_a.id, loc_b.id].into_iter().collect();
+    assert_eq!(got_set, want_set);
+    assert!(!got_set.contains(&loc_retired.id));
+}
+
+#[tokio::test]
+async fn sqlite_alias_resolver_returns_empty_when_version_has_no_live_locations() {
+    let (pool, id_repo, _tmp) = fresh_pool_and_identity().await;
+    let asset = id_repo.create_file_asset(T0).await.unwrap();
+    let version = id_repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "cafef00d".to_owned(),
+            size_bytes: 0,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let resolver = SqliteAliasResolver::new(pool);
+    let got = resolver.aliases_for_version(version.id).await.unwrap();
+    assert!(got.is_empty());
+}
+
+// -- FailingAliasResolver -------------------------------------------------
+
+use crate::test_support::FailingAliasResolver;
+
+#[tokio::test]
+async fn failing_alias_resolver_returns_unreachable_for_configured_ids() {
+    let resolver = FailingAliasResolver::new([FileVersionId(42)]);
+    let err = resolver
+        .aliases_for_version(FileVersionId(42))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AliasResolutionError::Unreachable { .. }));
+}
+
+#[tokio::test]
+async fn failing_alias_resolver_returns_empty_for_unconfigured_ids() {
+    let resolver = FailingAliasResolver::new([FileVersionId(42)]);
+    let got = resolver
+        .aliases_for_version(FileVersionId(7))
+        .await
+        .unwrap();
+    assert!(got.is_empty());
+}
+
+#[tokio::test]
+async fn failing_alias_resolver_empty_set_never_fails() {
+    let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let got = resolver
+        .aliases_for_version(FileVersionId(1))
+        .await
+        .unwrap();
+    assert!(got.is_empty());
+}

@@ -235,3 +235,50 @@ impl WorkerBuilder {
         .await
     }
 }
+
+// -- FailingAliasResolver --------------------------------------------------
+//
+// Test-only `AliasResolver` that returns `Unreachable` for a configured
+// set of `FileVersionId`s and `Ok(empty)` for every other version.
+// Used by Phase A / B integration tests (commits 4 / 6 / 10) to drive
+// the `BlockedByClosureIncomplete` path deterministically without an
+// actual filesystem-offline condition.
+
+use std::collections::BTreeSet;
+
+use voom_core::ids::{FileLocationId, FileVersionId};
+
+use crate::repo::commit_safety_gate::{AliasResolutionError, AliasResolver};
+
+#[derive(Debug, Clone)]
+pub struct FailingAliasResolver {
+    failing: BTreeSet<FileVersionId>,
+}
+
+impl FailingAliasResolver {
+    /// Construct from any iterable of `FileVersionId`. An empty
+    /// iterable produces a resolver that never fails — useful as a
+    /// silent stub for callers that just need an `AliasResolver`
+    /// implementor.
+    #[must_use]
+    pub fn new(failing: impl IntoIterator<Item = FileVersionId>) -> Self {
+        Self {
+            failing: failing.into_iter().collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AliasResolver for FailingAliasResolver {
+    async fn aliases_for_version(
+        &self,
+        file_version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, AliasResolutionError> {
+        if self.failing.contains(&file_version_id) {
+            return Err(AliasResolutionError::Unreachable {
+                message: format!("FailingAliasResolver: configured to fail for {file_version_id}"),
+            });
+        }
+        Ok(Vec::new())
+    }
+}

@@ -418,6 +418,100 @@ pub struct ForcePathToken {
     pub bypass: BTreeSet<BypassKind>,
 }
 
+/// Error returned by an `AliasResolver` when it cannot enumerate the
+/// live `FileLocation`s under a supplied `FileVersion`. The two
+/// variants are deliberately distinct: `Unreachable` is a
+/// physical-world condition the gate's force-path bypass (commit 10)
+/// is designed to override; `Database` is our own storage layer
+/// failing and surfaces at the gate boundary as
+/// `VoomError::Database`, never as a closure-incomplete abort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasResolutionError {
+    /// External alias source (filesystem mount, object store, remote
+    /// node) cannot enumerate live locations for the supplied
+    /// `FileVersion`. Caller surfaces as `BlockedByClosureIncomplete`
+    /// in Phase A and Phase B (commit 4 / commit 6).
+    Unreachable { message: String },
+    /// Underlying storage failure during alias resolution — not the
+    /// "external mount offline" case; this is "our own DB layer
+    /// broke." Surfaces at the gate boundary as `VoomError::Database`.
+    Database(String),
+}
+
+/// Closure-walk input: enumerates every live `FileLocation` ID that
+/// represents the same physical bytes as the supplied `FileVersion`.
+/// Sprint 1 ships `SqliteAliasResolver` (returns live DB rows on the
+/// version). Sprint 4 + 5 will layer FS / object-store-aware
+/// resolvers behind the same trait so the closure walk can pick up
+/// hardlinks, bind mounts, and shared mounts without changing the
+/// gate's call sites. Fail-closed semantics: on `Unreachable`, the
+/// gate aborts with `BlockedByClosureIncomplete` (commits 4 and 6).
+///
+/// Object-safe by construction: no generics, no associated types.
+/// Callers in Phase A / B / C hold a `&dyn AliasResolver`.
+#[async_trait::async_trait]
+pub trait AliasResolver: Send + Sync {
+    /// Return the IDs of every live `FileLocation` on `file_version_id`.
+    /// Order is unspecified; callers fold the result into a
+    /// `BTreeSet<FileLocationId>` so canonical ordering and dedup
+    /// happen at the closure level (see
+    /// `AffectedScopeClosure::file_locations`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `AliasResolutionError::Unreachable` if the alias source
+    /// is offline; `AliasResolutionError::Database` if the underlying
+    /// storage layer fails.
+    async fn aliases_for_version(
+        &self,
+        file_version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, AliasResolutionError>;
+}
+
+/// Production `AliasResolver` backed by the live `file_locations`
+/// table. Returns every `FileLocation` row where `file_version_id`
+/// matches the supplied version and `retired_at IS NULL`. Order is
+/// unspecified at the trait level — see `AliasResolver`.
+#[derive(Debug, Clone)]
+pub struct SqliteAliasResolver {
+    pool: sqlx::SqlitePool,
+}
+
+impl SqliteAliasResolver {
+    #[must_use]
+    pub fn new(pool: sqlx::SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl AliasResolver for SqliteAliasResolver {
+    async fn aliases_for_version(
+        &self,
+        file_version_id: FileVersionId,
+    ) -> Result<Vec<FileLocationId>, AliasResolutionError> {
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM file_locations \
+             WHERE file_version_id = ? AND retired_at IS NULL \
+             ORDER BY id ASC",
+        )
+        .bind(i64::try_from(file_version_id.0).map_err(|e| {
+            AliasResolutionError::Database(format!("alias resolver: id overflow: {e}"))
+        })?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AliasResolutionError::Database(format!("alias resolver: {e}")))?;
+
+        rows.into_iter()
+            .map(|id| {
+                u64::try_from(id).map(FileLocationId).map_err(|e| {
+                    AliasResolutionError::Database(format!("alias resolver: id signedness: {e}"))
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 #[path = "commit_safety_gate_test.rs"]
 mod tests;
