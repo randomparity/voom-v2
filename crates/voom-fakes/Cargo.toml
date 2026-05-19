@@ -61,5 +61,13 @@ path = "src/bin/fake_issue_provider.rs"
 name = "fake-use-lease-provider"
 path = "src/bin/fake_use_lease_provider.rs"
 
+[[bin]]
+name = "chaos-worker"
+path = "src/bin/chaos_worker.rs"
+
+[[bin]]
+name = "benchmark-worker"
+path = "src/bin/benchmark_worker.rs"
+
 [lints]
 workspace = true

@@ -1,0 +1,30 @@
+# Conformance harness manifest — Sprint 2 Phase 6 scaffold.
+#
+# Lists worker binaries the conformance suite runs against. Binaries
+# in [scaffold] are placeholders (Phase 3 / 4 / 5 stubs) and are
+# skipped until their real implementations land.
+#
+# `voom-conformance::Harness` will consume this file in a follow-up
+# commit to gate Phase 3 / 4 / 5 / 6 follow-up work.
+
+[[binaries]]
+name = "echo-worker"
+purpose = "bootstrap conformance — validates the harness against itself"
+status = "active"
+
+[scaffold]
+binaries = [
+    "fake-scanner",
+    "fake-prober",
+    "fake-transcoder",
+    "fake-remuxer",
+    "fake-backup-store",
+    "fake-health-checker",
+    "fake-identity-provider",
+    "fake-external-system",
+    "fake-quality-scorer",
+    "fake-issue-provider",
+    "fake-use-lease-provider",
+    "chaos-worker",
+    "benchmark-worker",
+]
