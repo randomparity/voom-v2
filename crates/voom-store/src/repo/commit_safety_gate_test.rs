@@ -132,38 +132,47 @@ fn commit_intent_constructor_smokes() {
 
 #[test]
 fn commit_permit_constructor_smokes() {
-    let permit = CommitPermit {
-        commit_id: CommitId(2),
-        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
-        closure_authorized: AffectedScopeClosure::default(),
-        evaluated_lease_ids: Vec::new(),
-        revalidated_evidence: Vec::new(),
-        target_row_epochs: Vec::new(),
-        epoch: 1,
-    };
-    assert_eq!(permit.commit_id, CommitId(2));
-    assert!(permit.target_row_epochs.is_empty());
+    let permit = CommitPermit::new(
+        CommitId(2),
+        time::OffsetDateTime::UNIX_EPOCH,
+        AffectedScopeClosure::default(),
+        Vec::new(),
+        Vec::new(),
+        1,
+    );
+    assert_eq!(permit.commit_id(), CommitId(2));
+    assert_eq!(permit.epoch(), 1);
 }
 
 #[test]
-fn commit_permit_carries_target_row_epoch_triples() {
-    let permit = CommitPermit {
-        commit_id: CommitId(3),
-        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
-        closure_authorized: AffectedScopeClosure::default(),
-        evaluated_lease_ids: Vec::new(),
-        revalidated_evidence: Vec::new(),
-        target_row_epochs: vec![
-            (TargetMemberKind::FileLocation, 7, 4),
-            (TargetMemberKind::FileVersion, 11, 2),
-        ],
-        epoch: 1,
-    };
-    assert_eq!(permit.target_row_epochs.len(), 2);
-    assert_eq!(
-        permit.target_row_epochs[0].0,
-        TargetMemberKind::FileLocation
+fn commit_permit_accessors_return_internal_state() {
+    // Round-4 finding: CommitPermit fields are pub(crate); external
+    // consumers reach state through accessors. This test pins each
+    // accessor to its constructor input so a future field rename or
+    // accessor regression breaks the test.
+    let mut closure = AffectedScopeClosure::default();
+    closure.file_locations.insert(FileLocationId(99));
+    let leases = vec![voom_core::ids::UseLeaseId(7)];
+    let evidence = vec![EvidenceRevalidationResult {
+        evidence_id: voom_core::ids::EvidenceId(3),
+        drift: None,
+    }];
+
+    let permit = CommitPermit::new(
+        CommitId(42),
+        time::OffsetDateTime::UNIX_EPOCH,
+        closure.clone(),
+        leases.clone(),
+        evidence.clone(),
+        5,
     );
+
+    assert_eq!(permit.commit_id(), CommitId(42));
+    assert_eq!(permit.authorized_at(), time::OffsetDateTime::UNIX_EPOCH);
+    assert_eq!(permit.closure_authorized(), &closure);
+    assert_eq!(permit.evaluated_lease_ids(), leases.as_slice());
+    assert_eq!(permit.revalidated_evidence(), evidence.as_slice());
+    assert_eq!(permit.epoch(), 5);
 }
 
 #[test]

@@ -178,10 +178,14 @@ pub enum EvidenceDrift {
     PinnedLocationRetired,
 }
 
-/// Granularity tag for a member of `AffectedScopeClosure`. Used by
-/// `CommitPermit.target_row_epochs` to drive the destructive dispatch
-/// lookup by `(kind, id)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Granularity tag for a member of `AffectedScopeClosure`. Used by the
+/// `commit_intents.target_row_epochs` JSON snapshot (migration 0005) to
+/// drive the destructive dispatch lookup by `(kind, id)`. Serde-encoded
+/// in `snake_case` so the JSON column form matches the existing
+/// per-table vocabulary (`file_asset`, `file_version`, `file_location`,
+/// `bundle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TargetMemberKind {
     FileAsset,
     FileVersion,
@@ -233,8 +237,15 @@ pub enum MutationOutcome {
 }
 
 /// Why a commit-intent row was transitioned to `aborted` (or
-/// `recovery_required`). Stored in the SQL `commit_intents.abort_reason`
-/// column at the moment the gate decides to fail the commit.
+/// `recovery_required`). One enum, two destination columns: the gate
+/// writes the value into `commit_intents.abort_reason` for `aborted`
+/// rows and into `commit_intents.recovery_reason` for
+/// `recovery_required` rows (migration 0005 enforces the per-state
+/// column shape). Most variants belong unambiguously to the
+/// pre-mutation abort path; `ClosureGrew`, `FreshLease`, and
+/// `MutationFailed` can drive either column depending on which phase
+/// fired the trip-wire — Phase B writes to `abort_reason`, Phase C
+/// writes to `recovery_reason`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbortReason {
     OperatorCancel,
@@ -245,7 +256,9 @@ pub enum AbortReason {
     StaleEvidence,
     /// Phase C defensive trip-wire: a member of `closure_authorized`
     /// has a different `epoch` than the value snapshotted in
-    /// `CommitPermit.target_row_epochs`. Drives `recovery_required`.
+    /// `commit_intents.target_row_epochs`. Drives `recovery_required`;
+    /// stored in `commit_intents.recovery_reason`. This variant never
+    /// reaches `abort_reason`.
     StaleTargetEpoch,
     Other(String),
 }
@@ -262,34 +275,92 @@ pub struct CommitIntent {
     pub epoch: u64,
 }
 
-/// Returned by `authorize_destructive_commit` on success. Carries
-/// the recomputed closure, the lease IDs evaluated against it, the
-/// evidence revalidation results, **and** the per-member epoch
-/// snapshot `target_row_epochs` taken inside the authorize
-/// transaction. Phase C consumes `target_row_epochs` as the
-/// `expected_epoch` arguments to the destructive `IdentityRepo`
-/// mutations.
+/// Opaque handle returned by `authorize_destructive_commit` on
+/// success. Carries the authorized closure, the lease IDs and evidence
+/// revalidation results evaluated against it, and the `commit_id`
+/// Phase C uses to re-read the durable per-member epoch snapshot. The
+/// per-member epochs are NOT carried inline: they are persisted
+/// atomically with the `state = 'authorized'` transition in
+/// `commit_intents.target_row_epochs` (migration 0005), and Phase C
+/// re-reads them by `commit_id` inside the finalize tx. This makes the
+/// stale-target-epoch trip-wire authoritative against the DB rather
+/// than against caller-held state, and makes the permit
+/// reconstructible after a process crash between authorize and
+/// finalize.
 ///
-/// `target_row_epochs` is a flat triple-list `(kind, row_id, epoch)`
-/// rather than a `HashMap<(kind, id), epoch>` so the type stays
-/// serde-friendly and append-ordering can be preserved for audit. Phase
-/// C looks up by `(kind, id)` regardless of ordering.
-///
-/// Note the shape asymmetry with `CommitGateResult::BlockedByStaleTargetEpoch.drift`:
-/// the snapshot here is a 3-tuple `(kind, row_id, snapshot_epoch)`, while the drift
-/// report is the 4-field `TargetEpochDrift { kind, id, expected, observed }`. The
-/// drift report's `expected` field is sourced from this snapshot at Phase C, and
-/// `observed` is the row's current epoch — so the drift carries strictly more
-/// information than the snapshot does, by design.
+/// Fields are `pub(crate)` — only the gate impl constructs and
+/// inspects permits; external consumers reach the closure and metadata
+/// through the accessor methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPermit {
-    pub commit_id: CommitId,
-    pub authorized_at: OffsetDateTime,
-    pub closure_authorized: AffectedScopeClosure,
-    pub evaluated_lease_ids: Vec<UseLeaseId>,
-    pub revalidated_evidence: Vec<EvidenceRevalidationResult>,
-    pub target_row_epochs: Vec<(TargetMemberKind, u64, u64)>,
-    pub epoch: u64,
+    pub(crate) commit_id: CommitId,
+    pub(crate) authorized_at: OffsetDateTime,
+    pub(crate) closure_authorized: AffectedScopeClosure,
+    pub(crate) evaluated_lease_ids: Vec<UseLeaseId>,
+    pub(crate) revalidated_evidence: Vec<EvidenceRevalidationResult>,
+    pub(crate) epoch: u64,
+}
+
+impl CommitPermit {
+    /// Construct a permit. Crate-private — only the gate impl in
+    /// Phase B (`authorize_destructive_commit`, commit 6) builds these.
+    /// External consumers cannot fabricate a permit and so cannot
+    /// bypass the gate's invariants.
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Phase B (commit 6) is the production caller; sibling tests already exercise this constructor"
+        )
+    )]
+    pub(crate) fn new(
+        commit_id: CommitId,
+        authorized_at: OffsetDateTime,
+        closure_authorized: AffectedScopeClosure,
+        evaluated_lease_ids: Vec<UseLeaseId>,
+        revalidated_evidence: Vec<EvidenceRevalidationResult>,
+        epoch: u64,
+    ) -> Self {
+        Self {
+            commit_id,
+            authorized_at,
+            closure_authorized,
+            evaluated_lease_ids,
+            revalidated_evidence,
+            epoch,
+        }
+    }
+
+    #[must_use]
+    pub fn commit_id(&self) -> CommitId {
+        self.commit_id
+    }
+
+    #[must_use]
+    pub fn authorized_at(&self) -> OffsetDateTime {
+        self.authorized_at
+    }
+
+    #[must_use]
+    pub fn closure_authorized(&self) -> &AffectedScopeClosure {
+        &self.closure_authorized
+    }
+
+    #[must_use]
+    pub fn evaluated_lease_ids(&self) -> &[UseLeaseId] {
+        &self.evaluated_lease_ids
+    }
+
+    #[must_use]
+    pub fn revalidated_evidence(&self) -> &[EvidenceRevalidationResult] {
+        &self.revalidated_evidence
+    }
+
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
 }
 
 /// Returned by `finalize_destructive_commit` (and surfaced through
@@ -349,8 +420,8 @@ pub enum CommitGateResult {
     BlockedByClosureGrew { delta: ClosureMemberDelta },
     /// Phase C defensive trip-wire: one or more members of
     /// `closure_authorized` have a different `epoch` than the value
-    /// snapshotted in `CommitPermit.target_row_epochs`. Drives the
-    /// commit to `recovery_required` and emits
+    /// snapshotted in `commit_intents.target_row_epochs` at Phase B.
+    /// Drives the commit to `recovery_required` and emits
     /// `commit.aborted_post_mutation` with
     /// `reason = 'stale_target_epoch'`.
     BlockedByStaleTargetEpoch { drift: Vec<TargetEpochDrift> },
