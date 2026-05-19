@@ -85,6 +85,17 @@ pub enum ErrorCode {
     ApprovalRequired,
     /// Two priority sources disagree and policy has no precedence rule.
     PriorityPolicyConflict,
+    // --- Sprint 2 Phase 1: worker protocol layer ----------------------
+    /// A retired worker incarnation attempted to call the supervisor;
+    /// the call was refused without mutating any lease.
+    WorkerRetired,
+    /// A worker callback's presented incarnation does not match the
+    /// live `worker_incarnations` row (epoch / secret hash mismatch
+    /// outside the standard auth path).
+    WorkerIncarnationStale,
+    /// More than one active worker advertises the requested
+    /// `OperationKind` and no explicit override is set.
+    AmbiguousWorkerSelection,
 }
 
 impl ErrorCode {
@@ -125,6 +136,9 @@ impl ErrorCode {
             Self::UserCancellation => "USER_CANCELLATION",
             Self::ApprovalRequired => "APPROVAL_REQUIRED",
             Self::PriorityPolicyConflict => "PRIORITY_POLICY_CONFLICT",
+            Self::WorkerRetired => "WORKER_RETIRED",
+            Self::WorkerIncarnationStale => "WORKER_INCARNATION_STALE",
+            Self::AmbiguousWorkerSelection => "AMBIGUOUS_WORKER_SELECTION",
         }
     }
 }
@@ -195,6 +209,12 @@ pub enum VoomError {
     ApprovalRequired(String),
     #[error("priority policy conflict: {0}")]
     PriorityPolicyConflict(String),
+    #[error("worker retired: {0}")]
+    WorkerRetired(String),
+    #[error("worker incarnation stale: {0}")]
+    WorkerIncarnationStale(String),
+    #[error("ambiguous worker selection: {0}")]
+    AmbiguousWorkerSelection(String),
 }
 
 impl VoomError {
@@ -234,6 +254,9 @@ impl VoomError {
             Self::UserCancellation(_) => ErrorCode::UserCancellation,
             Self::ApprovalRequired(_) => ErrorCode::ApprovalRequired,
             Self::PriorityPolicyConflict(_) => ErrorCode::PriorityPolicyConflict,
+            Self::WorkerRetired(_) => ErrorCode::WorkerRetired,
+            Self::WorkerIncarnationStale(_) => ErrorCode::WorkerIncarnationStale,
+            Self::AmbiguousWorkerSelection(_) => ErrorCode::AmbiguousWorkerSelection,
         }
     }
 

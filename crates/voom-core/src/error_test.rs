@@ -86,6 +86,27 @@ fn closure_resolution_incomplete_error_code_string() {
     assert_eq!(e.error_code(), ErrorCode::ClosureResolutionIncomplete);
 }
 
+#[test]
+fn worker_retired_error_code_string() {
+    let e = VoomError::WorkerRetired("incarnation 3 was reaped".to_owned());
+    assert_eq!(e.code(), "WORKER_RETIRED");
+    assert_eq!(e.error_code(), ErrorCode::WorkerRetired);
+}
+
+#[test]
+fn worker_incarnation_stale_error_code_string() {
+    let e = VoomError::WorkerIncarnationStale("epoch 4 presented, current is 5".to_owned());
+    assert_eq!(e.code(), "WORKER_INCARNATION_STALE");
+    assert_eq!(e.error_code(), ErrorCode::WorkerIncarnationStale);
+}
+
+#[test]
+fn ambiguous_worker_selection_error_code_string() {
+    let e = VoomError::AmbiguousWorkerSelection("two workers advertise probe_file".to_owned());
+    assert_eq!(e.code(), "AMBIGUOUS_WORKER_SELECTION");
+    assert_eq!(e.error_code(), ErrorCode::AmbiguousWorkerSelection);
+}
+
 /// Adding a variant to `ErrorCode` must force a wire-string decision in
 /// `as_str()`. This test is intentionally an exhaustive match so a new
 /// variant fails compilation here too — both halves of the round trip
@@ -126,6 +147,9 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::UserCancellation,
         ErrorCode::ApprovalRequired,
         ErrorCode::PriorityPolicyConflict,
+        ErrorCode::WorkerRetired,
+        ErrorCode::WorkerIncarnationStale,
+        ErrorCode::AmbiguousWorkerSelection,
     ] {
         // Confirm the exhaustive match in `as_str()` produces a
         // SCREAMING_SNAKE_CASE token; format isn't load-bearing beyond

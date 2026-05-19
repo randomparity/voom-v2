@@ -30,3 +30,18 @@ pub use ids::{
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use version::VersionInfo;
+
+/// Worker-protocol wire version (Sprint 2). Consumed by
+/// `voom-worker-protocol`'s handshake and middleware. Bumped only
+/// when the on-wire shape changes in an incompatible way.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Minimum protocol version this binary will accept on a handshake.
+/// A worker offering a lower value is rejected with
+/// `ProtocolError::UnsupportedProtocolVersion`.
+pub const PROTOCOL_VERSION_SUPPORTED_MIN: u32 = 1;
+
+/// Maximum protocol version this binary will accept on a handshake.
+/// A worker offering a higher value is rejected with
+/// `ProtocolError::UnsupportedProtocolVersion`.
+pub const PROTOCOL_VERSION_SUPPORTED_MAX: u32 = 1;
