@@ -2437,3 +2437,185 @@ async fn abort_accepts_mutation_failed_and_other_variants() {
     assert_eq!(prior_b, "pending");
     assert_eq!(payload_reason_b, "other");
 }
+
+// -- list_pending_commit_intents sibling tests (commit 9) ------------------
+
+/// Variant of `prepare_pending_intent` that lets the test pick `now`,
+/// which lands in the `commit_intents.started_at` column. The
+/// no-argument helper above hardcodes `T0`; the `older_than` cutoff
+/// test needs two intents at different `started_at` values, so it
+/// goes through this variant instead.
+async fn prepare_pending_intent_at(
+    pool: &SqlitePool,
+    location_id: FileLocationId,
+    now: time::OffsetDateTime,
+) -> CommitId {
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = prepare_destructive_commit(
+        pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(location_id),
+        now,
+    )
+    .await
+    .unwrap();
+    match outcome {
+        PrepareOutcome::Pending(intent) => intent.commit_id,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending after seed, got Blocked({result:?})")
+        }
+    }
+}
+
+#[tokio::test]
+async fn list_pending_commit_intents_empty_database_returns_empty_vec() {
+    let (pool, _tmp) = fresh_pool().await;
+    let listed = list_pending_commit_intents(&pool, None).await.unwrap();
+    assert!(
+        listed.is_empty(),
+        "fresh DB must surface no in-flight intents, got {listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_pending_commit_intents_returns_pending_row_with_no_authorized_fields() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+
+    let listed = list_pending_commit_intents(&pool, None).await.unwrap();
+    assert_eq!(listed.len(), 1, "expected exactly one in-flight row");
+    let row = &listed[0];
+    assert_eq!(row.commit_id, commit_id);
+    assert_eq!(row.state, CommitIntentState::Pending);
+    assert_eq!(
+        row.target,
+        CommitTarget::DeleteFileLocation(seeded.location_id)
+    );
+    assert!(
+        row.closure_authorized.is_none(),
+        "pending rows must carry closure_authorized = None"
+    );
+    assert!(
+        row.authorized_at.is_none(),
+        "pending rows must carry authorized_at = None"
+    );
+    assert_eq!(
+        row.started_at, T0,
+        "started_at must round-trip through ISO8601"
+    );
+    assert!(row.accepted_evidence_ids.is_empty());
+    // The pending row's closure_initial walks the deleted location's
+    // version + asset; assert non-emptiness rather than the exact
+    // member shape (covered by Phase A's own sibling tests).
+    assert!(
+        row.closure_initial
+            .file_locations
+            .contains(&seeded.location_id),
+        "closure_initial must include the targeted location"
+    );
+}
+
+#[tokio::test]
+async fn list_pending_commit_intents_returns_pending_and_authorized_in_started_at_order() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded_a = seed_location(&pool, "/srv/a").await;
+    let seeded_b = seed_location(&pool, "/srv/b").await;
+
+    let t_first = T0;
+    let t_second = T0 + time::Duration::seconds(5);
+    let t_authorize = T0 + time::Duration::seconds(10);
+
+    // First-started intent gets authorized; second-started stays pending.
+    // Asserts both rows surface AND that ordering is by started_at
+    // (not by state or by id).
+    let commit_first = prepare_pending_intent_at(&pool, seeded_a.location_id, t_first).await;
+    let commit_second = prepare_pending_intent_at(&pool, seeded_b.location_id, t_second).await;
+    let _permit = authorize_pending_intent(&pool, commit_first, t_authorize).await;
+
+    let listed = list_pending_commit_intents(&pool, None).await.unwrap();
+    assert_eq!(listed.len(), 2, "expected both in-flight rows: {listed:?}");
+    assert_eq!(listed[0].commit_id, commit_first);
+    assert_eq!(listed[0].state, CommitIntentState::Authorized);
+    assert!(
+        listed[0].closure_authorized.is_some(),
+        "authorized row must carry closure_authorized = Some(_)"
+    );
+    assert_eq!(
+        listed[0].authorized_at,
+        Some(t_authorize),
+        "authorized row must carry authorized_at matching the authorize call's `now`"
+    );
+    assert_eq!(listed[0].started_at, t_first);
+
+    assert_eq!(listed[1].commit_id, commit_second);
+    assert_eq!(listed[1].state, CommitIntentState::Pending);
+    assert!(listed[1].closure_authorized.is_none());
+    assert!(listed[1].authorized_at.is_none());
+    assert_eq!(listed[1].started_at, t_second);
+}
+
+#[tokio::test]
+async fn list_pending_commit_intents_excludes_terminal_states() {
+    // Aborted, completed, and recovery_required rows must not surface
+    // — that's the entire point of the `commit_intents_in_flight`
+    // partial index this listing rides.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let events = SqliteEventRepo::new(pool.clone());
+    abort_destructive_commit(
+        &pool,
+        &events,
+        commit_id,
+        AbortReason::OperatorCancel,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+
+    let listed = list_pending_commit_intents(&pool, None).await.unwrap();
+    assert!(
+        listed.is_empty(),
+        "aborted row must not surface; got {listed:?}"
+    );
+}
+
+#[tokio::test]
+async fn list_pending_commit_intents_older_than_cutoff_excludes_newer_rows() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded_old = seed_location(&pool, "/srv/old").await;
+    let seeded_new = seed_location(&pool, "/srv/new").await;
+
+    let t_old = T0;
+    let t_new = T0 + time::Duration::seconds(60);
+    let cutoff = T0 + time::Duration::seconds(30);
+
+    let commit_old = prepare_pending_intent_at(&pool, seeded_old.location_id, t_old).await;
+    let _commit_new = prepare_pending_intent_at(&pool, seeded_new.location_id, t_new).await;
+
+    let listed = list_pending_commit_intents(&pool, Some(cutoff))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "cutoff must exclude the newer row; got {listed:?}"
+    );
+    assert_eq!(listed[0].commit_id, commit_old);
+    assert_eq!(listed[0].started_at, t_old);
+
+    // Sanity: a cutoff in the far future surfaces both rows, proving
+    // the filter — not some unrelated query bug — is what excluded the
+    // newer row above.
+    let far_future = T0 + time::Duration::days(365);
+    let listed_all = list_pending_commit_intents(&pool, Some(far_future))
+        .await
+        .unwrap();
+    assert_eq!(listed_all.len(), 2);
+}
