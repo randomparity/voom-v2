@@ -391,6 +391,85 @@ fn use_lease_recovered_stale_issuer_round_trip() {
 }
 
 #[test]
+fn commit_intent_recorded_round_trip() {
+    let p = CommitIntentRecordedPayload {
+        commit_id: voom_core::CommitId(11),
+        target_kind: "delete_file_location".to_owned(),
+        closure_asset_count: 1,
+        closure_bundle_count: 0,
+        closure_version_count: 1,
+        closure_location_count: 1,
+        accepted_evidence_count: 0,
+        started_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitIntentRecorded(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.intent_recorded");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitIntentRecorded(q) if q == p));
+    assert_eq!(
+        Event::CommitIntentRecorded(p).kind(),
+        EventKind::CommitIntentRecorded
+    );
+}
+
+#[test]
+fn commit_aborted_by_use_lease_round_trip() {
+    let p = CommitAbortedByUseLeasePayload {
+        commit_id: voom_core::CommitId(12),
+        lease_id: voom_core::UseLeaseId(3),
+        lease_scope_type: "version".to_owned(),
+        lease_scope_id: 99,
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAbortedByUseLease(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.aborted_by_use_lease");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAbortedByUseLease(q) if q == p));
+    assert_eq!(
+        Event::CommitAbortedByUseLease(p).kind(),
+        EventKind::CommitAbortedByUseLease
+    );
+}
+
+#[test]
+fn commit_aborted_by_stale_evidence_round_trip() {
+    let p = CommitAbortedByStaleEvidencePayload {
+        commit_id: voom_core::CommitId(13),
+        evidence_id: voom_core::EvidenceId(7),
+        drift_kind: "pinned_hash_differs".to_owned(),
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAbortedByStaleEvidence(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.aborted_by_stale_evidence");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAbortedByStaleEvidence(q) if q == p));
+    assert_eq!(
+        Event::CommitAbortedByStaleEvidence(p).kind(),
+        EventKind::CommitAbortedByStaleEvidence
+    );
+}
+
+#[test]
+fn commit_aborted_by_closure_incomplete_round_trip() {
+    let p = CommitAbortedByClosureIncompletePayload {
+        commit_id: voom_core::CommitId(14),
+        phase: "prepare".to_owned(),
+        message: "mount /srv/media offline".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    };
+    let json = serde_json::to_value(Event::CommitAbortedByClosureIncomplete(p.clone())).unwrap();
+    assert_eq!(json["kind"], "commit.aborted_by_closure_incomplete");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::CommitAbortedByClosureIncomplete(q) if q == p));
+    assert_eq!(
+        Event::CommitAbortedByClosureIncomplete(p).kind(),
+        EventKind::CommitAbortedByClosureIncomplete
+    );
+}
+
+#[test]
 fn use_lease_reanchored_by_move_round_trip() {
     let p = UseLeaseReanchoredByMovePayload {
         lease_id: 7,

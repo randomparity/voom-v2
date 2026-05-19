@@ -61,6 +61,11 @@ pub enum EventKind {
     UseLeaseForceReleased,
     UseLeaseRecoveredStaleIssuer,
     UseLeaseReanchoredByMove,
+    // M3 Phase 2 — commit safety gate (Phase A subset).
+    CommitIntentRecorded,
+    CommitAbortedByUseLease,
+    CommitAbortedByStaleEvidence,
+    CommitAbortedByClosureIncomplete,
 }
 
 impl EventKind {
@@ -113,6 +118,10 @@ impl EventKind {
             Self::UseLeaseForceReleased => "use_lease.force_released",
             Self::UseLeaseRecoveredStaleIssuer => "use_lease.recovered_stale_issuer",
             Self::UseLeaseReanchoredByMove => "use_lease.reanchored_by_move",
+            Self::CommitIntentRecorded => "commit.intent_recorded",
+            Self::CommitAbortedByUseLease => "commit.aborted_by_use_lease",
+            Self::CommitAbortedByStaleEvidence => "commit.aborted_by_stale_evidence",
+            Self::CommitAbortedByClosureIncomplete => "commit.aborted_by_closure_incomplete",
         }
     }
 
@@ -175,6 +184,10 @@ impl EventKind {
             "use_lease.force_released" => Self::UseLeaseForceReleased,
             "use_lease.recovered_stale_issuer" => Self::UseLeaseRecoveredStaleIssuer,
             "use_lease.reanchored_by_move" => Self::UseLeaseReanchoredByMove,
+            "commit.intent_recorded" => Self::CommitIntentRecorded,
+            "commit.aborted_by_use_lease" => Self::CommitAbortedByUseLease,
+            "commit.aborted_by_stale_evidence" => Self::CommitAbortedByStaleEvidence,
+            "commit.aborted_by_closure_incomplete" => Self::CommitAbortedByClosureIncomplete,
             other => {
                 return Err(VoomError::Database(format!(
                     "events.kind {other:?} not in EventKind vocab"

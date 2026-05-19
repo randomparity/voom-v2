@@ -1,19 +1,30 @@
-//! Commit safety gate types — Sprint 1 §9.3.
+//! Commit safety gate types and Phase A entry point — Sprint 1 §9.3.
 //!
-//! Home for the three-phase destructive-commit gate. The current state
-//! of the module is type stubs only; algorithms (prepare / authorize /
-//! finalize / abort / list, plus the `AliasResolver` trait) land
-//! alongside their respective slices and reference these types.
+//! Home for the three-phase destructive-commit gate. Phase A
+//! (`prepare_destructive_commit`) lands here; Phase B / C / abort / list
+//! land in later commits.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
+use voom_core::VoomError;
 use voom_core::ids::{
     BundleId, CommitId, EvidenceId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId,
 };
+use voom_events::payload::{
+    CommitAbortedByClosureIncompletePayload, CommitAbortedByStaleEvidencePayload,
+    CommitAbortedByUseLeasePayload, CommitIntentRecordedPayload,
+};
+use voom_events::{Event, EventEnvelope, SubjectType};
 
-use crate::repo::identity::{FileLocationKind, LocationProof};
+use crate::repo::common::{i64_from_u64, iso8601, u64_from_i64};
+use crate::repo::events::EventRepo;
+use crate::repo::identity::{
+    FileLocationKind, IdentityEvidenceTarget, IdentityRepo, LocationProof,
+};
 use crate::repo::use_leases::LeaseScope;
 
 /// Caller-facing proposal for a new `FileLocation` inside a destructive
@@ -532,6 +543,1066 @@ pub trait AliasResolver: Send + Sync {
         &self,
         file_version_id: FileVersionId,
     ) -> Result<Vec<FileLocationId>, AliasResolutionError>;
+}
+
+// ============================================================================
+// Phase A entry point — `prepare_destructive_commit` + abort helper
+// ============================================================================
+
+/// Disposition of a `prepare_destructive_commit` call.
+///
+/// `Pending` carries the durable `CommitIntent` (row landed in
+/// `state = 'pending'`). `Blocked` carries the abort outcome — a
+/// `commit_intents` row landed in `state = 'aborted'` with `commit_id`
+/// referring to that row, and the matching `commit.aborted_by_*` event
+/// row sits alongside it in `events`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepareOutcome {
+    Pending(CommitIntent),
+    Blocked {
+        commit_id: CommitId,
+        result: CommitGateResult,
+    },
+}
+
+/// Reason a Phase A gate-check aborted before any durable mutation could
+/// land. The helper translates one of these into the matching
+/// `AbortReason` row value AND the matching `commit.aborted_by_*` event.
+#[derive(Debug, Clone)]
+enum PhaseAAbort {
+    UseLease {
+        lease_id: UseLeaseId,
+        lease_scope: LeaseScope,
+    },
+    StaleEvidence {
+        evidence_id: EvidenceId,
+        drift: EvidenceDrift,
+    },
+    ClosureIncomplete {
+        message: String,
+    },
+}
+
+impl PhaseAAbort {
+    fn abort_reason(&self) -> AbortReason {
+        match self {
+            Self::UseLease { .. } => AbortReason::FreshLease,
+            Self::StaleEvidence { .. } => AbortReason::StaleEvidence,
+            Self::ClosureIncomplete { .. } => AbortReason::ClosureIncomplete,
+        }
+    }
+
+    fn abort_reason_str(&self) -> &'static str {
+        match self {
+            Self::UseLease { .. } => "fresh_lease",
+            Self::StaleEvidence { .. } => "stale_evidence",
+            Self::ClosureIncomplete { .. } => "closure_incomplete",
+        }
+    }
+
+    fn into_gate_result(self) -> CommitGateResult {
+        match self {
+            Self::UseLease {
+                lease_id,
+                lease_scope,
+            } => CommitGateResult::BlockedByUseLease {
+                lease_id,
+                lease_scope,
+            },
+            Self::StaleEvidence { evidence_id, drift } => {
+                CommitGateResult::BlockedByStaleEvidence { evidence_id, drift }
+            }
+            Self::ClosureIncomplete { message } => CommitGateResult::BlockedByClosureIncomplete {
+                reason: ClosureFailure::AliasUnreachable {
+                    message: message.clone(),
+                },
+                unreachable: vec![ClosureWarning { message }],
+            },
+        }
+    }
+}
+
+/// Snapshot of the JSON-encoded `commit_intents` row body, captured
+/// once before the closure walk so the gate's IMMEDIATE tx and the
+/// two-tx abort helper bind the same column values. The four fields
+/// mirror the four `commit_intents` columns the Phase A entry point
+/// populates regardless of outcome.
+struct CommitIntentRowBody<'a> {
+    target_json: &'a str,
+    closure_initial_json: &'a str,
+    accepted_evidence_ids_json: &'a str,
+    started_at: OffsetDateTime,
+}
+
+/// Phase A gate-check abort using the two-tx pattern (sequencing doc
+/// §5.2). The two-tx pattern is **only** used for Phase A gate-check
+/// aborts (raised before the `commit_intents` row would land in
+/// `'pending'`). Phase B aborts, Phase C trip-wire aborts, and the
+/// dedicated `abort_destructive_commit` entry point all commit the
+/// intent-state transition and the event row in a single IMMEDIATE
+/// transaction.
+///
+/// Tx 1 inserts the `commit_intents` row directly in `state = 'aborted'`
+/// (no prior `pending` write — the gate check tripped before any
+/// closure-bearing state landed). Tx 2 emits the matching
+/// `commit.aborted_by_*` event. The split keeps the in-tx event-append
+/// composition the rest of the codebase uses inaccessible from Phase A
+/// abort paths, which would otherwise need to materialize an empty
+/// closure into the durable `closure_initial` column under a tx the
+/// gate's later phases never own.
+///
+/// Returns the durable `CommitId` of the aborted row.
+async fn phase_a_gate_abort_with_event(
+    pool: &SqlitePool,
+    event_repo: &dyn EventRepo,
+    row: &CommitIntentRowBody<'_>,
+    aborted_at: OffsetDateTime,
+    abort: PhaseAAbort,
+) -> Result<CommitId, VoomError> {
+    // two-tx: tx 1 inserts the aborted row.
+    let started_iso = iso8601(row.started_at)?;
+    let aborted_iso = iso8601(aborted_at)?;
+    let mut tx1 = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("phase A abort tx1 begin: {e}")))?;
+    let insert = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at, \
+          aborted_at, abort_reason) \
+         VALUES (?, ?, ?, 'aborted', ?, ?, ?)",
+    )
+    .bind(row.target_json)
+    .bind(row.closure_initial_json)
+    .bind(row.accepted_evidence_ids_json)
+    .bind(&started_iso)
+    .bind(&aborted_iso)
+    .bind(abort.abort_reason_str())
+    .execute(&mut *tx1)
+    .await
+    .map_err(|e| VoomError::Database(format!("commit_intents abort insert: {e}")))?;
+    let commit_id = CommitId(u64_from_i64(insert.last_insert_rowid()));
+    tx1.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("phase A abort tx1 commit: {e}")))?;
+
+    // two-tx: tx 2 emits the matching event.
+    let payload = phase_a_abort_event(commit_id, aborted_at, &abort);
+    let mut tx2 = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("phase A abort tx2 begin: {e}")))?;
+    event_repo
+        .append_in_tx(
+            &mut tx2,
+            EventEnvelope {
+                occurred_at: aborted_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    tx2.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("phase A abort tx2 commit: {e}")))?;
+
+    // Reference fields once so `PhaseAAbort` does not need additional
+    // accessors. The abort_reason call also pins the
+    // `AbortReason` ↔ `PhaseAAbort` mapping (used here for audit /
+    // debug; the durable column carries the snake_case string).
+    let _ = abort.abort_reason();
+    Ok(commit_id)
+}
+
+fn phase_a_abort_event(
+    commit_id: CommitId,
+    aborted_at: OffsetDateTime,
+    abort: &PhaseAAbort,
+) -> Event {
+    match abort {
+        PhaseAAbort::UseLease {
+            lease_id,
+            lease_scope,
+        } => Event::CommitAbortedByUseLease(CommitAbortedByUseLeasePayload {
+            commit_id,
+            lease_id: *lease_id,
+            lease_scope_type: lease_scope.type_str().to_owned(),
+            lease_scope_id: lease_scope.id_u64(),
+            phase: "prepare".to_owned(),
+            aborted_at,
+        }),
+        PhaseAAbort::StaleEvidence { evidence_id, drift } => {
+            Event::CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload {
+                commit_id,
+                evidence_id: *evidence_id,
+                drift_kind: evidence_drift_str(drift).to_owned(),
+                phase: "prepare".to_owned(),
+                aborted_at,
+            })
+        }
+        PhaseAAbort::ClosureIncomplete { message } => {
+            Event::CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload {
+                commit_id,
+                phase: "prepare".to_owned(),
+                message: message.clone(),
+                aborted_at,
+            })
+        }
+    }
+}
+
+fn evidence_drift_str(d: &EvidenceDrift) -> &'static str {
+    match d {
+        EvidenceDrift::PinnedFileVersionRetired => "pinned_file_version_retired",
+        EvidenceDrift::PinnedHashDiffers => "pinned_hash_differs",
+        EvidenceDrift::PinnedLocationRetired => "pinned_location_retired",
+    }
+}
+
+fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
+    match t {
+        CommitTarget::DeleteFileLocation(_) => "delete_file_location",
+        CommitTarget::ReplaceFileLocation { .. } => "replace_file_location",
+        CommitTarget::MoveFileLocation { .. } => "move_file_location",
+    }
+}
+
+// ----- JSON wire formats for the `commit_intents` JSON columns ----------------
+//
+// `commit_intents.target` and `commit_intents.closure_initial` are
+// JSON-encoded; `accepted_evidence_ids` is a JSON array. The Rust-side
+// public types intentionally do NOT derive `Serialize`/`Deserialize`
+// (some embed M2 types like `FileLocationKind` and `LocationProof`
+// that do not derive serde, and adding derives there would force a
+// wider M2 touch). Dedicated wire-format structs keep the on-disk JSON
+// shape stable and isolated; later commits read the same columns back
+// via the inverse mappers.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CommitTargetWire {
+    #[serde(rename = "delete_file_location")]
+    Delete { retired: FileLocationId },
+    #[serde(rename = "replace_file_location")]
+    Replace {
+        retired: FileLocationId,
+        new: FileLocationProposalWire,
+    },
+    #[serde(rename = "move_file_location")]
+    Move {
+        retired: FileLocationId,
+        new: FileLocationProposalWire,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FileLocationProposalWire {
+    kind: String,
+    value: String,
+    proof_kind: Option<String>,
+    proof_value: Option<String>,
+    #[serde(with = "time::serde::iso8601")]
+    observed_at: OffsetDateTime,
+}
+
+impl FileLocationProposalWire {
+    fn from_proposal(p: &FileLocationProposal) -> Self {
+        let (proof_kind, proof_value) = match &p.proof {
+            None => (None, None),
+            Some(proof) => (
+                Some(proof_kind_str(proof).to_owned()),
+                Some(proof_value_str(proof)),
+            ),
+        };
+        Self {
+            kind: p.kind.as_str().to_owned(),
+            value: p.value.clone(),
+            proof_kind,
+            proof_value,
+            observed_at: p.observed_at,
+        }
+    }
+}
+
+fn proof_kind_str(proof: &LocationProof) -> &'static str {
+    match proof {
+        LocationProof::LocalFileIdGeneration { .. } => "file_id_generation",
+        LocationProof::ObjectStoreVersion { .. } => "object_version_id",
+    }
+}
+
+fn proof_value_str(proof: &LocationProof) -> String {
+    match proof {
+        LocationProof::LocalFileIdGeneration {
+            file_id,
+            generation,
+        } => serde_json::json!({
+            "file_id": file_id.to_string(),
+            "generation": generation,
+        })
+        .to_string(),
+        LocationProof::ObjectStoreVersion {
+            bucket,
+            key,
+            version_id,
+        } => serde_json::json!({
+            "bucket": bucket,
+            "key": key,
+            "version_id": version_id,
+        })
+        .to_string(),
+    }
+}
+
+fn commit_target_to_wire(t: &CommitTarget) -> CommitTargetWire {
+    match t {
+        CommitTarget::DeleteFileLocation(id) => CommitTargetWire::Delete { retired: *id },
+        CommitTarget::ReplaceFileLocation { retired, new } => CommitTargetWire::Replace {
+            retired: *retired,
+            new: FileLocationProposalWire::from_proposal(new),
+        },
+        CommitTarget::MoveFileLocation { retired, new } => CommitTargetWire::Move {
+            retired: *retired,
+            new: FileLocationProposalWire::from_proposal(new),
+        },
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AffectedScopeClosureWire {
+    file_assets: BTreeSet<FileAssetId>,
+    file_versions: BTreeSet<FileVersionId>,
+    file_locations: BTreeSet<FileLocationId>,
+    bundles: BTreeSet<BundleId>,
+    resolution_warnings: Vec<ClosureWarningWire>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClosureWarningWire {
+    message: String,
+}
+
+fn closure_to_wire(c: &AffectedScopeClosure) -> AffectedScopeClosureWire {
+    AffectedScopeClosureWire {
+        file_assets: c.file_assets.clone(),
+        file_versions: c.file_versions.clone(),
+        file_locations: c.file_locations.clone(),
+        bundles: c.bundles.clone(),
+        resolution_warnings: c
+            .resolution_warnings
+            .iter()
+            .map(|w| ClosureWarningWire {
+                message: w.message.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn encode_target(t: &CommitTarget) -> Result<String, VoomError> {
+    serde_json::to_string(&commit_target_to_wire(t))
+        .map_err(|e| VoomError::Internal(format!("encode commit_target: {e}")))
+}
+
+fn encode_closure(c: &AffectedScopeClosure) -> Result<String, VoomError> {
+    serde_json::to_string(&closure_to_wire(c))
+        .map_err(|e| VoomError::Internal(format!("encode closure: {e}")))
+}
+
+fn encode_evidence_ids(ids: &[EvidenceId]) -> Result<String, VoomError> {
+    serde_json::to_string(ids).map_err(|e| VoomError::Internal(format!("encode evidence_ids: {e}")))
+}
+
+// ----- Phase A main entry point --------------------------------------------
+
+/// Phase A of the destructive-commit gate — sub-slice 4 of the M3 Phase 2
+/// plan. Computes the affected-scope closure, evaluates the three Phase A
+/// gate checks (blocking use-lease, accepted-evidence drift,
+/// closure-walk reachability), and persists either a `state = 'pending'`
+/// `commit_intents` row (success) or a `state = 'aborted'` row (gate
+/// check tripped) along with the matching event.
+///
+/// The success path runs inside one IMMEDIATE transaction:
+/// closure-walk → lease check → evidence revalidation → INSERT pending
+/// row → expand `commit_intent_scope_members` → emit
+/// `commit.intent_recorded` → COMMIT. The abort paths rollback the
+/// gate's IMMEDIATE tx and use `phase_a_gate_abort_with_event` to land
+/// the aborted row and event in two sequential transactions (sequencing
+/// doc §5.2).
+///
+/// `alias_resolver` covers **external** (non-DB) alias sources only.
+/// DB-internal alias enumeration goes through
+/// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
+/// gate's tx handle (round-5 fix).
+///
+/// Sprint 1 ships no `override_token` parameter — commit 10 retrofits
+/// `DestructiveCommit` and this signature together. Calls that hit
+/// `AliasResolutionError::Unreachable` abort unconditionally for Phase A
+/// in Sprint 1 through commit 9.
+///
+/// # Errors
+///
+/// `VoomError::Database` / `VoomError::Internal` on storage failures
+/// (including `AliasResolutionError::Database` from an external alias
+/// source). Gate-check failures return `Ok(PrepareOutcome::Blocked)`
+/// rather than `Err` — `Err` is reserved for genuine storage failures
+/// that the caller cannot reason about.
+pub async fn prepare_destructive_commit(
+    pool: &SqlitePool,
+    identity_repo: &dyn IdentityRepo,
+    event_repo: &dyn EventRepo,
+    alias_resolver: &dyn AliasResolver,
+    input: DestructiveCommit,
+    now: OffsetDateTime,
+) -> Result<PrepareOutcome, VoomError> {
+    let DestructiveCommit {
+        target,
+        accepted_evidence_ids,
+    } = input;
+    let target_json = encode_target(&target)?;
+    let accepted_evidence_ids_json = encode_evidence_ids(&accepted_evidence_ids)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| VoomError::Database(format!("prepare: tx begin: {e}")))?;
+
+    let walk_outcome = run_phase_a_gate_in_tx(
+        &mut tx,
+        identity_repo,
+        alias_resolver,
+        &target,
+        &accepted_evidence_ids,
+    )
+    .await;
+    let walk = match walk_outcome {
+        Ok(Ok(w)) => w,
+        Ok(Err(abort_outcome)) => {
+            tx.rollback()
+                .await
+                .map_err(|e| VoomError::Database(format!("prepare: rollback: {e}")))?;
+            let closure_initial_json = encode_closure(&abort_outcome.closure_initial)?;
+            let row = CommitIntentRowBody {
+                target_json: &target_json,
+                closure_initial_json: &closure_initial_json,
+                accepted_evidence_ids_json: &accepted_evidence_ids_json,
+                started_at: now,
+            };
+            let commit_id = phase_a_gate_abort_with_event(
+                pool,
+                event_repo,
+                &row,
+                now,
+                abort_outcome.abort.clone(),
+            )
+            .await?;
+            return Ok(PrepareOutcome::Blocked {
+                commit_id,
+                result: abort_outcome.abort.into_gate_result(),
+            });
+        }
+        Err(e) => return Err(e),
+    };
+
+    let closure_initial_json = encode_closure(&walk.closure)?;
+    let commit_id = insert_pending_intent(
+        &mut tx,
+        &target_json,
+        &closure_initial_json,
+        &accepted_evidence_ids_json,
+        now,
+    )
+    .await?;
+    expand_scope_members(&mut tx, commit_id, &walk.closure).await?;
+    emit_intent_recorded(
+        event_repo,
+        &mut tx,
+        commit_id,
+        &target,
+        &walk.closure,
+        accepted_evidence_ids.len(),
+        now,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| VoomError::Database(format!("prepare: commit: {e}")))?;
+
+    Ok(PrepareOutcome::Pending(CommitIntent {
+        commit_id,
+        closure_initial: walk.closure,
+        evaluated_lease_ids: walk.evaluated_lease_ids,
+        revalidated_evidence: walk.revalidated_evidence,
+        epoch: 0,
+    }))
+}
+
+struct GateWalkOk {
+    closure: AffectedScopeClosure,
+    evaluated_lease_ids: Vec<UseLeaseId>,
+    revalidated_evidence: Vec<EvidenceRevalidationResult>,
+}
+
+struct GateWalkAbort {
+    closure_initial: AffectedScopeClosure,
+    abort: PhaseAAbort,
+}
+
+/// Run all three Phase A gate checks inside the gate's IMMEDIATE tx.
+/// Returns `Ok(Ok(_))` on a passing walk (caller proceeds to insert
+/// the `pending` row); `Ok(Err(_))` on a gate-check abort (caller
+/// rolls back and runs the two-tx abort helper); `Err(_)` on a storage
+/// failure the caller cannot reason about.
+async fn run_phase_a_gate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    alias_resolver: &dyn AliasResolver,
+    target: &CommitTarget,
+    accepted_evidence_ids: &[EvidenceId],
+) -> Result<Result<GateWalkOk, GateWalkAbort>, VoomError> {
+    // Step 1: closure walk on the gate's IMMEDIATE tx.
+    let closure = match build_closure(tx, identity_repo, alias_resolver, target).await? {
+        Ok((c, _)) => c,
+        Err(abort) => {
+            return Ok(Err(GateWalkAbort {
+                closure_initial: AffectedScopeClosure::default(),
+                abort,
+            }));
+        }
+    };
+
+    // Step 2: blocking-lease check.
+    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure).await?;
+    if let Some((lease_id, lease_scope)) = first_blocking_overlap_in_tx(tx, &closure).await? {
+        return Ok(Err(GateWalkAbort {
+            closure_initial: closure,
+            abort: PhaseAAbort::UseLease {
+                lease_id,
+                lease_scope,
+            },
+        }));
+    }
+
+    // Step 3: accepted-evidence revalidation.
+    let revalidated_evidence =
+        revalidate_evidence_in_tx(tx, identity_repo, accepted_evidence_ids).await?;
+    if let Some((evidence_id, drift)) = first_evidence_drift(&revalidated_evidence) {
+        return Ok(Err(GateWalkAbort {
+            closure_initial: closure,
+            abort: PhaseAAbort::StaleEvidence {
+                evidence_id,
+                drift: drift.clone(),
+            },
+        }));
+    }
+
+    Ok(Ok(GateWalkOk {
+        closure,
+        evaluated_lease_ids,
+        revalidated_evidence,
+    }))
+}
+
+async fn insert_pending_intent(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    target_json: &str,
+    closure_initial_json: &str,
+    accepted_evidence_ids_json: &str,
+    started_at: OffsetDateTime,
+) -> Result<CommitId, VoomError> {
+    let started_iso = iso8601(started_at)?;
+    let res = sqlx::query(
+        "INSERT INTO commit_intents \
+         (target, closure_initial, accepted_evidence_ids, state, started_at) \
+         VALUES (?, ?, ?, 'pending', ?)",
+    )
+    .bind(target_json)
+    .bind(closure_initial_json)
+    .bind(accepted_evidence_ids_json)
+    .bind(&started_iso)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("commit_intents pending insert: {e}")))?;
+    Ok(CommitId(u64_from_i64(res.last_insert_rowid())))
+}
+
+async fn emit_intent_recorded(
+    event_repo: &dyn EventRepo,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    target: &CommitTarget,
+    closure: &AffectedScopeClosure,
+    accepted_evidence_count: usize,
+    started_at: OffsetDateTime,
+) -> Result<(), VoomError> {
+    let payload = Event::CommitIntentRecorded(CommitIntentRecordedPayload {
+        commit_id,
+        target_kind: commit_target_kind_str(target).to_owned(),
+        closure_asset_count: u32::try_from(closure.file_assets.len()).unwrap_or(u32::MAX),
+        closure_bundle_count: u32::try_from(closure.bundles.len()).unwrap_or(u32::MAX),
+        closure_version_count: u32::try_from(closure.file_versions.len()).unwrap_or(u32::MAX),
+        closure_location_count: u32::try_from(closure.file_locations.len()).unwrap_or(u32::MAX),
+        accepted_evidence_count: u32::try_from(accepted_evidence_count).unwrap_or(u32::MAX),
+        started_at,
+    });
+    event_repo
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at: started_at,
+                subject_type: SubjectType::CommitIntent,
+                subject_id: Some(commit_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Resolve the destructive target into the set of `FileLocation` rows
+/// the closure walk anchors on. Returns `None` if the target's retired
+/// row is missing or already terminal — Phase C will trip the epoch
+/// guard regardless, but Phase A surfaces it eagerly as a closure-walk
+/// failure so the operator does not wait for the round trip.
+async fn build_closure(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    alias_resolver: &dyn AliasResolver,
+    target: &CommitTarget,
+) -> Result<Result<(AffectedScopeClosure, Vec<FileLocationId>), PhaseAAbort>, VoomError> {
+    let retired_location_id = match target {
+        CommitTarget::DeleteFileLocation(id) => *id,
+        CommitTarget::ReplaceFileLocation { retired, .. }
+        | CommitTarget::MoveFileLocation { retired, .. } => *retired,
+    };
+
+    let location = identity_repo
+        .get_file_location_in_tx(tx, retired_location_id)
+        .await?;
+    let Some(location) = location else {
+        return Ok(Err(PhaseAAbort::ClosureIncomplete {
+            message: format!("target file_location {retired_location_id} not found"),
+        }));
+    };
+    if location.retired_at.is_some() {
+        return Ok(Err(PhaseAAbort::ClosureIncomplete {
+            message: format!("target file_location {retired_location_id} already retired"),
+        }));
+    }
+
+    let version = identity_repo
+        .get_file_version_in_tx(tx, location.file_version_id)
+        .await?;
+    let Some(version) = version else {
+        return Ok(Err(PhaseAAbort::ClosureIncomplete {
+            message: format!("target file_version {} not found", location.file_version_id),
+        }));
+    };
+
+    // DB-internal live alias enumeration on the same tx (round-5 fix).
+    let live_locations: BTreeSet<FileLocationId> = identity_repo
+        .list_live_file_locations_by_version_in_tx(tx, version.id)
+        .await?
+        .into_iter()
+        .collect();
+
+    // External alias enumeration through the trait — Sprint 1 ships
+    // only `FailingAliasResolver`, which returns `Unreachable` to drive
+    // the closure-incomplete abort branch in tests.
+    let mut alias_warnings: Vec<ClosureWarning> = Vec::new();
+    let mut external_locations: BTreeSet<FileLocationId> = BTreeSet::new();
+    match alias_resolver.aliases_for_version(version.id).await {
+        Ok(extra) => {
+            for id in extra {
+                external_locations.insert(id);
+            }
+        }
+        Err(AliasResolutionError::Unreachable { message }) => {
+            return Ok(Err(PhaseAAbort::ClosureIncomplete { message }));
+        }
+        Err(AliasResolutionError::Database(msg)) => {
+            return Err(VoomError::Database(format!("alias resolver: {msg}")));
+        }
+    }
+
+    let mut file_locations = live_locations;
+    for id in external_locations {
+        file_locations.insert(id);
+    }
+    // The retired target itself is always part of the closure even if
+    // the live-listing query already excluded retired rows: Phase A
+    // guards against the target already being terminal upstream, so
+    // a non-terminal target is always live and already present, but a
+    // defense-in-depth insert here keeps the invariant explicit.
+    file_locations.insert(retired_location_id);
+
+    // Bundle membership for the owning FileAsset.
+    let mut bundles: BTreeSet<BundleId> = BTreeSet::new();
+    let bundle_rows: Vec<i64> =
+        sqlx::query_scalar("SELECT bundle_id FROM asset_bundle_members WHERE file_asset_id = ?")
+            .bind(i64_from_u64(version.file_asset_id.0))
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("asset_bundle_members lookup: {e}")))?;
+    for raw in bundle_rows {
+        bundles.insert(BundleId(u64_from_i64(raw)));
+    }
+
+    let mut file_versions: BTreeSet<FileVersionId> = BTreeSet::new();
+    file_versions.insert(version.id);
+
+    let mut file_assets: BTreeSet<FileAssetId> = BTreeSet::new();
+    file_assets.insert(version.file_asset_id);
+
+    let _ = std::mem::take(&mut alias_warnings); // warnings stay empty in Sprint 1; placeholder for FS resolvers.
+    let closure = AffectedScopeClosure {
+        file_assets,
+        file_versions,
+        file_locations: file_locations.clone(),
+        bundles,
+        resolution_warnings: Vec::new(),
+    };
+    let target_locations: Vec<FileLocationId> = file_locations.into_iter().collect();
+    Ok(Ok((closure, target_locations)))
+}
+
+/// Read every live blocking use-lease whose scope_*_id column matches a
+/// member of `closure`. Returns the list of `UseLeaseId`s evaluated
+/// (used as `CommitIntent.evaluated_lease_ids` on the success path).
+async fn list_blocking_leases_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    closure: &AffectedScopeClosure,
+) -> Result<Vec<UseLeaseId>, VoomError> {
+    let mut ids: Vec<UseLeaseId> = Vec::new();
+    let raw_rows = blocking_lease_rows_in_tx(tx, closure).await?;
+    for (id, _) in raw_rows {
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+/// First overlap between a live blocking use-lease and `closure`. The
+/// return shape carries both the lease id and the lease's scope so the
+/// abort payload can report the offending scope without a second
+/// lookup.
+async fn first_blocking_overlap_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    closure: &AffectedScopeClosure,
+) -> Result<Option<(UseLeaseId, LeaseScope)>, VoomError> {
+    Ok(blocking_lease_rows_in_tx(tx, closure)
+        .await?
+        .into_iter()
+        .next())
+}
+
+/// Underlying query: returns every (`lease_id`, scope) pair where the
+/// lease is live (`release_reason IS NULL`), blocking, and its scope
+/// matches a member of `closure`. Ordered by `id ASC` so the
+/// "first overlap" path is deterministic across test runs.
+async fn blocking_lease_rows_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    closure: &AffectedScopeClosure,
+) -> Result<Vec<(UseLeaseId, LeaseScope)>, VoomError> {
+    if closure.file_assets.is_empty()
+        && closure.bundles.is_empty()
+        && closure.file_versions.is_empty()
+        && closure.file_locations.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+    let assets_json = serde_json::to_string(&closure.file_assets)
+        .map_err(|e| VoomError::Internal(format!("encode closure.file_assets: {e}")))?;
+    let bundles_json = serde_json::to_string(&closure.bundles)
+        .map_err(|e| VoomError::Internal(format!("encode closure.bundles: {e}")))?;
+    let versions_json = serde_json::to_string(&closure.file_versions)
+        .map_err(|e| VoomError::Internal(format!("encode closure.file_versions: {e}")))?;
+    let locations_json = serde_json::to_string(&closure.file_locations)
+        .map_err(|e| VoomError::Internal(format!("encode closure.file_locations: {e}")))?;
+
+    // SQLite `json_each` produces one row per element of the bound JSON
+    // array; the UNION ALL across the four scope columns is the
+    // four-granularity overlap check from §9.3. `release_reason IS NULL`
+    // restricts to live leases; `blocking_mode = 'blocking'` honors the
+    // arch-spec distinction between blocking and advisory.
+    let rows = sqlx::query(
+        "SELECT id, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id \
+         FROM asset_use_leases \
+         WHERE release_reason IS NULL AND blocking_mode = 'blocking' AND ( \
+             scope_asset_id    IN (SELECT value FROM json_each(?)) \
+          OR scope_bundle_id   IN (SELECT value FROM json_each(?)) \
+          OR scope_version_id  IN (SELECT value FROM json_each(?)) \
+          OR scope_location_id IN (SELECT value FROM json_each(?)) \
+         ) \
+         ORDER BY id ASC",
+    )
+    .bind(&assets_json)
+    .bind(&bundles_json)
+    .bind(&versions_json)
+    .bind(&locations_json)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("blocking-lease overlap: {e}")))?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+        let sa: Option<i64> = row
+            .try_get("scope_asset_id")
+            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+        let sb: Option<i64> = row
+            .try_get("scope_bundle_id")
+            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+        let sv: Option<i64> = row
+            .try_get("scope_version_id")
+            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+        let sl: Option<i64> = row
+            .try_get("scope_location_id")
+            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+        let scope = match (sa, sb, sv, sl) {
+            (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(v))),
+            (None, Some(v), None, None) => LeaseScope::Bundle(BundleId(u64_from_i64(v))),
+            (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(v))),
+            (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(v))),
+            other => {
+                return Err(VoomError::Database(format!(
+                    "blocking-lease row: scope_*_id columns are not exactly-one: {other:?}"
+                )));
+            }
+        };
+        out.push((UseLeaseId(u64_from_i64(id)), scope));
+    }
+    Ok(out)
+}
+
+/// Revalidate every accepted-evidence pin against current state. For
+/// each `evidence_id`, look up the row inside the gate's tx, decode the
+/// pinned columns, and compare against current state. Returns one
+/// result per id (`drift = None` for pins that still match).
+async fn revalidate_evidence_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    ids: &[EvidenceId],
+) -> Result<Vec<EvidenceRevalidationResult>, VoomError> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let evidence = identity_repo
+            .get_identity_evidence_in_tx(tx, *id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("identity_evidence {id} not found")))?;
+        // Phase A only consults accepted rows. Treat un-accepted /
+        // superseded pins as drift so the gate cannot proceed against
+        // evidence that no longer carries an authoritative pin.
+        if evidence.accepted_at.is_none() {
+            out.push(EvidenceRevalidationResult {
+                evidence_id: *id,
+                drift: Some(EvidenceDrift::PinnedFileVersionRetired),
+            });
+            continue;
+        }
+
+        let drift = first_evidence_pin_drift(tx, &evidence).await?;
+        out.push(EvidenceRevalidationResult {
+            evidence_id: *id,
+            drift,
+        });
+        // `IdentityEvidenceTarget` exists in `identity.rs` and is
+        // imported here so the round-trip parsing of the row's
+        // `target_type` is the single source of truth; the variant
+        // itself is unused in Sprint 1 evidence revalidation.
+        let _ = std::marker::PhantomData::<IdentityEvidenceTarget>;
+    }
+    Ok(out)
+}
+
+async fn first_evidence_pin_drift(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    evidence: &crate::repo::identity::IdentityEvidence,
+) -> Result<Option<EvidenceDrift>, VoomError> {
+    // Pinned FileVersion IDs — any retired version → drift.
+    if let Some(versions_json) = &evidence.pinned_file_version_ids {
+        for vid in pinned_u64_array(versions_json, "pinned_file_version_ids")? {
+            if version_is_retired(tx, FileVersionId(vid)).await? {
+                return Ok(Some(EvidenceDrift::PinnedFileVersionRetired));
+            }
+        }
+    }
+    // Pinned locations — any retired location → drift.
+    if let Some(locs_json) = &evidence.pinned_locations {
+        for lid in pinned_u64_array(locs_json, "pinned_locations")? {
+            if location_is_retired(tx, FileLocationId(lid)).await? {
+                return Ok(Some(EvidenceDrift::PinnedLocationRetired));
+            }
+        }
+    }
+    // Pinned hashes — compare against current `file_versions.content_hash`.
+    // The pin shape ships as `[ [version_id, hash], ... ]` per sprint
+    // §8.7; rows where the stored hash no longer matches drive the
+    // `PinnedHashDiffers` exit.
+    if let Some(hashes_json) = &evidence.pinned_hashes {
+        for (vid, expected) in pinned_hash_pairs(hashes_json, "pinned_hashes")? {
+            if let Some(current) = version_content_hash(tx, FileVersionId(vid)).await? {
+                if current != expected {
+                    return Ok(Some(EvidenceDrift::PinnedHashDiffers));
+                }
+            } else {
+                // Pinned to a version that no longer exists — surface
+                // the retired-version drift kind so the operator's
+                // diagnostic path is consistent.
+                return Ok(Some(EvidenceDrift::PinnedFileVersionRetired));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn pinned_u64_array(value: &JsonValue, field: &str) -> Result<Vec<u64>, VoomError> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array")))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let n = v
+            .as_u64()
+            .ok_or_else(|| VoomError::Database(format!("{field}: expected u64 element")))?;
+        out.push(n);
+    }
+    Ok(out)
+}
+
+fn pinned_hash_pairs(value: &JsonValue, field: &str) -> Result<Vec<(u64, String)>, VoomError> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array")))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for pair in arr {
+        let row = pair
+            .as_array()
+            .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array element")))?;
+        if row.len() != 2 {
+            return Err(VoomError::Database(format!(
+                "{field}: expected 2-element [version_id, hash] arrays"
+            )));
+        }
+        let vid = row[0]
+            .as_u64()
+            .ok_or_else(|| VoomError::Database(format!("{field}: version_id not u64")))?;
+        let hash = row[1]
+            .as_str()
+            .ok_or_else(|| VoomError::Database(format!("{field}: hash not str")))?
+            .to_owned();
+        out.push((vid, hash));
+    }
+    Ok(out)
+}
+
+async fn version_is_retired(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: FileVersionId,
+) -> Result<bool, VoomError> {
+    let row: Option<Option<String>> =
+        sqlx::query_scalar("SELECT retired_at FROM file_versions WHERE id = ?")
+            .bind(i64_from_u64(id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("file_versions retired probe: {e}")))?;
+    Ok(matches!(row, Some(Some(_))))
+}
+
+async fn location_is_retired(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: FileLocationId,
+) -> Result<bool, VoomError> {
+    let row: Option<Option<String>> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(i64_from_u64(id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("file_locations retired probe: {e}")))?;
+    Ok(matches!(row, Some(Some(_))))
+}
+
+async fn version_content_hash(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: FileVersionId,
+) -> Result<Option<String>, VoomError> {
+    let row: Option<String> =
+        sqlx::query_scalar("SELECT content_hash FROM file_versions WHERE id = ?")
+            .bind(i64_from_u64(id.0))
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("file_versions hash probe: {e}")))?;
+    Ok(row)
+}
+
+fn first_evidence_drift(
+    results: &[EvidenceRevalidationResult],
+) -> Option<(EvidenceId, &EvidenceDrift)> {
+    for r in results {
+        if let Some(d) = &r.drift {
+            return Some((r.evidence_id, d));
+        }
+    }
+    None
+}
+
+/// Insert one `commit_intent_scope_members` row per closure member,
+/// across all four granularities. Per migration 0005's CHECK exactly
+/// one of the four `scope_*_id` columns is non-NULL per row.
+async fn expand_scope_members(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    commit_id: CommitId,
+    closure: &AffectedScopeClosure,
+) -> Result<(), VoomError> {
+    let cid = i64_from_u64(commit_id.0);
+    for id in &closure.file_assets {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_asset_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members asset insert: {e}")))?;
+    }
+    for id in &closure.bundles {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_bundle_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members bundle insert: {e}")))?;
+    }
+    for id in &closure.file_versions {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_version_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members version insert: {e}")))?;
+    }
+    for id in &closure.file_locations {
+        sqlx::query(
+            "INSERT INTO commit_intent_scope_members \
+             (commit_intent_id, scope_location_id) VALUES (?, ?)",
+        )
+        .bind(cid)
+        .bind(i64_from_u64(id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scope_members location insert: {e}")))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

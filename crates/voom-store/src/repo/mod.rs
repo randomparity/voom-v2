@@ -22,7 +22,8 @@ pub use commit_safety_gate::{
     ClosureFailure, ClosureMemberDelta, ClosureWarning, CommitGateOutcome, CommitGateResult,
     CommitIntent, CommitIntentState, CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift,
     EvidenceRevalidationResult, FileLocationProposal, ForcePathToken, MutationOutcome,
-    PendingCommitIntent, TargetEpochDrift, TargetMemberKind,
+    PendingCommitIntent, PrepareOutcome, TargetEpochDrift, TargetMemberKind,
+    prepare_destructive_commit,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};

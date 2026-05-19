@@ -34,6 +34,10 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::UseLeaseForceReleased,
         EventKind::UseLeaseRecoveredStaleIssuer,
         EventKind::UseLeaseReanchoredByMove,
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
     ];
     let mut seen = std::collections::HashSet::new();
     for k in kinds {
@@ -90,6 +94,10 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::UseLeaseForceReleased,
         EventKind::UseLeaseRecoveredStaleIssuer,
         EventKind::UseLeaseReanchoredByMove,
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
     ];
     for k in kinds {
         let s = k.as_str();
@@ -211,4 +219,38 @@ fn identity_layer_event_kinds_use_dotted_wire_format() {
         EventKind::UseLeaseReanchoredByMove.as_str(),
         "use_lease.reanchored_by_move"
     );
+}
+
+#[test]
+fn commit_safety_gate_event_kinds_use_dotted_wire_format() {
+    assert_eq!(
+        EventKind::CommitIntentRecorded.as_str(),
+        "commit.intent_recorded"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByUseLease.as_str(),
+        "commit.aborted_by_use_lease"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByStaleEvidence.as_str(),
+        "commit.aborted_by_stale_evidence"
+    );
+    assert_eq!(
+        EventKind::CommitAbortedByClosureIncomplete.as_str(),
+        "commit.aborted_by_closure_incomplete"
+    );
+}
+
+#[test]
+fn commit_safety_gate_event_kinds_round_trip() {
+    for k in [
+        EventKind::CommitIntentRecorded,
+        EventKind::CommitAbortedByUseLease,
+        EventKind::CommitAbortedByStaleEvidence,
+        EventKind::CommitAbortedByClosureIncomplete,
+    ] {
+        let wire = k.as_str();
+        let back = EventKind::from_str(wire).unwrap();
+        assert_eq!(k, back, "round-trip failed for {wire}");
+    }
 }

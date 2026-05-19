@@ -58,6 +58,14 @@ fn identity_layer_subjects_round_trip() {
 }
 
 #[test]
+fn commit_safety_gate_subject_round_trips() {
+    let s = SubjectType::CommitIntent;
+    assert_eq!(s.as_str(), "commit_intent");
+    let back = SubjectType::from_str("commit_intent").unwrap();
+    assert_eq!(back, s);
+}
+
+#[test]
 fn identity_layer_subjects_use_expected_wire_format() {
     assert_eq!(SubjectType::MediaWork.as_str(), "media_work");
     assert_eq!(SubjectType::MediaVariant.as_str(), "media_variant");

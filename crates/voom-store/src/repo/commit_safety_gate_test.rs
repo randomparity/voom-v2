@@ -521,6 +521,463 @@ async fn commit_intents_check_rejects_recovery_required_with_null_closure_author
     );
 }
 
+// -- prepare_destructive_commit sibling tests (commit 4) -------------------
+
+use crate::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use crate::repo::identity::{
+    AcceptedPin, FileLocationKind as IdentityFileLocationKind, IdentityRepo,
+    NewFileLocation as IdentityNewFileLocation, NewFileVersion, NewIdentityEvidence, ProducedBy,
+    SqliteIdentityRepo,
+};
+use crate::repo::use_leases::{
+    BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind, UseLeaseRepo,
+};
+use crate::test_support::T0;
+use sqlx::SqlitePool;
+use tempfile::NamedTempFile;
+use voom_core::ids::FileLocationId as CoreFileLocationId;
+use voom_events::EventKind;
+
+/// One full M2 identity chain (asset → version → location), returned
+/// in raw IDs. Sufficient for a Phase A closure walk.
+#[expect(
+    clippy::struct_field_names,
+    reason = "every field is an ID by design; the `_id` postfix is the convention used elsewhere in the codebase (see ingest_identity_invariants.rs)"
+)]
+struct SeededLocation {
+    asset_id: voom_core::FileAssetId,
+    version_id: FileVersionId,
+    location_id: FileLocationId,
+}
+
+/// Seed one asset/version/location. Uses raw repo calls (not control
+/// plane) so the test stays inside `voom-store`. Each invocation
+/// creates a distinct chain.
+async fn seed_location(pool: &SqlitePool, value: &str) -> SeededLocation {
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let asset = identity.create_file_asset(T0).await.unwrap();
+    let version = identity
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: format!("hash-{value}"),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let location = identity
+        .create_file_location_in_tx(
+            &mut tx,
+            IdentityNewFileLocation {
+                file_version_id: version.id,
+                kind: IdentityFileLocationKind::LocalPath,
+                value: value.to_owned(),
+                proof: None,
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    SeededLocation {
+        asset_id: asset.id,
+        version_id: version.id,
+        location_id: location.id,
+    }
+}
+
+async fn fresh_pool() -> (SqlitePool, NamedTempFile) {
+    let tmp = NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    (pool, tmp)
+}
+
+async fn pending_commit_intent_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM commit_intents WHERE state = 'pending'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn aborted_commit_intent_state(pool: &SqlitePool, commit_id: CommitId) -> (String, String) {
+    let row = sqlx::query("SELECT state, abort_reason FROM commit_intents WHERE id = ?")
+        .bind(commit_id.0.cast_signed())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let state: String = row.try_get("state").unwrap();
+    let abort_reason: String = row.try_get("abort_reason").unwrap();
+    (state, abort_reason)
+}
+
+async fn events_for_commit(pool: &SqlitePool, commit_id: CommitId) -> Vec<EventKind> {
+    let events = SqliteEventRepo::new(pool.clone());
+    let page = events
+        .list(
+            EventFilter {
+                subject_type: Some(voom_events::SubjectType::CommitIntent),
+                subject_id: Some(commit_id.0),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 20,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    page.items
+        .iter()
+        .map(|r| r.envelope.payload.kind())
+        .collect()
+}
+
+/// Construct a default `DestructiveCommit` targeting `location_id` with
+/// `DeleteFileLocation`. Used by every Phase A test except the
+/// stale-evidence variant which carries `accepted_evidence_ids`.
+fn delete_target_for(location_id: FileLocationId) -> DestructiveCommit {
+    DestructiveCommit {
+        target: CommitTarget::DeleteFileLocation(location_id),
+        accepted_evidence_ids: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn prepare_phase_a_success_lands_pending_row_plus_intent_recorded_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(seeded.location_id),
+        T0,
+    )
+    .await
+    .unwrap();
+    let intent = match outcome {
+        PrepareOutcome::Pending(i) => i,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending, got Blocked({result:?})")
+        }
+    };
+    // Closure must carry the asset, version, and location we seeded.
+    assert!(
+        intent
+            .closure_initial
+            .file_assets
+            .contains(&seeded.asset_id)
+    );
+    assert!(
+        intent
+            .closure_initial
+            .file_versions
+            .contains(&seeded.version_id)
+    );
+    assert!(
+        intent
+            .closure_initial
+            .file_locations
+            .contains(&seeded.location_id)
+    );
+    // Pending row landed.
+    assert_eq!(pending_commit_intent_count(&pool).await, 1);
+    // scope_members expanded across all four granularities (3 in this
+    // closure: asset + version + location; no bundle, since the asset
+    // is not a member of any).
+    let scope_member_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM commit_intent_scope_members WHERE commit_intent_id = ?",
+    )
+    .bind(intent.commit_id.0.cast_signed())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scope_member_count, 3);
+    // Event emitted on the same tx.
+    let kinds = events_for_commit(&pool, intent.commit_id).await;
+    assert!(kinds.contains(&EventKind::CommitIntentRecorded));
+}
+
+#[tokio::test]
+async fn prepare_phase_a_blocked_by_use_lease_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let leases = SqliteUseLeaseRepo::new(pool.clone());
+    // Place a blocking lease on the FileVersion (so the lease overlaps
+    // the closure's Version granularity).
+    leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(seeded.version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(time::Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(seeded.location_id),
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let (commit_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    assert!(matches!(result, CommitGateResult::BlockedByUseLease { .. }));
+    // Aborted row landed with abort_reason='fresh_lease'.
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "fresh_lease");
+    // No pending row remains.
+    assert_eq!(pending_commit_intent_count(&pool).await, 0);
+    // Event emitted via the two-tx pattern.
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByUseLease),
+        "expected CommitAbortedByUseLease in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_phase_a_advisory_lease_does_not_block() {
+    // The blocking-lease query restricts to `blocking_mode = 'blocking'`.
+    // An advisory lease must not cause a Phase A abort.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let leases = SqliteUseLeaseRepo::new(pool.clone());
+    leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Scan,
+            scope: LeaseScope::Version(seeded.version_id),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "w-1".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: Some(time::Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(seeded.location_id),
+        T0,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, PrepareOutcome::Pending(_)));
+}
+
+#[tokio::test]
+async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+
+    // Record evidence then accept it with a pin to the live version's
+    // hash. Then mutate the hash via direct UPDATE so the pin drifts.
+    let evidence = identity
+        .record_identity_evidence_in_tx(
+            &mut pool.begin().await.unwrap(),
+            NewIdentityEvidence {
+                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_id: seeded.version_id.0,
+                assertion_type: voom_events::AssertionKind::HashMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "0".to_owned(),
+                confidence: 1.0,
+                provenance: serde_json::json!({}),
+                observed_at: T0,
+            },
+        )
+        .await;
+    // Open a fresh tx to record + accept evidence in one go.
+    let mut tx = pool.begin().await.unwrap();
+    let recorded = identity
+        .record_identity_evidence_in_tx(
+            &mut tx,
+            NewIdentityEvidence {
+                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_id: seeded.version_id.0,
+                assertion_type: voom_events::AssertionKind::HashMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "0".to_owned(),
+                confidence: 1.0,
+                provenance: serde_json::json!({}),
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+    identity
+        .accept_identity_evidence_in_tx(
+            &mut tx,
+            recorded.id,
+            Some("alice".to_owned()),
+            T0,
+            AcceptedPin {
+                file_version_ids: None,
+                hashes: Some(serde_json::json!([[seeded.version_id.0, "hash-/srv/x"]])),
+                locations: None,
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let _ = evidence; // pre-flight call only used to ensure target schema exists; drop result.
+    // Drift the hash on the version row to force `PinnedHashDiffers`.
+    sqlx::query("UPDATE file_versions SET content_hash = 'drifted' WHERE id = ?")
+        .bind(seeded.version_id.0.cast_signed())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location_id),
+            accepted_evidence_ids: vec![recorded.id],
+        },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let (commit_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    assert!(matches!(
+        result,
+        CommitGateResult::BlockedByStaleEvidence {
+            drift: EvidenceDrift::PinnedHashDiffers,
+            ..
+        }
+    ));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "stale_evidence");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByStaleEvidence),
+        "expected CommitAbortedByStaleEvidence in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_phase_a_blocked_by_closure_incomplete_lands_aborted_row_plus_event() {
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    // Configure the resolver to fail for this version_id.
+    let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(seeded.location_id),
+        T0 + time::Duration::seconds(3),
+    )
+    .await
+    .unwrap();
+    let (commit_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    assert!(matches!(
+        result,
+        CommitGateResult::BlockedByClosureIncomplete { .. }
+    ));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "closure_incomplete");
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedByClosureIncomplete),
+        "expected CommitAbortedByClosureIncomplete in {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_phase_a_missing_target_location_aborts_as_closure_incomplete() {
+    // Defense-in-depth: a caller may target a location that does not
+    // exist (e.g., stale operator handle). The closure walker surfaces
+    // it as closure-incomplete rather than a generic NotFound, so the
+    // audit trail carries the abort row.
+    let (pool, _tmp) = fresh_pool().await;
+    let _seeded = seed_location(&pool, "/srv/x").await;
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        delete_target_for(CoreFileLocationId(99_999)),
+        T0,
+    )
+    .await
+    .unwrap();
+    let (commit_id, result) = match outcome {
+        PrepareOutcome::Blocked { commit_id, result } => (commit_id, result),
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    assert!(matches!(
+        result,
+        CommitGateResult::BlockedByClosureIncomplete { .. }
+    ));
+    let (state, reason) = aborted_commit_intent_state(&pool, commit_id).await;
+    assert_eq!(state, "aborted");
+    assert_eq!(reason, "closure_incomplete");
+}
+
 #[tokio::test]
 async fn commit_intents_check_accepts_authorized_with_closure_authorized_set() {
     // Positive control: the same row shape with closure_authorized

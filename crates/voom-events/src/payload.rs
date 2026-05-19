@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use voom_core::{FailureClass, IssueId};
+use voom_core::{CommitId, EvidenceId, FailureClass, IssueId, UseLeaseId};
 
 use crate::kind::EventKind;
 
@@ -419,6 +419,83 @@ pub struct UseLeaseReanchoredByMovePayload {
     pub reanchored_at: OffsetDateTime,
 }
 
+// --- M3 Phase 2 — commit safety gate (Phase A subset) -----------------------
+//
+// Sprint 1 §9.3 destructive-commit gate. Phase A emits one of four events
+// per `prepare_destructive_commit` call: `commit.intent_recorded` on the
+// success path (a `commit_intents` row landed in `state = 'pending'`),
+// and one of three abort kinds for the matching Phase A `Blocked*` exits.
+// Phases B / C land in later commits with their own dedicated event kinds.
+
+/// `commit.intent_recorded` — Phase A success. The row is in
+/// `state = 'pending'` and the gate's closure walk has been persisted
+/// alongside the target. Carries the granularity-bucketed member counts
+/// so an audit reader can size the closure without re-deserializing the
+/// JSON column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitIntentRecordedPayload {
+    pub commit_id: CommitId,
+    /// Wire-format tag identifying the `CommitTarget` variant (one of
+    /// `"delete_file_location"`, `"replace_file_location"`,
+    /// `"move_file_location"`). Carried separately from the durable
+    /// `target` JSON column so audit readers can filter without parsing.
+    pub target_kind: String,
+    pub closure_asset_count: u32,
+    pub closure_bundle_count: u32,
+    pub closure_version_count: u32,
+    pub closure_location_count: u32,
+    pub accepted_evidence_count: u32,
+    #[serde(with = "time::serde::iso8601")]
+    pub started_at: OffsetDateTime,
+}
+
+/// `commit.aborted_by_use_lease` — Phase A or Phase B trip-wire: a
+/// blocking use-lease overlapped the closure. The phase tag distinguishes
+/// the two emission points (Phase A is the two-tx pattern; Phase B
+/// commits in-tx — both pin the same payload shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedByUseLeasePayload {
+    pub commit_id: CommitId,
+    pub lease_id: UseLeaseId,
+    /// One of `"asset" | "bundle" | "version" | "location"` —
+    /// mirrors `LeaseScope::type_str`.
+    pub lease_scope_type: String,
+    pub lease_scope_id: u64,
+    /// Which gate phase fired this abort. `"prepare"` for Phase A;
+    /// `"authorize"` for Phase B (Phase B emission lands in commit 6).
+    pub phase: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
+/// `commit.aborted_by_stale_evidence` — Phase A or Phase B trip-wire: at
+/// least one accepted-evidence pin no longer matches current state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedByStaleEvidencePayload {
+    pub commit_id: CommitId,
+    pub evidence_id: EvidenceId,
+    /// One of `"pinned_file_version_retired" | "pinned_hash_differs" |
+    /// "pinned_location_retired"` — mirrors the `EvidenceDrift` enum
+    /// variants (`snake_case`).
+    pub drift_kind: String,
+    pub phase: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
+/// `commit.aborted_by_closure_incomplete` — the closure walker could not
+/// enumerate every required member (alias-resolver `Unreachable` in
+/// Sprint 1). `message` carries the resolver's diagnostic so an operator
+/// can act on the failed mount / object store / FS endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitAbortedByClosureIncompletePayload {
+    pub commit_id: CommitId,
+    pub phase: String,
+    pub message: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub aborted_at: OffsetDateTime,
+}
+
 // --- sum type --------------------------------------------------------------
 
 /// Sum type pairing each `EventKind` with its typed payload.
@@ -527,6 +604,14 @@ pub enum Event {
     UseLeaseRecoveredStaleIssuer(UseLeaseRecoveredStaleIssuerPayload),
     #[serde(rename = "use_lease.reanchored_by_move")]
     UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload),
+    #[serde(rename = "commit.intent_recorded")]
+    CommitIntentRecorded(CommitIntentRecordedPayload),
+    #[serde(rename = "commit.aborted_by_use_lease")]
+    CommitAbortedByUseLease(CommitAbortedByUseLeasePayload),
+    #[serde(rename = "commit.aborted_by_stale_evidence")]
+    CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload),
+    #[serde(rename = "commit.aborted_by_closure_incomplete")]
+    CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload),
 }
 
 impl Event {
@@ -582,6 +667,12 @@ impl Event {
             Self::UseLeaseForceReleased(_) => EventKind::UseLeaseForceReleased,
             Self::UseLeaseRecoveredStaleIssuer(_) => EventKind::UseLeaseRecoveredStaleIssuer,
             Self::UseLeaseReanchoredByMove(_) => EventKind::UseLeaseReanchoredByMove,
+            Self::CommitIntentRecorded(_) => EventKind::CommitIntentRecorded,
+            Self::CommitAbortedByUseLease(_) => EventKind::CommitAbortedByUseLease,
+            Self::CommitAbortedByStaleEvidence(_) => EventKind::CommitAbortedByStaleEvidence,
+            Self::CommitAbortedByClosureIncomplete(_) => {
+                EventKind::CommitAbortedByClosureIncomplete
+            }
         }
     }
 }
