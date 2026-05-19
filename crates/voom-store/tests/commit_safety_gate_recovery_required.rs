@@ -32,9 +32,10 @@ use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AffectedScopeClosure, AuthorizeOutcome, CommitGateResult, CommitPermit, CommitTarget,
-    DestructiveCommit, FinalizeOutcome, MutationOutcome, PrepareOutcome,
-    authorize_destructive_commit, finalize_destructive_commit, prepare_destructive_commit,
+    AffectedScopeClosure, AuthorizeOutcome, BypassKind, CommitGateResult, CommitPermit,
+    CommitTarget, DestructiveCommit, FinalizeOutcome, ForcePathToken, MutationOutcome,
+    PrepareOutcome, authorize_destructive_commit, finalize_destructive_commit,
+    prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -582,4 +583,121 @@ async fn phase_c_applied_with_observed_alias_drives_recovery_required_with_merge
         event_count(&pool, commit_id, EventKind::CommitRecoveryRequired).await,
         1
     );
+}
+
+#[tokio::test]
+async fn phase_c_trip_wire_recompute_failure_lands_recovery_required_with_mutation_failed() {
+    // Round-8 finding #1 (critical) e2e: the Applied recovery boundary
+    // covers EVERY post-Applied failure path, not just the silent
+    // dispatch + completion + event append. The trip-wire recompute
+    // (closure walker, lease re-eval, per-member epoch check)
+    // previously ran via `?` outside the round-7 savepoint, so a
+    // closure-walker failure at Phase C left the row in `'authorized'`
+    // even though the caller had already mutated the filesystem.
+    //
+    // Force-path bypass gets the intent through prepare + authorize
+    // while the resolver fails on the seeded version; Phase C
+    // deliberately walks with an empty bypass set so the same
+    // resolver failure becomes `VoomError::Internal` via the
+    // closure-incomplete escape. The recovery boundary now routes
+    // this Err to `recovery_required` with `mutation_failed`.
+    let (pool, _tmp) = open_pool().await;
+    let seeded = seed_chain(&pool, "/srv/x").await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = FailingAliasResolver::new([seeded.version_id]);
+
+    let mut bypass = std::collections::BTreeSet::new();
+    bypass.insert(BypassKind::ClosureIncomplete);
+    let token = ForcePathToken {
+        actor: "ops@example.com".to_owned(),
+        reason: "round-8 finding #1 e2e".to_owned(),
+        bypass,
+    };
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location_id),
+            accepted_evidence_ids: Vec::new(),
+            override_token: Some(token),
+        },
+        T0,
+    )
+    .await
+    .unwrap();
+    let commit_id = match outcome {
+        PrepareOutcome::Pending(i) => i.commit_id,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending with bypass, got Blocked({result:?})")
+        }
+    };
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let permit = match outcome {
+        AuthorizeOutcome::Authorized(p) => p,
+        AuthorizeOutcome::Blocked { result, .. } => {
+            panic!("expected Authorized with bypass, got Blocked({result:?})")
+        }
+    };
+
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            gate_outcome.result,
+            CommitGateResult::BlockedByMutationFailed { .. }
+        ),
+        "expected BlockedByMutationFailed, got {:?}",
+        gate_outcome.result
+    );
+
+    let (state, abort_reason, recovery_reason) = recovery_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("mutation_failed"));
+
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitAbortedPostMutation).await,
+        1
+    );
+    assert_eq!(
+        event_count(&pool, commit_id, EventKind::CommitRecoveryRequired).await,
+        1
+    );
+
+    // The target row must still be live — no dispatch ran (failure
+    // occurred during the trip-wire recompute, before dispatch).
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(seeded.location_id.0.cast_signed())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retired_at.is_none());
 }

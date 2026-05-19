@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sqlx::{Acquire, Row, SqlitePool};
+use sqlx::{Acquire, Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_core::ids::{
@@ -779,6 +779,35 @@ impl PhaseAAbort {
     }
 }
 
+/// Open a commit-safety-gate transaction with `BEGIN IMMEDIATE` so
+/// `SQLite` takes a RESERVED lock at tx start (round-8 finding #2).
+/// Every gate entry point — `prepare_destructive_commit`,
+/// `authorize_destructive_commit`, `finalize_destructive_commit`,
+/// `abort_destructive_commit` — plus the two-tx helper
+/// `phase_a_gate_abort_with_event` routes through this function.
+///
+/// The Phase 2 spec ("one IMMEDIATE transaction") is now enforced at
+/// the API boundary: with `pool.begin()` (deferred mode), two
+/// concurrent prepares on overlapping scope could both read "no
+/// overlap" before either inserted `scope_members` rows, racing through
+/// the in-tx overlapping-prepare consult. RESERVED-on-BEGIN forces
+/// the second writer to either wait on `busy_timeout` or receive
+/// `SQLITE_BUSY` — the duplicate-pending-rows outcome becomes
+/// impossible at the lock layer rather than relying solely on a
+/// re-check inside the deferred tx.
+///
+/// # Errors
+///
+/// Returns `VoomError::Database` if acquiring the pool connection or
+/// emitting `BEGIN IMMEDIATE` fails.
+pub(crate) async fn begin_gate_tx(
+    pool: &SqlitePool,
+) -> Result<Transaction<'static, Sqlite>, VoomError> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| VoomError::Database(format!("gate tx begin IMMEDIATE: {e}")))
+}
+
 /// Snapshot of the JSON-encoded `commit_intents` row body, captured
 /// once before the closure walk so the gate's IMMEDIATE tx and the
 /// two-tx abort helper bind the same column values. The four fields
@@ -816,13 +845,12 @@ async fn phase_a_gate_abort_with_event(
     aborted_at: OffsetDateTime,
     abort: PhaseAAbort,
 ) -> Result<CommitId, VoomError> {
-    // two-tx: tx 1 inserts the aborted row.
+    // two-tx: tx 1 inserts the aborted row. Round-8 finding #2: both
+    // legs of the two-tx pattern route through `begin_gate_tx` so the
+    // gate's BEGIN IMMEDIATE invariant holds even on the abort path.
     let started_iso = iso8601(row.started_at)?;
     let aborted_iso = iso8601(aborted_at)?;
-    let mut tx1 = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("phase A abort tx1 begin: {e}")))?;
+    let mut tx1 = begin_gate_tx(pool).await?;
     let insert = sqlx::query(
         "INSERT INTO commit_intents \
          (target, closure_initial, accepted_evidence_ids, state, started_at, \
@@ -845,10 +873,7 @@ async fn phase_a_gate_abort_with_event(
 
     // two-tx: tx 2 emits the matching event.
     let payload = phase_a_abort_event(commit_id, aborted_at, &abort);
-    let mut tx2 = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("phase A abort tx2 begin: {e}")))?;
+    let mut tx2 = begin_gate_tx(pool).await?;
     event_repo
         .append_in_tx(
             &mut tx2,
@@ -1313,10 +1338,7 @@ pub async fn prepare_destructive_commit(
         .map(|t| t.bypass.clone())
         .unwrap_or_default();
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("prepare: tx begin: {e}")))?;
+    let mut tx = begin_gate_tx(pool).await?;
 
     let walk_outcome = run_phase_a_gate_in_tx(
         &mut tx,
@@ -2202,10 +2224,7 @@ pub async fn authorize_destructive_commit(
     commit_id: CommitId,
     now: OffsetDateTime,
 ) -> Result<AuthorizeOutcome, VoomError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("authorize: tx begin: {e}")))?;
+    let mut tx = begin_gate_tx(pool).await?;
 
     let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
     let walk_outcome = run_phase_b_gate_in_tx(
@@ -3046,10 +3065,7 @@ pub async fn finalize_destructive_commit(
     outcome: MutationOutcome,
     now: OffsetDateTime,
 ) -> Result<FinalizeOutcome, VoomError> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("finalize: tx begin: {e}")))?;
+    let mut tx = begin_gate_tx(pool).await?;
 
     let row = read_authorized_intent_in_tx(&mut tx, permit.commit_id(), permit.epoch()).await?;
 
@@ -3070,76 +3086,181 @@ pub async fn finalize_destructive_commit(
         MutationOutcome::Applied { observed } => observed,
     };
 
-    // Applied branch — decode the durable per-member epoch snapshot
-    // Phase B wrote, then run the defensive trip-wires.
+    // Applied accept point. The caller has performed the durable
+    // filesystem mutation; from here on, EVERY post-mutation failure
+    // path must transition the row to `recovery_required` rather than
+    // propagate Err and leave the row stuck in `'authorized'`.
+    //
+    // Round-8 finding #1: the recovery boundary now wraps the entire
+    // post-Applied block (snapshot decode + trip-wire recompute +
+    // either silent path or trip-wire branch). Round-7 wrapped only
+    // the silent dispatch + completion + event append; the trip-wire
+    // recompute itself ran through `?` and could propagate
+    // `VoomError::Internal` from a Phase C closure-walker abort,
+    // bypassing recovery entirely. The single outer savepoint
+    // subsumes the round-7 inner savepoint; on inner Err the
+    // savepoint rolls back to pre-Applied-accept state and the outer
+    // tx writes the `mutation_failed` recovery transition.
+    finalize_applied_with_recovery_boundary(
+        tx,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+        permit,
+        row,
+        observed,
+        now,
+    )
+    .await
+}
+
+/// Round-8 finding #1: the recovery boundary covering every
+/// post-Applied-accept failure path. Wraps the snapshot decode,
+/// trip-wire recompute, silent-path dispatch + completion + event
+/// append, and trip-wire UPDATE + events inside a single savepoint.
+/// On Ok, releases the savepoint and commits the outer tx. On Err,
+/// rolls the savepoint back to pre-Applied-accept state and routes
+/// through `finalize_mutation_failed_in_tx` on the outer tx so the
+/// caller observes `FinalizeOutcome::Blocked(BlockedByMutationFailed)`
+/// regardless of which sub-step failed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Phase C recovery boundary needs the full execution context; splitting would scatter the savepoint contract across multiple helpers"
+)]
+async fn finalize_applied_with_recovery_boundary(
+    mut tx: Transaction<'_, Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    event_repo: &dyn EventRepo,
+    alias_resolver: &dyn AliasResolver,
+    permit: CommitPermit,
+    row: AuthorizedIntentRow,
+    observed: Option<AffectedScopeClosure>,
+    now: OffsetDateTime,
+) -> Result<FinalizeOutcome, VoomError> {
+    let result = {
+        let mut sp = tx.begin().await.map_err(|e| {
+            VoomError::Database(format!("finalize: applied recovery savepoint begin: {e}"))
+        })?;
+        let inner = finalize_applied_inner(
+            &mut sp,
+            identity_repo,
+            event_repo,
+            alias_resolver,
+            &permit,
+            &row,
+            observed.as_ref(),
+            now,
+        )
+        .await;
+        match inner {
+            Ok(outcome) => {
+                sp.commit().await.map_err(|e| {
+                    VoomError::Database(format!(
+                        "finalize: applied recovery savepoint release: {e}"
+                    ))
+                })?;
+                Ok(outcome)
+            }
+            Err(e) => {
+                // Drop the savepoint so the outer tx is restored to the
+                // pre-Applied-accept state. `sqlx` rolls back the
+                // savepoint on Drop of an unconsumed `Transaction`
+                // (savepoint) handle.
+                drop(sp);
+                Err(e)
+            }
+        }
+    };
+
+    match result {
+        Ok(outcome) => {
+            tx.commit()
+                .await
+                .map_err(|e| VoomError::Database(format!("finalize: commit applied: {e}")))?;
+            Ok(outcome)
+        }
+        Err(inner) => {
+            // closure_final is intentionally empty: any sub-step may
+            // have failed, so we cannot trust a partially-built
+            // closure. The mutation-failure path is orthogonal to the
+            // four §9.3.2 trip-wires; the post-mutation event's
+            // delta / lease / drift arrays are empty by contract.
+            let outcome = finalize_mutation_failed_in_tx(
+                &mut tx,
+                event_repo,
+                &permit,
+                &row,
+                AffectedScopeClosure::default(),
+                inner,
+                now,
+            )
+            .await?;
+            tx.commit().await.map_err(|e| {
+                VoomError::Database(format!("finalize: commit mutation_failed recovery: {e}"))
+            })?;
+            Ok(FinalizeOutcome::Blocked(outcome))
+        }
+    }
+}
+
+/// Body of the recovery-boundary helper. Runs the snapshot decode,
+/// trip-wire recompute, and either the silent-path success branch or
+/// the trip-wire branch inside the caller-supplied savepoint. Every
+/// `?` exit returns Err to the savepoint owner so the savepoint can
+/// roll back and the outer tx can route through the
+/// `mutation_failed` recovery transition.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Phase C recovery boundary needs the full execution context; splitting would scatter the savepoint contract across multiple helpers"
+)]
+async fn finalize_applied_inner(
+    sp: &mut Transaction<'_, Sqlite>,
+    identity_repo: &dyn IdentityRepo,
+    event_repo: &dyn EventRepo,
+    alias_resolver: &dyn AliasResolver,
+    permit: &CommitPermit,
+    row: &AuthorizedIntentRow,
+    observed: Option<&AffectedScopeClosure>,
+    now: OffsetDateTime,
+) -> Result<FinalizeOutcome, VoomError> {
+    // Decode the durable per-member epoch snapshot Phase B wrote.
+    // A decode failure here is one of the round-8 failure modes the
+    // recovery boundary closes: previously `?` propagated out of
+    // finalize without a recovery transition.
     let snapshot = decode_target_row_epochs(&row.target_row_epochs_json)?;
+    // Run the defensive trip-wires. Round-8 finding #1: a Phase C
+    // closure-walker abort (translated to `VoomError::Internal`) used
+    // to propagate via `?` here, leaving the row stuck in
+    // `'authorized'`. Now any Err inside this call rolls the
+    // savepoint back and routes through `finalize_mutation_failed_in_tx`.
     let trip_wire = run_phase_c_trip_wires_in_tx(
-        &mut tx,
+        sp,
         identity_repo,
         alias_resolver,
-        &row,
+        row,
         permit.closure_authorized(),
         &snapshot,
-        observed.as_ref(),
+        observed,
     )
     .await?;
 
     match trip_wire {
         PhaseCRecheck::Pass { closure_final } => {
-            // Round-7 finding #1: SAVEPOINT around identity dispatch +
-            // intent completion + event append. The caller has already
-            // performed the durable filesystem mutation by the time we
-            // get here; a post-trip-wire DB failure must not roll back
-            // the whole outer tx and leave the row stuck in
-            // 'authorized'. On Err inside the savepoint, drop it
-            // (ROLLBACK TO) and transition the intent to
-            // recovery_required with reason='mutation_failed' on the
-            // outer tx, emit commit.aborted_post_mutation +
-            // commit.recovery_required, then COMMIT.
-            match finalize_silent_path_in_savepoint(
-                &mut tx,
+            let outcome = finalize_silent_path_in_tx(
+                sp,
                 identity_repo,
                 event_repo,
-                &permit,
-                &row,
+                permit,
+                row,
                 &snapshot,
-                closure_final.clone(),
+                closure_final,
                 now,
             )
-            .await
-            {
-                Ok(outcome) => {
-                    tx.commit().await.map_err(|e| {
-                        VoomError::Database(format!("finalize: commit success: {e}"))
-                    })?;
-                    Ok(FinalizeOutcome::Completed(outcome))
-                }
-                Err(inner) => {
-                    let outcome = finalize_mutation_failed_in_tx(
-                        &mut tx,
-                        event_repo,
-                        &permit,
-                        &row,
-                        closure_final,
-                        inner,
-                        now,
-                    )
-                    .await?;
-                    tx.commit().await.map_err(|e| {
-                        VoomError::Database(format!(
-                            "finalize: commit mutation_failed recovery: {e}"
-                        ))
-                    })?;
-                    Ok(FinalizeOutcome::Blocked(outcome))
-                }
-            }
+            .await?;
+            Ok(FinalizeOutcome::Completed(outcome))
         }
         PhaseCRecheck::Trip(trip) => {
-            let outcome =
-                finalize_trip_wire_in_tx(&mut tx, event_repo, &permit, &row, *trip, now).await?;
-            tx.commit()
-                .await
-                .map_err(|e| VoomError::Database(format!("finalize: commit trip-wire: {e}")))?;
+            let outcome = finalize_trip_wire_in_tx(sp, event_repo, permit, row, *trip, now).await?;
             Ok(FinalizeOutcome::Blocked(outcome))
         }
     }
@@ -3197,10 +3318,7 @@ pub async fn abort_destructive_commit(
 ) -> Result<AbortOutcome, VoomError> {
     let reason_str = caller_abort_reason_str(&reason)?;
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("abort: tx begin: {e}")))?;
+    let mut tx = begin_gate_tx(pool).await?;
 
     let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
 
@@ -3908,19 +4026,19 @@ async fn push_drift_if_mismatch(
     Ok(())
 }
 
-/// Silent-path success branch. Wraps identity dispatch + intent
-/// completion + completed-event append in a SAVEPOINT (round-7 finding
-/// #1). The caller has already performed the durable filesystem
-/// mutation; if any post-trip-wire DB step fails, the savepoint is
-/// rolled back and the outer caller transitions the intent to
-/// `recovery_required` with `recovery_reason = 'mutation_failed'`.
-/// Mirrors the round-6 SAVEPOINT pattern in
-/// `IdentityRepo::replace_file_location_in_tx`.
+/// Silent-path success branch. Dispatches the durable identity
+/// mutation, transitions the row to `completed`, and emits the
+/// completed event. Round-8 finding #1: the recovery-boundary
+/// savepoint is owned by `finalize_applied_with_recovery_boundary`
+/// (the caller of this function); the round-7 inner savepoint has
+/// been subsumed because the outer boundary now covers every
+/// post-Applied failure path, including the trip-wire recompute that
+/// previously ran outside the savepoint.
 #[expect(
     clippy::too_many_arguments,
     reason = "Phase C silent path needs the full execution context; splitting would scatter the §9.3.2 step 4-5 invariants under one helper"
 )]
-async fn finalize_silent_path_in_savepoint(
+async fn finalize_silent_path_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
     event_repo: &dyn EventRepo,
@@ -3930,16 +4048,7 @@ async fn finalize_silent_path_in_savepoint(
     closure_final: AffectedScopeClosure,
     now: OffsetDateTime,
 ) -> Result<CommitGateOutcome, VoomError> {
-    // Round-7 finding #1: SAVEPOINT around the post-trip-wire block.
-    // Dropping `sp` on the early-return Err paths rolls back to the
-    // savepoint and leaves the outer tx restored to pre-dispatch state;
-    // the caller then writes the recovery_required transition on the
-    // outer tx and commits.
-    let mut sp = tx
-        .begin()
-        .await
-        .map_err(|e| VoomError::Database(format!("finalize: silent-path savepoint begin: {e}")))?;
-    dispatch_durable_mutation_in_tx(&mut sp, identity_repo, &row.target, snapshot, now).await?;
+    dispatch_durable_mutation_in_tx(tx, identity_repo, &row.target, snapshot, now).await?;
     let new_epoch = row.epoch + 1;
     let finalized_iso = iso8601(now)?;
     let res = sqlx::query(
@@ -3950,7 +4059,7 @@ async fn finalize_silent_path_in_savepoint(
     .bind(i64_from_u64(new_epoch))
     .bind(i64_from_u64(row.commit_id.0))
     .bind(i64_from_u64(row.epoch))
-    .execute(&mut *sp)
+    .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("finalize: completed UPDATE: {e}")))?;
     if res.rows_affected() != 1 {
@@ -3962,16 +4071,13 @@ async fn finalize_silent_path_in_savepoint(
     }
     emit_completed_event(
         event_repo,
-        &mut sp,
+        tx,
         row.commit_id,
         &row.target,
         &closure_final,
         now,
     )
     .await?;
-    sp.commit().await.map_err(|e| {
-        VoomError::Database(format!("finalize: silent-path savepoint release: {e}"))
-    })?;
     Ok(CommitGateOutcome {
         commit_id: row.commit_id,
         closure_initial: row.closure_initial.clone(),

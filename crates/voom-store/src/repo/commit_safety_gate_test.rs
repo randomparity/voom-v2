@@ -2433,6 +2433,332 @@ async fn prepare_blocked_by_overlapping_pending_commit_on_location() {
     );
 }
 
+// -- round-8 finding #1: expanded Applied recovery boundary ----------------
+
+#[tokio::test]
+async fn finalize_phase_c_trip_wire_recompute_failure_drives_recovery_required() {
+    // Round-8 finding #1 (critical): the Applied recovery boundary now
+    // covers EVERY post-Applied failure path, not just the silent
+    // dispatch + completion + event append. Previously
+    // `run_phase_c_trip_wires_in_tx` ran via `?` before the round-7
+    // savepoint, so a closure-walker failure during the Phase C
+    // recompute propagated `VoomError::Internal` out of finalize and
+    // left the row stuck in `'authorized'` — even though the caller
+    // had performed the durable filesystem mutation.
+    //
+    // We drive that exact failure mode here: a `FailingAliasResolver`
+    // configured to fail on the seeded version. The force-path bypass
+    // gets us through Phase A and Phase B (bypass set persists on the
+    // intent row); Phase C deliberately runs the closure walker with
+    // an empty bypass set, so the resolver still trips
+    // `AliasResolutionError::Unreachable`, which `build_closure`
+    // converts to `PhaseAAbort::ClosureIncomplete`, and the Phase C
+    // recompute translates to `VoomError::Internal`. Before round-8
+    // this Err exited finalize; after round-8 it routes through the
+    // recovery boundary and lands the row in `recovery_required`
+    // with `recovery_reason = 'mutation_failed'`.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
+
+    let mut bypass = std::collections::BTreeSet::new();
+    bypass.insert(BypassKind::ClosureIncomplete);
+    let token = ForcePathToken {
+        actor: "ops@example.com".to_owned(),
+        reason: "force-path for round-8 finding #1 repro".to_owned(),
+        bypass,
+    };
+    let outcome = prepare_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        DestructiveCommit {
+            target: CommitTarget::DeleteFileLocation(seeded.location_id),
+            accepted_evidence_ids: Vec::new(),
+            override_token: Some(token),
+        },
+        T0,
+    )
+    .await
+    .unwrap();
+    let intent = match outcome {
+        PrepareOutcome::Pending(i) => i,
+        PrepareOutcome::Blocked { result, .. } => {
+            panic!("expected Pending (bypass), got Blocked({result:?})")
+        }
+    };
+    let commit_id = intent.commit_id;
+
+    let outcome = authorize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        commit_id,
+        T0 + time::Duration::seconds(1),
+    )
+    .await
+    .unwrap();
+    let permit = match outcome {
+        AuthorizeOutcome::Authorized(p) => p,
+        AuthorizeOutcome::Blocked { result, .. } => {
+            panic!("expected Authorized (bypass re-applied), got Blocked({result:?})")
+        }
+    };
+
+    // Phase C: same resolver. Phase C walks with an EMPTY bypass set
+    // (force-path is consumed by prepare + authorize, not re-honored).
+    // The closure walker hits `Unreachable`, builds `ClosureIncomplete`
+    // abort, the Phase C recompute converts to `VoomError::Internal`.
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            gate_outcome.result,
+            CommitGateResult::BlockedByMutationFailed { .. }
+        ),
+        "expected BlockedByMutationFailed, got {:?}",
+        gate_outcome.result
+    );
+
+    // The row is in `recovery_required` with `mutation_failed`, NOT in
+    // `authorized`. This is the load-bearing property the round-8 fix
+    // adds: a trip-wire-recompute failure no longer strands the row.
+    let (state, abort_reason, recovery_reason) =
+        finalized_commit_intent_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("mutation_failed"));
+
+    // Both events durably written — recovery tooling can decode the
+    // signal from either the row or the event log.
+    let kinds = events_for_commit(&pool, commit_id).await;
+    assert!(
+        kinds.contains(&EventKind::CommitAbortedPostMutation),
+        "expected CommitAbortedPostMutation in {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&EventKind::CommitRecoveryRequired),
+        "expected CommitRecoveryRequired in {kinds:?}"
+    );
+
+    // The retired_at column on the target row must still be NULL — the
+    // recovery boundary's savepoint rolled back before any dispatch ran
+    // (the trip-wire recompute fails before dispatch is reached).
+    let retired_at: Option<String> =
+        sqlx::query_scalar("SELECT retired_at FROM file_locations WHERE id = ?")
+            .bind(seeded.location_id.0.cast_signed())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(retired_at.is_none());
+}
+
+#[tokio::test]
+async fn finalize_phase_c_silent_dispatch_failure_still_drives_recovery_required() {
+    // Round-7 finding #1 regression guard: the round-8 recovery
+    // boundary expansion subsumes the round-7 inner savepoint. The
+    // pre-existing silent-dispatch failure pinned in
+    // `finalize_phase_c_applied_mutation_failure_drives_recovery_required`
+    // must still produce the same outcome — recovery_required with
+    // recovery_reason='mutation_failed' — under the new code path.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let commit_id = prepare_pending_intent(&pool, seeded.location_id).await;
+    let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
+
+    sqlx::query(
+        "CREATE TRIGGER force_round8_dispatch_failure \
+         BEFORE UPDATE OF retired_at ON file_locations \
+         WHEN NEW.retired_at IS NOT NULL AND OLD.retired_at IS NULL \
+         BEGIN SELECT RAISE(ABORT, 'forced for round-8 dispatch test'); END",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+    let outcome = finalize_destructive_commit(
+        &pool,
+        &identity,
+        &events,
+        &resolver,
+        permit,
+        MutationOutcome::Applied { observed: None },
+        T0 + time::Duration::seconds(2),
+    )
+    .await
+    .unwrap();
+    let gate_outcome = match outcome {
+        FinalizeOutcome::Blocked(o) => o,
+        other => panic!("expected Blocked, got {other:?}"),
+    };
+    assert!(matches!(
+        gate_outcome.result,
+        CommitGateResult::BlockedByMutationFailed { .. }
+    ));
+
+    let (state, abort_reason, recovery_reason) =
+        finalized_commit_intent_row(&pool, commit_id).await;
+    assert_eq!(state, "recovery_required");
+    assert!(abort_reason.is_none());
+    assert_eq!(recovery_reason.as_deref(), Some("mutation_failed"));
+
+    sqlx::query("DROP TRIGGER force_round8_dispatch_failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+// -- round-8 finding #2: BEGIN IMMEDIATE on every gate tx -----------------
+
+#[tokio::test]
+async fn begin_gate_tx_emits_begin_immediate_and_takes_reserved_lock() {
+    // Round-8 finding #2: the gate-tx helper must emit BEGIN IMMEDIATE
+    // so SQLite acquires a RESERVED lock at tx start. The load-bearing
+    // property: a second BEGIN IMMEDIATE on a parallel connection
+    // returns SQLITE_BUSY (busy_timeout-bounded) while the first is
+    // open. Default `pool.begin()` (deferred) does not take RESERVED
+    // and both calls succeed.
+    //
+    // We pin the contract by opening tx1 via `begin_gate_tx`, holding
+    // it open, then attempting to acquire a second connection from the
+    // pool and emit BEGIN IMMEDIATE on it. The second BEGIN must fail
+    // (busy_timeout is 5s, but the in-tx writer keeps the lock for the
+    // duration of the assertion, well under busy_timeout — so we use
+    // the raw `pool.acquire().await` + manual BEGIN IMMEDIATE path
+    // with a single retry-bounded probe via the connection-level
+    // busy_timeout=0 SQL hint. Practically: we set the second
+    // connection's busy_timeout to 0 before BEGIN IMMEDIATE so the
+    // contention surfaces deterministically rather than waiting).
+    let (pool, _tmp) = fresh_pool().await;
+    let tx1 = super::begin_gate_tx(&pool).await.unwrap();
+
+    // Probe on a separate connection. busy_timeout=0 turns the
+    // contention into an immediate SQLITE_BUSY rather than a wait.
+    let mut conn2 = pool.acquire().await.unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *conn2)
+        .await
+        .unwrap();
+    let probe = sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn2).await;
+    assert!(
+        probe.is_err(),
+        "expected SQLITE_BUSY on overlapping BEGIN IMMEDIATE; got {probe:?}"
+    );
+
+    // Release the first tx; the second connection can then take the
+    // lock.
+    tx1.commit().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn2)
+        .await
+        .unwrap();
+    sqlx::query("ROLLBACK").execute(&mut *conn2).await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_overlapping_prepares_cannot_both_land_pending() {
+    // Round-8 finding #2: two concurrent prepares on overlapping scope
+    // must not both end up with `pending` intents. With deferred BEGIN
+    // the two transactions could both read "no overlap" before either
+    // inserted scope_members rows; BEGIN IMMEDIATE serializes the
+    // writer side so the second prepare either sees the first's
+    // committed pending row (→ `BlockedByPendingCommit`) or fails with
+    // SQLITE_BUSY (→ `VoomError::Database`).
+    //
+    // Spawn two tasks against the same seeded location; both call
+    // `prepare_destructive_commit`. Assert: AT MOST one ends in
+    // `Pending`, and the durable `commit_intents` table has exactly
+    // one row in `pending` for that location's scope. The "both
+    // pending" outcome is the load-bearing property the fix excludes.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+
+    let pool1 = pool.clone();
+    let pool2 = pool.clone();
+    let h1 = tokio::spawn(async move {
+        let identity = SqliteIdentityRepo::new(pool1.clone());
+        let events = SqliteEventRepo::new(pool1.clone());
+        let resolver =
+            crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+        prepare_destructive_commit(
+            &pool1,
+            &identity,
+            &events,
+            &resolver,
+            delete_target_for(seeded.location_id),
+            T0,
+        )
+        .await
+    });
+    let h2 = tokio::spawn(async move {
+        let identity = SqliteIdentityRepo::new(pool2.clone());
+        let events = SqliteEventRepo::new(pool2.clone());
+        let resolver =
+            crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+        prepare_destructive_commit(
+            &pool2,
+            &identity,
+            &events,
+            &resolver,
+            delete_target_for(seeded.location_id),
+            T0,
+        )
+        .await
+    });
+    let r1 = h1.await.unwrap();
+    let r2 = h2.await.unwrap();
+
+    // At most one Pending across both outcomes. The "both pending"
+    // outcome MUST NOT be possible.
+    let pendings = [&r1, &r2]
+        .into_iter()
+        .filter(|res| matches!(res, Ok(PrepareOutcome::Pending(_))))
+        .count();
+    assert!(
+        pendings <= 1,
+        "at most one prepare may land Pending; got r1={r1:?}, r2={r2:?}"
+    );
+
+    // Durable invariant: at most one `pending` row in the table.
+    let pending_count = pending_commit_intent_count(&pool).await;
+    assert!(
+        pending_count <= 1,
+        "expected at most one pending row, got {pending_count}; r1={r1:?}, r2={r2:?}"
+    );
+
+    // Sanity: at least one of the two prepares either succeeded
+    // (Pending) or was blocked by the overlap consult / SQLITE_BUSY.
+    // The "neither succeeds nor fails cleanly" outcome would indicate
+    // a deadlock and is not allowed.
+    let one_succeeded = r1.is_ok() || r2.is_ok();
+    assert!(
+        one_succeeded,
+        "at least one prepare must produce Ok(_); r1={r1:?}, r2={r2:?}"
+    );
+}
+
 // -- abort_destructive_commit sibling tests (commit 8) ---------------------
 
 /// Read the first `commit.aborted_pre_mutation` event for `commit_id`
