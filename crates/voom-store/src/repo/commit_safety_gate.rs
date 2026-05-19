@@ -288,50 +288,23 @@ pub struct CommitIntent {
 /// reconstructible after a process crash between authorize and
 /// finalize.
 ///
-/// Fields are `pub(crate)` — only the gate impl constructs and
-/// inspects permits; external consumers reach the closure and metadata
-/// through the accessor methods.
+/// Fields are module-private — only code inside `commit_safety_gate`
+/// (Phase B's `authorize_destructive_commit` in commit 6, plus the
+/// sibling tests under the `tests` child module) can fabricate or
+/// inspect them. External consumers reach state through the accessor
+/// methods. No `pub(crate) fn new` constructor exists yet; it lands
+/// with Phase B in commit 6 alongside its only production caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPermit {
-    pub(crate) commit_id: CommitId,
-    pub(crate) authorized_at: OffsetDateTime,
-    pub(crate) closure_authorized: AffectedScopeClosure,
-    pub(crate) evaluated_lease_ids: Vec<UseLeaseId>,
-    pub(crate) revalidated_evidence: Vec<EvidenceRevalidationResult>,
-    pub(crate) epoch: u64,
+    commit_id: CommitId,
+    authorized_at: OffsetDateTime,
+    closure_authorized: AffectedScopeClosure,
+    evaluated_lease_ids: Vec<UseLeaseId>,
+    revalidated_evidence: Vec<EvidenceRevalidationResult>,
+    epoch: u64,
 }
 
 impl CommitPermit {
-    /// Construct a permit. Crate-private — only the gate impl in
-    /// Phase B (`authorize_destructive_commit`, commit 6) builds these.
-    /// External consumers cannot fabricate a permit and so cannot
-    /// bypass the gate's invariants.
-    #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Phase B (commit 6) is the production caller; sibling tests already exercise this constructor"
-        )
-    )]
-    pub(crate) fn new(
-        commit_id: CommitId,
-        authorized_at: OffsetDateTime,
-        closure_authorized: AffectedScopeClosure,
-        evaluated_lease_ids: Vec<UseLeaseId>,
-        revalidated_evidence: Vec<EvidenceRevalidationResult>,
-        epoch: u64,
-    ) -> Self {
-        Self {
-            commit_id,
-            authorized_at,
-            closure_authorized,
-            evaluated_lease_ids,
-            revalidated_evidence,
-            epoch,
-        }
-    }
-
     #[must_use]
     pub fn commit_id(&self) -> CommitId {
         self.commit_id

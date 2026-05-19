@@ -132,24 +132,25 @@ fn commit_intent_constructor_smokes() {
 
 #[test]
 fn commit_permit_constructor_smokes() {
-    let permit = CommitPermit::new(
-        CommitId(2),
-        time::OffsetDateTime::UNIX_EPOCH,
-        AffectedScopeClosure::default(),
-        Vec::new(),
-        Vec::new(),
-        1,
-    );
+    let permit = CommitPermit {
+        commit_id: CommitId(2),
+        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
+        closure_authorized: AffectedScopeClosure::default(),
+        evaluated_lease_ids: Vec::new(),
+        revalidated_evidence: Vec::new(),
+        epoch: 1,
+    };
     assert_eq!(permit.commit_id(), CommitId(2));
     assert_eq!(permit.epoch(), 1);
 }
 
 #[test]
 fn commit_permit_accessors_return_internal_state() {
-    // Round-4 finding: CommitPermit fields are pub(crate); external
-    // consumers reach state through accessors. This test pins each
-    // accessor to its constructor input so a future field rename or
-    // accessor regression breaks the test.
+    // Round-4 finding: CommitPermit fields are module-private; external
+    // consumers reach state through accessors. This test is a sibling
+    // of the parent module and uses the struct literal directly to pin
+    // each accessor to its field — a future rename or accessor
+    // regression breaks the test.
     let mut closure = AffectedScopeClosure::default();
     closure.file_locations.insert(FileLocationId(99));
     let leases = vec![voom_core::ids::UseLeaseId(7)];
@@ -158,14 +159,14 @@ fn commit_permit_accessors_return_internal_state() {
         drift: None,
     }];
 
-    let permit = CommitPermit::new(
-        CommitId(42),
-        time::OffsetDateTime::UNIX_EPOCH,
-        closure.clone(),
-        leases.clone(),
-        evidence.clone(),
-        5,
-    );
+    let permit = CommitPermit {
+        commit_id: CommitId(42),
+        authorized_at: time::OffsetDateTime::UNIX_EPOCH,
+        closure_authorized: closure.clone(),
+        evaluated_lease_ids: leases.clone(),
+        revalidated_evidence: evidence.clone(),
+        epoch: 5,
+    };
 
     assert_eq!(permit.commit_id(), CommitId(42));
     assert_eq!(permit.authorized_at(), time::OffsetDateTime::UNIX_EPOCH);
