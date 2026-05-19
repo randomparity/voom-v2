@@ -2517,6 +2517,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "voom-fake-support"
+version = "0.1.0-dev"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "voom-core",
+ "voom-worker-protocol",
+]
+
+[[package]]
+name = "voom-fakes"
+version = "0.1.0-dev"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "voom-core",
+ "voom-fake-support",
+ "voom-worker-protocol",
+]
+
+[[package]]
 name = "voom-plan"
 version = "0.1.0-dev"
 

@@ -13,6 +13,8 @@ members = [
     "crates/voom-api",
     "crates/voom-cli",
     "crates/voom-conformance",
+    "crates/voom-fake-support",
+    "crates/voom-fakes",
 ]
 
 [workspace.package]
@@ -34,6 +36,7 @@ voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
 voom-worker-protocol = { version = "0.1.0-dev", path = "crates/voom-worker-protocol" }
 voom-conformance = { version = "0.1.0-dev", path = "crates/voom-conformance" }
+voom-fake-support = { version = "0.1.0-dev", path = "crates/voom-fake-support" }
 
 # Shared third-party crates. Workspace declarations carry the union of
 # features common to every consumer; member crates add crate-specific
