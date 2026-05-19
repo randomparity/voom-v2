@@ -90,12 +90,18 @@ Every `_test.rs` is linked from its source with `#[path]` per ADR-0004.
 /// `/v1/operations` endpoint. The HTTP response body is an NDJSON
 /// stream of `ProgressFrame`s terminated by exactly one `Result` or
 /// `Error` frame.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Idempotency is carried ONLY in the `X-Voom-Idempotency-Key`
+/// request header (§3.8). It is intentionally NOT present in the
+/// body, so header and body cannot disagree; the middleware checks
+/// the header once, and the handler trusts it. A raw-wire mutation
+/// test pins that a body field named `idempotency_key` is rejected
+/// as `InvalidPayload`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationRequest {
     pub protocol_version: u32,            // voom-core::PROTOCOL_VERSION
     pub lease_id: LeaseId,
     pub ticket_id: TicketId,
-    pub idempotency_key: String,          // ULID
     pub operation: OperationKind,
     pub payload: serde_json::Value,       // operation-specific
     pub heartbeat_deadline_ms: u32,
@@ -104,13 +110,27 @@ pub struct OperationRequest {
 
 /// Worker → supervisor response for the immediate ack on
 /// `/v1/operations`. The supervisor verifies it before consuming
-/// the NDJSON body.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// the NDJSON body. The idempotency key is echoed in the response
+/// header (`X-Voom-Idempotency-Key`), not the body.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct OperationResponse {
     pub protocol_version: u32,
     pub lease_id: LeaseId,
-    pub idempotency_key: String,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// 0..=10000 basis points so `Eq` is derivable and on-wire JSON is
+/// integer (no NaN, no float-equality foot-guns). 0 → 0%, 10000 → 100%.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct PercentBps(pub u16);
+
+impl PercentBps {
+    pub const ZERO: Self = Self(0);
+    pub const FULL: Self = Self(10_000);
+    pub fn new(bps: u16) -> Result<Self, ProtocolError> {
+        if bps > 10_000 { Err(ProtocolError::InvalidPayload { detail: format!("percent_bps={bps} > 10000") }) } else { Ok(Self(bps)) }
+    }
 }
 
 /// One frame on the NDJSON progress stream.
@@ -118,6 +138,10 @@ pub struct OperationResponse {
 /// Every frame includes `lease_id` and `seq`. Per §4.2: `seq` is
 /// monotonic starting at 0; duplicates with seq ≤ last_seen are
 /// dropped; gaps abort the stream as `malformed_worker_result`.
+/// `lease_id` is checked against the expected lease the
+/// `NdjsonReader` was constructed with — any frame whose `lease_id`
+/// differs is rejected as `MalformedFrame` BEFORE any other check
+/// (§3.5).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProgressFrame {
@@ -125,7 +149,7 @@ pub enum ProgressFrame {
         lease_id: LeaseId,
         seq: u64,
         emitted_at: chrono::DateTime<chrono::Utc>,
-        percent: Option<f32>,            // 0.0..=100.0
+        percent: Option<PercentBps>,
         message: Option<String>,
         payload: Option<serde_json::Value>,
     },
@@ -162,15 +186,21 @@ pub enum ProtocolError {
     FrameTooLarge { bytes: u64, max: u64 },
     MalformedFrame { detail: String },
     OutOfOrderFrame { expected_seq: u64, got_seq: u64 },
+    WrongLeaseId { expected: LeaseId, got: LeaseId },
     UnexpectedFrameAfterTerminal,
+    HeaderBodyKeyMismatch,                 // body carries idempotency_key (forbidden)
     InternalServerError,
 }
 ```
 
 ### 3.3 OperationKind (operation_kind.rs)
 
-One variant per architectural-spec fixed-operation. New plugin-defined
-operations stay outside Sprint 2 scope (Sprint 8 plugin SDK).
+One variant per architectural-spec fixed-operation, with **no test-only
+variant**. Conformance and `echo-worker` use `OperationKind::ProbeFile`
+with a synthetic-but-typed payload (one path string), so the wire
+vocabulary stays exactly the architectural-spec fixed list. New
+plugin-defined operations stay outside Sprint 2 scope (Sprint 8
+plugin SDK).
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -191,15 +221,14 @@ pub enum OperationKind {
     VerifyArtifact,
     CommitArtifact,
     DeleteArtifact,
-    /// Reserved for echo-worker, conformance, benchmark. Not in the
-    /// architectural-spec fixed vocabulary; will be hidden behind
-    /// a `#[cfg(any(test, feature = "conformance"))]` feature flag.
-    Noop,
 }
 ```
 
 Serialization is snake_case to match the architectural-spec vocabulary
 verbatim. A round-trip test pins this against every variant.
+`echo-worker` (§4.5) handles `ProbeFile` only and rejects all other
+variants with `ProtocolError::UnknownOperation` (so a test asserting
+that rejection is meaningful).
 
 ### 3.4 Credentials (credentials.rs)
 
@@ -245,9 +274,18 @@ compare is required to prevent timing oracles. Crate dep:
 
 ### 3.5 NDJSON codec (ndjson.rs)
 
+The reader is constructed with the **expected `LeaseId`** so the lease
+boundary is enforced at the lowest layer that handles bytes. A frame
+whose `lease_id` does not match the expected lease is rejected as
+`WrongLeaseId` BEFORE seq or terminal-state checks run; the stream is
+aborted. This closes the durable-corruption class where a worker
+could emit a valid terminal frame for a different lease and still
+satisfy the seq/terminal invariants.
+
 ```rust
 pub struct NdjsonReader<R: AsyncRead + Unpin> {
     reader: tokio::io::BufReader<R>,
+    expected_lease_id: LeaseId,
     last_seq: Option<u64>,
     terminal_seen: bool,
     max_frame_bytes: usize,  // 64 KiB default
@@ -255,6 +293,8 @@ pub struct NdjsonReader<R: AsyncRead + Unpin> {
 }
 
 impl<R> NdjsonReader<R> {
+    pub fn new(reader: R, expected_lease_id: LeaseId) -> Self;
+    pub fn with_max_frame_bytes(mut self, max: usize) -> Self;
     pub async fn next_frame(&mut self) -> Result<NdjsonOutcome, ProtocolError>;
     // NdjsonOutcome:
     //   Frame(ProgressFrame),
@@ -264,21 +304,26 @@ impl<R> NdjsonReader<R> {
 
 pub struct NdjsonWriter<W: AsyncWrite + Unpin> {
     writer: tokio::io::BufWriter<W>,
+    bound_lease_id: LeaseId,         // writer is bound to one lease for its lifetime
     next_seq: u64,
     terminal_sent: bool,
 }
 
 impl<W> NdjsonWriter<W> {
+    pub fn new(writer: W, bound_lease_id: LeaseId) -> Self;
+    /// `frame.lease_id()` must equal `self.bound_lease_id`; mismatch
+    /// returns Err and the frame is NOT written.
     pub async fn emit(&mut self, frame: ProgressFrame) -> Result<(), ProtocolError>;
     pub async fn flush_and_close(self) -> std::io::Result<()>;
 }
 ```
 
-Reader invariants pinned by sibling unit tests:
+Reader invariants pinned by sibling unit tests AND raw-wire mutations:
 
-- frame on first line, seq = 0 → OK
+- frame on first line, seq = 0, expected lease → OK
 - frame with seq ≤ last_seq → frame dropped, no error
 - frame with seq > last_seq + 1 → `OutOfOrderFrame`
+- frame whose `lease_id` ≠ expected → `WrongLeaseId`, stream aborted
 - line length > max_frame_bytes → `FrameTooLarge`, stream aborted
 - frame after terminal → `UnexpectedFrameAfterTerminal`
 - EOF with no terminal → `StreamEnd { partial_bytes: bytes }`
@@ -297,39 +342,61 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const SUPPORTED_MIN: u32 = 1;
 pub const SUPPORTED_MAX: u32 = 1;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Handshake {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HandshakeRequest {
     pub offered: u32,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HandshakeResponse {
     pub agreed: u32,
 }
 ```
 
-Worker exposes `GET /v1/handshake` returning `HandshakeResponse`.
-The supervisor calls it before issuing any operation. A version
-outside `[SUPPORTED_MIN, SUPPORTED_MAX]` returns
-`ProtocolError::UnsupportedProtocolVersion` with `supported_min` and
-`supported_max` populated so future-Sprint workers can negotiate.
+Worker exposes `POST /v1/handshake` accepting `HandshakeRequest` and
+returning `HandshakeResponse` (or a `ProtocolError` body on
+mismatch). **The handshake route is explicitly exempt from the
+version middleware** — that exemption lives in one place in
+`http.rs` (`is_version_gated_route(path: &str) -> bool` returns
+`false` for `/v1/handshake`). This lets the handshake handler return
+a structured `ProtocolError::UnsupportedProtocolVersion { offered,
+supported_min, supported_max }` instead of a generic middleware
+rejection, so the test for "version skew" is positive-shape rather
+than "did middleware return some error".
+
+A `POST` (not `GET`) carries the offered version in a JSON body
+where serde validation gives a clean negative test for malformed
+content. The supervisor calls handshake before issuing any operation.
 
 ### 3.7 Transport traits (transport.rs)
 
+The public traits MUST NOT expose `hyper` types — Sprint 4's TLS
+transport will swap the underlying implementation, and consumers
+that hold `hyper::body::Incoming` would break. The body type is a
+crate-owned alias over `Pin<Box<dyn AsyncRead + Send>>`:
+
 ```rust
+/// Crate-owned NDJSON byte stream type. The `voom-worker-protocol`
+/// crate is the only thing that knows the concrete inner reader.
+pub type NdjsonStream = NdjsonReader<Pin<Box<dyn tokio::io::AsyncRead + Send>>>;
+
 #[async_trait::async_trait]
 pub trait ClientHandle: Send + Sync {
-    async fn handshake(&self) -> Result<HandshakeResponse, ProtocolError>;
+    async fn handshake(&self, offered: u32) -> Result<HandshakeResponse, ProtocolError>;
+    /// Caller supplies a fresh `idempotency_key` (ULID) per dispatch.
+    /// The same key on a retry MUST yield the same outcome via
+    /// worker-side dedupe.
     async fn dispatch(
         &self,
         creds: &WorkerCredentials,
+        idempotency_key: &str,
         request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError>;
 }
 
 pub struct DispatchStream {
     pub response: OperationResponse,
-    pub frames: NdjsonReader<hyper::body::BodyDataStream<hyper::Body>>,
+    pub frames: NdjsonStream,
 }
 
 #[async_trait::async_trait]
@@ -346,8 +413,9 @@ pub struct ServerRunning {
 
 The traits are deliberately small. A supervisor consumes
 `ClientHandle`; a worker exposes `ServerHandle`. Sprint 4 replaces
-the HTTP transport with a TLS one behind the same trait without
-touching consumers.
+`HttpClient` / `HttpServer` (the hyper-backed implementors) with TLS
+equivalents behind the same trait without touching consumers, and
+`NdjsonStream` continues to wrap the new inner `AsyncRead`.
 
 ### 3.8 HTTP/1.1 loopback transport (http.rs)
 
@@ -369,11 +437,16 @@ the routes:
 
 Every request goes through one middleware:
 
-1. Parse `protocol_version` header; reject mismatches.
+1. If the route is version-gated (`is_version_gated_route` —
+   everything except `POST /v1/handshake`), parse `protocol_version`
+   header; reject mismatches with `ProtocolError::UnsupportedProtocolVersion`.
 2. Parse `Authorization: Bearer ...`, `X-Voom-Worker-Id`,
    `X-Voom-Worker-Epoch`. Validate via `validate_credentials`.
-3. Reject `X-Voom-Idempotency-Key` collision (the worker maintains
-   an LRU of recent keys; conformance pins this).
+3. Parse `X-Voom-Idempotency-Key` (canonical idempotency location).
+   Reject collisions against the worker's recent-key LRU; the request
+   body MUST NOT carry an `idempotency_key` field — a body that does
+   is rejected as `HeaderBodyKeyMismatch` (this guards against a
+   client that puts the key in two places where they could disagree).
 
 Phase 1 does NOT ship the supervisor's HTTP server (Phase 2 work),
 but it DOES ship a tiny embedded server inside `voom-conformance` so
@@ -500,18 +573,28 @@ sends them via `low_level`, and asserts the worker's reply:
 - `wrong_content_length__rejects_malformed`
 - `oversize_frame__rejects_frame_too_large`
 - `frame_with_no_lease_id__rejects_malformed`
-- `frame_with_negative_seq__rejects_malformed`     (serde catches; verify)
+- `frame_with_wrong_lease_id__rejects_wrong_lease`     (load-bearing — closes the cross-lease leak)
+- `frame_with_negative_seq__rejects_malformed`         (serde catches; verify)
 - `frame_after_terminal__rejects`
 - `wrong_bearer_header__rejects_unauthorized`
 - `missing_worker_id_header__rejects_unauthorized`
 - `wrong_worker_epoch__rejects_stale_epoch`
+- `body_carries_idempotency_key__rejects_header_body_mismatch`
+- `header_missing_idempotency_key__rejects_invalid_payload`
+- `duplicate_idempotency_key__rejects_duplicate`
+- `handshake_below_supported_min__rejects_unsupported_version` (positive structured error, not generic middleware reject)
+- `handshake_above_supported_max__rejects_unsupported_version`
 - `partial_response_body__classified_as_stream_end`
 
-Golden bytes are stored as fixture files committed to git. A separate
-unit test in `voom-conformance` re-emits each golden via the typed
-encoder and asserts byte-for-byte equality — if the typed encoder
-drifts, the golden test fails and the encoder must be fixed (rather
-than the golden being rewritten silently).
+Golden bytes are **hand-curated** (not generated by the typed encoder
+at test time). Each golden file is a small JSON-with-byte-comments
+artifact committed to git that documents the canonical wire shape.
+A separate unit test re-emits each golden via the typed encoder and
+asserts byte-for-byte equality — if the encoder drifts away from the
+hand-curated canonical, the test fails and the encoder must be fixed
+(NOT the golden updated silently). Generating goldens from the
+encoder at build time would defeat the purpose: encoder + decoder
+could agree on a wrong wire format and the suite would happily pass.
 
 ### 4.5 `echo-worker` binary
 
@@ -524,13 +607,17 @@ Minimal Tokio binary, ~150 lines. Behavior:
 - Spawns a tokio task to read stdin in a loop; when stdin closes
   (parent dies), the task cancels the running operation and exits
   the process.
-- Implements one `OperationKind::Noop`: emit one `Progress` frame at
-  `seq = 0`, then one `Result` frame at `seq = 1`, then close the
+- Implements `OperationKind::ProbeFile` only: accepts a `payload`
+  shaped `{ "path": "<string>" }`, emits one `Progress` frame at
+  `seq = 0` carrying the path back, then one `Result` frame at
+  `seq = 1` whose `payload` echoes the request, then closes the
   stream.
-- Implements one operation `OperationKind::ScoreQuality` for the
-  conformance suite to use as an "unknown payload" check by
-  passing an unparseable payload.
-- Rejects any other `OperationKind` with `ProtocolError::UnknownOperation`.
+- An `OperationKind::ProbeFile` request with a malformed payload
+  (missing `path`, wrong type) returns `ProtocolError::InvalidPayload`.
+- Rejects every other `OperationKind` with
+  `ProtocolError::UnknownOperation`. (`echo-worker` deliberately
+  advertises support for `ProbeFile` only; the conformance suite
+  uses the rejection paths as positive tests for the contract.)
 
 `echo-worker` does NOT depend on `voom-fake-support` (which does not
 exist yet — Phase 3 creates it).
