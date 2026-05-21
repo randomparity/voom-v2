@@ -86,10 +86,18 @@ handler returns an `OperationDispatch` with a buffered `Vec<u8>` body,
 so it cannot express `stall`, `non_converging_progress`, or
 `deadline_exceeded`. This slice therefore uses a small chaos-owned
 HTTP implementation for the worker server path. The implementation
-must remain wire-compatible with `HttpServer` for handshake,
-version/auth/idempotency validation, structured protocol errors, and
-the valid baseline response shape. Do not generalize
-`voom-worker-protocol::HttpServer` in this slice.
+must remain compatible with the public wire behavior exercised by
+conformance: handshake, version/auth/idempotency validation,
+structured protocol errors, and the valid baseline response shape.
+
+The compatibility boundary is local to `chaos-worker` in this slice:
+the chaos-owned server keeps its own small shim for header names, route
+handling, operation response framing, and idempotency behavior.
+Conformance is the compatibility oracle. Do not generalize
+`voom-worker-protocol::HttpServer`, export its private server helpers,
+or add new `voom-worker-protocol` public API for this slice. The
+duplication is intentional because `chaos-worker` is a fault injector,
+not a new shared transport abstraction.
 
 The binary has three internal responsibilities:
 
@@ -220,8 +228,16 @@ Expected protocol rejections return structured `ProtocolError`s:
   mode -> `InvalidPayload`;
 - timing values above the allowed cap -> `InvalidPayload`;
 - malformed request JSON, auth errors, version errors, and
-  idempotency conflicts must match the existing `HttpServer` and
-  protocol crate behavior.
+  idempotency conflicts must match the current conformance
+  expectations for worker HTTP behavior.
+
+The local compatibility shim must preserve the active-worker checks
+that already exist in `voom-conformance`: missing auth, wrong bearer,
+wrong worker epoch, missing idempotency key, exact-byte replay, and
+same-key different-body rejection. If `HttpServer` internals change
+later, this spec does not require `chaos-worker` to track private
+implementation details beyond what the public conformance suite
+asserts.
 
 Deliberate chaos modes must not be implemented as structured
 `ProtocolError`s. They should create the observable failure being
@@ -268,6 +284,10 @@ Integration tests:
   EOF;
 - conformance integration launches `chaos-worker` through the manifest
   and passes active-worker Tier 1;
+- raw-wire conformance is the drift guard for the local compatibility
+  shim; the implementation must not add `voom-worker-protocol` public
+  API to satisfy this slice unless a later spec explicitly approves
+  the API expansion;
 - `crash` exits non-zero before a terminal frame is accepted;
 - `stall` uses a raw or streaming client and keeps the response body
   pending until a short caller-side timeout;
