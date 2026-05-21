@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use secrecy::SecretString;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_worker_protocol::{
     ClientHandle, HttpClient, OperationKind, OperationRequest, WorkerCredentials,
@@ -62,6 +62,220 @@ async fn invalid_payload_returns_protocol_error_and_worker_stays_alive() {
     ));
     assert!(launch.child.try_wait().unwrap().is_none());
     launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn crash_mode_exits_non_zero() {
+    let mut launch = spawn_chaos().await;
+    let body = operation_body(
+        201,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "crash"
+        }),
+    );
+    let _ = send_raw_operation_and_read_some(launch.bound, body, "crash-mode").await;
+    let status = tokio::time::timeout(Duration::from_secs(5), launch.child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!status.success());
+}
+
+#[tokio::test]
+async fn malformed_result_is_rejected_by_reader() {
+    let mut launch = spawn_chaos().await;
+    let client = HttpClient::new(launch.bound);
+    let req = operation_request(
+        202,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "malformed_result"
+        }),
+    );
+    let mut stream = client
+        .dispatch(&launch.credentials, "malformed-result", req)
+        .await
+        .unwrap();
+    let err = stream.frames.next_frame().await.unwrap_err();
+    assert!(matches!(
+        err,
+        voom_worker_protocol::ProtocolError::MalformedFrame { .. }
+    ));
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn stall_mode_keeps_response_body_pending() {
+    let mut launch = spawn_chaos().await;
+    let body = operation_body(
+        203,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "stall",
+            "stall_ms": 1000
+        }),
+    );
+    let mut stream = tokio::net::TcpStream::connect(launch.bound).await.unwrap();
+    write_raw_operation(&mut stream, launch.bound, body, "stall-mode").await;
+    let mut bytes = read_until_headers(&mut stream).await;
+    assert_text_contains(&bytes, "HTTP/1.1 200 OK");
+    read_until_contains(&mut stream, &mut bytes, "\"lease_id\"").await;
+    assert_no_more_bytes_within(&mut stream, Duration::from_millis(250)).await;
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn non_converging_progress_yields_progress_without_terminal() {
+    let mut launch = spawn_chaos().await;
+    let body = operation_body(
+        204,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "non_converging_progress",
+            "progress_count": 2
+        }),
+    );
+    let mut stream = tokio::net::TcpStream::connect(launch.bound).await.unwrap();
+    write_raw_operation(&mut stream, launch.bound, body, "non-converging").await;
+    let mut bytes = read_until_headers(&mut stream).await;
+    assert_text_contains(&bytes, "HTTP/1.1 200 OK");
+    read_until_contains(&mut stream, &mut bytes, "\"lease_id\"").await;
+    read_until_contains(&mut stream, &mut bytes, "\"kind\":\"progress\"").await;
+    assert_text_does_not_contain(&bytes, "\"kind\":\"result\"");
+    assert_no_more_bytes_within(&mut stream, Duration::from_millis(250)).await;
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn deadline_exceeded_delays_progress_past_short_timeout() {
+    let mut launch = spawn_chaos().await;
+    let body = operation_body(
+        205,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "deadline_exceeded",
+            "progress_interval_ms": 1000,
+            "progress_count": 1
+        }),
+    );
+    let mut stream = tokio::net::TcpStream::connect(launch.bound).await.unwrap();
+    write_raw_operation(&mut stream, launch.bound, body, "deadline-exceeded").await;
+    let mut bytes = read_until_headers(&mut stream).await;
+    assert_text_contains(&bytes, "HTTP/1.1 200 OK");
+    read_until_contains(&mut stream, &mut bytes, "\"lease_id\"").await;
+    assert_text_does_not_contain(&bytes, "\"kind\":\"progress\"");
+    assert_text_does_not_contain(&bytes, "\"kind\":\"result\"");
+    assert_no_more_bytes_within(&mut stream, Duration::from_millis(250)).await;
+    launch.shutdown().await;
+}
+
+fn operation_request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
+    OperationRequest {
+        operation: OperationKind::ProbeFile,
+        lease_id: voom_core::LeaseId(lease_id),
+        payload,
+        heartbeat_deadline_ms: 100,
+        progress_idle_deadline_ms: 100,
+    }
+}
+
+fn operation_body(lease_id: u64, payload: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&operation_request(lease_id, payload)).unwrap()
+}
+
+async fn send_raw_operation_and_read_some(
+    bound: std::net::SocketAddr,
+    body: Vec<u8>,
+    idempotency_key: &str,
+) -> Vec<u8> {
+    let mut stream = tokio::net::TcpStream::connect(bound).await.unwrap();
+    write_raw_operation(&mut stream, bound, body, idempotency_key).await;
+    let mut out = vec![0; 4096];
+    let n = stream.read(&mut out).await.unwrap();
+    out.truncate(n);
+    out
+}
+
+async fn read_until_headers(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    read_until_contains_bytes(stream, b"\r\n\r\n", Duration::from_secs(1)).await
+}
+
+async fn read_until_contains(
+    stream: &mut tokio::net::TcpStream,
+    out: &mut Vec<u8>,
+    needle: &str,
+) {
+    let needle = needle.as_bytes();
+    loop {
+        if out.windows(needle.len()).any(|window| window == needle) {
+            return;
+        }
+        read_more(stream, out, Duration::from_secs(1)).await;
+    }
+}
+
+async fn read_until_contains_bytes(
+    stream: &mut tokio::net::TcpStream,
+    needle: &[u8],
+    timeout: Duration,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        if out.windows(needle.len()).any(|window| window == needle) {
+            return out;
+        }
+        read_more(stream, &mut out, timeout).await;
+    }
+}
+
+async fn read_more(stream: &mut tokio::net::TcpStream, out: &mut Vec<u8>, timeout: Duration) {
+    let mut buf = [0_u8; 1024];
+    let n = tokio::time::timeout(timeout, stream.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(n > 0, "connection closed before expected bytes arrived");
+    out.extend_from_slice(&buf[..n]);
+}
+
+async fn assert_no_more_bytes_within(stream: &mut tokio::net::TcpStream, duration: Duration) {
+    let mut buf = [0_u8; 1];
+    let outcome = tokio::time::timeout(duration, stream.read(&mut buf)).await;
+    assert!(outcome.is_err(), "stream produced bytes before timeout");
+}
+
+fn assert_text_contains(bytes: &[u8], needle: &str) {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.contains(needle), "missing {needle:?} in {text:?}");
+}
+
+fn assert_text_does_not_contain(bytes: &[u8], needle: &str) {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(!text.contains(needle), "unexpected {needle:?} in {text:?}");
+}
+
+async fn write_raw_operation(
+    stream: &mut tokio::net::TcpStream,
+    bound: std::net::SocketAddr,
+    body: Vec<u8>,
+    idempotency_key: &str,
+) {
+    let req = format!(
+        "POST /v1/operations HTTP/1.1\r\n\
+         Host: {bound}\r\n\
+         Content-Length: {}\r\n\
+         X-Voom-Protocol-Version: {}\r\n\
+         Authorization: Bearer phase1-bootstrap-secret\r\n\
+         X-Voom-Worker-Id: 1\r\n\
+         X-Voom-Worker-Epoch: 0\r\n\
+         X-Voom-Idempotency-Key: {idempotency_key}\r\n\
+         \r\n",
+        body.len(),
+        voom_core::PROTOCOL_VERSION
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.write_all(&body).await.unwrap();
 }
 
 struct TestLaunch {

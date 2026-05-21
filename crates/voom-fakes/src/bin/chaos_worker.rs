@@ -9,6 +9,10 @@
     clippy::print_stdout,
     reason = "chaos-worker advertises readiness with BOUND addr=..."
 )]
+#![expect(
+    clippy::exit,
+    reason = "chaos-worker crash mode intentionally terminates the worker process"
+)]
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -294,8 +298,13 @@ async fn handle_operation(
             ));
         }
     };
+    let cacheable = request
+        .payload
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|mode| mode == "baseline");
     let response = dispatch_operation(&request)?;
-    if matches!(response, ChaosResponse::Fixed { .. }) {
+    if cacheable && matches!(response, ChaosResponse::Fixed { .. }) {
         cache
             .lock()
             .await
@@ -319,7 +328,7 @@ fn dispatch_operation(req: &OperationRequest) -> Result<ChaosResponse, ProtocolE
     };
     match payload.mode {
         ChaosMode::Baseline => fixed_operation_response(req, baseline_body(req, &payload)?),
-        mode => Ok(streaming_or_fault_response(req, &payload, mode)),
+        mode => streaming_or_fault_response(req, &payload, mode),
     }
 }
 
@@ -547,9 +556,24 @@ fn baseline_body(req: &OperationRequest, payload: &ChaosPayload) -> Result<Vec<u
     Ok(body)
 }
 
-#[cfg(test)]
 fn malformed_body() -> Vec<u8> {
     b"{not-json\n".to_vec()
+}
+
+fn progress_body(req: &OperationRequest, count: usize) -> Result<Vec<u8>, ProtocolError> {
+    let mut body = Vec::new();
+    for seq in 0..count {
+        let frame = ProgressFrame::Progress {
+            lease_id: req.lease_id,
+            seq: seq as u64,
+            emitted_at: Utc::now(),
+            percent: None,
+            message: Some("chaos progress".to_owned()),
+            payload: Some(serde_json::json!({"mode": "progress"})),
+        };
+        push_frame(&mut body, &frame)?;
+    }
+    Ok(body)
 }
 
 fn fixed_operation_response(
@@ -624,21 +648,38 @@ fn write_err(e: std::io::Error) -> ProtocolError {
 }
 
 fn streaming_or_fault_response(
-    _req: &OperationRequest,
+    req: &OperationRequest,
     payload: &ChaosPayload,
     mode: ChaosMode,
-) -> ChaosResponse {
-    let _ = (
-        payload.progress_count,
-        payload.progress_interval,
-        payload.stall,
-    );
-    json_response(
-        "400 Bad Request",
-        &ProtocolError::InvalidPayload {
-            detail: format!("mode {mode:?} is reserved for Task 4"),
-        },
-    )
+) -> Result<ChaosResponse, ProtocolError> {
+    match mode {
+        ChaosMode::Crash => Ok(ChaosResponse::ExitProcess(101)),
+        ChaosMode::MalformedResult => {
+            let mut body = operation_response_line(req)?;
+            body.extend_from_slice(&malformed_body());
+            Ok(ChaosResponse::Fixed {
+                status: "200 OK",
+                content_type: "application/x-ndjson",
+                body,
+            })
+        }
+        ChaosMode::Stall => Ok(ChaosResponse::Open {
+            prefix: operation_response_line(req)?,
+            chunks: Vec::new(),
+            hold: payload.stall,
+        }),
+        ChaosMode::NonConvergingProgress => Ok(ChaosResponse::Open {
+            prefix: operation_response_line(req)?,
+            chunks: vec![(progress_body(req, payload.progress_count)?, Duration::ZERO)],
+            hold: payload.stall,
+        }),
+        ChaosMode::DeadlineExceeded => Ok(ChaosResponse::Open {
+            prefix: operation_response_line(req)?,
+            chunks: vec![(progress_body(req, payload.progress_count)?, payload.progress_interval)],
+            hold: payload.stall,
+        }),
+        ChaosMode::Baseline => fixed_operation_response(req, baseline_body(req, payload)?),
+    }
 }
 
 fn push_frame(out: &mut Vec<u8>, frame: &ProgressFrame) -> Result<(), ProtocolError> {
