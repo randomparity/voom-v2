@@ -434,9 +434,7 @@ fn benchmark_worker_bin() -> TestResult<PathBuf> {
     let target_dir =
         std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, target_dir_from_env);
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Ok(target_dir
-        .join("debug")
-        .join(format!("benchmark-worker{suffix}")))
+    Ok(benchmark_worker_debug_dir(&target_dir).join(format!("benchmark-worker{suffix}")))
 }
 
 fn build_benchmark_worker() -> TestResult<()> {
@@ -459,6 +457,15 @@ fn target_dir_from_env(path: std::ffi::OsString) -> PathBuf {
         path
     } else {
         workspace_root().join(path)
+    }
+}
+
+fn benchmark_worker_debug_dir(target_dir: &std::path::Path) -> PathBuf {
+    if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET").filter(|target| !target.is_empty())
+    {
+        target_dir.join(target).join("debug")
+    } else {
+        target_dir.join("debug")
     }
 }
 
