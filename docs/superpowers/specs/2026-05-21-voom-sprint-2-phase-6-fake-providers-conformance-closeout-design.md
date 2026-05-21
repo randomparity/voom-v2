@@ -71,46 +71,81 @@ Exit criteria:
   provider.
 - The conformance manifest has no Sprint 2 fake provider remaining
   under `[scaffold]`.
+- Every fixed `OperationKind` has at least one active manifest-backed
+  conformance case.
+- Every parent Phase 6 requirement is either covered by this phase or
+  explicitly marked as deferred with a successor owner in §3.
 - `just ci` passes.
 
-## 3. Architecture
+## 3. Parent Phase 6 Coverage
+
+The Sprint 2 overview defines Phase 6 as the final conformance
+expansion. This slice closes the parts that can be tested at the
+current worker-protocol and process-launch boundary, and explicitly
+names the parent requirements that remain outside that boundary.
+
+| Parent Phase 6 requirement | Status in this spec |
+|---|---|
+| Every operation kind from the fixed vocabulary | Covered by manifest-backed primary and secondary fake-provider operations in §4. |
+| Every error category from the failure taxonomy | Covered at the conformance boundary by structured protocol-error cases, fake-provider invalid-payload/error frames, chaos-worker failure modes, and conformance-owned negative fixtures. The implementation plan must add named fixture cases for `WorkerTimeout`, `WorkerCrash`, `NoEligibleWorker`, `ArtifactUnavailable`, `ArtifactChecksumMismatch`, `ExternalSystemUnavailable`, `ExternalSystemRateLimited`, `VerificationFailure`, `BackupFailure`, `CommitFailure`, `PolicyParseError`, `PolicyValidationError`, `MissingCapability`, `MalformedWorkerResult`, `UserCancellation`, `StaleIdentityEvidence`, `ClosureResolutionIncomplete`, `BlockedByActiveUseLease`, `ApprovalRequired`, `PriorityPolicyConflict`, `ProgressTimeout`, and `AmbiguousWorkerSelection`. Durable retry and terminal-issue classification remains owned by control-plane/store tests. |
+| Cancellation | Deferred. The current worker protocol has no cancel route; lease/job cancellation exists in store/control-plane APIs, not the worker transport. A later cancellation-transport slice must add the route before worker conformance can test it. |
+| Registration replay | Covered at the process-launch boundary by relaunching active workers with the same worker id/epoch/secret shape and requiring deterministic startup, auth, and stdin EOF shutdown. Durable worker-incarnation replay remains a control-plane supervisor concern. |
+| Capability mismatch | Covered as manifest-declared operation mismatch: conformance sends an unsupported operation to each active worker and requires `UnknownOperation`. Full scheduler capability scoring remains deferred to the scheduler/control-plane phase that introduces multi-worker scoring. |
+| Worker re-registration after crash | Covered at the black-box process boundary by chaos-worker crash scenarios plus relaunching a fresh process and re-running conformance. Durable incarnation retirement/reconciliation remains a control-plane supervisor concern. |
+| Supervisor-side recovery from each chaos scenario | Deferred from this fake-provider closeout spec. The worker-side chaos modes are already implemented; durable supervisor recovery belongs in the control-plane chaos integration plan. |
+| Final integration across Phase 3/4/5 binaries | Covered by requiring all eleven fake providers, `chaos-worker`, and `benchmark-worker` to be active conformance manifest entries. |
+
+## 4. Architecture
 
 `voom-fake-support` becomes the common runtime for the eleven provider
-fakes. It owns the behavior that should be identical across those
-workers:
+fakes. It wraps `voom_worker_protocol::HttpServer` for canonical
+protocol behavior instead of reimplementing the transport. The
+protocol crate remains responsible for:
+
+- handshake negotiation;
+- protocol version, bearer token, worker id, worker epoch, content
+  length, and idempotency validation;
+- NDJSON transport behavior.
+
+`voom-fake-support` owns the reusable fake-provider behavior around
+that canonical transport:
 
 - process bootstrap from `VOOM_WORKER_SECRET`, `VOOM_WORKER_ID`,
   `VOOM_WORKER_EPOCH`, and `VOOM_WORKER_BIND`;
 - loopback HTTP server startup and `BOUND addr=...` readiness output;
 - stdin EOF shutdown;
-- handshake negotiation;
-- protocol version, bearer token, worker id, worker epoch, content
-  length, and idempotency validation;
-- NDJSON response writing;
+- provider dispatch;
+- provider payload validation;
 - helper builders for progress frames and terminal result frames.
 
 Each fake binary stays small. It declares:
 
 - provider name;
-- supported `OperationKind`;
+- supported primary and secondary `OperationKind`s;
 - payload parser;
 - deterministic response builder.
 
 The provider-to-operation mapping is fixed for this phase:
 
-| Binary | Supported operation |
-|---|---|
-| `fake-scanner` | `ScanLibrary` |
-| `fake-prober` | `ProbeFile` |
-| `fake-transcoder` | `TranscodeVideo` |
-| `fake-remuxer` | `Remux` |
-| `fake-backup-store` | `BackUpFile` |
-| `fake-health-checker` | `VerifyArtifact` |
-| `fake-identity-provider` | `IdentifyMedia` |
-| `fake-external-system` | `SyncExternalSystem` |
-| `fake-quality-scorer` | `ScoreQuality` |
-| `fake-issue-provider` | `CommitArtifact` |
-| `fake-use-lease-provider` | `EditTracks` |
+| Binary | Primary operation | Secondary conformance operations |
+|---|---|---|
+| `fake-scanner` | `ScanLibrary` | none |
+| `fake-prober` | `ProbeFile` | `HashFile` |
+| `fake-transcoder` | `TranscodeVideo` | `ExtractAudio`, `TranscribeAudio` |
+| `fake-remuxer` | `Remux` | none |
+| `fake-backup-store` | `BackUpFile` | `DeleteArtifact` |
+| `fake-health-checker` | `VerifyArtifact` | none |
+| `fake-identity-provider` | `IdentifyMedia` | none |
+| `fake-external-system` | `SyncExternalSystem` | none |
+| `fake-quality-scorer` | `ScoreQuality` | none |
+| `fake-issue-provider` | `CommitArtifact` | none |
+| `fake-use-lease-provider` | `EditTracks` | none |
+
+This mapping covers all fifteen fixed `OperationKind` variants:
+`ScanLibrary`, `ProbeFile`, `HashFile`, `IdentifyMedia`,
+`ScoreQuality`, `SyncExternalSystem`, `BackUpFile`, `Remux`,
+`TranscodeVideo`, `EditTracks`, `ExtractAudio`, `TranscribeAudio`,
+`VerifyArtifact`, `CommitArtifact`, and `DeleteArtifact`.
 
 `voom-conformance` remains black-box. It may read operation and
 payload expectations from the manifest, but it must not depend on
@@ -121,10 +156,13 @@ using their existing worker-specific runtime code. This keeps their
 fault and measurement behavior independent from the shared helper used
 by the eleven positive-path provider fakes.
 
-## 4. Provider Behavior
+## 5. Provider Behavior
 
-Each fake supports exactly one primary operation and rejects every
-other `OperationKind` with `ProtocolError::UnknownOperation`.
+Each fake supports one primary operation. The three fakes listed with
+secondary conformance operations in §4 also support those secondary
+operations so the full fixed operation vocabulary is exercised without
+adding more binaries. Every other `OperationKind` is rejected with
+`ProtocolError::UnknownOperation`.
 
 Payloads are small JSON objects. Common fields are reused where they
 fit:
@@ -171,12 +209,12 @@ Invalid behavior is deterministic:
 - Repeating an idempotency key with a different request body returns
   `ProtocolError::DuplicateIdempotencyKey`.
 
-## 5. Manifest-Driven Conformance
+## 6. Manifest-Driven Conformance
 
 The current conformance suite uses `ProbeFile` as its generic positive
 operation. Phase 6 changes that model because most fake providers
-support a different single operation. Active manifest entries gain
-operation and payload metadata:
+support a different operation. Active manifest entries gain operation
+case metadata:
 
 ```toml
 [[binaries]]
@@ -185,6 +223,8 @@ target = "fake-scanner"
 purpose = "phase 3 scanner fake - deterministic library discovery"
 status = "active"
 required = true
+
+[[binaries.operations]]
 operation = "scan_library"
 valid_payload = { path = "/library", scenario = "default" }
 invalid_payload = { scenario = "missing_path" }
@@ -196,27 +236,30 @@ The manifest parser validates that every active entry has:
 - `target`;
 - `status = "active"`;
 - `required = true`;
-- `operation`;
-- object-shaped `valid_payload`;
-- object-shaped `invalid_payload`.
+- at least one `operations` case;
+- each operation case has `operation`, object-shaped `valid_payload`,
+  and object-shaped `invalid_payload`.
+
+The conformance integration test validates global operation coverage:
+the union of active manifest operation cases must include every
+variant in `OperationKind`. Missing coverage is a manifest validation
+failure, not a skipped test.
 
 Scaffold entries remain supported for future non-Sprint-2 binaries,
 but the Phase 6 integration test must fail if any of the eleven
 Sprint 2 fake providers remains scaffolded.
 
 The typed suite builds positive and negative operation requests from
-the manifest entry. Generic assertions still cover handshake, auth,
-identity, progress ordering, terminal-last, idempotency, invalid
-payload handling, and unsupported operation handling. For
-`unknown_operation_rejected`, the suite chooses a different
-`OperationKind` from the fixed vocabulary than the worker's declared
-operation.
+the manifest operation cases. Generic assertions still cover
+handshake, auth, identity, progress ordering, terminal-last,
+idempotency, invalid payload handling, and unsupported operation
+handling. For `unknown_operation_rejected`, the suite chooses a fixed
+operation kind that is not declared in that worker's operation cases.
 
 The raw-wire suite uses the same manifest operation and payload so
-single-operation workers are tested without being forced to implement
-`ProbeFile`.
+workers are tested without being forced to implement `ProbeFile`.
 
-## 6. Tests
+## 7. Tests
 
 `voom-fakes` adds a process-backed integration test for the eleven
 provider fakes. For each binary, the test launches the worker with
@@ -232,6 +275,8 @@ ordinary Sprint 2 credentials and asserts:
 - idempotent replay with the same body returns the same response;
 - idempotent replay with a different body returns
   `DuplicateIdempotencyKey`.
+- secondary operation cases for `fake-prober`, `fake-transcoder`, and
+  `fake-backup-store` succeed with their declared valid payloads.
 
 `voom-fake-support` keeps sibling unit tests for reusable runtime
 pieces that do not need a child process:
@@ -247,8 +292,10 @@ pieces that do not need a child process:
 - require `echo-worker`, `chaos-worker`, `benchmark-worker`, and all
   eleven fake providers as active manifest entries;
 - reject any Sprint 2 fake provider under `[scaffold]`;
+- fail when any fixed `OperationKind` lacks an active manifest-backed
+  operation case;
 - run typed and raw-wire suites against every active worker using the
-  manifest-declared operation and payload;
+  manifest-declared operation cases and payloads;
 - keep the existing conformance-owned protocol-negative fixture checks.
 
 Primary verification:
@@ -260,7 +307,7 @@ cargo test -p voom-conformance --all-features
 just ci
 ```
 
-## 7. Failure Handling
+## 8. Failure Handling
 
 Worker launch failure, bind timeout, malformed bind line, early exit,
 cleanup timeout, protocol error, missing provider fields, unexpected
@@ -278,18 +325,21 @@ failure. This mirrors the current chaos, benchmark, and conformance
 launch patterns so repeated local test runs do not leave worker
 processes behind.
 
-## 8. Implementation Notes
+## 9. Implementation Notes
 
 The implementation should proceed provider-support first:
 
-1. Expand `voom-fake-support` into the shared runtime and prove it
-   with a small test-only provider.
+1. Expand `voom-fake-support` into the shared runtime around
+   `voom_worker_protocol::HttpServer` and prove it with a small
+   test-only provider.
 2. Convert a few simple fakes (`fake-prober`, `fake-quality-scorer`,
    `fake-health-checker`) to shake out the runtime API.
 3. Convert the remaining fake providers in small batches.
 4. Extend the conformance manifest schema and suite request builders.
-5. Promote all eleven fake providers to active and enforce the final
-   no-Sprint-2-scaffold rule.
+5. Add secondary operation cases for `HashFile`, `ExtractAudio`,
+   `TranscribeAudio`, and `DeleteArtifact`.
+6. Promote all eleven fake providers to active and enforce the final
+   no-Sprint-2-scaffold and all-operation-coverage rules.
 
 Each commit should keep `cargo test -p voom-fake-support
 --all-features`, `cargo test -p voom-fakes --all-features`, or
