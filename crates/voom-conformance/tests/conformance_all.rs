@@ -65,6 +65,7 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
     }
 
     combined.extend(voom_conformance::raw_wire_suite::run_protocol_negative_fixture().await);
+    combined.extend(voom_conformance::failure_taxonomy::run().await);
 
     let stdin_result = stdin_eof_terminates_worker().await;
     combined.extend(stdin_result);

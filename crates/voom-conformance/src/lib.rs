@@ -14,6 +14,7 @@
 //! `SuiteResult`s as scaffolding so consumers (the echo-worker
 //! smoke test in commit 11) can wire against the public API today.
 
+pub mod failure_taxonomy;
 pub mod harness;
 pub mod manifest;
 pub mod negative_fixture;
