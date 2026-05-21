@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn operation_body_uses_manifest_operation_and_payload() {
+    let body = operation_body(
+        9,
+        voom_worker_protocol::OperationKind::Remux,
+        serde_json::json!({"path": "/library/example.mkv", "container": "mkv"}),
+    )
+    .unwrap();
+    let req: voom_worker_protocol::OperationRequest = serde_json::from_slice(&body).unwrap();
+    assert_eq!(req.operation, voom_worker_protocol::OperationKind::Remux);
+    assert_eq!(
+        req.payload,
+        serde_json::json!({"path": "/library/example.mkv", "container": "mkv"})
+    );
+}
+
+#[test]
 fn auth_headers_include_protocol_worker_and_idempotency() {
     let creds = voom_worker_protocol::WorkerCredentials {
         worker_id: voom_core::WorkerId(1),

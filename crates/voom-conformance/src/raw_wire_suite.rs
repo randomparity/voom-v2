@@ -1,75 +1,97 @@
 use bytes::Bytes;
 use secrecy::ExposeSecret;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use voom_core::LeaseId;
 use voom_worker_protocol::low_level::raw_post_request;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProtocolError, WorkerCredentials};
 
-pub async fn run_active_worker(launch: &mut crate::WorkerLaunch) -> crate::SuiteResult {
+use crate::manifest::{ActiveBinary, OperationCase};
+
+pub async fn run_active_worker(
+    launch: &mut crate::WorkerLaunch,
+    entry: &ActiveBinary,
+) -> crate::SuiteResult {
     let mut result = crate::SuiteResult::default();
+    let Some(primary_case) = entry.operations.first() else {
+        result.fail(
+            format!("{}::raw_wire_suite_has_operation_case", entry.name),
+            "active binary has no operation cases",
+        );
+        return result;
+    };
     record_raw(
         &mut result,
-        "golden_handshake_request_round_trips",
+        format!("{}::golden_handshake_request_round_trips", entry.name),
         golden_handshake_request_round_trips(launch),
     )
     .await;
     record_raw(
         &mut result,
-        "golden_operation_request_round_trips",
-        golden_operation_request_round_trips(launch),
+        format!("{}::golden_operation_request_round_trips", entry.name),
+        golden_operation_request_round_trips(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "missing_auth_headers_rejected",
-        missing_auth_headers_rejected(launch),
+        format!("{}::missing_auth_headers_rejected", entry.name),
+        missing_auth_headers_rejected(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "wrong_bearer_header_rejected",
-        wrong_bearer_header_rejected(launch),
+        format!("{}::wrong_bearer_header_rejected", entry.name),
+        wrong_bearer_header_rejected(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "wrong_worker_epoch_header_rejected",
-        wrong_worker_epoch_header_rejected(launch),
+        format!("{}::wrong_worker_epoch_header_rejected", entry.name),
+        wrong_worker_epoch_header_rejected(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "malformed_json_rejected",
+        format!("{}::malformed_json_rejected", entry.name),
         malformed_json_rejected(launch),
     )
     .await;
     record_raw(
         &mut result,
-        "wrong_content_length_rejected",
-        wrong_content_length_rejected(launch),
+        format!("{}::wrong_content_length_rejected", entry.name),
+        wrong_content_length_rejected(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "unknown_route_returns_404",
+        format!("{}::unknown_route_returns_404", entry.name),
         unknown_route_returns_404(launch),
     )
     .await;
     record_raw(
         &mut result,
-        "handshake_version_skew_returns_structured_error",
+        format!(
+            "{}::handshake_version_skew_returns_structured_error",
+            entry.name
+        ),
         handshake_version_skew_returns_structured_error(launch),
     )
     .await;
     record_raw(
         &mut result,
-        "idempotency_exact_byte_replay_returns_cached_response",
-        idempotency_exact_byte_replay_returns_cached_response(launch),
+        format!(
+            "{}::idempotency_exact_byte_replay_returns_cached_response",
+            entry.name
+        ),
+        idempotency_exact_byte_replay_returns_cached_response(launch, primary_case),
     )
     .await;
     record_raw(
         &mut result,
-        "idempotency_same_key_different_body_rejected",
-        idempotency_same_key_different_body_rejected(launch),
+        format!(
+            "{}::idempotency_same_key_different_body_rejected",
+            entry.name
+        ),
+        idempotency_same_key_different_body_rejected(launch, primary_case),
     )
     .await;
     result
@@ -121,9 +143,16 @@ async fn golden_handshake_request_round_trips(launch: &crate::WorkerLaunch) -> R
     require_status_prefix(&parsed, "HTTP/1.1 200")
 }
 
-async fn golden_operation_request_round_trips(launch: &crate::WorkerLaunch) -> Result<(), String> {
-    let response =
-        send_operation(launch, "raw-valid", operation_body(30, "/library/raw.mkv")?).await?;
+async fn golden_operation_request_round_trips(
+    launch: &crate::WorkerLaunch,
+    case: &OperationCase,
+) -> Result<(), String> {
+    let response = send_operation(
+        launch,
+        "raw-valid",
+        operation_body(30, case.operation, case.valid_payload.clone())?,
+    )
+    .await?;
     let parsed = RawHttpResponse::parse(&response)?;
     require_status_prefix(&parsed, "HTTP/1.1 200")?;
     if !parsed.is_success() {
@@ -140,8 +169,11 @@ async fn golden_operation_request_round_trips(launch: &crate::WorkerLaunch) -> R
     }
 }
 
-async fn missing_auth_headers_rejected(launch: &crate::WorkerLaunch) -> Result<(), String> {
-    let body = operation_body(31, "/library/missing-auth.mkv")?;
+async fn missing_auth_headers_rejected(
+    launch: &crate::WorkerLaunch,
+    case: &OperationCase,
+) -> Result<(), String> {
+    let body = operation_body(31, case.operation, case.valid_payload.clone())?;
     let response = send_raw(
         launch.bound,
         raw_post_request(&launch.bound.to_string(), "/v1/operations", &body, &[]),
@@ -154,14 +186,17 @@ async fn missing_auth_headers_rejected(launch: &crate::WorkerLaunch) -> Result<(
     }
 }
 
-async fn wrong_bearer_header_rejected(launch: &crate::WorkerLaunch) -> Result<(), String> {
+async fn wrong_bearer_header_rejected(
+    launch: &crate::WorkerLaunch,
+    case: &OperationCase,
+) -> Result<(), String> {
     let mut creds = launch.credentials.clone();
     creds.secret = secrecy::SecretString::from("wrong");
     let response = send_operation_with_creds(
         launch,
         &creds,
         "raw-wrong-bearer",
-        operation_body(32, "/library/wrong-bearer.mkv")?,
+        operation_body(32, case.operation, case.valid_payload.clone())?,
     )
     .await?;
     match RawHttpResponse::parse(&response)?.protocol_error()? {
@@ -170,14 +205,17 @@ async fn wrong_bearer_header_rejected(launch: &crate::WorkerLaunch) -> Result<()
     }
 }
 
-async fn wrong_worker_epoch_header_rejected(launch: &crate::WorkerLaunch) -> Result<(), String> {
+async fn wrong_worker_epoch_header_rejected(
+    launch: &crate::WorkerLaunch,
+    case: &OperationCase,
+) -> Result<(), String> {
     let mut creds = launch.credentials.clone();
     creds.worker_epoch += 1;
     let response = send_operation_with_creds(
         launch,
         &creds,
         "raw-wrong-worker-epoch",
-        operation_body(33, "/library/wrong-epoch.mkv")?,
+        operation_body(33, case.operation, case.valid_payload.clone())?,
     )
     .await?;
     match RawHttpResponse::parse(&response)?.protocol_error()? {
@@ -195,8 +233,11 @@ async fn malformed_json_rejected(launch: &crate::WorkerLaunch) -> Result<(), Str
     }
 }
 
-async fn wrong_content_length_rejected(launch: &crate::WorkerLaunch) -> Result<(), String> {
-    let body = operation_body(34, "/library/wrong-length.mkv")?;
+async fn wrong_content_length_rejected(
+    launch: &crate::WorkerLaunch,
+    case: &OperationCase,
+) -> Result<(), String> {
+    let body = operation_body(34, case.operation, case.valid_payload.clone())?;
     let header_values = auth_headers(&launch.credentials, "raw-wrong-length");
     let headers = header_values
         .iter()
@@ -252,8 +293,9 @@ async fn handshake_version_skew_returns_structured_error(
 
 async fn idempotency_exact_byte_replay_returns_cached_response(
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), String> {
-    let request = operation_request(35, "/library/raw-replay.mkv", "raw-replay")?;
+    let request = operation_request(35, case, "raw-replay")?;
     let first = send_raw(launch.bound, request.clone()).await?;
     let second = send_raw(launch.bound, request).await?;
     let first = RawHttpResponse::parse(&first)?;
@@ -269,18 +311,19 @@ async fn idempotency_exact_byte_replay_returns_cached_response(
 
 async fn idempotency_same_key_different_body_rejected(
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), String> {
     let first = send_operation(
         launch,
         "raw-replay-conflict",
-        operation_body(36, "/library/raw-one.mkv")?,
+        operation_body(36, case.operation, case.valid_payload.clone())?,
     )
     .await?;
     require_status_prefix(&RawHttpResponse::parse(&first)?, "HTTP/1.1 200")?;
     let second = send_operation(
         launch,
         "raw-replay-conflict",
-        operation_body(36, "/library/raw-two.mkv")?,
+        operation_body(36, case.operation, conflict_payload(&case.valid_payload))?,
     )
     .await?;
     match RawHttpResponse::parse(&second)?.protocol_error()? {
@@ -310,8 +353,12 @@ async fn send_operation_with_creds(
     .await
 }
 
-fn operation_request(lease_id: u64, path: &str, idempotency_key: &str) -> Result<Bytes, String> {
-    let body = operation_body(lease_id, path)?;
+fn operation_request(
+    lease_id: u64,
+    case: &OperationCase,
+    idempotency_key: &str,
+) -> Result<Bytes, String> {
+    let body = operation_body(lease_id, case.operation, case.valid_payload.clone())?;
     let creds = WorkerCredentials {
         worker_id: voom_core::WorkerId(1),
         worker_epoch: 0,
@@ -349,11 +396,15 @@ fn operation_request_with_creds(
     )
 }
 
-fn operation_body(lease_id: u64, path: &str) -> Result<Vec<u8>, String> {
+fn operation_body(
+    lease_id: u64,
+    operation: OperationKind,
+    payload: serde_json::Value,
+) -> Result<Vec<u8>, String> {
     let request = OperationRequest {
-        operation: OperationKind::ProbeFile,
-        lease_id: voom_core::LeaseId(lease_id),
-        payload: serde_json::json!({ "path": path }),
+        operation,
+        lease_id: LeaseId(lease_id),
+        payload,
         heartbeat_deadline_ms: 1_000,
         progress_idle_deadline_ms: 1_000,
     };
@@ -380,7 +431,7 @@ fn malformed_json_body() -> &'static [u8] {
     b"{not-json"
 }
 
-async fn record_raw<F>(result: &mut crate::SuiteResult, name: &'static str, fut: F)
+async fn record_raw<F>(result: &mut crate::SuiteResult, name: String, fut: F)
 where
     F: std::future::Future<Output = Result<(), String>>,
 {
@@ -388,6 +439,14 @@ where
         Ok(()) => result.pass(name),
         Err(e) => result.fail(name, e),
     }
+}
+
+fn conflict_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let mut payload = payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("__voom_conflict".to_owned(), serde_json::json!(true));
+    }
+    payload
 }
 
 async fn send_raw(addr: std::net::SocketAddr, bytes: Bytes) -> Result<Vec<u8>, String> {

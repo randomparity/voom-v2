@@ -3,108 +3,164 @@ use voom_worker_protocol::{
     ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProtocolError,
 };
 
-pub(crate) fn probe_request(lease_id: LeaseId, path: &str) -> OperationRequest {
+use crate::manifest::{ActiveBinary, OperationCase};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PayloadKind {
+    Valid,
+    Invalid,
+}
+
+pub(crate) fn operation_request(
+    lease_id: LeaseId,
+    case: &OperationCase,
+    payload_kind: PayloadKind,
+) -> OperationRequest {
+    let payload = match payload_kind {
+        PayloadKind::Valid => case.valid_payload.clone(),
+        PayloadKind::Invalid => case.invalid_payload.clone(),
+    };
     OperationRequest {
-        operation: OperationKind::ProbeFile,
+        operation: case.operation,
         lease_id,
-        payload: serde_json::json!({ "path": path }),
+        payload,
         heartbeat_deadline_ms: 1_000,
         progress_idle_deadline_ms: 1_000,
     }
 }
 
-pub(crate) fn missing_path_request(lease_id: LeaseId) -> OperationRequest {
-    OperationRequest {
-        operation: OperationKind::ProbeFile,
-        lease_id,
-        payload: serde_json::json!({}),
-        heartbeat_deadline_ms: 1_000,
-        progress_idle_deadline_ms: 1_000,
-    }
-}
-
-pub async fn run(launch: &mut crate::WorkerLaunch) -> crate::SuiteResult {
+pub async fn run(launch: &mut crate::WorkerLaunch, entry: &ActiveBinary) -> crate::SuiteResult {
     let client = HttpClient::new(launch.bound);
     let mut result = crate::SuiteResult::default();
+    let Some(primary_case) = entry.operations.first() else {
+        result.fail(
+            format!("{}::typed_suite_has_operation_case", entry.name),
+            "active binary has no operation cases",
+        );
+        return result;
+    };
 
     record(
         &mut result,
-        "handshake_returns_supported_version",
+        format!("{}::handshake_returns_supported_version", entry.name),
         handshake_returns_supported_version(&client),
     )
     .await;
     record(
         &mut result,
-        "handshake_rejects_below_supported_min",
+        format!("{}::handshake_rejects_below_supported_min", entry.name),
         handshake_rejects_below_supported_min(&client),
     )
     .await;
     record(
         &mut result,
-        "probe_file_accepts_valid_payload",
-        probe_file_accepts_valid_payload(&client, launch),
+        format!(
+            "{}::{}::accepts_valid_payload",
+            entry.name,
+            operation_name(primary_case.operation)
+        ),
+        accepts_valid_payload(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "probe_file_rejects_missing_path",
-        probe_file_rejects_missing_path(&client, launch),
+        format!(
+            "{}::{}::rejects_invalid_payload",
+            entry.name,
+            operation_name(primary_case.operation)
+        ),
+        rejects_invalid_payload(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "unknown_operation_rejected",
-        unknown_operation_rejected(&client, launch),
+        format!("{}::unknown_operation_rejected", entry.name),
+        unknown_operation_rejected(&client, launch, entry),
     )
     .await;
     record(
         &mut result,
-        "progress_seq_starts_at_zero",
-        progress_seq_starts_at_zero(&client, launch),
+        format!(
+            "{}::{}::progress_seq_starts_at_zero",
+            entry.name,
+            operation_name(primary_case.operation)
+        ),
+        progress_seq_starts_at_zero(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "progress_seq_is_monotonic",
-        progress_seq_is_monotonic(&client, launch),
+        format!(
+            "{}::{}::progress_seq_is_monotonic",
+            entry.name,
+            operation_name(primary_case.operation)
+        ),
+        progress_seq_is_monotonic(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "terminal_frame_is_last",
-        terminal_frame_is_last(&client, launch),
+        format!(
+            "{}::{}::terminal_frame_is_last",
+            entry.name,
+            operation_name(primary_case.operation)
+        ),
+        terminal_frame_is_last(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "wrong_bearer_rejected",
-        wrong_bearer_rejected(&client, launch),
+        format!("{}::wrong_bearer_rejected", entry.name),
+        wrong_bearer_rejected(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "wrong_worker_id_rejected",
-        wrong_worker_id_rejected(&client, launch),
+        format!("{}::wrong_worker_id_rejected", entry.name),
+        wrong_worker_id_rejected(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "wrong_worker_epoch_rejected",
-        wrong_worker_epoch_rejected(&client, launch),
+        format!("{}::wrong_worker_epoch_rejected", entry.name),
+        wrong_worker_epoch_rejected(&client, launch, primary_case),
     )
     .await;
     record(
         &mut result,
-        "idempotency_same_logical_request_replay_returns_cached_response",
-        idempotency_same_logical_request_replay_returns_cached_response(&client, launch),
+        format!(
+            "{}::idempotency_same_logical_request_replay_returns_cached_response",
+            entry.name
+        ),
+        idempotency_same_logical_request_replay_returns_cached_response(
+            &client,
+            launch,
+            primary_case,
+        ),
     )
     .await;
     record(
         &mut result,
-        "idempotency_same_key_different_body_rejected",
-        idempotency_same_key_different_body_rejected(&client, launch),
+        format!(
+            "{}::idempotency_same_key_different_body_rejected",
+            entry.name
+        ),
+        idempotency_same_key_different_body_rejected(&client, launch, primary_case),
     )
     .await;
+
+    for case in &entry.operations {
+        record(
+            &mut result,
+            format!(
+                "{}::{}::operation_case_progress_terminal",
+                entry.name,
+                operation_name(case.operation)
+            ),
+            accepts_valid_payload(&client, launch, case),
+        )
+        .await;
+    }
 
     result
 }
@@ -129,15 +185,16 @@ async fn handshake_rejects_below_supported_min(client: &HttpClient) -> Result<()
     )
 }
 
-async fn probe_file_accepts_valid_payload(
+async fn accepts_valid_payload(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut stream = client
         .dispatch(
             &launch.credentials,
             "typed-valid",
-            probe_request(LeaseId(10), "/library/example.mkv"),
+            operation_request(LeaseId(10), case, PayloadKind::Valid),
         )
         .await?;
     require_frame(&mut stream.frames).await?;
@@ -145,16 +202,17 @@ async fn probe_file_accepts_valid_payload(
     Ok(())
 }
 
-async fn probe_file_rejects_missing_path(
+async fn rejects_invalid_payload(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     expect_protocol_err(
         client
             .dispatch(
                 &launch.credentials,
                 "typed-missing-path",
-                missing_path_request(LeaseId(11)),
+                operation_request(LeaseId(11), case, PayloadKind::Invalid),
             )
             .await,
         |e| matches!(e, ProtocolError::InvalidPayload { .. }),
@@ -164,9 +222,25 @@ async fn probe_file_rejects_missing_path(
 async fn unknown_operation_rejected(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    entry: &ActiveBinary,
 ) -> Result<(), ProtocolError> {
-    let mut req = probe_request(LeaseId(12), "/library/example.mkv");
-    req.operation = OperationKind::HashFile;
+    let Some(case) = entry.operations.first() else {
+        return Err(ProtocolError::InvalidPayload {
+            detail: "active binary has no operation cases".to_owned(),
+        });
+    };
+    let Some(unknown) = OperationKind::ALL.iter().copied().find(|operation| {
+        !entry
+            .operations
+            .iter()
+            .any(|case| case.operation == *operation)
+    }) else {
+        return Err(ProtocolError::InvalidPayload {
+            detail: "active binary declares every fixed operation".to_owned(),
+        });
+    };
+    let mut req = operation_request(LeaseId(12), case, PayloadKind::Valid);
+    req.operation = unknown;
     expect_protocol_err(
         client
             .dispatch(&launch.credentials, "typed-unknown-operation", req)
@@ -178,12 +252,13 @@ async fn unknown_operation_rejected(
 async fn progress_seq_starts_at_zero(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut stream = client
         .dispatch(
             &launch.credentials,
             "typed-progress-zero",
-            probe_request(LeaseId(13), "/library/example.mkv"),
+            operation_request(LeaseId(13), case, PayloadKind::Valid),
         )
         .await?;
     let frame = require_frame(&mut stream.frames).await?;
@@ -200,12 +275,13 @@ async fn progress_seq_starts_at_zero(
 async fn progress_seq_is_monotonic(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut stream = client
         .dispatch(
             &launch.credentials,
             "typed-progress-monotonic",
-            probe_request(LeaseId(14), "/library/example.mkv"),
+            operation_request(LeaseId(14), case, PayloadKind::Valid),
         )
         .await?;
     let first = require_frame(&mut stream.frames).await?;
@@ -223,12 +299,13 @@ async fn progress_seq_is_monotonic(
 async fn terminal_frame_is_last(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut stream = client
         .dispatch(
             &launch.credentials,
             "typed-terminal-last",
-            probe_request(LeaseId(15), "/library/example.mkv"),
+            operation_request(LeaseId(15), case, PayloadKind::Valid),
         )
         .await?;
     require_frame(&mut stream.frames).await?;
@@ -241,6 +318,7 @@ async fn terminal_frame_is_last(
 async fn wrong_bearer_rejected(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut creds = launch.credentials.clone();
     creds.secret = secrecy::SecretString::from("wrong");
@@ -249,7 +327,7 @@ async fn wrong_bearer_rejected(
             .dispatch(
                 &creds,
                 "typed-wrong-bearer",
-                probe_request(LeaseId(16), "/library/example.mkv"),
+                operation_request(LeaseId(16), case, PayloadKind::Valid),
             )
             .await,
         |e| matches!(e, ProtocolError::UnauthorizedBearer),
@@ -259,6 +337,7 @@ async fn wrong_bearer_rejected(
 async fn wrong_worker_id_rejected(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut creds = launch.credentials.clone();
     creds.worker_id = voom_core::WorkerId(999);
@@ -267,7 +346,7 @@ async fn wrong_worker_id_rejected(
             .dispatch(
                 &creds,
                 "typed-wrong-worker-id",
-                probe_request(LeaseId(17), "/library/example.mkv"),
+                operation_request(LeaseId(17), case, PayloadKind::Valid),
             )
             .await,
         |e| matches!(e, ProtocolError::UnknownWorkerId { .. }),
@@ -277,6 +356,7 @@ async fn wrong_worker_id_rejected(
 async fn wrong_worker_epoch_rejected(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
     let mut creds = launch.credentials.clone();
     creds.worker_epoch += 1;
@@ -285,7 +365,7 @@ async fn wrong_worker_epoch_rejected(
             .dispatch(
                 &creds,
                 "typed-wrong-worker-epoch",
-                probe_request(LeaseId(18), "/library/example.mkv"),
+                operation_request(LeaseId(18), case, PayloadKind::Valid),
             )
             .await,
         |e| matches!(e, ProtocolError::StaleWorkerEpoch { .. }),
@@ -295,8 +375,9 @@ async fn wrong_worker_epoch_rejected(
 async fn idempotency_same_logical_request_replay_returns_cached_response(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
-    let req = probe_request(LeaseId(19), "/library/example.mkv");
+    let req = operation_request(LeaseId(19), case, PayloadKind::Valid);
     let mut first = client
         .dispatch(&launch.credentials, "typed-replay", req.clone())
         .await?;
@@ -318,28 +399,24 @@ async fn idempotency_same_logical_request_replay_returns_cached_response(
 async fn idempotency_same_key_different_body_rejected(
     client: &HttpClient,
     launch: &crate::WorkerLaunch,
+    case: &OperationCase,
 ) -> Result<(), ProtocolError> {
+    let first_req = operation_request(LeaseId(20), case, PayloadKind::Valid);
+    let mut second_req = first_req.clone();
+    second_req.payload = conflict_payload(&second_req.payload);
     let mut first = client
-        .dispatch(
-            &launch.credentials,
-            "typed-replay-conflict",
-            probe_request(LeaseId(20), "/library/one.mkv"),
-        )
+        .dispatch(&launch.credentials, "typed-replay-conflict", first_req)
         .await?;
     drain_stream(&mut first.frames).await?;
     expect_protocol_err(
         client
-            .dispatch(
-                &launch.credentials,
-                "typed-replay-conflict",
-                probe_request(LeaseId(20), "/library/two.mkv"),
-            )
+            .dispatch(&launch.credentials, "typed-replay-conflict", second_req)
             .await,
         |e| matches!(e, ProtocolError::DuplicateIdempotencyKey { .. }),
     )
 }
 
-async fn record<F>(result: &mut crate::SuiteResult, name: &'static str, fut: F)
+async fn record<F>(result: &mut crate::SuiteResult, name: String, fut: F)
 where
     F: std::future::Future<Output = Result<(), ProtocolError>>,
 {
@@ -360,6 +437,21 @@ fn expect_protocol_err(
         Err(e) if predicate(&e) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn conflict_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let mut payload = payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("__voom_conflict".to_owned(), serde_json::json!(true));
+    }
+    payload
+}
+
+fn operation_name(operation: OperationKind) -> String {
+    serde_json::to_value(operation)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{operation:?}"))
 }
 
 async fn require_frame(

@@ -54,7 +54,7 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
                 continue;
             }
         };
-        let result = harness.run_all(&mut launch).await;
+        let result = harness.run_all(&mut launch, entry).await;
         let shutdown_name = format!("{}::shutdown_after_suites", entry.name);
         record_shutdown(
             &mut combined,

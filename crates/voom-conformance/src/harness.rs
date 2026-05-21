@@ -12,6 +12,8 @@ use tokio::process::{Child, ChildStdin};
 use tokio::time::timeout;
 use voom_worker_protocol::WorkerCredentials;
 
+use crate::manifest::ActiveBinary;
+
 #[derive(Debug, Default, Clone)]
 pub struct SuiteResult {
     pub passed: Vec<String>,
@@ -133,25 +135,28 @@ impl Harness {
     }
 
     /// Run the typed conformance suite.
-    pub async fn run_typed_suite(&self, launch: &mut WorkerLaunch) -> SuiteResult {
-        crate::typed_suite::run(launch).await
+    pub async fn run_typed_suite(
+        &self,
+        launch: &mut WorkerLaunch,
+        entry: &ActiveBinary,
+    ) -> SuiteResult {
+        crate::typed_suite::run(launch, entry).await
     }
 
     /// Run the raw-wire conformance suite.
-    pub async fn run_raw_wire_suite(&self, launch: &mut WorkerLaunch) -> SuiteResult {
-        crate::raw_wire_suite::run_active_worker(launch).await
+    pub async fn run_raw_wire_suite(
+        &self,
+        launch: &mut WorkerLaunch,
+        entry: &ActiveBinary,
+    ) -> SuiteResult {
+        crate::raw_wire_suite::run_active_worker(launch, entry).await
     }
 
     /// Convenience wrapper that runs both suites and merges results.
-    pub async fn run_all(&self, launch: &mut WorkerLaunch) -> SuiteResult {
-        let mut combined = self.run_typed_suite(launch).await;
-        combined.extend(self.run_raw_wire_suite(launch).await);
-        combined.fail_if_empty_for(
-            self.worker_binary
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or("worker"),
-        );
+    pub async fn run_all(&self, launch: &mut WorkerLaunch, entry: &ActiveBinary) -> SuiteResult {
+        let mut combined = self.run_typed_suite(launch, entry).await;
+        combined.extend(self.run_raw_wire_suite(launch, entry).await);
+        combined.fail_if_empty_for(&entry.name);
         combined
     }
 }
