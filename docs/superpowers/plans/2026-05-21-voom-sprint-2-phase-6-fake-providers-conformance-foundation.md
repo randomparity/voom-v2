@@ -14,6 +14,8 @@
 
 - Modify `crates/voom-core/src/failure.rs`: add `FailureClass::ALL`.
 - Modify `crates/voom-core/src/failure_test.rs`: assert `ALL` covers retry and error-code mappings.
+- Modify `crates/voom-worker-protocol/src/operation_kind.rs`: add `OperationKind::ALL`.
+- Modify `crates/voom-worker-protocol/src/operation_kind_test.rs`: assert `ALL` covers the fixed operation vocabulary.
 - Modify `crates/voom-fake-support/Cargo.toml`: add Tokio + `secrecy` dependencies already used by worker bootstrap.
 - Replace `crates/voom-fake-support/src/lib.rs`: shared runtime, provider catalog types, payload helpers, frame builders, and `run_provider`.
 - Replace `crates/voom-fake-support/src/lib_test.rs`: sibling tests for runtime-independent support logic.
@@ -157,7 +159,106 @@ git add crates/voom-core/src/failure.rs crates/voom-core/src/failure_test.rs
 git commit -m "feat(core): expose failure class coverage list"
 ```
 
-## Task 2: Fake Support Runtime
+## Task 2: OperationKind Authoritative Variant List
+
+**Files:**
+- Modify: `crates/voom-worker-protocol/src/operation_kind.rs`
+- Modify: `crates/voom-worker-protocol/src/operation_kind_test.rs`
+
+- [ ] **Step 1: Add failing tests for `OperationKind::ALL`**
+
+Add these tests to `crates/voom-worker-protocol/src/operation_kind_test.rs`:
+
+```rust
+#[test]
+fn all_contains_every_operation_kind_once() {
+    use std::collections::HashSet;
+
+    let all = OperationKind::ALL;
+    assert_eq!(all.len(), 15);
+    let unique = all.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), all.len());
+    assert!(unique.contains(&OperationKind::ScanLibrary));
+    assert!(unique.contains(&OperationKind::ProbeFile));
+    assert!(unique.contains(&OperationKind::HashFile));
+    assert!(unique.contains(&OperationKind::IdentifyMedia));
+    assert!(unique.contains(&OperationKind::ScoreQuality));
+    assert!(unique.contains(&OperationKind::SyncExternalSystem));
+    assert!(unique.contains(&OperationKind::BackUpFile));
+    assert!(unique.contains(&OperationKind::Remux));
+    assert!(unique.contains(&OperationKind::TranscodeVideo));
+    assert!(unique.contains(&OperationKind::EditTracks));
+    assert!(unique.contains(&OperationKind::ExtractAudio));
+    assert!(unique.contains(&OperationKind::TranscribeAudio));
+    assert!(unique.contains(&OperationKind::VerifyArtifact));
+    assert!(unique.contains(&OperationKind::CommitArtifact));
+    assert!(unique.contains(&OperationKind::DeleteArtifact));
+}
+
+#[test]
+fn all_operation_kinds_round_trip_through_wire_names() {
+    for operation in OperationKind::ALL {
+        let encoded = serde_json::to_string(operation).unwrap();
+        let decoded: OperationKind = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, *operation);
+    }
+}
+```
+
+- [ ] **Step 2: Run the focused failing test**
+
+Run:
+
+```bash
+cargo test -p voom-worker-protocol all_operation --all-features
+```
+
+Expected: compile failure because `OperationKind::ALL` does not exist.
+
+- [ ] **Step 3: Implement `OperationKind::ALL`**
+
+Add this associated constant inside a new `impl OperationKind` block in `crates/voom-worker-protocol/src/operation_kind.rs`:
+
+```rust
+impl OperationKind {
+    pub const ALL: &'static [Self] = &[
+        Self::ScanLibrary,
+        Self::ProbeFile,
+        Self::HashFile,
+        Self::IdentifyMedia,
+        Self::ScoreQuality,
+        Self::SyncExternalSystem,
+        Self::BackUpFile,
+        Self::Remux,
+        Self::TranscodeVideo,
+        Self::EditTracks,
+        Self::ExtractAudio,
+        Self::TranscribeAudio,
+        Self::VerifyArtifact,
+        Self::CommitArtifact,
+        Self::DeleteArtifact,
+    ];
+}
+```
+
+- [ ] **Step 4: Verify and commit**
+
+Run:
+
+```bash
+cargo test -p voom-worker-protocol all_operation --all-features
+```
+
+Expected: both new `all_operation` tests pass.
+
+Commit:
+
+```bash
+git add crates/voom-worker-protocol/src/operation_kind.rs crates/voom-worker-protocol/src/operation_kind_test.rs
+git commit -m "feat(protocol): expose operation kind coverage list"
+```
+
+## Task 3: Fake Support Runtime
 
 **Files:**
 - Modify: `crates/voom-fake-support/Cargo.toml`
@@ -280,7 +381,7 @@ git add crates/voom-fake-support/Cargo.toml crates/voom-fake-support/src/lib.rs 
 git commit -m "feat(fake-support): add provider runtime"
 ```
 
-## Task 3: Fake Provider Binaries
+## Task 4: Fake Provider Binaries
 
 **Files:**
 - Modify: all eleven `crates/voom-fakes/src/bin/fake_*.rs`
@@ -382,11 +483,12 @@ git add crates/voom-fakes/src/bin/fake_*.rs crates/voom-fakes/tests/fake_provide
 git commit -m "feat(fakes): implement provider workers"
 ```
 
-## Task 4: Manifest Operation Cases
+## Task 5: Manifest Operation Cases
 
 **Files:**
 - Modify: `crates/voom-conformance/src/manifest.rs`
 - Modify: `crates/voom-conformance/src/manifest_test.rs`
+- Modify: `crates/voom-conformance/voom-fakes-manifest.toml`
 
 - [ ] **Step 1: Write failing manifest tests**
 
@@ -454,7 +556,17 @@ Validation rules:
 - `echo-worker`, `chaos-worker`, and `benchmark-worker` must have a `ProbeFile` operation case in the manifest.
 - Every active entry must have at least one operation case.
 - Every `valid_payload` and `invalid_payload` must be an object.
-- `validate_operation_coverage` checks all 15 `OperationKind` variants from a new local `ALL_OPERATION_KINDS` constant in `manifest.rs`.
+- `validate_operation_coverage` checks all variants from `voom_worker_protocol::OperationKind::ALL`.
+- Update `voom-fakes-manifest.toml` so currently active `echo-worker`, `chaos-worker`, and `benchmark-worker` each have this operation case:
+
+```toml
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+```
+
+- Keep all eleven fake providers under `[scaffold]` in this task.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -469,11 +581,11 @@ Expected: manifest tests pass.
 Commit:
 
 ```bash
-git add crates/voom-conformance/src/manifest.rs crates/voom-conformance/src/manifest_test.rs
+git add crates/voom-conformance/src/manifest.rs crates/voom-conformance/src/manifest_test.rs crates/voom-conformance/voom-fakes-manifest.toml
 git commit -m "feat(conformance): add manifest operation cases"
 ```
 
-## Task 5: Typed And Raw Suites Use Manifest Operation Cases
+## Task 6: Typed And Raw Suites Use Manifest Operation Cases
 
 **Files:**
 - Modify: `crates/voom-conformance/src/harness.rs`
@@ -504,7 +616,8 @@ pub async fn run_active_worker(
 Run:
 
 ```bash
-cargo test -p voom-conformance typed_suite raw_wire_suite --all-features
+cargo test -p voom-conformance typed_suite --all-features
+cargo test -p voom-conformance raw_wire_suite --all-features
 ```
 
 Expected: compile failure until suite signatures and callers are updated.
@@ -516,7 +629,7 @@ Rules:
 - `handshake_*`, auth, identity, progress, terminal, and idempotency checks use `entry.operations[0].valid_payload`.
 - invalid-payload check uses `entry.operations[0].invalid_payload`.
 - operation case loop runs the happy-path progress/terminal assertions for every `entry.operations` item.
-- `unknown_operation_rejected` chooses the first operation from the fixed list that does not appear in `entry.operations`.
+- `unknown_operation_rejected` chooses the first operation from `OperationKind::ALL` that does not appear in `entry.operations`.
 - assertion names include the binary and operation, for example `fake-transcoder::transcode_video::progress_seq_starts_at_zero`.
 
 - [ ] **Step 4: Update raw-wire suite**
@@ -542,11 +655,12 @@ Rules:
 Run:
 
 ```bash
-cargo test -p voom-conformance typed_suite raw_wire_suite --all-features
+cargo test -p voom-conformance typed_suite --all-features
+cargo test -p voom-conformance raw_wire_suite --all-features
 cargo test -p voom-conformance --test conformance_all --all-features
 ```
 
-Expected: tests pass for currently active echo, chaos, and benchmark entries after manifest entries gain `ProbeFile` cases.
+Expected: tests pass for currently active echo, chaos, and benchmark entries because Task 5 already added their `ProbeFile` operation cases.
 
 Commit:
 
@@ -555,7 +669,7 @@ git add crates/voom-conformance/src/harness.rs crates/voom-conformance/src/typed
 git commit -m "feat(conformance): drive suites from manifest operations"
 ```
 
-## Task 6: Failure Taxonomy Registry
+## Task 7: Failure Taxonomy Registry
 
 **Files:**
 - Create: `crates/voom-conformance/src/failure_taxonomy.rs`
@@ -665,7 +779,7 @@ git add crates/voom-conformance/src/lib.rs crates/voom-conformance/src/failure_t
 git commit -m "feat(conformance): enforce failure taxonomy coverage"
 ```
 
-## Task 7: Promote Fake Providers In Manifest
+## Task 8: Promote Fake Providers In Manifest
 
 **Files:**
 - Modify: `crates/voom-conformance/voom-fakes-manifest.toml`
@@ -708,14 +822,7 @@ Expected: failure because fake providers are still scaffolded.
 
 - [ ] **Step 3: Promote manifest entries**
 
-Replace the scaffolded fake-provider entries with active `[[binaries]]` entries using the exact operation cases from the Provider Contract Decisions table. Keep `echo-worker`, `chaos-worker`, and `benchmark-worker` active and add this operation case to each:
-
-```toml
-[[binaries.operations]]
-operation = "probe_file"
-valid_payload = { path = "/library/example.mkv" }
-invalid_payload = { }
-```
+Replace the scaffolded fake-provider entries with active `[[binaries]]` entries using the exact operation cases from the Provider Contract Decisions table. Keep the existing `echo-worker`, `chaos-worker`, and `benchmark-worker` active entries and their `ProbeFile` operation cases unchanged.
 
 For fake providers, each active entry has:
 
@@ -755,7 +862,7 @@ git add crates/voom-conformance/voom-fakes-manifest.toml crates/voom-conformance
 git commit -m "test(conformance): promote fake providers"
 ```
 
-## Task 8: Final Phase 6 Verification
+## Task 9: Final Phase 6 Verification
 
 **Files:**
 - No planned source edits unless verification exposes a bug in the Phase 6 files touched above.
@@ -796,12 +903,12 @@ Expected: both pass with no output from `git diff --check`.
 
 - [ ] **Step 4: Handle verification fixes**
 
-If verification failed and required code changes, return to the task that owns the failed subsystem, make the smallest fix there, commit it with that task's commit style, and rerun Task 8 from Step 1.
+If verification failed and required code changes, return to the task that owns the failed subsystem, make the smallest fix there, commit it with that task's commit style, and rerun Task 9 from Step 1.
 
 If no fixes were needed, do not create an empty commit.
 
 ## Self-Review Notes
 
-- Spec coverage: Tasks 2 and 3 implement fake providers; Tasks 4 and 5 implement manifest-driven operation conformance; Task 6 implements `FailureClass` registry coverage; Task 7 activates all providers and enforces no scaffolds; Task 8 verifies Phase 6.
+- Spec coverage: Tasks 3 and 4 implement fake providers; Tasks 5 and 6 implement manifest-driven operation conformance; Task 7 implements `FailureClass` registry coverage; Task 8 activates all providers and enforces no scaffolds; Task 9 verifies Phase 6.
 - Phase 7 boundary: This plan intentionally does not add scanner-to-prober orchestration through the real scheduler, supervisor-side chaos recovery, or scheduler throughput reporting.
-- Type consistency: `OperationCase`, `ActiveBinary.operations`, `FailureClass::ALL`, and `FailureFixture` names are used consistently across tasks.
+- Type consistency: `OperationKind::ALL`, `OperationCase`, `ActiveBinary.operations`, `FailureClass::ALL`, and `FailureFixture` names are used consistently across tasks.
