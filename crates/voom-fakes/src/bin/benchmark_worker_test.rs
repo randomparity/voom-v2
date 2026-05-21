@@ -1,3 +1,8 @@
+#![expect(
+    clippy::panic,
+    reason = "benchmark-worker tests fail fast on unexpected frame variants"
+)]
+
 use super::*;
 
 fn request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {

@@ -11,8 +11,8 @@
 )]
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use secrecy::SecretString;
+use serde::Deserialize;
 use std::hint::black_box;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,8 +20,8 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use voom_worker_protocol::http::OperationDispatch;
 use voom_worker_protocol::{
-    HttpServer, OperationFuture, OperationKind, OperationRequest, OperationResponse,
-    ProgressFrame, ProtocolError, ServerHandle, WorkerCredentials,
+    HttpServer, OperationFuture, OperationKind, OperationRequest, OperationResponse, ProgressFrame,
+    ProtocolError, ServerHandle, WorkerCredentials,
 };
 
 const MAX_BENCHMARK_OPERATIONS: u64 = 10_000;
@@ -262,7 +262,13 @@ fn benchmark_dispatch_with_body_limit(
         lease_id: req.lease_id,
         seq: sample_index,
         emitted_at: completed_at,
-        payload: benchmark_result_payload(config, sample_index, elapsed_worker_ns, started_at, completed_at),
+        payload: benchmark_result_payload(
+            config,
+            sample_index,
+            elapsed_worker_ns,
+            started_at,
+            completed_at,
+        ),
     });
     let body = body_from_frames(&frames)?;
     enforce_benchmark_body_size(&body, max_body_bytes)?;
@@ -282,9 +288,11 @@ fn benchmark_result_payload(
     started_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
 ) -> serde_json::Value {
-    let worker_ops_per_second_milli = ((u128::from(config.operations) * 1_000_000_000_000_u128)
-        / u128::from(elapsed_worker_ns))
-    .min(u128::from(u64::MAX)) as u64;
+    let worker_ops_per_second_milli = u64::try_from(
+        ((u128::from(config.operations) * 1_000_000_000_000_u128) / u128::from(elapsed_worker_ns))
+            .min(u128::from(u64::MAX)),
+    )
+    .unwrap_or(u64::MAX);
     serde_json::json!({
         "mode": "benchmark",
         "operations_total": config.operations,
@@ -297,11 +305,14 @@ fn benchmark_result_payload(
 }
 
 fn elapsed_worker_ns(started_instant: Instant) -> u64 {
-    (started_instant
-        .elapsed()
-        .as_nanos()
-        .min(u128::from(u64::MAX)) as u64)
-        .max(1)
+    u64::try_from(
+        started_instant
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1)
 }
 
 fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> {
@@ -317,10 +328,7 @@ fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> 
     Ok(body)
 }
 
-fn enforce_benchmark_body_size(
-    body: &[u8],
-    max_body_bytes: usize,
-) -> Result<(), ProtocolError> {
+fn enforce_benchmark_body_size(body: &[u8], max_body_bytes: usize) -> Result<(), ProtocolError> {
     if body.len() > max_body_bytes {
         Err(ProtocolError::InvalidPayload {
             detail: format!("benchmark response body {} > {max_body_bytes}", body.len()),

@@ -2,6 +2,10 @@
     clippy::unwrap_used,
     reason = "integration tests use direct process assertions"
 )]
+#![expect(
+    clippy::panic,
+    reason = "integration tests fail fast on unexpected stream shapes"
+)]
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,8 +14,8 @@ use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_worker_protocol::{
-    ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProtocolError,
-    ProgressFrame, WorkerCredentials,
+    ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
+    ProtocolError, WorkerCredentials,
 };
 
 #[tokio::test]
@@ -164,10 +168,7 @@ async fn same_idempotency_key_with_different_benchmark_body_is_rejected() {
         .dispatch(&launch.credentials, "benchmark-conflict", second)
         .await
         .unwrap_err();
-    assert!(matches!(
-        err,
-        ProtocolError::DuplicateIdempotencyKey { .. }
-    ));
+    assert!(matches!(err, ProtocolError::DuplicateIdempotencyKey { .. }));
     launch.shutdown().await;
 }
 
