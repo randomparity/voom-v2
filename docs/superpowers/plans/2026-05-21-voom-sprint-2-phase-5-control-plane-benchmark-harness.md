@@ -354,7 +354,7 @@ impl BenchmarkLaunch {
         let worker_epoch = 0;
         let secret = "control-plane-benchmark-secret";
         let worker_bin = benchmark_worker_bin();
-        let mut child = tokio::process::Command::new(&worker_bin)
+        let child = tokio::process::Command::new(&worker_bin)
             .env("VOOM_WORKER_SECRET", secret)
             .env("VOOM_WORKER_ID", worker_id.0.to_string())
             .env("VOOM_WORKER_EPOCH", worker_epoch.to_string())
@@ -369,8 +369,10 @@ impl BenchmarkLaunch {
                     worker_bin.display()
                 ))
             })?;
-        let stdin = child.stdin.take();
-        let stdout = child
+        let mut pending = PendingLaunch { child: Some(child) };
+        let stdin = pending.child_mut()?.stdin.take();
+        let stdout = pending
+            .child_mut()?
             .stdout
             .take()
             .ok_or_else(|| TestFailure("benchmark-worker stdout missing".to_owned()))?;
@@ -385,6 +387,7 @@ impl BenchmarkLaunch {
             .ok_or_else(|| TestFailure(format!("malformed benchmark-worker bind line: {line}")))?
             .parse::<std::net::SocketAddr>()
             .map_err(|e| TestFailure(format!("benchmark-worker bind addr parse failed: {e}")))?;
+        let child = pending.take_child()?;
         Ok(Self {
             child,
             stdin,
@@ -416,6 +419,32 @@ impl BenchmarkLaunch {
 impl Drop for BenchmarkLaunch {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
+    }
+}
+
+struct PendingLaunch {
+    child: Option<Child>,
+}
+
+impl PendingLaunch {
+    fn child_mut(&mut self) -> TestResult<&mut Child> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| TestFailure("benchmark-worker pending child missing".to_owned()))
+    }
+
+    fn take_child(&mut self) -> TestResult<Child> {
+        self.child
+            .take()
+            .ok_or_else(|| TestFailure("benchmark-worker pending child already taken".to_owned()))
+    }
+}
+
+impl Drop for PendingLaunch {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 
