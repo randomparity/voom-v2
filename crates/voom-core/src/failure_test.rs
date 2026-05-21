@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn all_contains_every_failure_class_once() {
+    use std::collections::HashSet;
+
+    let all = FailureClass::ALL;
+    assert_eq!(all.len(), 22);
+    let unique = all.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), all.len());
+    assert!(unique.contains(&FailureClass::WorkerTimeout));
+    assert!(unique.contains(&FailureClass::WorkerCrash));
+    assert!(unique.contains(&FailureClass::NoEligibleWorker));
+    assert!(unique.contains(&FailureClass::ArtifactUnavailable));
+    assert!(unique.contains(&FailureClass::ArtifactChecksumMismatch));
+    assert!(unique.contains(&FailureClass::ExternalSystemUnavailable));
+    assert!(unique.contains(&FailureClass::ExternalSystemRateLimited));
+    assert!(unique.contains(&FailureClass::VerificationFailure));
+    assert!(unique.contains(&FailureClass::BackupFailure));
+    assert!(unique.contains(&FailureClass::CommitFailure));
+    assert!(unique.contains(&FailureClass::PolicyParseError));
+    assert!(unique.contains(&FailureClass::PolicyValidationError));
+    assert!(unique.contains(&FailureClass::MissingCapability));
+    assert!(unique.contains(&FailureClass::MalformedWorkerResult));
+    assert!(unique.contains(&FailureClass::UserCancellation));
+    assert!(unique.contains(&FailureClass::StaleIdentityEvidence));
+    assert!(unique.contains(&FailureClass::ClosureResolutionIncomplete));
+    assert!(unique.contains(&FailureClass::BlockedByActiveUseLease));
+    assert!(unique.contains(&FailureClass::ApprovalRequired));
+    assert!(unique.contains(&FailureClass::PriorityPolicyConflict));
+    assert!(unique.contains(&FailureClass::ProgressTimeout));
+    assert!(unique.contains(&FailureClass::AmbiguousWorkerSelection));
+}
+
+#[test]
+fn all_variants_have_retry_and_error_code_mappings() {
+    for class in FailureClass::ALL {
+        let _ = class.retry_class();
+        let _ = class.into_error_code();
+    }
+}
+
+#[test]
 fn retriable_partition_matches_spec() {
     let retriable = [
         FailureClass::WorkerTimeout,

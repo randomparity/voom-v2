@@ -65,6 +65,31 @@ pub enum FailureRetryClass {
 }
 
 impl FailureClass {
+    pub const ALL: &'static [Self] = &[
+        Self::WorkerTimeout,
+        Self::WorkerCrash,
+        Self::NoEligibleWorker,
+        Self::ArtifactUnavailable,
+        Self::ArtifactChecksumMismatch,
+        Self::ExternalSystemUnavailable,
+        Self::ExternalSystemRateLimited,
+        Self::VerificationFailure,
+        Self::BackupFailure,
+        Self::CommitFailure,
+        Self::PolicyParseError,
+        Self::PolicyValidationError,
+        Self::MissingCapability,
+        Self::MalformedWorkerResult,
+        Self::UserCancellation,
+        Self::StaleIdentityEvidence,
+        Self::ClosureResolutionIncomplete,
+        Self::BlockedByActiveUseLease,
+        Self::ApprovalRequired,
+        Self::PriorityPolicyConflict,
+        Self::ProgressTimeout,
+        Self::AmbiguousWorkerSelection,
+    ];
+
     /// Coarse-grained retry class — the single source of truth for the
     /// retriability partition. All other classifier methods derive from
     /// this match.
