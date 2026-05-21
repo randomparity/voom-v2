@@ -35,19 +35,15 @@ enum BenchmarkMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BenchmarkPayload {
-    path: String,
-    mode: BenchmarkMode,
-    operations: Option<u64>,
-    emit_every: Option<u64>,
+enum ParsedBenchmarkPayload {
+    Baseline { path: String },
+    Benchmark(BenchmarkConfig),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkConfig {
-    path: String,
     operations: u64,
     emit_every: u64,
-    progress_frames: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,17 +104,14 @@ fn handle_operation(req: OperationRequest) -> OperationFuture {
             });
         }
         let payload = parse_payload(req.payload.clone())?;
-        match payload.mode {
-            BenchmarkMode::Baseline => baseline_dispatch(&req, &payload.path),
-            BenchmarkMode::Benchmark => {
-                let config = benchmark_config(&payload)?;
-                benchmark_dispatch(&req, &config)
-            }
+        match payload {
+            ParsedBenchmarkPayload::Baseline { path } => baseline_dispatch(&req, &path),
+            ParsedBenchmarkPayload::Benchmark(config) => benchmark_dispatch(&req, &config),
         }
     })
 }
 
-fn parse_payload(value: serde_json::Value) -> Result<BenchmarkPayload, ProtocolError> {
+fn parse_payload(value: serde_json::Value) -> Result<ParsedBenchmarkPayload, ProtocolError> {
     let raw: RawBenchmarkPayload =
         serde_json::from_value(value).map_err(|e| ProtocolError::InvalidPayload {
             detail: format!("benchmark payload decode: {e}"),
@@ -138,30 +131,28 @@ fn parse_payload(value: serde_json::Value) -> Result<BenchmarkPayload, ProtocolE
             });
         }
     };
-    let payload = BenchmarkPayload {
-        path,
-        mode,
-        operations: raw.operations,
-        emit_every: raw.emit_every,
-    };
-    if mode == BenchmarkMode::Benchmark {
-        let _ = benchmark_config(&payload)?;
+    match mode {
+        BenchmarkMode::Baseline => Ok(ParsedBenchmarkPayload::Baseline { path }),
+        BenchmarkMode::Benchmark => Ok(ParsedBenchmarkPayload::Benchmark(benchmark_config(
+            raw.operations,
+            raw.emit_every,
+        )?)),
     }
-    Ok(payload)
 }
 
-fn benchmark_config(payload: &BenchmarkPayload) -> Result<BenchmarkConfig, ProtocolError> {
-    let operations = payload
-        .operations
-        .ok_or_else(|| ProtocolError::InvalidPayload {
-            detail: "benchmark operations missing".to_owned(),
-        })?;
+fn benchmark_config(
+    operations: Option<u64>,
+    emit_every: Option<u64>,
+) -> Result<BenchmarkConfig, ProtocolError> {
+    let operations = operations.ok_or_else(|| ProtocolError::InvalidPayload {
+        detail: "benchmark operations missing".to_owned(),
+    })?;
     if operations == 0 || operations > MAX_BENCHMARK_OPERATIONS {
         return Err(ProtocolError::InvalidPayload {
             detail: format!("operations must be 1..={MAX_BENCHMARK_OPERATIONS}"),
         });
     }
-    let emit_every = payload.emit_every.unwrap_or(operations);
+    let emit_every = emit_every.unwrap_or(operations);
     if emit_every == 0 || emit_every > operations {
         return Err(ProtocolError::InvalidPayload {
             detail: "emit_every must be within 1..=operations".to_owned(),
@@ -174,10 +165,8 @@ fn benchmark_config(payload: &BenchmarkPayload) -> Result<BenchmarkConfig, Proto
         });
     }
     Ok(BenchmarkConfig {
-        path: payload.path.clone(),
         operations,
         emit_every,
-        progress_frames,
     })
 }
 

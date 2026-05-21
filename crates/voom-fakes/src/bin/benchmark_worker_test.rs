@@ -18,10 +18,12 @@ fn request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
 #[test]
 fn missing_mode_defaults_to_baseline_after_path_validation() {
     let parsed = parse_payload(serde_json::json!({"path": "/library/example.mkv"})).unwrap();
-    assert_eq!(parsed.mode, BenchmarkMode::Baseline);
-    assert_eq!(parsed.path, "/library/example.mkv");
-    assert_eq!(parsed.operations, None);
-    assert_eq!(parsed.emit_every, None);
+    assert_eq!(
+        parsed,
+        ParsedBenchmarkPayload::Baseline {
+            path: "/library/example.mkv".to_owned()
+        }
+    );
 }
 
 #[test]
@@ -39,10 +41,13 @@ fn accepts_benchmark_with_valid_operations_and_emit_every() {
         "emit_every": 10
     }))
     .unwrap();
-    let config = benchmark_config(&parsed).unwrap();
-    assert_eq!(config.operations, 100);
-    assert_eq!(config.emit_every, 10);
-    assert_eq!(config.progress_frames, 10);
+    assert_eq!(
+        parsed,
+        ParsedBenchmarkPayload::Benchmark(BenchmarkConfig {
+            operations: 100,
+            emit_every: 10
+        })
+    );
 }
 
 #[test]
@@ -53,9 +58,13 @@ fn missing_emit_every_defaults_to_operations() {
         "operations": 25
     }))
     .unwrap();
-    let config = benchmark_config(&parsed).unwrap();
-    assert_eq!(config.emit_every, 25);
-    assert_eq!(config.progress_frames, 1);
+    assert_eq!(
+        parsed,
+        ParsedBenchmarkPayload::Benchmark(BenchmarkConfig {
+            operations: 25,
+            emit_every: 25
+        })
+    );
 }
 
 #[test]
@@ -100,7 +109,13 @@ fn accepts_max_operations_when_progress_frame_count_is_capped() {
         "emit_every": 100
     }))
     .unwrap();
-    assert_eq!(benchmark_config(&parsed).unwrap().progress_frames, 100);
+    assert_eq!(
+        parsed,
+        ParsedBenchmarkPayload::Benchmark(BenchmarkConfig {
+            operations: 10_000,
+            emit_every: 100
+        })
+    );
 }
 
 #[test]
@@ -136,10 +151,8 @@ fn baseline_dispatch_rejects_generated_body_above_limit() {
 fn benchmark_dispatch_emits_cadence_and_final_totals() {
     let req = request(8, serde_json::json!({}));
     let config = BenchmarkConfig {
-        path: "/library/example.mkv".to_owned(),
         operations: 25,
         emit_every: 10,
-        progress_frames: 3,
     };
     let dispatch = benchmark_dispatch(&req, &config).unwrap();
     let frames: Vec<ProgressFrame> = dispatch
@@ -199,10 +212,8 @@ fn body_size_guard_accepts_at_or_below_limit() {
 fn benchmark_dispatch_rejects_generated_body_above_limit() {
     let req = request(9, serde_json::json!({}));
     let config = BenchmarkConfig {
-        path: "/library/example.mkv".to_owned(),
         operations: 10,
         emit_every: 10,
-        progress_frames: 1,
     };
     let err = benchmark_dispatch_with_body_limit(&req, &config, 1).unwrap_err();
     assert!(err.to_string().contains("response body"));
