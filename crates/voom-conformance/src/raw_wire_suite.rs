@@ -109,9 +109,7 @@ async fn record_fixture(
     }
 }
 
-async fn golden_handshake_request_round_trips(
-    launch: &crate::WorkerLaunch,
-) -> Result<(), String> {
+async fn golden_handshake_request_round_trips(launch: &crate::WorkerLaunch) -> Result<(), String> {
     let body = serde_json::to_vec(&serde_json::json!({"offered": 1}))
         .map_err(|e| format!("handshake encode: {e}"))?;
     let response = send_raw(
@@ -123,17 +121,19 @@ async fn golden_handshake_request_round_trips(
     require_status_prefix(&parsed, "HTTP/1.1 200")
 }
 
-async fn golden_operation_request_round_trips(
-    launch: &crate::WorkerLaunch,
-) -> Result<(), String> {
-    let response = send_operation(launch, "raw-valid", operation_body(30, "/library/raw.mkv")?)
-        .await?;
+async fn golden_operation_request_round_trips(launch: &crate::WorkerLaunch) -> Result<(), String> {
+    let response =
+        send_operation(launch, "raw-valid", operation_body(30, "/library/raw.mkv")?).await?;
     let parsed = RawHttpResponse::parse(&response)?;
     require_status_prefix(&parsed, "HTTP/1.1 200")?;
     if !parsed.is_success() {
         return Err("handshake response was not successful".to_owned());
     }
-    if parsed.body.windows(b"\"lease_id\":".len()).any(|w| w == b"\"lease_id\":") {
+    if parsed
+        .body
+        .windows(b"\"lease_id\":".len())
+        .any(|w| w == b"\"lease_id\":")
+    {
         Ok(())
     } else {
         Err("operation response body missing lease_id".to_owned())
@@ -187,8 +187,8 @@ async fn wrong_worker_epoch_header_rejected(launch: &crate::WorkerLaunch) -> Res
 }
 
 async fn malformed_json_rejected(launch: &crate::WorkerLaunch) -> Result<(), String> {
-    let response = send_operation(launch, "raw-malformed-json", malformed_json_body().to_vec())
-        .await?;
+    let response =
+        send_operation(launch, "raw-malformed-json", malformed_json_body().to_vec()).await?;
     match RawHttpResponse::parse(&response)?.protocol_error()? {
         ProtocolError::InvalidPayload { .. } => Ok(()),
         other => Err(format!("expected InvalidPayload, got {other:?}")),
@@ -203,7 +203,9 @@ async fn wrong_content_length_rejected(launch: &crate::WorkerLaunch) -> Result<(
         .map(|(k, v)| (*k, v.as_str()))
         .collect::<Vec<_>>();
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(format!("POST /v1/operations HTTP/1.1\r\nHost: {}\r\n", launch.bound).as_bytes());
+    bytes.extend_from_slice(
+        format!("POST /v1/operations HTTP/1.1\r\nHost: {}\r\n", launch.bound).as_bytes(),
+    );
     bytes.extend_from_slice(format!("Content-Length: {}\r\n", body.len() + 64).as_bytes());
     for (k, v) in headers {
         bytes.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
@@ -242,18 +244,16 @@ async fn handshake_version_skew_returns_structured_error(
     .await?;
     match RawHttpResponse::parse(&response)?.protocol_error()? {
         ProtocolError::UnsupportedProtocolVersion { .. } => Ok(()),
-        other => Err(format!("expected UnsupportedProtocolVersion, got {other:?}")),
+        other => Err(format!(
+            "expected UnsupportedProtocolVersion, got {other:?}"
+        )),
     }
 }
 
 async fn idempotency_exact_byte_replay_returns_cached_response(
     launch: &crate::WorkerLaunch,
 ) -> Result<(), String> {
-    let request = operation_request(
-        35,
-        "/library/raw-replay.mkv",
-        Some("raw-replay".to_owned()),
-    )?;
+    let request = operation_request(35, "/library/raw-replay.mkv", Some("raw-replay".to_owned()))?;
     let first = send_raw(launch.bound, request.clone()).await?;
     let second = send_raw(launch.bound, request).await?;
     let first = RawHttpResponse::parse(&first)?;
@@ -455,7 +455,10 @@ fn require_status_prefix(response: &RawHttpResponse, prefix: &str) -> Result<(),
     if response.status_line.starts_with(prefix) {
         Ok(())
     } else {
-        Err(format!("expected status {prefix}, got {}", response.status_line))
+        Err(format!(
+            "expected status {prefix}, got {}",
+            response.status_line
+        ))
     }
 }
 
