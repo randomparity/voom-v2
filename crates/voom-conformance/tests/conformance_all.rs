@@ -28,7 +28,14 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
             .iter()
             .any(|entry| entry.name == "chaos-worker")
     );
+    assert!(
+        manifest
+            .active
+            .iter()
+            .any(|entry| entry.name == "benchmark-worker")
+    );
     assert!(!manifest.scaffold.iter().any(|s| s == "chaos-worker"));
+    assert!(!manifest.scaffold.iter().any(|s| s == "benchmark-worker"));
 
     let mut combined = SuiteResult::default();
     for entry in &manifest.active {

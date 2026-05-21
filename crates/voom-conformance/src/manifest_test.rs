@@ -7,16 +7,28 @@ target = "echo-worker"
 status = "active"
 required = true
 
+[[binaries]]
+name = "benchmark-worker"
+target = "benchmark-worker"
+status = "active"
+required = true
+
 [scaffold]
-binaries = ["chaos-worker", "benchmark-worker"]
+binaries = ["chaos-worker"]
 "#;
 
 #[test]
 fn parses_active_and_scaffold_entries() {
     let manifest = Manifest::parse_str(VALID).unwrap();
-    assert_eq!(manifest.active[0].name, "echo-worker");
-    assert_eq!(manifest.active[0].target, "echo-worker");
-    assert_eq!(manifest.scaffold, vec!["chaos-worker", "benchmark-worker"]);
+    assert_eq!(
+        manifest
+            .active
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["echo-worker", "benchmark-worker"]
+    );
+    assert_eq!(manifest.scaffold, vec!["chaos-worker"]);
 }
 
 #[test]
@@ -36,8 +48,8 @@ fn rejects_active_entry_with_non_active_status() {
 #[test]
 fn rejects_binary_listed_as_active_and_scaffold() {
     let raw = VALID.replace(
-        "binaries = [\"chaos-worker\", \"benchmark-worker\"]",
-        "binaries = [\"echo-worker\"]",
+        "binaries = [\"chaos-worker\"]",
+        "binaries = [\"benchmark-worker\"]",
     );
     let err = Manifest::parse_str(&raw).unwrap_err();
     assert!(err.to_string().contains("active and scaffold"));

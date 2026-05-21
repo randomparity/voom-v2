@@ -21,6 +21,13 @@ purpose = "phase 4 chaos worker - baseline conformance and process-backed fault 
 status = "active"
 required = true
 
+[[binaries]]
+name = "benchmark-worker"
+target = "benchmark-worker"
+purpose = "phase 5 benchmark worker - baseline conformance and bounded worker-level metric frames"
+status = "active"
+required = true
+
 [scaffold]
 binaries = [
     "fake-scanner",
@@ -34,5 +41,4 @@ binaries = [
     "fake-quality-scorer",
     "fake-issue-provider",
     "fake-use-lease-provider",
-    "benchmark-worker",
 ]
