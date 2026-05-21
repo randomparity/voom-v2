@@ -14,7 +14,7 @@
 
 - Modify `Cargo.toml`: add workspace dependency `toml = "0.8"`.
 - Modify `crates/voom-conformance/Cargo.toml`: add `toml.workspace = true`.
-- Modify `crates/voom-conformance/src/lib.rs`: export new modules and public types needed by integration tests.
+- Modify `crates/voom-conformance/src/lib.rs`: add the crate-level test lint allowance used by sibling crates, then export new modules and public types needed by integration tests.
 - Modify `crates/voom-conformance/src/harness.rs`: make suite runners async, call suite modules, add empty-suite failure helper.
 - Create `crates/voom-conformance/src/manifest.rs`: parse/validate `voom-fakes-manifest.toml`, resolve active binaries, and report scaffold skips.
 - Create `crates/voom-conformance/src/manifest_test.rs`: sibling tests for manifest validation and resolution.
@@ -141,7 +141,20 @@ toml = "0.8"
 toml.workspace = true
 ```
 
-Add `pub mod manifest;` to `crates/voom-conformance/src/lib.rs`.
+Add the crate-level test lint allowance and `pub mod manifest;` to
+`crates/voom-conformance/src/lib.rs`:
+
+```rust
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "conformance tests favor direct fixture assertions"
+    )
+)]
+
+pub mod manifest;
+```
 
 Implement `manifest.rs` with these public shapes:
 
@@ -543,9 +556,9 @@ The remaining checks must perform these exact assertions:
 - `wrong_bearer_rejected`: clone launch credentials, replace secret with `"wrong"`, dispatch valid request, require `ProtocolError::UnauthorizedBearer`.
 - `wrong_worker_id_rejected`: clone credentials with `WorkerId(999)`, require `ProtocolError::UnknownWorkerId`.
 - `wrong_worker_epoch_rejected`: clone credentials with `worker_epoch + 1`, require `ProtocolError::StaleWorkerEpoch`.
-- `idempotency_exact_byte_replay_returns_cached_response`: dispatch the same request object twice with key `typed-replay`; require both responses have same lease id and both streams terminate.
+- `idempotency_same_logical_request_replay_returns_cached_response`: dispatch the same request object twice with key `typed-replay`; require both responses have same lease id and both streams terminate. This typed check is not the exact-byte replay gate because `HttpClient` serializes the request internally on each dispatch.
 - `idempotency_same_key_different_body_rejected`: dispatch two requests with the same key and different `payload.path`; require `ProtocolError::DuplicateIdempotencyKey` on the second.
-- `stdin_eof_terminates_worker`: do not consume `launch`; this remains covered by an integration test that owns a separate launch and calls `shutdown`.
+- `stdin_eof_terminates_worker`: do not consume `launch` inside the typed suite. Task 6 records this as a named integration assertion using a fresh launch and `WorkerLaunch::shutdown`.
 
 Use these helper functions:
 
@@ -621,6 +634,22 @@ fn auth_headers_include_protocol_worker_and_idempotency() {
 fn malformed_json_body_is_not_valid_json() {
     assert!(serde_json::from_slice::<serde_json::Value>(malformed_json_body()).is_err());
 }
+
+#[test]
+fn raw_response_parser_decodes_protocol_error_body() {
+    let body = serde_json::to_vec(&voom_worker_protocol::ProtocolError::UnauthorizedBearer)
+        .unwrap();
+    let raw = [
+        b"HTTP/1.1 401 Unauthorized\r\ncontent-length: ".as_slice(),
+        body.len().to_string().as_bytes(),
+        b"\r\n\r\n",
+        &body,
+    ]
+    .concat();
+    let parsed = RawHttpResponse::parse(&raw).unwrap();
+    let err = parsed.protocol_error().unwrap();
+    assert!(matches!(err, voom_worker_protocol::ProtocolError::UnauthorizedBearer));
+}
 ```
 
 - [ ] **Step 2: Run raw-wire tests and verify they fail**
@@ -641,13 +670,15 @@ Implement checks:
 
 - `golden_handshake_request_round_trips`: send raw `POST /v1/handshake` with `{"offered":1}`; assert response status starts with `HTTP/1.1 200`.
 - `golden_operation_request_round_trips`: send raw valid `POST /v1/operations`; assert `HTTP/1.1 200` and response body contains `"lease_id":`.
-- `missing_auth_headers_rejected`: omit auth/version/idempotency headers; assert non-2xx.
-- `wrong_bearer_header_rejected`: use wrong bearer; assert response body contains `UNAUTHORIZED_BEARER`.
-- `wrong_worker_epoch_header_rejected`: use stale epoch; assert response body contains `STALE_WORKER_EPOCH`.
-- `malformed_json_rejected`: send body `b"{not-json"`; assert non-2xx.
+- `missing_auth_headers_rejected`: omit auth/version/idempotency headers; parse the JSON error body as `ProtocolError` and require `InvalidPayload` or `UnauthorizedBearer` according to the first rejected gate.
+- `wrong_bearer_header_rejected`: use wrong bearer; parse the JSON error body as `ProtocolError::UnauthorizedBearer`.
+- `wrong_worker_epoch_header_rejected`: use stale epoch; parse the JSON error body as `ProtocolError::StaleWorkerEpoch`.
+- `malformed_json_rejected`: send body `b"{not-json"`; parse the JSON error body as `ProtocolError::InvalidPayload`.
 - `wrong_content_length_rejected`: manually construct a request whose `Content-Length` is larger than the written body, close the socket, and assert non-2xx or connection close without `HTTP/1.1 200`.
 - `unknown_route_returns_404`: send `POST /v1/unknown`; assert `HTTP/1.1 404`.
-- `handshake_version_skew_returns_structured_error`: send unsupported offered version and assert body contains `UNSUPPORTED_PROTOCOL_VERSION`.
+- `handshake_version_skew_returns_structured_error`: send unsupported offered version; parse the JSON error body as `ProtocolError::UnsupportedProtocolVersion`.
+- `idempotency_exact_byte_replay_returns_cached_response`: construct one complete raw `POST /v1/operations` byte buffer with idempotency key `raw-replay`, send that exact `Bytes` value twice, and require both responses are `HTTP/1.1 200` with byte-identical response bodies.
+- `idempotency_same_key_different_body_rejected`: construct two raw `POST /v1/operations` byte buffers with the same idempotency key and different JSON bodies; send the first successfully, parse the second JSON error body as `ProtocolError::DuplicateIdempotencyKey`.
 
 Implement this helper shape:
 
@@ -663,6 +694,8 @@ pub async fn run_active_worker(launch: &mut crate::WorkerLaunch) -> crate::Suite
     record_raw(&mut result, "wrong_content_length_rejected", wrong_content_length_rejected(launch)).await;
     record_raw(&mut result, "unknown_route_returns_404", unknown_route_returns_404(launch)).await;
     record_raw(&mut result, "handshake_version_skew_returns_structured_error", handshake_version_skew_returns_structured_error(launch)).await;
+    record_raw(&mut result, "idempotency_exact_byte_replay_returns_cached_response", idempotency_exact_byte_replay_returns_cached_response(launch)).await;
+    record_raw(&mut result, "idempotency_same_key_different_body_rejected", idempotency_same_key_different_body_rejected(launch)).await;
     result
 }
 
@@ -676,7 +709,40 @@ async fn send_raw(addr: std::net::SocketAddr, bytes: bytes::Bytes) -> std::io::R
 }
 ```
 
-Use string inspection for HTTP status/body in this task. Do not add an HTTP response parser unless a test proves string inspection is ambiguous.
+Use a tiny raw response parser in this task:
+
+```rust
+#[derive(Debug)]
+struct RawHttpResponse {
+    status_line: String,
+    body: Vec<u8>,
+}
+
+impl RawHttpResponse {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        let split = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "missing header/body split".to_owned())?;
+        let headers = String::from_utf8_lossy(&bytes[..split]);
+        let status_line = headers.lines().next().unwrap_or_default().to_owned();
+        Ok(Self {
+            status_line,
+            body: bytes[split + 4..].to_vec(),
+        })
+    }
+
+    fn is_success(&self) -> bool {
+        self.status_line.starts_with("HTTP/1.1 2")
+    }
+
+    fn protocol_error(&self) -> Result<voom_worker_protocol::ProtocolError, String> {
+        serde_json::from_slice(&self.body).map_err(|e| format!("protocol error decode: {e}"))
+    }
+}
+```
+
+For structured error responses, parse `RawHttpResponse::protocol_error()` and match enum variants. Use status-line string checks only for `unknown_route_returns_404`, because that route intentionally returns a plain text body.
 
 - [ ] **Step 4: Run raw-wire helper tests**
 
@@ -718,11 +784,10 @@ async fn wrong_lease_fixture_is_rejected() {
 
 #[tokio::test]
 async fn frame_after_terminal_fixture_is_rejected() {
+    let bytes = fixture_bytes(FixtureMode::FrameAfterTerminal, voom_core::LeaseId(1)).unwrap();
+    assert!(has_frame_after_terminal(&bytes, voom_core::LeaseId(1)).unwrap());
     let err = classify_fixture(FixtureMode::FrameAfterTerminal).await.unwrap_err();
-    assert!(matches!(
-        err,
-        voom_worker_protocol::ProtocolError::UnexpectedFrameAfterTerminal
-    ));
+    assert!(matches!(err, voom_worker_protocol::ProtocolError::UnexpectedFrameAfterTerminal));
 }
 
 #[tokio::test]
@@ -801,6 +866,30 @@ where
     }
 }
 
+pub fn has_frame_after_terminal(bytes: &[u8], expected: LeaseId) -> Result<bool, ProtocolError> {
+    let mut terminal_seen = false;
+    for raw_line in bytes.split(|b| *b == b'\n') {
+        if raw_line.is_empty() {
+            continue;
+        }
+        let frame: ProgressFrame =
+            serde_json::from_slice(raw_line).map_err(|e| ProtocolError::MalformedFrame {
+                detail: format!("fixture scan decode: {e}"),
+            })?;
+        if frame.lease_id() != expected {
+            return Err(ProtocolError::WrongLeaseId {
+                expected,
+                got: frame.lease_id(),
+            });
+        }
+        if terminal_seen {
+            return Ok(true);
+        }
+        terminal_seen = frame.is_terminal();
+    }
+    Ok(false)
+}
+
 fn fixture_bytes(mode: FixtureMode, expected: LeaseId) -> Result<Vec<u8>, ProtocolError> {
     let now = Utc::now();
     let mut bytes = Vec::new();
@@ -874,6 +963,14 @@ pub async fn run_protocol_negative_fixture() -> crate::SuiteResult {
 }
 ```
 
+`classify_fixture(FixtureMode::FrameAfterTerminal)` must first call
+`has_frame_after_terminal(&bytes, expected)?`. If it returns `false`,
+return `ProtocolError::MalformedFrame { detail:
+"fixture missing frame after terminal".to_owned() }` before calling
+`classify_reader`. This prevents a false green where any normal
+terminal stream is treated as proof of a frame-after-terminal
+violation.
+
 - [ ] **Step 4: Run fixture tests**
 
 Run:
@@ -910,7 +1007,9 @@ use voom_conformance::{Harness, SuiteResult};
 
 #[tokio::test]
 async fn echo_worker_and_negative_fixtures_pass_conformance() {
-    let manifest = Manifest::load("crates/voom-conformance/voom-fakes-manifest.toml").unwrap();
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("voom-fakes-manifest.toml");
+    let manifest = Manifest::load(manifest_path).unwrap();
     assert_eq!(manifest.active.len(), 1);
     assert!(manifest.scaffold.iter().any(|s| s == "chaos-worker"));
 
@@ -926,12 +1025,51 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
 
     combined.extend(voom_conformance::raw_wire_suite::run_protocol_negative_fixture().await);
 
+    let stdin_result = stdin_eof_terminates_worker().await;
+    combined.extend(stdin_result);
+
     assert!(
         combined.all_passed(),
         "conformance failures: {:?}",
         combined.failed
     );
     assert!(!combined.is_empty());
+}
+
+async fn stdin_eof_terminates_worker() -> SuiteResult {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("voom-fakes-manifest.toml");
+    let manifest = match Manifest::load(manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            let mut result = SuiteResult::default();
+            result.fail("stdin_eof_terminates_worker", e.to_string());
+            return result;
+        }
+    };
+    let Some(entry) = manifest.active.iter().find(|entry| entry.name == "echo-worker") else {
+        let mut result = SuiteResult::default();
+        result.fail("stdin_eof_terminates_worker", "echo-worker active entry missing");
+        return result;
+    };
+    let mut result = SuiteResult::default();
+    let path = match resolve_active(entry) {
+        Ok(path) => path,
+        Err(e) => {
+            result.fail("stdin_eof_terminates_worker", e.to_string());
+            return result;
+        }
+    };
+    let harness = Harness::new(path);
+    match harness.launch().await {
+        Ok(launch) => match launch.shutdown(Duration::from_secs(5)).await {
+            Ok(status) if status.success() => result.pass("stdin_eof_terminates_worker"),
+            Ok(status) => result.fail("stdin_eof_terminates_worker", format!("exit status {status}")),
+            Err(e) => result.fail("stdin_eof_terminates_worker", e.to_string()),
+        },
+        Err(e) => result.fail("stdin_eof_terminates_worker", e.to_string()),
+    }
+    result
 }
 ```
 
@@ -943,13 +1081,21 @@ Run:
 cargo test -p voom-conformance --test conformance_all --all-features
 ```
 
-Expected before final fixes: fail if any suite still returns `*_pending_task_*` or if the manifest cannot resolve `echo-worker`.
+Expected before final fixes: fail if any suite still returns `*_pending_task_*`, if `stdin_eof_terminates_worker` is missing, or if the manifest cannot resolve `echo-worker`.
 
 - [ ] **Step 3: Finish exports and manifest path handling**
 
 Ensure `lib.rs` exports:
 
 ```rust
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "conformance tests favor direct fixture assertions"
+    )
+)]
+
 pub mod harness;
 pub mod manifest;
 pub mod negative_fixture;
