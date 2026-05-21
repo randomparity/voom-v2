@@ -29,6 +29,10 @@ pub(crate) fn operation_request(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "suite assembly stays explicit so each conformance check has a stable name"
+)]
 pub async fn run(launch: &mut crate::WorkerLaunch, entry: &ActiveBinary) -> crate::SuiteResult {
     let client = HttpClient::new(launch.bound);
     let mut result = crate::SuiteResult::default();

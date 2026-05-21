@@ -137,6 +137,10 @@ async fn fake_providers_follow_worker_protocol() {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "table-driven integration cases keep each provider contract visible"
+)]
 fn provider_cases() -> Vec<ProviderCase> {
     vec![
         ProviderCase {
@@ -403,9 +407,8 @@ async fn spawn_provider(case: &ProviderCase) -> TestLaunch {
 }
 
 fn binary_path(case: &ProviderCase) -> PathBuf {
-    std::env::var_os(case.bin_env)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    std::env::var_os(case.bin_env).map_or_else(
+        || {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .parent()
                 .and_then(std::path::Path::parent)
@@ -413,5 +416,7 @@ fn binary_path(case: &ProviderCase) -> PathBuf {
                 .join("target")
                 .join("debug")
                 .join(case.name)
-        })
+        },
+        PathBuf::from,
+    )
 }

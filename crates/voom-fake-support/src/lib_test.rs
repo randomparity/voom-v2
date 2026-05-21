@@ -8,7 +8,7 @@ fn provider_definition_rejects_unsupported_operation() {
         OperationKind::Remux,
         serde_json::json!({"path": "/library/movie.mkv"}),
     );
-    let err = dispatch_provider(&provider, req).unwrap_err();
+    let err = dispatch_provider(&provider, &req).unwrap_err();
     assert!(matches!(
         err,
         voom_worker_protocol::ProtocolError::UnknownOperation { .. }
@@ -22,7 +22,7 @@ fn provider_definition_accepts_secondary_operation() {
         OperationKind::HashFile,
         serde_json::json!({"path": "/library/movie.mkv"}),
     );
-    let dispatch = dispatch_provider(&provider, req).unwrap();
+    let dispatch = dispatch_provider(&provider, &req).unwrap();
     assert_eq!(dispatch.response.lease_id, voom_core::LeaseId(42));
     assert!(
         String::from_utf8(dispatch.body)
@@ -38,7 +38,7 @@ fn missing_path_is_invalid_payload() {
         OperationKind::ScanLibrary,
         serde_json::json!({"scenario": "default"}),
     );
-    let err = dispatch_provider(&provider, req).unwrap_err();
+    let err = dispatch_provider(&provider, &req).unwrap_err();
     assert!(matches!(
         err,
         voom_worker_protocol::ProtocolError::InvalidPayload { .. }

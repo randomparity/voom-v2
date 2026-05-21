@@ -154,7 +154,8 @@ pub fn validate_registry() -> Result<(), FailureTaxonomyError> {
     validate_registry_with(REGISTRY)
 }
 
-pub async fn run() -> crate::SuiteResult {
+#[must_use]
+pub fn run() -> crate::SuiteResult {
     let mut result = crate::SuiteResult::default();
     match validate_registry() {
         Ok(()) => result.pass("failure_taxonomy_registry_complete"),

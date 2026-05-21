@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 use voom_worker_protocol::OperationKind;
 
 const VALID: &str = r#"
@@ -214,7 +215,8 @@ required = true
 "#,
     );
     for operation in operations {
-        raw.push_str(&format!(
+        let _ = write!(
+            raw,
             r#"
 [[binaries.operations]]
 operation = "{}"
@@ -222,7 +224,7 @@ valid_payload = {{ path = "/library/example.mkv" }}
 invalid_payload = {{ }}
 "#,
             operation_name(*operation)
-        ));
+        );
     }
     raw
 }

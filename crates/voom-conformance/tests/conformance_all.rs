@@ -3,6 +3,23 @@ use std::time::Duration;
 use voom_conformance::manifest::{Manifest, resolve_active, validate_operation_coverage};
 use voom_conformance::{Harness, SuiteResult};
 
+const REQUIRED_ACTIVE: &[&str] = &[
+    "echo-worker",
+    "chaos-worker",
+    "benchmark-worker",
+    "fake-scanner",
+    "fake-prober",
+    "fake-transcoder",
+    "fake-remuxer",
+    "fake-backup-store",
+    "fake-health-checker",
+    "fake-identity-provider",
+    "fake-external-system",
+    "fake-quality-scorer",
+    "fake-issue-provider",
+    "fake-use-lease-provider",
+];
+
 #[tokio::test]
 async fn echo_worker_and_negative_fixtures_pass_conformance() {
     let manifest_path =
@@ -16,29 +33,18 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
             return;
         }
     };
-    const REQUIRED_ACTIVE: &[&str] = &[
-        "echo-worker",
-        "chaos-worker",
-        "benchmark-worker",
-        "fake-scanner",
-        "fake-prober",
-        "fake-transcoder",
-        "fake-remuxer",
-        "fake-backup-store",
-        "fake-health-checker",
-        "fake-identity-provider",
-        "fake-external-system",
-        "fake-quality-scorer",
-        "fake-issue-provider",
-        "fake-use-lease-provider",
-    ];
     for name in REQUIRED_ACTIVE {
         assert!(manifest.active.iter().any(|entry| entry.name == *name));
     }
     for name in &REQUIRED_ACTIVE[3..] {
         assert!(!manifest.scaffold.iter().any(|scaffold| scaffold == name));
     }
-    validate_operation_coverage(&manifest).unwrap();
+    if let Err(e) = validate_operation_coverage(&manifest) {
+        let mut combined = SuiteResult::default();
+        combined.fail("manifest_operation_coverage", e.to_string());
+        assert_all_passed(&combined);
+        return;
+    }
 
     let mut combined = SuiteResult::default();
     for entry in &manifest.active {
@@ -68,7 +74,7 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
     }
 
     combined.extend(voom_conformance::raw_wire_suite::run_protocol_negative_fixture().await);
-    combined.extend(voom_conformance::failure_taxonomy::run().await);
+    combined.extend(voom_conformance::failure_taxonomy::run());
 
     let stdin_result = stdin_eof_terminates_worker().await;
     combined.extend(stdin_result);

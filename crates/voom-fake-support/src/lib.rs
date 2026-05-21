@@ -219,12 +219,12 @@ const PROVIDERS: &[ProviderCatalogEntry] = &[
 
 #[must_use]
 pub fn provider_definition(binary_name: &str) -> Option<ProviderDefinition> {
-    provider_entry(binary_name).map(|entry| entry.definition.clone())
+    provider_entry(binary_name).map(|entry| entry.definition)
 }
 
 pub fn dispatch_provider(
     provider: &ProviderDefinition,
-    req: OperationRequest,
+    req: &OperationRequest,
 ) -> Result<OperationDispatch, ProtocolError> {
     let entry =
         provider_entry(provider.binary_name).ok_or_else(|| ProtocolError::UnknownOperation {
@@ -237,7 +237,7 @@ pub fn dispatch_provider(
     }
 
     let scenario = scenario(&req.payload);
-    validate_payload(entry.kind, &req)?;
+    validate_payload(entry.kind, req)?;
     let now = Utc::now();
     let progress = ProgressFrame::Progress {
         lease_id: req.lease_id,
@@ -281,8 +281,8 @@ pub async fn run_provider(binary_name: &'static str) -> Result<(), Box<dyn std::
     let server = HttpServer::new(
         credentials,
         Arc::new(move |req| {
-            let provider = provider.clone();
-            Box::pin(async move { dispatch_provider(&provider, req) }) as OperationFuture
+            let provider = provider;
+            Box::pin(async move { dispatch_provider(&provider, &req) }) as OperationFuture
         }),
     );
     let running = server
