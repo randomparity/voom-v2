@@ -65,9 +65,11 @@ Exit criteria:
 - `echo-worker` passes the typed and raw-wire suites.
 - Manifest handling proves scaffold binaries are skipped
   intentionally, not silently ignored.
-- Tier 1 covers retry safety, worker identity, lease isolation, and
-  terminal-stream correctness before any Phase 4/5 worker can be
-  promoted from scaffold to active.
+- Tier 1 covers active-worker retry safety and worker identity, plus
+  conformance-owned negative fixtures for lease isolation and
+  terminal-stream correctness. No Phase 4/5 worker can be promoted
+  from scaffold to active until it passes the active-worker Tier 1
+  checks.
 
 ## 3. Architecture
 
@@ -80,11 +82,19 @@ explicit suite modules:
 | `manifest.rs` | Parse `voom-fakes-manifest.toml`, classify active vs scaffold binaries, and fail closed on ambiguous entries. |
 | `typed_suite.rs` | Semantic protocol checks through `voom-worker-protocol::HttpClient` and typed envelopes. |
 | `raw_wire_suite.rs` | Byte-level protocol checks through `voom-worker-protocol::low_level` and hand-authored HTTP/JSON bytes. |
+| `negative_fixture.rs` | Conformance-owned fixture server / stream source that emits intentionally malformed response bodies below the typed worker helper path. |
 
 The crate remains independent from `voom-fake-support` and
-`voom-fakes`. The harness only knows binary paths and the public wire
-protocol. This preserves the Sprint 2 invariant that shared fake
-helpers cannot hide contract drift.
+`voom-fakes`. The harness only knows binary paths, the public wire
+protocol, and conformance-owned negative fixtures. This preserves the
+Sprint 2 invariant that shared fake helpers cannot hide contract
+drift.
+
+`echo-worker` stays minimal and positive-path only. It is not modified
+to emit malformed response streams. Wrong-lease, frame-after-terminal,
+and truncated-response cases are produced by `negative_fixture.rs`, so
+the suite does not confuse protocol-reader coverage with active-worker
+behavior.
 
 ### 3.1 Manifest schema and resolution
 
@@ -130,31 +140,42 @@ Resolution rules:
 
 ## 4. Data Flow
 
-A normal conformance run proceeds as follows:
+A normal active-worker conformance run proceeds as follows:
 
 1. Load and validate `voom-fakes-manifest.toml`.
 2. For each active binary, launch the worker and wait for
    `BOUND addr=...`.
 3. Run the typed suite through the public typed client path.
-4. Run the raw-wire suite by opening direct loopback connections and
-   sending hand-authored HTTP/JSON bytes.
+4. Run the active-worker raw-wire suite by opening direct loopback
+   connections to the worker and sending hand-authored HTTP/JSON
+   requests for request/auth/idempotency checks.
 5. Aggregate named pass/fail entries into `SuiteResult`.
 6. Fail the active binary if no checks executed.
 7. Report scaffold binaries as skipped by name without counting them
    as passing.
 
+The protocol-negative fixture run is separate: the harness starts or
+constructs a conformance-owned fixture that emits malformed response
+bodies, then asserts `NdjsonReader` and the raw-wire suite classify
+those responses correctly. Fixture passes never count as active-worker
+passes.
+
 For this slice, `echo-worker` is the only active worker expected to
 pass. `chaos-worker` and `benchmark-worker` remain listed as
 scaffolds until their non-faulting baseline operations exist and pass
-all Tier 1 checks.
+the active-worker Tier 1 checks.
 
 ## 5. Assertions
 
-The conformance assertions are split into two tiers.
+The conformance assertions are split into two tiers. Tier 1 has two
+target groups: active-worker checks and protocol-negative fixture
+checks.
 
-### 5.1 Tier 1 — Required Now
+### 5.1 Tier 1 — Active worker checks required now
 
-Tier 1 lands in this follow-up and must pass against `echo-worker`.
+These checks land in this follow-up and must pass against
+`echo-worker`. They are also the promotion gate for later active
+workers such as `chaos-worker` and `benchmark-worker`.
 
 Typed assertions:
 
@@ -178,9 +199,6 @@ Raw-wire assertions:
 
 - `golden_handshake_request_round_trips`
 - `golden_operation_request_round_trips`
-- `frame_with_wrong_lease_id_rejected`
-- `frame_after_terminal_rejected`
-- `partial_response_body_classified`
 - `missing_auth_headers_rejected`
 - `wrong_bearer_header_rejected`
 - `wrong_worker_epoch_header_rejected`
@@ -189,12 +207,28 @@ Raw-wire assertions:
 - `unknown_route_returns_404`
 - `handshake_version_skew_returns_structured_error`
 
-### 5.2 Tier 2 — Later Phase 4/5 Admission Gates
+### 5.2 Tier 1 — Protocol negative fixture checks required now
+
+These checks land in this follow-up but run against the
+conformance-owned negative fixture, not `echo-worker` and not any
+Phase 4/5 active worker:
+
+- `frame_with_wrong_lease_id_rejected`
+- `frame_after_terminal_rejected`
+- `partial_response_body_classified`
+
+The fixture emits the malformed response body directly below the typed
+worker helper path. These checks prove the conformance reader and
+classification path rejects dangerous response streams without making
+positive-path workers implement fault modes.
+
+### 5.3 Tier 2 — Later Phase 4/5 Admission Gates
 
 Tier 2 does not need to land in this follow-up. These checks become
 mandatory before Phase 4 or Phase 5 declares its deep implementation
 complete, but they are not sufficient to promote a binary from
-`[scaffold]` to active. Promotion requires Tier 1 first.
+`[scaffold]` to active. Promotion requires the active-worker Tier 1
+checks first.
 
 - Cancellation route drains the current operation.
 - Oversize NDJSON frame handling.
@@ -247,9 +281,13 @@ Integration tests:
 - Exact-byte idempotency replay returns the cached response.
 - Same-key / different-body idempotency replay fails with
   `DuplicateIdempotencyKey`.
-- Wrong lease id and frame-after-terminal streams fail conformance.
-- Partial response body is classified according to the existing
-  `NdjsonReader` behavior.
+- The negative fixture emits a wrong-lease-id frame and the harness
+  classifies it as rejection.
+- The negative fixture emits a frame after terminal and the harness
+  classifies it as rejection.
+- The negative fixture truncates a response body and the harness
+  classifies it according to the existing `NdjsonReader` behavior.
+- Fixture results never count as active-worker passes.
 
 Verification:
 
@@ -261,8 +299,11 @@ Verification:
 1. Add manifest parsing and result aggregation tests.
 2. Add `typed_suite.rs` and wire `Harness::run_typed_suite`.
 3. Add `raw_wire_suite.rs` and wire `Harness::run_raw_wire_suite`.
-4. Add integration tests that run `echo-worker` through `run_all`.
-5. Update `voom-fakes-manifest.toml` to use the active-entry schema
+4. Add `negative_fixture.rs` and wire the protocol-negative fixture
+   checks into the raw-wire suite.
+5. Add integration tests that run `echo-worker` through `run_all` and
+   the negative fixture through the protocol-negative checks.
+6. Update `voom-fakes-manifest.toml` to use the active-entry schema
    for `echo-worker` and document the Phase 4/5 promotion rule next
    to the scaffold list.
 
