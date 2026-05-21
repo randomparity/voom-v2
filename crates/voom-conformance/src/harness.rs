@@ -28,6 +28,28 @@ impl SuiteResult {
     pub fn all_passed(&self) -> bool {
         self.failed.is_empty()
     }
+
+    pub fn pass(&mut self, name: impl Into<String>) {
+        self.passed.push(name.into());
+    }
+
+    pub fn fail(&mut self, name: impl Into<String>, detail: impl Into<String>) {
+        self.failed.push((name.into(), detail.into()));
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        self.passed.extend(other.passed);
+        self.failed.extend(other.failed);
+    }
+
+    pub fn fail_if_empty_for(&mut self, binary_name: &str) {
+        if self.is_empty() {
+            self.fail(
+                format!("{binary_name}::empty_suite"),
+                "active binary executed zero conformance checks",
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,27 +132,26 @@ impl Harness {
         })
     }
 
-    /// Placeholder for the typed conformance suite — Phase 1
-    /// commit 12 will fill this in.
-    #[must_use]
-    pub fn run_typed_suite(&self, _launch: &mut WorkerLaunch) -> SuiteResult {
-        SuiteResult::default()
+    /// Run the typed conformance suite.
+    pub async fn run_typed_suite(&self, launch: &mut WorkerLaunch) -> SuiteResult {
+        crate::typed_suite::run(launch).await
     }
 
-    /// Placeholder for the raw-wire conformance suite — Phase 1
-    /// commit 12 will fill this in.
-    #[must_use]
-    pub fn run_raw_wire_suite(&self, _launch: &mut WorkerLaunch) -> SuiteResult {
-        SuiteResult::default()
+    /// Run the raw-wire conformance suite.
+    pub async fn run_raw_wire_suite(&self, launch: &mut WorkerLaunch) -> SuiteResult {
+        crate::raw_wire_suite::run_active_worker(launch).await
     }
 
     /// Convenience wrapper that runs both suites and merges results.
-    #[must_use]
-    pub fn run_all(&self, launch: &mut WorkerLaunch) -> SuiteResult {
-        let mut combined = self.run_typed_suite(launch);
-        let raw = self.run_raw_wire_suite(launch);
-        combined.passed.extend(raw.passed);
-        combined.failed.extend(raw.failed);
+    pub async fn run_all(&self, launch: &mut WorkerLaunch) -> SuiteResult {
+        let mut combined = self.run_typed_suite(launch).await;
+        combined.extend(self.run_raw_wire_suite(launch).await);
+        combined.fail_if_empty_for(
+            self.worker_binary
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("worker"),
+        );
         combined
     }
 }
@@ -150,6 +171,10 @@ impl std::fmt::Debug for WorkerLaunch {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+#[path = "harness_test.rs"]
+mod tests;
 
 impl WorkerLaunch {
     /// Drop the stdin pipe (worker's parent-death watchdog sees EOF

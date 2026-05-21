@@ -16,5 +16,7 @@
 
 pub mod harness;
 pub mod manifest;
+pub mod raw_wire_suite;
+pub mod typed_suite;
 
 pub use harness::{Harness, SuiteResult, WorkerLaunch};
