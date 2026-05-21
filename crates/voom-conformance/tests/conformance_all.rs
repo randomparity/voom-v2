@@ -4,19 +4,38 @@ use voom_conformance::manifest::{Manifest, resolve_active};
 use voom_conformance::{Harness, SuiteResult};
 
 #[tokio::test]
-async fn echo_worker_and_negative_fixtures_pass_conformance()
--> Result<(), Box<dyn std::error::Error>> {
+async fn echo_worker_and_negative_fixtures_pass_conformance() {
     let manifest_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("voom-fakes-manifest.toml");
-    let manifest = Manifest::load(manifest_path)?;
+    let manifest = match Manifest::load(manifest_path) {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            let mut combined = SuiteResult::default();
+            combined.fail("manifest_loads", e.to_string());
+            assert_all_passed(&combined);
+            return;
+        }
+    };
     assert_eq!(manifest.active.len(), 1);
     assert!(manifest.scaffold.iter().any(|s| s == "chaos-worker"));
 
     let mut combined = SuiteResult::default();
     for entry in &manifest.active {
-        let path = resolve_active(entry)?;
+        let path = match resolve_active(entry) {
+            Ok(path) => path,
+            Err(e) => {
+                combined.fail(format!("{}::resolve_active", entry.name), e.to_string());
+                continue;
+            }
+        };
         let harness = Harness::new(path);
-        let mut launch = harness.launch().await?;
+        let mut launch = match harness.launch().await {
+            Ok(launch) => launch,
+            Err(e) => {
+                combined.fail(format!("{}::launch", entry.name), e.to_string());
+                continue;
+            }
+        };
         let result = harness.run_all(&mut launch).await;
         let shutdown_name = format!("{}::shutdown_after_suites", entry.name);
         record_shutdown(
@@ -32,13 +51,16 @@ async fn echo_worker_and_negative_fixtures_pass_conformance()
     let stdin_result = stdin_eof_terminates_worker().await;
     combined.extend(stdin_result);
 
+    assert_all_passed(&combined);
+}
+
+fn assert_all_passed(combined: &SuiteResult) {
     assert!(
         combined.all_passed(),
         "conformance failures: {:?}",
         combined.failed
     );
     assert!(!combined.is_empty());
-    Ok(())
 }
 
 async fn stdin_eof_terminates_worker() -> SuiteResult {
