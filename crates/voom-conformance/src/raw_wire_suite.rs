@@ -75,6 +75,40 @@ pub async fn run_active_worker(launch: &mut crate::WorkerLaunch) -> crate::Suite
     result
 }
 
+pub async fn run_protocol_negative_fixture() -> crate::SuiteResult {
+    let mut result = crate::SuiteResult::default();
+    record_fixture(
+        &mut result,
+        "frame_with_wrong_lease_id_rejected",
+        crate::negative_fixture::FixtureMode::WrongLeaseId,
+    )
+    .await;
+    record_fixture(
+        &mut result,
+        "frame_after_terminal_rejected",
+        crate::negative_fixture::FixtureMode::FrameAfterTerminal,
+    )
+    .await;
+    record_fixture(
+        &mut result,
+        "partial_response_body_classified",
+        crate::negative_fixture::FixtureMode::TruncatedBody,
+    )
+    .await;
+    result
+}
+
+async fn record_fixture(
+    result: &mut crate::SuiteResult,
+    name: &'static str,
+    mode: crate::negative_fixture::FixtureMode,
+) {
+    match crate::negative_fixture::classify_fixture(mode).await {
+        Err(_) => result.pass(name),
+        Ok(()) => result.fail(name, "fixture was accepted"),
+    }
+}
+
 async fn golden_handshake_request_round_trips(
     launch: &crate::WorkerLaunch,
 ) -> Result<(), String> {

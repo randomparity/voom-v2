@@ -16,6 +16,7 @@
 
 pub mod harness;
 pub mod manifest;
+pub mod negative_fixture;
 pub mod raw_wire_suite;
 pub mod typed_suite;
 
