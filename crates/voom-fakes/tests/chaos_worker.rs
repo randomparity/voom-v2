@@ -170,6 +170,35 @@ async fn deadline_exceeded_delays_progress_past_short_timeout() {
     launch.shutdown().await;
 }
 
+#[tokio::test]
+async fn short_body_with_larger_content_length_is_not_accepted() {
+    let mut launch = spawn_chaos().await;
+    let body = operation_body(
+        206,
+        serde_json::json!({
+            "path": "/library/example.mkv"
+        }),
+    );
+    let mut stream = tokio::net::TcpStream::connect(launch.bound).await.unwrap();
+    write_raw_operation_with_content_length(
+        &mut stream,
+        launch.bound,
+        body.clone(),
+        body.len() + 64,
+        "short-body",
+    )
+    .await;
+    stream.shutdown().await.unwrap();
+    let mut bytes = Vec::new();
+    let outcome = tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, bytes.len());
+    assert_text_does_not_contain(&bytes, "HTTP/1.1 200 OK");
+    launch.shutdown().await;
+}
+
 fn operation_request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
     OperationRequest {
         operation: OperationKind::ProbeFile,
@@ -268,6 +297,29 @@ async fn write_raw_operation(
          X-Voom-Idempotency-Key: {idempotency_key}\r\n\
          \r\n",
         body.len(),
+        voom_core::PROTOCOL_VERSION
+    );
+    stream.write_all(req.as_bytes()).await.unwrap();
+    stream.write_all(&body).await.unwrap();
+}
+
+async fn write_raw_operation_with_content_length(
+    stream: &mut tokio::net::TcpStream,
+    bound: std::net::SocketAddr,
+    body: Vec<u8>,
+    content_length: usize,
+    idempotency_key: &str,
+) {
+    let req = format!(
+        "POST /v1/operations HTTP/1.1\r\n\
+         Host: {bound}\r\n\
+         Content-Length: {content_length}\r\n\
+         X-Voom-Protocol-Version: {}\r\n\
+         Authorization: Bearer phase1-bootstrap-secret\r\n\
+         X-Voom-Worker-Id: 1\r\n\
+         X-Voom-Worker-Epoch: 0\r\n\
+         X-Voom-Idempotency-Key: {idempotency_key}\r\n\
+         \r\n",
         voom_core::PROTOCOL_VERSION
     );
     stream.write_all(req.as_bytes()).await.unwrap();

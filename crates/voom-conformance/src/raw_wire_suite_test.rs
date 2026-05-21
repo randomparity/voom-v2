@@ -52,3 +52,30 @@ fn raw_response_parser_decodes_protocol_error_body() {
         voom_worker_protocol::ProtocolError::UnauthorizedBearer
     ));
 }
+
+#[test]
+fn wrong_content_length_classifier_rejects_success_response() {
+    let raw = b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec();
+    let err = classify_wrong_content_length_response(Ok(raw)).unwrap_err();
+    assert!(err.contains("accepted"));
+}
+
+#[test]
+fn wrong_content_length_classifier_accepts_non_success_response() {
+    let raw = b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n".to_vec();
+    classify_wrong_content_length_response(Ok(raw)).unwrap();
+}
+
+#[test]
+fn wrong_content_length_classifier_accepts_clean_close() {
+    classify_wrong_content_length_response(Ok(Vec::new())).unwrap();
+}
+
+#[test]
+fn wrong_content_length_classifier_rejects_timeout() {
+    let err = classify_wrong_content_length_response(Err(
+        "wrong content-length hung waiting for response/close".to_owned(),
+    ))
+    .unwrap_err();
+    assert!(err.contains("hung"));
+}

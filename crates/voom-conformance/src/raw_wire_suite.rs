@@ -254,12 +254,9 @@ async fn wrong_content_length_rejected(
     bytes.extend_from_slice(b"\r\n");
     bytes.extend_from_slice(&body);
 
-    match send_raw(launch.bound, Bytes::from(bytes)).await {
-        Ok(response) if response.starts_with(b"HTTP/1.1 200") => {
-            Err("wrong content-length was accepted".to_owned())
-        }
-        Ok(_) | Err(_) => Ok(()),
-    }
+    classify_wrong_content_length_response(
+        send_raw_short_body(launch.bound, Bytes::from(bytes)).await,
+    )
 }
 
 async fn unknown_route_returns_404(launch: &crate::WorkerLaunch) -> Result<(), String> {
@@ -488,6 +485,62 @@ async fn send_raw(addr: std::net::SocketAddr, bytes: Bytes) -> Result<Vec<u8>, S
     })
     .await
     .map_err(|_| "raw HTTP response timed out".to_owned())?
+}
+
+async fn send_raw_short_body(addr: std::net::SocketAddr, bytes: Bytes) -> Result<Vec<u8>, String> {
+    tokio::time::timeout(std::time::Duration::from_millis(250), async move {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        stream
+            .write_all(&bytes)
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        stream
+            .shutdown()
+            .await
+            .map_err(|e| format!("shutdown write: {e}"))?;
+        read_raw_response(&mut stream).await
+    })
+    .await
+    .map_err(|_| "wrong content-length hung waiting for response/close".to_owned())?
+}
+
+async fn read_raw_response(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut buf = [0_u8; 1024];
+    let mut header_len = None;
+    loop {
+        let n = stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&buf[..n]);
+        if header_len.is_none() {
+            header_len = out.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+        }
+        if let Some(header_len) = header_len {
+            let Ok(body_len) = content_length(&out[..header_len]) else {
+                return Ok(out);
+            };
+            if out.len() >= header_len + body_len {
+                return Ok(out);
+            }
+        }
+    }
+}
+
+fn classify_wrong_content_length_response(response: Result<Vec<u8>, String>) -> Result<(), String> {
+    match response {
+        Ok(response) if response.starts_with(b"HTTP/1.1 200") => {
+            Err("wrong content-length was accepted".to_owned())
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn content_length(headers: &[u8]) -> Result<usize, String> {

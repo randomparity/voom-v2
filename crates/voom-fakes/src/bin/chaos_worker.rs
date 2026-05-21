@@ -204,7 +204,9 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, Protoc
                 detail: format!("read body: {e}"),
             })?;
         if n == 0 {
-            break;
+            return Err(ProtocolError::InvalidPayload {
+                detail: "connection closed before full body".to_owned(),
+            });
         }
         buf.extend_from_slice(&tmp[..n]);
     }
