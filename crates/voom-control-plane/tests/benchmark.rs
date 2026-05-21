@@ -62,9 +62,9 @@ async fn benchmark_worker_protocol_boundary_reports_metrics() -> TestResult<()> 
             Ok(())
         }
         (Err(err), Ok(())) => Err(err),
-        (Ok(summary), Err(cleanup_err)) => {
-            Err(TestFailure(format!("{summary}; cleanup failed: {cleanup_err}")))
-        }
+        (Ok(summary), Err(cleanup_err)) => Err(TestFailure(format!(
+            "{summary}; cleanup failed: {cleanup_err}"
+        ))),
         (Err(err), Err(cleanup_err)) => {
             Err(TestFailure(format!("{err}; cleanup failed: {cleanup_err}")))
         }
@@ -157,8 +157,10 @@ async fn collect_and_validate_stream(
                 }
                 let throughput = validate_result_payload(sample_index, &payload)?;
                 let err = dispatch.frames.next_frame().await.unwrap_err();
-                if !matches!(err, voom_worker_protocol::ProtocolError::UnexpectedFrameAfterTerminal)
-                {
+                if !matches!(
+                    err,
+                    voom_worker_protocol::ProtocolError::UnexpectedFrameAfterTerminal
+                ) {
                     return Err(TestFailure(format!(
                         "sample {sample_index}: expected UnexpectedFrameAfterTerminal got={err}"
                     )));
@@ -195,12 +197,12 @@ fn validate_progress_payload(
         EMIT_EVERY * (u64::try_from(progress_index).unwrap() + 1),
     )?;
     let elapsed = get_u64(sample_index, payload, "elapsed_worker_ns")?;
-    if let Some(previous) = previous_elapsed {
-        if elapsed < *previous {
-            return Err(TestFailure(format!(
-                "sample {sample_index}: elapsed_worker_ns went backward previous={previous} current={elapsed}"
-            )));
-        }
+    if let Some(previous) = previous_elapsed
+        && elapsed < *previous
+    {
+        return Err(TestFailure(format!(
+            "sample {sample_index}: elapsed_worker_ns went backward previous={previous} current={elapsed}"
+        )));
     }
     *previous_elapsed = Some(elapsed);
     Ok(())
@@ -294,7 +296,7 @@ impl BenchmarkLaunch {
         let worker_id = voom_core::WorkerId(1);
         let worker_epoch = 0;
         let secret = "control-plane-benchmark-secret";
-        let worker_bin = benchmark_worker_bin();
+        let worker_bin = benchmark_worker_bin()?;
         let child = tokio::process::Command::new(&worker_bin)
             .env("VOOM_WORKER_SECRET", secret)
             .env("VOOM_WORKER_ID", worker_id.0.to_string())
@@ -311,47 +313,63 @@ impl BenchmarkLaunch {
                 ))
             })?;
         let mut pending = PendingLaunch { child: Some(child) };
-        let stdin = pending.child_mut()?.stdin.take();
-        let stdout = pending
-            .child_mut()?
-            .stdout
-            .take()
-            .ok_or_else(|| TestFailure("benchmark-worker stdout missing".to_owned()))?;
-        let mut lines = BufReader::new(stdout).lines();
-        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
-            .await
-            .map_err(|_| TestFailure("benchmark-worker bind line timed out".to_owned()))?
-            .map_err(TestFailure::from)?
-            .ok_or_else(|| TestFailure("benchmark-worker exited before bind line".to_owned()))?;
-        let bound = line
-            .strip_prefix("BOUND addr=")
-            .ok_or_else(|| TestFailure(format!("malformed benchmark-worker bind line: {line}")))?
-            .parse::<std::net::SocketAddr>()
-            .map_err(|e| TestFailure(format!("benchmark-worker bind addr parse failed: {e}")))?;
-        let child = pending.take_child()?;
-        Ok(Self {
-            child,
-            stdin,
-            bound,
-            credentials: WorkerCredentials {
-                worker_id,
-                worker_epoch,
-                secret: SecretString::from(secret),
-            },
-        })
+        let result = async {
+            let stdin = pending.child_mut()?.stdin.take();
+            let stdout = pending
+                .child_mut()?
+                .stdout
+                .take()
+                .ok_or_else(|| TestFailure("benchmark-worker stdout missing".to_owned()))?;
+            let mut lines = BufReader::new(stdout).lines();
+            let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+                .await
+                .map_err(|_| TestFailure("benchmark-worker bind line timed out".to_owned()))?
+                .map_err(TestFailure::from)?
+                .ok_or_else(|| {
+                    TestFailure("benchmark-worker exited before bind line".to_owned())
+                })?;
+            let bound = line
+                .strip_prefix("BOUND addr=")
+                .ok_or_else(|| {
+                    TestFailure(format!("malformed benchmark-worker bind line: {line}"))
+                })?
+                .parse::<std::net::SocketAddr>()
+                .map_err(|e| {
+                    TestFailure(format!("benchmark-worker bind addr parse failed: {e}"))
+                })?;
+            let child = pending.take_child()?;
+            Ok(Self {
+                child,
+                stdin,
+                bound,
+                credentials: WorkerCredentials {
+                    worker_id,
+                    worker_epoch,
+                    secret: SecretString::from(secret),
+                },
+            })
+        }
+        .await;
+        if result.is_err() {
+            let _ = pending.kill_and_wait().await;
+        }
+        result
     }
 
     async fn shutdown(&mut self) -> TestResult<()> {
         drop(self.stdin.take());
-        let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-            .await
-            .map_err(|_| {
-                let _ = self.child.start_kill();
-                TestFailure("benchmark-worker cleanup timed out".to_owned())
-            })?
-            .map_err(TestFailure::from)?;
+        let status = if let Ok(status) =
+            tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await
+        {
+            status.map_err(TestFailure::from)?
+        } else {
+            terminate_child(&mut self.child).await?;
+            return Err(TestFailure("benchmark-worker cleanup timed out".to_owned()));
+        };
         if !status.success() {
-            return Err(TestFailure(format!("benchmark-worker exited with {status}")));
+            return Err(TestFailure(format!(
+                "benchmark-worker exited with {status}"
+            )));
         }
         Ok(())
     }
@@ -379,6 +397,13 @@ impl PendingLaunch {
             .take()
             .ok_or_else(|| TestFailure("benchmark-worker pending child already taken".to_owned()))
     }
+
+    async fn kill_and_wait(&mut self) -> TestResult<()> {
+        if let Some(mut child) = self.child.take() {
+            terminate_child(&mut child).await?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for PendingLaunch {
@@ -389,26 +414,63 @@ impl Drop for PendingLaunch {
     }
 }
 
-fn benchmark_worker_bin() -> PathBuf {
+async fn terminate_child(child: &mut Child) -> TestResult<()> {
+    let _ = child.start_kill();
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .map_err(|_| TestFailure("benchmark-worker kill cleanup timed out".to_owned()))?
+        .map_err(TestFailure::from)?;
+    Ok(())
+}
+
+fn benchmark_worker_bin() -> TestResult<PathBuf> {
     if let Some(path) = std::env::var_os("VOOM_BENCHMARK_WORKER_BIN") {
-        return PathBuf::from(path);
+        return Ok(PathBuf::from(path));
     }
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_benchmark-worker") {
-        return PathBuf::from(path);
+        return Ok(PathBuf::from(path));
     }
+    build_benchmark_worker()?;
     let target_dir =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, PathBuf::from);
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, target_dir_from_env);
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    target_dir
+    Ok(target_dir
         .join("debug")
-        .join(format!("benchmark-worker{suffix}"))
+        .join(format!("benchmark-worker{suffix}")))
+}
+
+fn build_benchmark_worker() -> TestResult<()> {
+    let status = std::process::Command::new("cargo")
+        .args(["build", "-p", "voom-fakes", "--bin", "benchmark-worker"])
+        .current_dir(workspace_root())
+        .status()
+        .map_err(|e| TestFailure(format!("benchmark-worker build failed to start: {e}")))?;
+    if !status.success() {
+        return Err(TestFailure(format!(
+            "benchmark-worker build exited with {status}"
+        )));
+    }
+    Ok(())
+}
+
+fn target_dir_from_env(path: std::ffi::OsString) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        workspace_root().join(path)
+    }
 }
 
 fn default_target_dir() -> PathBuf {
+    workspace_root().join("target")
+}
+
+fn workspace_root() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
-        .map_or_else(|| PathBuf::from("target"), |workspace| workspace.join("target"))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 #[derive(Debug)]
