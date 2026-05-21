@@ -63,10 +63,24 @@ impl Manifest {
 }
 
 pub fn resolve_active(entry: &ActiveBinary) -> Result<PathBuf, ManifestError> {
-    resolve_active_with(entry, |key| std::env::var_os(key))
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_target_dir);
+    resolve_active_with_sources(entry, |key| std::env::var_os(key), Some(target_dir.as_path()))
 }
 
 pub fn resolve_active_with<F>(entry: &ActiveBinary, env: F) -> Result<PathBuf, ManifestError>
+where
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+{
+    resolve_active_with_sources(entry, env, None)
+}
+
+pub fn resolve_active_with_sources<F>(
+    entry: &ActiveBinary,
+    env: F,
+    target_dir: Option<&Path>,
+) -> Result<PathBuf, ManifestError>
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,
 {
@@ -74,12 +88,27 @@ where
         return Ok(path.clone());
     }
     let env_key = format!("CARGO_BIN_EXE_{}", entry.target);
-    env(&env_key)
-        .map(PathBuf::from)
-        .ok_or_else(|| ManifestError::MissingActiveBinary {
-            name: entry.name.clone(),
-            env_key,
-        })
+    if let Some(path) = env(&env_key) {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(target_dir) = target_dir {
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        return Ok(target_dir
+            .join("debug")
+            .join(format!("{}{}", entry.target, suffix)));
+    }
+    Err(ManifestError::MissingActiveBinary {
+        name: entry.name.clone(),
+        env_key,
+    })
+}
+
+pub fn default_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(|workspace| workspace.join("target"))
+        .unwrap_or_else(|| PathBuf::from("target"))
 }
 
 fn validate(raw: RawManifest) -> Result<Manifest, ManifestError> {

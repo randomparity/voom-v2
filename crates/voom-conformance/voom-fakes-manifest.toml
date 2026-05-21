@@ -14,6 +14,13 @@ purpose = "bootstrap conformance - validates the harness against itself"
 status = "active"
 required = true
 
+[[binaries]]
+name = "chaos-worker"
+target = "chaos-worker"
+purpose = "phase 4 chaos worker - baseline conformance and process-backed fault modes"
+status = "active"
+required = true
+
 [scaffold]
 binaries = [
     "fake-scanner",
@@ -27,6 +34,5 @@ binaries = [
     "fake-quality-scorer",
     "fake-issue-provider",
     "fake-use-lease-provider",
-    "chaos-worker",
     "benchmark-worker",
 ]
