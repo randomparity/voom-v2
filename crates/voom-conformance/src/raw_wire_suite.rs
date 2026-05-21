@@ -403,19 +403,52 @@ async fn send_raw(addr: std::net::SocketAddr, bytes: Bytes) -> Result<Vec<u8>, S
             .write_all(&bytes)
             .await
             .map_err(|e| format!("write: {e}"))?;
-        stream
-            .shutdown()
-            .await
-            .map_err(|e| format!("shutdown write half: {e}"))?;
         let mut out = Vec::new();
-        stream
-            .read_to_end(&mut out)
-            .await
-            .map_err(|e| format!("read: {e}"))?;
+        let mut buf = [0_u8; 1024];
+        let header_len = loop {
+            if let Some(split) = out.windows(4).position(|w| w == b"\r\n\r\n") {
+                break split + 4;
+            }
+            let n = stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("read: {e}"))?;
+            if n == 0 {
+                return Ok(out);
+            }
+            out.extend_from_slice(&buf[..n]);
+        };
+        let body_len = content_length(&out[..header_len])?;
+        while out.len() < header_len + body_len {
+            let n = stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("read: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
         Ok(out)
     })
     .await
     .map_err(|_| "raw HTTP response timed out".to_owned())?
+}
+
+fn content_length(headers: &[u8]) -> Result<usize, String> {
+    let headers = String::from_utf8_lossy(headers);
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
+            return value
+                .trim()
+                .parse::<usize>()
+                .map_err(|e| format!("content-length parse: {e}"));
+        }
+    }
+    Err("response missing content-length".to_owned())
 }
 
 fn require_status_prefix(response: &RawHttpResponse, prefix: &str) -> Result<(), String> {
