@@ -176,6 +176,14 @@ fn benchmark_dispatch(
     req: &OperationRequest,
     config: &BenchmarkConfig,
 ) -> Result<OperationDispatch, ProtocolError> {
+    benchmark_dispatch_with_body_limit(req, config, MAX_BENCHMARK_RESPONSE_BODY_BYTES)
+}
+
+fn benchmark_dispatch_with_body_limit(
+    req: &OperationRequest,
+    config: &BenchmarkConfig,
+    max_body_bytes: usize,
+) -> Result<OperationDispatch, ProtocolError> {
     let accepted_at = Utc::now();
     let started_at = Utc::now();
     let completed_at = Utc::now();
@@ -210,7 +218,7 @@ fn benchmark_dispatch(
         payload: benchmark_result_payload(config, sample_index, started_at, completed_at),
     });
     let body = body_from_frames(&frames)?;
-    enforce_benchmark_body_size(&body)?;
+    enforce_benchmark_body_size(&body, max_body_bytes)?;
     Ok(OperationDispatch {
         response: OperationResponse {
             lease_id: req.lease_id,
@@ -250,11 +258,11 @@ fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> 
     Ok(body)
 }
 
-fn enforce_benchmark_body_size(body: &[u8]) -> Result<(), ProtocolError> {
-    if body.len() > MAX_BENCHMARK_RESPONSE_BODY_BYTES {
+fn enforce_benchmark_body_size(body: &[u8], max_body_bytes: usize) -> Result<(), ProtocolError> {
+    if body.len() > max_body_bytes {
         Err(ProtocolError::InvalidPayload {
             detail: format!(
-                "benchmark response body {} > {MAX_BENCHMARK_RESPONSE_BODY_BYTES}",
+                "benchmark response body {} > {max_body_bytes}",
                 body.len()
             ),
         })
@@ -416,13 +424,19 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
 #[test]
 fn body_size_guard_accepts_at_or_below_limit() {
     let body = vec![b'x'; MAX_BENCHMARK_RESPONSE_BODY_BYTES];
-    enforce_benchmark_body_size(&body).unwrap();
+    enforce_benchmark_body_size(&body, MAX_BENCHMARK_RESPONSE_BODY_BYTES).unwrap();
 }
 
 #[test]
-fn body_size_guard_rejects_above_limit() {
-    let body = vec![b'x'; MAX_BENCHMARK_RESPONSE_BODY_BYTES + 1];
-    let err = enforce_benchmark_body_size(&body).unwrap_err();
+fn benchmark_dispatch_rejects_generated_body_above_limit() {
+    let req = request(9, serde_json::json!({}));
+    let config = BenchmarkConfig {
+        path: "/library/example.mkv".to_owned(),
+        operations: 10,
+        emit_every: 10,
+        progress_frames: 1,
+    };
+    let err = benchmark_dispatch_with_body_limit(&req, &config, 1).unwrap_err();
     assert!(err.to_string().contains("benchmark response body"));
 }
 ```
@@ -723,6 +737,29 @@ assert_eq!(
 );
 assert_eq!(manifest.scaffold, vec!["chaos-worker"]);
 ```
+
+Update `rejects_binary_listed_as_active_and_scaffold` so it mutates
+the new scaffold list instead of the old two-entry list:
+
+```rust
+let raw = VALID.replace(
+    "binaries = [\"chaos-worker\"]",
+    "binaries = [\"benchmark-worker\"]",
+);
+let err = Manifest::parse_str(&raw).unwrap_err();
+assert!(err.to_string().contains("active and scaffold"));
+```
+
+Keep `rejects_active_entry_without_required_true` and
+`rejects_active_entry_with_non_active_status` as validation tests
+against the first active fixture entry; they do not depend on the
+scaffold list. After the edits, run:
+
+```bash
+rg -n 'chaos-worker\", \"benchmark-worker|binaries = \[\"chaos-worker\", \"benchmark-worker\"\]' crates/voom-conformance/src/manifest_test.rs
+```
+
+Expected: no matches.
 
 - [ ] **Step 2: Run manifest/conformance tests to verify promotion is not done**
 
