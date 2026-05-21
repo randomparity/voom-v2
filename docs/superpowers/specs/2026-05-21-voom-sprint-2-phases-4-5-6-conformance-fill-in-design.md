@@ -65,8 +65,9 @@ Exit criteria:
 - `echo-worker` passes the typed and raw-wire suites.
 - Manifest handling proves scaffold binaries are skipped
   intentionally, not silently ignored.
-- The suite names every assertion that lands now and every Phase 4/5
-  assertion that becomes an admission gate later.
+- Tier 1 covers retry safety, worker identity, lease isolation, and
+  terminal-stream correctness before any Phase 4/5 worker can be
+  promoted from scaffold to active.
 
 ## 3. Architecture
 
@@ -85,6 +86,48 @@ The crate remains independent from `voom-fake-support` and
 protocol. This preserves the Sprint 2 invariant that shared fake
 helpers cannot hide contract drift.
 
+### 3.1 Manifest schema and resolution
+
+Active binaries are listed as `[[binaries]]` entries:
+
+```toml
+[[binaries]]
+name = "echo-worker"
+target = "echo-worker"
+status = "active"
+required = true
+```
+
+`name` is the human-readable suite label. `target` is the Cargo binary
+target name. `status` must be `"active"` for entries under
+`[[binaries]]`. `required` must be `true` in Sprint 2 so an active
+binary cannot disappear without failing the gate.
+
+Scaffold binaries remain listed under `[scaffold].binaries`:
+
+```toml
+[scaffold]
+binaries = [
+    "chaos-worker",
+    "benchmark-worker",
+]
+```
+
+Resolution rules:
+
+- Active entries resolve through the Cargo integration-test
+  environment variable `CARGO_BIN_EXE_<target>`. The `<target>` token
+  is the Cargo binary target name exactly as declared, including
+  hyphens.
+- An active entry may later add an explicit `path`; when present, the
+  harness uses `path` instead of the Cargo environment variable.
+- Missing active binaries are failures.
+- Missing scaffold binaries are explicit skips.
+- A binary listed as both active and scaffold is a manifest validation
+  error.
+- Unlisted binaries are ignored; they are not implicitly skipped and
+  cannot count as passing.
+
 ## 4. Data Flow
 
 A normal conformance run proceeds as follows:
@@ -102,7 +145,8 @@ A normal conformance run proceeds as follows:
 
 For this slice, `echo-worker` is the only active worker expected to
 pass. `chaos-worker` and `benchmark-worker` remain listed as
-scaffolds until their non-faulting baseline operations exist.
+scaffolds until their non-faulting baseline operations exist and pass
+all Tier 1 checks.
 
 ## 5. Assertions
 
@@ -126,12 +170,17 @@ Typed assertions:
 - `wrong_bearer_rejected`
 - `wrong_worker_id_rejected`
 - `wrong_worker_epoch_rejected`
+- `idempotency_exact_byte_replay_returns_cached_response`
+- `idempotency_same_key_different_body_rejected`
 - `stdin_eof_terminates_worker`
 
 Raw-wire assertions:
 
 - `golden_handshake_request_round_trips`
 - `golden_operation_request_round_trips`
+- `frame_with_wrong_lease_id_rejected`
+- `frame_after_terminal_rejected`
+- `partial_response_body_classified`
 - `missing_auth_headers_rejected`
 - `wrong_bearer_header_rejected`
 - `wrong_worker_epoch_header_rejected`
@@ -143,18 +192,16 @@ Raw-wire assertions:
 ### 5.2 Tier 2 — Later Phase 4/5 Admission Gates
 
 Tier 2 does not need to land in this follow-up. These checks become
-admission gates before Phase 4 or Phase 5 moves a binary from
-`[scaffold]` to active:
+mandatory before Phase 4 or Phase 5 declares its deep implementation
+complete, but they are not sufficient to promote a binary from
+`[scaffold]` to active. Promotion requires Tier 1 first.
 
-- Idempotency duplicate-key behavior.
 - Cancellation route drains the current operation.
 - Oversize NDJSON frame handling.
-- Wrong lease id and frame-after-terminal detection.
-- Partial response body classification.
-- `chaos-worker` non-faulting baseline operation passes Tier 1 before
-  fault modes are tested.
-- `benchmark-worker` no-op operation passes Tier 1 before throughput
-  thresholds are tested.
+- `chaos-worker` fault-mode operations pass their scenario-specific
+  malformed-frame and timeout assertions.
+- `benchmark-worker` throughput operations pass their measurement
+  envelope and threshold assertions.
 
 ## 6. Error Handling
 
@@ -170,6 +217,8 @@ failure. A manifest active binary that runs zero checks is a suite
 failure, because an empty suite would otherwise make placeholder code
 look accepted.
 
+An active binary missing from the resolved Cargo binary environment is
+a failure unless it has an explicit manifest `path` that exists.
 Scaffold binaries are explicit skips. A skipped scaffold is not a pass,
 and an unlisted binary is not implicitly skipped.
 
@@ -179,6 +228,12 @@ Unit tests:
 
 - Manifest parsing classifies active and scaffold binaries.
 - Manifest parsing rejects duplicate or ambiguous entries.
+- Manifest parsing rejects `[[binaries]]` entries whose `status` is
+  not `"active"` or whose `required` flag is not `true`.
+- Active binary resolution maps `target = "echo-worker"` to
+  `CARGO_BIN_EXE_echo-worker`.
+- Missing active binaries fail resolution.
+- Missing scaffold binaries are reported as skips.
 - `SuiteResult` aggregation preserves named pass/fail details.
 - Empty active suites are failures.
 
@@ -189,6 +244,12 @@ Integration tests:
 - `run_all` merges both suite results and fails if either layer fails.
 - A scaffold binary listed in `[scaffold]` is reported as skipped.
 - A nonexistent active binary is a launch failure, not a skip.
+- Exact-byte idempotency replay returns the cached response.
+- Same-key / different-body idempotency replay fails with
+  `DuplicateIdempotencyKey`.
+- Wrong lease id and frame-after-terminal streams fail conformance.
+- Partial response body is classified according to the existing
+  `NdjsonReader` behavior.
 
 Verification:
 
@@ -201,8 +262,9 @@ Verification:
 2. Add `typed_suite.rs` and wire `Harness::run_typed_suite`.
 3. Add `raw_wire_suite.rs` and wire `Harness::run_raw_wire_suite`.
 4. Add integration tests that run `echo-worker` through `run_all`.
-5. Update `voom-fakes-manifest.toml` comments so the Phase 4/5
-   promotion rule is visible next to the scaffold list.
+5. Update `voom-fakes-manifest.toml` to use the active-entry schema
+   for `echo-worker` and document the Phase 4/5 promotion rule next
+   to the scaffold list.
 
 Every slice keeps `cargo test -p voom-conformance` green before the
 next slice starts.
