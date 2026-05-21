@@ -1,6 +1,40 @@
 use super::OperationKind;
 
 #[test]
+fn all_contains_every_operation_kind_once() {
+    use std::collections::HashSet;
+
+    let all = OperationKind::ALL;
+    assert_eq!(all.len(), 15);
+    let unique = all.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), all.len());
+    assert!(unique.contains(&OperationKind::ScanLibrary));
+    assert!(unique.contains(&OperationKind::ProbeFile));
+    assert!(unique.contains(&OperationKind::HashFile));
+    assert!(unique.contains(&OperationKind::IdentifyMedia));
+    assert!(unique.contains(&OperationKind::ScoreQuality));
+    assert!(unique.contains(&OperationKind::SyncExternalSystem));
+    assert!(unique.contains(&OperationKind::BackUpFile));
+    assert!(unique.contains(&OperationKind::Remux));
+    assert!(unique.contains(&OperationKind::TranscodeVideo));
+    assert!(unique.contains(&OperationKind::EditTracks));
+    assert!(unique.contains(&OperationKind::ExtractAudio));
+    assert!(unique.contains(&OperationKind::TranscribeAudio));
+    assert!(unique.contains(&OperationKind::VerifyArtifact));
+    assert!(unique.contains(&OperationKind::CommitArtifact));
+    assert!(unique.contains(&OperationKind::DeleteArtifact));
+}
+
+#[test]
+fn all_operation_kinds_round_trip_through_wire_names() {
+    for operation in OperationKind::ALL {
+        let encoded = serde_json::to_string(operation).unwrap();
+        let decoded: OperationKind = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, *operation);
+    }
+}
+
+#[test]
 fn every_variant_round_trips_snake_case() {
     let cases: &[(OperationKind, &str)] = &[
         (OperationKind::ScanLibrary, "scan_library"),

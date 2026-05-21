@@ -30,6 +30,26 @@ pub enum OperationKind {
     DeleteArtifact,
 }
 
+impl OperationKind {
+    pub const ALL: &'static [Self] = &[
+        Self::ScanLibrary,
+        Self::ProbeFile,
+        Self::HashFile,
+        Self::IdentifyMedia,
+        Self::ScoreQuality,
+        Self::SyncExternalSystem,
+        Self::BackUpFile,
+        Self::Remux,
+        Self::TranscodeVideo,
+        Self::EditTracks,
+        Self::ExtractAudio,
+        Self::TranscribeAudio,
+        Self::VerifyArtifact,
+        Self::CommitArtifact,
+        Self::DeleteArtifact,
+    ];
+}
+
 #[cfg(test)]
 #[path = "operation_kind_test.rs"]
 mod tests;
