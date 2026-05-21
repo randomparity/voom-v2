@@ -106,6 +106,19 @@ The binary has three internal responsibilities:
 | Payload parser | Decode `payload.path`, `payload.mode`, `payload.operations`, and `payload.emit_every` into a typed internal benchmark config. Reject unknown modes and malformed fields before work starts. |
 | Operation runner | Convert a valid `OperationRequest` into baseline frames or schema-stable benchmark progress and result frames. |
 
+Benchmark response generation is bounded by three worker-local
+constants:
+
+- `MAX_BENCHMARK_OPERATIONS = 10_000`;
+- `MAX_BENCHMARK_PROGRESS_FRAMES = 100`;
+- `MAX_BENCHMARK_RESPONSE_BODY_BYTES = 64 * 1024`.
+
+The response body cap applies to the NDJSON progress/result body
+produced by the operation runner, excluding HTTP headers and the
+immediate `OperationResponse` line. Later supervisor benchmark work
+may raise these limits in a separate design if it changes streaming or
+cache behavior.
+
 The startup contract mirrors the other Sprint 2 local workers:
 
 - required env: `VOOM_WORKER_SECRET`, `VOOM_WORKER_ID`,
@@ -176,14 +189,19 @@ Mode names:
 Benchmark config:
 
 - `operations` is required for `benchmark` mode and must be within
-  `1..=10_000`.
+  `1..=MAX_BENCHMARK_OPERATIONS`.
 - `emit_every` is optional for `benchmark` mode. Missing
   `emit_every` defaults to `operations`, producing one progress frame
   before the terminal result.
 - `emit_every` must be within `1..=operations`.
+- `progress_frames = ceil(operations / emit_every)` must be within
+  `1..=MAX_BENCHMARK_PROGRESS_FRAMES`.
 - Unknown `mode`, wrong field types, missing `path`, missing
   `operations` for benchmark mode, excessive operation counts, and
   unsupported combinations return `ProtocolError::InvalidPayload`.
+  For example, `operations = 10_000, emit_every = 100` is accepted,
+  while `operations = 10_000, emit_every = 1` is rejected because it
+  would emit too many progress frames.
 
 ## 5. Metric Frames
 
@@ -216,6 +234,12 @@ not assert a fixed rate value because that number is
 machine-dependent. The only performance claim in this slice is that
 the worker emits a well-formed measurement summary for the later
 supervisor benchmark harness to consume.
+
+After frame construction, the worker must serialize the benchmark
+NDJSON progress/result body and check it before returning a successful
+operation dispatch. If the body exceeds
+`MAX_BENCHMARK_RESPONSE_BODY_BYTES`, the operation is rejected with
+`ProtocolError::InvalidPayload` before any idempotency cache insertion.
 
 ## 6. Data Flow
 
@@ -259,8 +283,12 @@ Expected protocol rejections return structured `ProtocolError`s:
 - missing or malformed `payload.path` -> `InvalidPayload`;
 - unknown `mode` -> `InvalidPayload`;
 - missing or malformed benchmark config fields -> `InvalidPayload`;
-- `operations = 0`, `operations > 10_000`, `emit_every = 0`, or
-  `emit_every > operations` -> `InvalidPayload`;
+- `operations = 0`, `operations > MAX_BENCHMARK_OPERATIONS`,
+  `emit_every = 0`, `emit_every > operations`, or
+  `progress_frames > MAX_BENCHMARK_PROGRESS_FRAMES` ->
+  `InvalidPayload`;
+- generated benchmark body bytes above
+  `MAX_BENCHMARK_RESPONSE_BODY_BYTES` -> `InvalidPayload`;
 - malformed request JSON, auth errors, version errors, and
   idempotency conflicts must match the current conformance
   expectations for worker HTTP behavior.
@@ -269,7 +297,9 @@ Idempotency behavior follows the active-worker contract: exact replay
 with the same key returns the cached fixed response, and the same key
 with a different request body is rejected. The cache must be bounded.
 Because benchmark mode completes promptly, both baseline and completed
-benchmark responses may be cached as fixed byte responses.
+benchmark responses may be cached as fixed byte responses. Oversized
+benchmark responses are rejected before entering the cache, so exact
+replay semantics apply only to accepted requests.
 
 Benchmark results are payload data, not protocol status. A low
 `worker_ops_per_second_milli` number is still a successful protocol
@@ -291,10 +321,19 @@ Sibling/unit tests:
 - parser rejects missing, non-integer, zero, or excessive
   `operations`;
 - parser rejects non-integer, zero, or too-large `emit_every`;
+- parser accepts `operations = 10_000, emit_every = 100` because it
+  emits exactly 100 progress frames;
+- parser rejects `operations = 10_000, emit_every = 1` because it
+  exceeds the progress-frame cap;
 - frame builder for `baseline` emits `seq=0` progress and `seq=1`
   result;
 - benchmark frame builder emits monotonic `operations_completed` and
-  a terminal result whose totals match the requested operation count.
+  a terminal result whose totals match the requested operation count;
+- benchmark body-size guard accepts generated NDJSON bodies at or
+  below `MAX_BENCHMARK_RESPONSE_BODY_BYTES`;
+- benchmark body-size guard rejects generated NDJSON bodies above
+  `MAX_BENCHMARK_RESPONSE_BODY_BYTES` before idempotency cache
+  insertion.
 
 Integration tests:
 
@@ -307,7 +346,7 @@ Integration tests:
 - `benchmark` operation returns cadence-correct progress frames and a
   terminal metric summary;
 - idempotent replay of the same benchmark request returns the cached
-  response;
+  response for a valid bounded benchmark body;
 - same idempotency key with a different benchmark body is rejected;
 - invalid benchmark payloads return structured protocol errors and do
   not crash the process;
@@ -330,8 +369,8 @@ Minimum verification:
 3. Add direct launch and baseline integration tests.
 4. Promote `benchmark-worker` in the conformance manifest and make
    conformance pass against it.
-5. Add benchmark mode, metric frame construction, idempotency replay,
-   and direct benchmark tests.
+5. Add benchmark mode, metric frame construction, frame/body-size
+   guards, idempotency replay, and direct benchmark tests.
 6. Run full verification and keep the branch green.
 
 Each slice keeps conformance green for active workers before the next
