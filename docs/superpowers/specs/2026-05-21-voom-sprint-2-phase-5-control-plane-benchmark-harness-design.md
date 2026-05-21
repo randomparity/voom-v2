@@ -65,9 +65,9 @@ Out of scope:
 Exit criteria:
 
 - `cargo test -p voom-control-plane --test benchmark --all-features`
-  launches `benchmark-worker`, completes all samples, validates the
-  metric stream, and prints a compact summary when the test output is
-  visible.
+  launches a prebuilt `benchmark-worker`, completes all samples,
+  validates the metric stream, and includes a compact summary in
+  assertion/failure diagnostics.
 - The test fails on protocol errors, missing benchmark fields,
   unexpected frame counts, non-monotonic progress, non-positive worker
   throughput, early worker exit, bind timeout, or cleanup failure.
@@ -89,7 +89,7 @@ The test talks only to public protocol surfaces:
 | Worker launcher | Resolve and spawn `benchmark-worker`, pass credentials and `VOOM_WORKER_BIND=127.0.0.1:0`, keep stdin open, and parse `BOUND addr=...` from stdout. |
 | Benchmark runner | Build benchmark-mode `OperationRequest`s, call `ClientHandle::dispatch`, measure request-to-ack and request-to-terminal durations with `std::time::Instant`, and drain the NDJSON stream. |
 | Frame validator | Require cadence-correct progress frames, monotonic worker elapsed time, monotonic `operations_completed`, one terminal result, and no frame after terminal. |
-| Summary calculator | Sort successful samples and report min/median/max for dispatch ack latency, stream completion latency, and worker-reported throughput. |
+| Summary calculator | Sort successful samples and expose min/median/max for dispatch ack latency, stream completion latency, and worker-reported throughput through assertion/failure diagnostics. |
 
 The initial request shape is fixed so results are comparable across
 runs:
@@ -128,6 +128,17 @@ Missing binary is a test setup failure with an actionable message. It
 must not be silently skipped, because this phase is the first
 control-plane-owned benchmark gate.
 
+The primary verification flow must build the cross-package worker
+binary before running the control-plane integration test:
+
+```bash
+cargo build -p voom-fakes --bin benchmark-worker
+cargo test -p voom-control-plane --test benchmark --all-features
+```
+
+The control-plane test may rely on that prerequisite instead of
+invoking Cargo recursively from inside the test process.
+
 ## 5. Data Flow
 
 Each measured sample follows this sequence:
@@ -139,10 +150,11 @@ Each measured sample follows this sequence:
 3. Record `request_start = Instant::now()`.
 4. Call `HttpClient::dispatch`.
 5. Record dispatch ack latency when the immediate `OperationResponse`
-   is returned.
+   is returned. Zero-duration local measurements are valid.
 6. Consume frames from the returned NDJSON stream until the terminal
    result.
-7. Record stream completion latency.
+7. Record stream completion latency. Zero-duration local measurements
+   are valid.
 8. Validate the progress cadence and terminal benchmark summary.
 9. Assert one additional read after terminal returns the protocol's
    terminal-after-terminal error.
@@ -175,9 +187,8 @@ The first benchmark gate must avoid flaky performance assertions.
 Assertions are therefore limited to contract and sanity checks:
 
 - each sample completes within five seconds;
-- dispatch ack latency is greater than zero and below one second;
-- stream completion latency is greater than zero and below five
-  seconds;
+- dispatch ack latency is at or below one second;
+- stream completion latency is at or below five seconds;
 - worker-reported throughput is positive;
 - measured sample count is exactly five;
 - progress frame count is exactly ten per sample.
@@ -187,6 +198,12 @@ The compact summary includes min/median/max for:
 - dispatch ack latency;
 - stream completion latency;
 - `worker_ops_per_second_milli`.
+
+The harness must not use `println!` or `eprintln!` for the summary.
+Workspace lint settings deny stdout/stderr print macros under
+`just ci`, and `allow` attributes are denied. The summary should be
+available through assertion messages and helper return values so a
+failing test gives useful diagnostics without violating lint policy.
 
 These numbers become baseline data for a later supervisor benchmark
 design. A later slice may promote calibrated values into CI regression
@@ -210,10 +227,19 @@ and kill the child on timeout. The cleanup path must run even after
 test failure so repeated benchmark runs do not leave local worker
 processes behind.
 
+The integration test should use a `Result`-returning async body rather
+than direct panics for ordinary validation failures. The body records
+the first error, runs explicit async cleanup, and then returns the
+recorded error. The launch guard must also have a synchronous `Drop`
+fallback using `tokio::process::Child::start_kill` or equivalent so
+panic/unwind paths still signal the child even though `Drop` cannot
+await process shutdown.
+
 ## 8. Testing
 
 Primary verification:
 
+- `cargo build -p voom-fakes --bin benchmark-worker`
 - `cargo test -p voom-control-plane --test benchmark --all-features`
 
 Regression checks for the worker boundary this test depends on:
