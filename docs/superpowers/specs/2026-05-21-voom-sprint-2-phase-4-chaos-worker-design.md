@@ -76,18 +76,28 @@ Exit criteria:
 ## 3. Architecture
 
 `chaos-worker` stays in `crates/voom-fakes/src/bin/chaos_worker.rs`.
-It depends on `voom-worker-protocol` directly and uses `HttpServer`
-for the normal worker boundary. It does not use `voom-fake-support`,
-because the chaos worker must not inherit behavior from the shared
-fake-provider helper path.
+It depends on `voom-worker-protocol` directly and does not use
+`voom-fake-support`, because the chaos worker must not inherit
+behavior from the shared fake-provider helper path.
+
+Unlike `echo-worker`, `chaos-worker` must be able to hold operation
+response bodies open. The current `voom-worker-protocol::HttpServer`
+handler returns an `OperationDispatch` with a buffered `Vec<u8>` body,
+so it cannot express `stall`, `non_converging_progress`, or
+`deadline_exceeded`. This slice therefore uses a small chaos-owned
+HTTP implementation for the worker server path. The implementation
+must remain wire-compatible with `HttpServer` for handshake,
+version/auth/idempotency validation, structured protocol errors, and
+the valid baseline response shape. Do not generalize
+`voom-worker-protocol::HttpServer` in this slice.
 
 The binary has three internal responsibilities:
 
 | Part | Responsibility |
 |---|---|
-| Bootstrap | Parse `VOOM_WORKER_SECRET`, `VOOM_WORKER_ID`, `VOOM_WORKER_EPOCH`, and `VOOM_WORKER_BIND`; start `HttpServer`; print `BOUND addr=...`; shut down on stdin EOF. |
+| Bootstrap | Parse `VOOM_WORKER_SECRET`, `VOOM_WORKER_ID`, `VOOM_WORKER_EPOCH`, and `VOOM_WORKER_BIND`; start the chaos-owned HTTP server; print `BOUND addr=...`; shut down on stdin EOF. |
 | Payload parser | Decode `payload.mode` and optional timing fields into a typed internal `ChaosMode`. Reject unknown modes and malformed fields before fault execution. |
-| Mode dispatcher | Convert a valid `OperationRequest` into an `OperationDispatch`, a structured `ProtocolError`, a process exit, or a deliberately non-terminating response body. |
+| Mode dispatcher | Convert a valid `OperationRequest` into a valid buffered response, a structured `ProtocolError`, a process exit, malformed NDJSON, or an open streaming response body. |
 
 The startup contract mirrors `echo-worker`:
 
@@ -136,6 +146,7 @@ Common payload shape:
 
 ```json
 {
+  "path": "/library/example.mkv",
   "mode": "baseline",
   "progress_count": 3,
   "progress_interval_ms": 50,
@@ -143,11 +154,16 @@ Common payload shape:
 }
 ```
 
-All fields except `mode` are optional. Missing `mode` means
-`baseline`. Numeric fields must be non-negative and small enough for
-CI-bound tests; the implementation should reject values above a fixed
-cap rather than sleeping for unbounded user-supplied durations. A
-reasonable Sprint 2 cap is 30 seconds per operation.
+`path` is required for every `ProbeFile` request, including
+conformance baseline requests. Missing or non-string `path` is
+`ProtocolError::InvalidPayload`; it must not fall through to
+`baseline`. All fields except `path` and mode-specific timing fields
+are optional. Missing `mode` means `baseline` only after the normal
+`ProbeFile` payload contract has been validated. Numeric fields must
+be non-negative and small enough for CI-bound tests; the implementation
+should reject values above a fixed cap rather than sleeping for
+unbounded user-supplied durations. A reasonable Sprint 2 cap is 30
+seconds per operation.
 
 Mode names:
 
@@ -155,14 +171,14 @@ Mode names:
 |---|---|
 | `baseline` | Emit `Progress(seq=0)` and `Result(seq=1)` with a small result payload echoing the mode. |
 | `crash` | Terminate the worker process after the operation is accepted and before any terminal frame is delivered. |
-| `stall` | Accept the operation and emit no progress for `stall_ms`, long enough for caller-side timeout tests. |
+| `stall` | Send HTTP 200 and a valid `OperationResponse`, then hold the response body open without progress until the caller-side timeout fires. |
 | `malformed_result` | Return a valid `OperationResponse` followed by malformed NDJSON body bytes. |
 | `non_converging_progress` | Emit valid monotonic progress frames and then keep the response open without a terminal frame. |
-| `deadline_exceeded` | Emit progress at `progress_interval_ms` cadence without completing before the caller's configured progress deadline. |
+| `deadline_exceeded` | Emit progress at `progress_interval_ms` cadence slowly enough to exceed the caller's configured progress deadline, then keep the stream open or complete only after the deadline window. |
 
 Invalid payloads are not chaos modes. Unknown `mode`, wrong field
-types, excessive timing values, and unsupported combinations return
-`ProtocolError::InvalidPayload`.
+types, missing `path`, excessive timing values, and unsupported
+combinations return `ProtocolError::InvalidPayload`.
 
 ## 5. Data Flow
 
@@ -175,16 +191,17 @@ Baseline conformance flow:
 4. The worker binds, prints `BOUND addr=...`, and waits for
    `/v1/operations`.
 5. The typed and raw-wire conformance suites send ordinary
-   `ProbeFile` requests. Because those requests do not carry
-   `payload.mode`, the worker defaults to `baseline`.
+   `ProbeFile` requests with valid `payload.path`. Because those
+   requests do not carry `payload.mode`, the worker defaults to
+   `baseline`.
 6. The worker emits a valid ordered progress stream and passes the
    same active-worker Tier 1 assertions as `echo-worker`.
 
 Fault-mode test flow:
 
 1. A direct test launches `chaos-worker`.
-2. The test sends a `ProbeFile` request with an explicit
-   `payload.mode`.
+2. The test sends a `ProbeFile` request with valid `payload.path` and
+   an explicit `payload.mode`.
 3. The worker executes the selected deterministic behavior.
 4. The test classifies the observable worker-boundary outcome:
    process exit, caller-side timeout, malformed stream rejection, or
@@ -198,18 +215,26 @@ supervisor maps boundary observations to lease failure classes.
 Expected protocol rejections return structured `ProtocolError`s:
 
 - unsupported operation kind -> `UnknownOperation`;
-- missing or malformed required payload fields for a selected mode ->
-  `InvalidPayload`;
+- missing or malformed `payload.path` -> `InvalidPayload`;
+- missing or malformed mode-specific payload fields for a selected
+  mode -> `InvalidPayload`;
 - timing values above the allowed cap -> `InvalidPayload`;
 - malformed request JSON, auth errors, version errors, and
-  idempotency conflicts remain owned by `HttpServer` and the protocol
-  crate.
+  idempotency conflicts must match the existing `HttpServer` and
+  protocol crate behavior.
 
 Deliberate chaos modes must not be implemented as structured
 `ProtocolError`s. They should create the observable failure being
 tested: process exit, an idle stream, malformed NDJSON, valid progress
 without a terminal frame, or progress timing that exceeds the caller's
 deadline.
+
+Open-stream chaos modes are produced by the chaos-owned HTTP server,
+not by `voom-worker-protocol::HttpServer`. Tests for `stall`,
+`non_converging_progress`, and `deadline_exceeded` must use a raw or
+streaming client with short `tokio::time::timeout` guards so they can
+observe a deliberately pending response without hanging the test
+process.
 
 `crash` may call `std::process::exit(101)` from the operation path.
 The exact non-zero status is not semantically important, but tests
@@ -223,8 +248,11 @@ targets the NDJSON reader boundary, matching Sprint 2 §4.2.
 
 Sibling/unit tests:
 
-- payload parser accepts missing mode as `baseline`;
+- payload parser accepts `{ "path": "/library/example.mkv" }` as
+  `baseline`;
 - payload parser accepts each known mode;
+- payload parser rejects `{}` and `{ "mode": "baseline" }` with
+  missing `path`;
 - parser rejects unknown mode;
 - parser rejects negative, non-integer, or excessive timing values;
 - frame builder for `baseline` emits `seq=0` progress and `seq=1`
@@ -241,12 +269,13 @@ Integration tests:
 - conformance integration launches `chaos-worker` through the manifest
   and passes active-worker Tier 1;
 - `crash` exits non-zero before a terminal frame is accepted;
-- `stall` keeps the response pending until a short caller-side timeout;
+- `stall` uses a raw or streaming client and keeps the response body
+  pending until a short caller-side timeout;
 - `malformed_result` is rejected by `NdjsonReader`;
-- `non_converging_progress` yields valid progress then no terminal
-  frame before timeout;
-- `deadline_exceeded` produces timing suitable for later watchdog
-  `ProgressTimeout` assertions;
+- `non_converging_progress` uses a raw or streaming client, yields
+  valid progress, then no terminal frame before timeout;
+- `deadline_exceeded` uses a raw or streaming client and produces
+  timing suitable for later watchdog `ProgressTimeout` assertions;
 - invalid payloads return structured protocol errors and do not crash
   the process.
 
