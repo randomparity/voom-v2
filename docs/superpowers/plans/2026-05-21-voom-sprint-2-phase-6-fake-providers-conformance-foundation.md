@@ -647,7 +647,8 @@ Rules:
 
 - `Harness::run_typed_suite` and `run_raw_wire_suite` accept `&ActiveBinary`.
 - `Harness::run_all` accepts `&ActiveBinary`.
-- `conformance_all.rs` calls `validate_operation_coverage(&manifest)` before launching workers.
+- `conformance_all.rs` continues to launch every currently active manifest entry.
+- Full `validate_operation_coverage(&manifest)` integration remains deferred until Task 8, after all fake-provider operation cases are active.
 - `stdin_eof_terminates_worker` remains per active entry.
 
 - [ ] **Step 6: Verify and commit**
@@ -810,6 +811,8 @@ const REQUIRED_ACTIVE: &[&str] = &[
 
 Also assert none of the eleven fake-provider names appear in `manifest.scaffold`.
 
+After these required-active and no-scaffold assertions, call `validate_operation_coverage(&manifest)` before launching workers. This is the first integration point where full fixed-operation coverage is expected to pass because Task 8 promotes all fake-provider operation cases.
+
 - [ ] **Step 2: Run failing integration**
 
 Run:
@@ -818,7 +821,7 @@ Run:
 cargo test -p voom-conformance --test conformance_all --all-features
 ```
 
-Expected: failure because fake providers are still scaffolded.
+Expected: failure because fake providers are still scaffolded and full operation coverage is incomplete.
 
 - [ ] **Step 3: Promote manifest entries**
 
@@ -909,6 +912,6 @@ If no fixes were needed, do not create an empty commit.
 
 ## Self-Review Notes
 
-- Spec coverage: Tasks 3 and 4 implement fake providers; Tasks 5 and 6 implement manifest-driven operation conformance; Task 7 implements `FailureClass` registry coverage; Task 8 activates all providers and enforces no scaffolds; Task 9 verifies Phase 6.
+- Spec coverage: Tasks 3 and 4 implement fake providers; Task 5 defines manifest operation coverage validation; Task 6 makes typed/raw suites consume per-entry operation cases; Task 7 implements `FailureClass` registry coverage; Task 8 activates all providers, enforces no scaffolds, and integrates full operation coverage; Task 9 verifies Phase 6.
 - Phase 7 boundary: This plan intentionally does not add scanner-to-prober orchestration through the real scheduler, supervisor-side chaos recovery, or scheduler throughput reporting.
 - Type consistency: `OperationKind::ALL`, `OperationCase`, `ActiveBinary.operations`, `FailureClass::ALL`, and `FailureFixture` names are used consistently across tasks.
