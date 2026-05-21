@@ -13,7 +13,7 @@
 ## File Structure
 
 - Modify `Cargo.toml`: add workspace dependency `toml = "0.8"`.
-- Modify `crates/voom-conformance/Cargo.toml`: add `toml.workspace = true`.
+- Modify `crates/voom-conformance/Cargo.toml`: add `toml.workspace = true` and `thiserror.workspace = true`.
 - Modify `crates/voom-conformance/src/lib.rs`: add the crate-level test lint allowance used by sibling crates, then export new modules and public types needed by integration tests.
 - Modify `crates/voom-conformance/src/harness.rs`: make suite runners async, call suite modules, add empty-suite failure helper.
 - Create `crates/voom-conformance/src/manifest.rs`: parse/validate `voom-fakes-manifest.toml`, resolve active binaries, and report scaffold skips.
@@ -139,6 +139,7 @@ toml = "0.8"
 ```toml
 # crates/voom-conformance/Cargo.toml [dependencies]
 toml.workspace = true
+thiserror.workspace = true
 ```
 
 Add the crate-level test lint allowance and `pub mod manifest;` to
@@ -699,15 +700,31 @@ pub async fn run_active_worker(launch: &mut crate::WorkerLaunch) -> crate::Suite
     result
 }
 
-async fn send_raw(addr: std::net::SocketAddr, bytes: bytes::Bytes) -> std::io::Result<Vec<u8>> {
-    let mut stream = tokio::net::TcpStream::connect(addr).await?;
-    tokio::io::AsyncWriteExt::write_all(&mut stream, &bytes).await?;
-    tokio::io::AsyncWriteExt::shutdown(&mut stream).await?;
-    let mut out = Vec::new();
-    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut out).await?;
-    Ok(out)
+async fn send_raw(addr: std::net::SocketAddr, bytes: bytes::Bytes) -> Result<Vec<u8>, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &bytes)
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        tokio::io::AsyncWriteExt::shutdown(&mut stream)
+            .await
+            .map_err(|e| format!("shutdown write half: {e}"))?;
+        let mut out = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut out)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "raw HTTP response timed out".to_owned())?
 }
 ```
+
+`wrong_content_length_rejected` must not hang the suite. Treat timeout,
+connection close, or any parsed non-2xx response as a passing rejection
+only when no successful `HTTP/1.1 200` response was observed.
 
 Use a tiny raw response parser in this task:
 
@@ -961,7 +978,22 @@ pub async fn run_protocol_negative_fixture() -> crate::SuiteResult {
     record_fixture(&mut result, "partial_response_body_classified", crate::negative_fixture::FixtureMode::TruncatedBody).await;
     result
 }
+
+async fn record_fixture(
+    result: &mut crate::SuiteResult,
+    name: &'static str,
+    mode: crate::negative_fixture::FixtureMode,
+) {
+    match crate::negative_fixture::classify_fixture(mode).await {
+        Err(_) => result.pass(name),
+        Ok(()) => result.fail(name, "fixture was accepted"),
+    }
+}
 ```
+
+The suite-level fixture runner records whether each malformed fixture is
+rejected. The sibling unit tests above are responsible for asserting the
+exact `ProtocolError` variants for each fixture mode.
 
 `classify_fixture(FixtureMode::FrameAfterTerminal)` must first call
 `has_frame_after_terminal(&bytes, expected)?`. If it returns `false`,
@@ -1019,7 +1051,12 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
         let harness = Harness::new(path);
         let mut launch = harness.launch().await.unwrap();
         let result = harness.run_all(&mut launch).await;
-        let _ = launch.shutdown(Duration::from_secs(5)).await.unwrap();
+        let shutdown_name = format!("{}::shutdown_after_suites", entry.name);
+        record_shutdown(
+            &mut combined,
+            shutdown_name,
+            launch.shutdown(Duration::from_secs(5)).await,
+        );
         combined.extend(result);
     }
 
@@ -1070,6 +1107,18 @@ async fn stdin_eof_terminates_worker() -> SuiteResult {
         Err(e) => result.fail("stdin_eof_terminates_worker", e.to_string()),
     }
     result
+}
+
+fn record_shutdown(
+    result: &mut SuiteResult,
+    name: String,
+    shutdown: std::io::Result<std::process::ExitStatus>,
+) {
+    match shutdown {
+        Ok(status) if status.success() => result.pass(name),
+        Ok(status) => result.fail(name, format!("exit status {status}")),
+        Err(e) => result.fail(name, e.to_string()),
+    }
 }
 ```
 
