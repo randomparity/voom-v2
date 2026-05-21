@@ -1,10 +1,4 @@
-#![expect(
-    clippy::print_stderr,
-    reason = "fake-* placeholder advertises its scaffold status on stderr (Phase 3 design §2)"
-)]
-//! `fake_remuxer` — Sprint 2 Phase 3 placeholder. Real implementation deferred
-//! to a follow-up commit per the Phase 3 design.
-
-fn main() {
-    eprintln!("fake_remuxer is a Phase 3 follow-up commit");
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    voom_fake_support::run_provider("fake-remuxer").await
 }
