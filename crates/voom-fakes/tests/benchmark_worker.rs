@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use voom_worker_protocol::{
     ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProtocolError,
-    WorkerCredentials,
+    ProgressFrame, WorkerCredentials,
 };
 
 #[tokio::test]
@@ -42,6 +42,169 @@ async fn invalid_payload_returns_protocol_error_and_worker_stays_alive() {
     assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
     assert!(launch.child.try_wait().unwrap().is_none());
     launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn benchmark_mode_returns_cadence_progress_and_summary() {
+    let mut launch = spawn_benchmark().await;
+    let client = HttpClient::new(launch.bound);
+    let req = operation_request(
+        201,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "benchmark",
+            "operations": 25,
+            "emit_every": 10
+        }),
+    );
+    let mut stream = client
+        .dispatch(&launch.credentials, "benchmark-mode", req)
+        .await
+        .unwrap();
+    let mut progress_cadence = Vec::new();
+    let mut last_progress_elapsed = None;
+    loop {
+        match stream.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(frame) => {
+                let ProgressFrame::Progress { payload, .. } = frame else {
+                    panic!("expected progress frame");
+                };
+                let payload = payload.unwrap();
+                assert_eq!(payload["mode"], "benchmark");
+                assert_eq!(payload["operations_total"], 25);
+                progress_cadence.push((
+                    payload["sample_index"].as_u64().unwrap(),
+                    payload["operations_completed"].as_u64().unwrap(),
+                ));
+                let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                assert!(elapsed > 0);
+                if let Some(previous) = last_progress_elapsed {
+                    assert!(elapsed >= previous);
+                }
+                last_progress_elapsed = Some(elapsed);
+            }
+            NdjsonOutcome::Terminated(frame) => {
+                let ProgressFrame::Result { payload, .. } = frame else {
+                    panic!("expected result frame");
+                };
+                assert_eq!(progress_cadence, vec![(0, 10), (1, 20), (2, 25)]);
+                assert_eq!(payload["mode"], "benchmark");
+                assert_eq!(payload["operations_total"], 25);
+                assert_eq!(payload["progress_frames"], 3);
+                let result_elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                assert!(result_elapsed > 0);
+                assert!(result_elapsed >= last_progress_elapsed.unwrap());
+                assert!(payload["worker_ops_per_second_milli"].as_u64().unwrap() > 0);
+                break;
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn idempotent_replay_returns_same_benchmark_response() {
+    let mut launch = spawn_benchmark().await;
+    let client = HttpClient::new(launch.bound);
+    let req = operation_request(
+        202,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "benchmark",
+            "operations": 10,
+            "emit_every": 5
+        }),
+    );
+    let first = collect_body(
+        client
+            .dispatch(&launch.credentials, "benchmark-replay", req.clone())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = collect_body(
+        client
+            .dispatch(&launch.credentials, "benchmark-replay", req)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first, second);
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn same_idempotency_key_with_different_benchmark_body_is_rejected() {
+    let mut launch = spawn_benchmark().await;
+    let client = HttpClient::new(launch.bound);
+    let first = operation_request(
+        203,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "benchmark",
+            "operations": 10,
+            "emit_every": 5
+        }),
+    );
+    let second = operation_request(
+        203,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "benchmark",
+            "operations": 10,
+            "emit_every": 10
+        }),
+    );
+    let _ = client
+        .dispatch(&launch.credentials, "benchmark-conflict", first)
+        .await
+        .unwrap();
+    let err = client
+        .dispatch(&launch.credentials, "benchmark-conflict", second)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ProtocolError::DuplicateIdempotencyKey { .. }
+    ));
+    launch.shutdown().await;
+}
+
+#[tokio::test]
+async fn too_many_progress_frames_is_rejected_without_crashing() {
+    let mut launch = spawn_benchmark().await;
+    let client = HttpClient::new(launch.bound);
+    let req = operation_request(
+        204,
+        serde_json::json!({
+            "path": "/library/example.mkv",
+            "mode": "benchmark",
+            "operations": 10_000,
+            "emit_every": 1
+        }),
+    );
+    let err = client
+        .dispatch(&launch.credentials, "benchmark-too-many-frames", req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    assert!(launch.child.try_wait().unwrap().is_none());
+    launch.shutdown().await;
+}
+
+async fn collect_body(mut stream: voom_worker_protocol::DispatchStream) -> Vec<ProgressFrame> {
+    let mut frames = Vec::new();
+    loop {
+        match stream.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(frame) => frames.push(frame),
+            NdjsonOutcome::Terminated(frame) => {
+                frames.push(frame);
+                return frames;
+            }
+            other => panic!("unexpected outcome {other:?}"),
+        }
+    }
 }
 
 fn operation_request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
