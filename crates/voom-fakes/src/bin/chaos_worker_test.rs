@@ -90,7 +90,10 @@ fn baseline_body_has_progress_then_result() {
     };
     let payload = parse_payload(req.payload.clone()).unwrap();
     let body = baseline_body(&req, &payload).unwrap();
-    let lines = std::str::from_utf8(&body).unwrap().lines().collect::<Vec<_>>();
+    let lines = std::str::from_utf8(&body)
+        .unwrap()
+        .lines()
+        .collect::<Vec<_>>();
     assert_eq!(lines.len(), 2);
     assert!(lines[0].contains("\"kind\":\"progress\""));
     assert!(lines[0].contains("\"seq\":0"));
