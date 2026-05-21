@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use voom_conformance::manifest::{Manifest, resolve_active};
+use voom_conformance::manifest::{Manifest, resolve_active, validate_operation_coverage};
 use voom_conformance::{Harness, SuiteResult};
 
 #[tokio::test]
@@ -16,26 +16,29 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
             return;
         }
     };
-    assert!(
-        manifest
-            .active
-            .iter()
-            .any(|entry| entry.name == "echo-worker")
-    );
-    assert!(
-        manifest
-            .active
-            .iter()
-            .any(|entry| entry.name == "chaos-worker")
-    );
-    assert!(
-        manifest
-            .active
-            .iter()
-            .any(|entry| entry.name == "benchmark-worker")
-    );
-    assert!(!manifest.scaffold.iter().any(|s| s == "chaos-worker"));
-    assert!(!manifest.scaffold.iter().any(|s| s == "benchmark-worker"));
+    const REQUIRED_ACTIVE: &[&str] = &[
+        "echo-worker",
+        "chaos-worker",
+        "benchmark-worker",
+        "fake-scanner",
+        "fake-prober",
+        "fake-transcoder",
+        "fake-remuxer",
+        "fake-backup-store",
+        "fake-health-checker",
+        "fake-identity-provider",
+        "fake-external-system",
+        "fake-quality-scorer",
+        "fake-issue-provider",
+        "fake-use-lease-provider",
+    ];
+    for name in REQUIRED_ACTIVE {
+        assert!(manifest.active.iter().any(|entry| entry.name == *name));
+    }
+    for name in &REQUIRED_ACTIVE[3..] {
+        assert!(!manifest.scaffold.iter().any(|scaffold| scaffold == name));
+    }
+    validate_operation_coverage(&manifest).unwrap();
 
     let mut combined = SuiteResult::default();
     for entry in &manifest.active {

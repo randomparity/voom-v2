@@ -193,7 +193,7 @@ async fn accepts_valid_payload(
     let mut stream = client
         .dispatch(
             &launch.credentials,
-            "typed-valid",
+            &format!("typed-valid-{}", operation_name(case.operation)),
             operation_request(LeaseId(10), case, PayloadKind::Valid),
         )
         .await?;
