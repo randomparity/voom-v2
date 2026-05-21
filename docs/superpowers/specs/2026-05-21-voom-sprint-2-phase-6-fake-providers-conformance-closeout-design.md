@@ -73,6 +73,10 @@ Exit criteria:
   under `[scaffold]`.
 - Every fixed `OperationKind` has at least one active manifest-backed
   conformance case.
+- Every `FailureClass` variant has at least one named conformance
+  fixture/assertion, and `cargo test -p voom-conformance
+  --all-features` fails when the registry is missing a variant,
+  contains a duplicate class, or contains an unknown class.
 - Every parent Phase 6 requirement is either covered by this phase or
   explicitly marked as deferred with a successor owner in §3.
 - `just ci` passes.
@@ -87,7 +91,7 @@ names the parent requirements that remain outside that boundary.
 | Parent Phase 6 requirement | Status in this spec |
 |---|---|
 | Every operation kind from the fixed vocabulary | Covered by manifest-backed primary and secondary fake-provider operations in §4. |
-| Every error category from the failure taxonomy | Covered at the conformance boundary by structured protocol-error cases, fake-provider invalid-payload/error frames, chaos-worker failure modes, and conformance-owned negative fixtures. The implementation plan must add named fixture cases for `WorkerTimeout`, `WorkerCrash`, `NoEligibleWorker`, `ArtifactUnavailable`, `ArtifactChecksumMismatch`, `ExternalSystemUnavailable`, `ExternalSystemRateLimited`, `VerificationFailure`, `BackupFailure`, `CommitFailure`, `PolicyParseError`, `PolicyValidationError`, `MissingCapability`, `MalformedWorkerResult`, `UserCancellation`, `StaleIdentityEvidence`, `ClosureResolutionIncomplete`, `BlockedByActiveUseLease`, `ApprovalRequired`, `PriorityPolicyConflict`, `ProgressTimeout`, and `AmbiguousWorkerSelection`. Durable retry and terminal-issue classification remains owned by control-plane/store tests. |
+| Every error category from the failure taxonomy | Covered by a mechanically checked `voom-conformance` fixture registry keyed by `FailureClass`. The registry must contain one named fixture/assertion for every variant in the authoritative `voom_core::FailureClass` list, and the conformance test suite must fail on missing, duplicate, or unknown classes. Durable retry and terminal-issue classification remains owned by control-plane/store tests. |
 | Cancellation | Deferred. The current worker protocol has no cancel route; lease/job cancellation exists in store/control-plane APIs, not the worker transport. A later cancellation-transport slice must add the route before worker conformance can test it. |
 | Registration replay | Covered at the process-launch boundary by relaunching active workers with the same worker id/epoch/secret shape and requiring deterministic startup, auth, and stdin EOF shutdown. Durable worker-incarnation replay remains a control-plane supervisor concern. |
 | Capability mismatch | Covered as manifest-declared operation mismatch: conformance sends an unsupported operation to each active worker and requires `UnknownOperation`. Full scheduler capability scoring remains deferred to the scheduler/control-plane phase that introduces multi-worker scoring. |
@@ -259,7 +263,38 @@ operation kind that is not declared in that worker's operation cases.
 The raw-wire suite uses the same manifest operation and payload so
 workers are tested without being forced to implement `ProbeFile`.
 
-## 7. Tests
+## 7. Failure Taxonomy Conformance
+
+`voom-conformance` must make failure taxonomy coverage mechanically
+enforceable. The implementation must add an authoritative iterable
+variant list at `voom_core::FailureClass::ALL`, so the conformance
+crate can compare its registry against the enum instead of copying the
+enum shape into a test.
+
+The conformance fixture registry must contain one entry per
+`FailureClass`. Each entry has:
+
+- a stable assertion name;
+- the `FailureClass` under test;
+- the expected `ErrorCode` from `FailureClass::into_error_code`;
+- the expected retry class from `FailureClass::retry_class`;
+- a fixture source: fake-provider error frame, chaos-worker scenario,
+  or conformance-owned synthetic frame.
+
+The registry test fails when:
+
+- any `FailureClass` variant lacks a fixture;
+- any registry entry names a class not present in the authoritative
+  variant list;
+- any class appears more than once;
+- a fixture's error code or retry class disagrees with
+  `FailureClass`'s canonical mapping.
+
+This phase owns wire-level classification coverage. Durable lease
+retry, issue creation, and terminal-failure persistence remain covered
+by control-plane and store tests.
+
+## 8. Tests
 
 `voom-fakes` adds a process-backed integration test for the eleven
 provider fakes. For each binary, the test launches the worker with
@@ -294,6 +329,12 @@ pieces that do not need a child process:
 - reject any Sprint 2 fake provider under `[scaffold]`;
 - fail when any fixed `OperationKind` lacks an active manifest-backed
   operation case;
+- fail when any `FailureClass` variant lacks a named taxonomy
+  fixture/assertion;
+- fail when the failure taxonomy registry contains duplicate or
+  unknown classes;
+- assert each registered failure fixture's `FailureClass`,
+  `ErrorCode`, and retry-class mapping;
 - run typed and raw-wire suites against every active worker using the
   manifest-declared operation cases and payloads;
 - keep the existing conformance-owned protocol-negative fixture checks.
@@ -307,7 +348,7 @@ cargo test -p voom-conformance --all-features
 just ci
 ```
 
-## 8. Failure Handling
+## 9. Failure Handling
 
 Worker launch failure, bind timeout, malformed bind line, early exit,
 cleanup timeout, protocol error, missing provider fields, unexpected
@@ -325,7 +366,7 @@ failure. This mirrors the current chaos, benchmark, and conformance
 launch patterns so repeated local test runs do not leave worker
 processes behind.
 
-## 9. Implementation Notes
+## 10. Implementation Notes
 
 The implementation should proceed provider-support first:
 
@@ -338,7 +379,9 @@ The implementation should proceed provider-support first:
 4. Extend the conformance manifest schema and suite request builders.
 5. Add secondary operation cases for `HashFile`, `ExtractAudio`,
    `TranscribeAudio`, and `DeleteArtifact`.
-6. Promote all eleven fake providers to active and enforce the final
+6. Add the failure taxonomy fixture registry and coverage test before
+   declaring Phase 6 conformance complete.
+7. Promote all eleven fake providers to active and enforce the final
    no-Sprint-2-scaffold and all-operation-coverage rules.
 
 Each commit should keep `cargo test -p voom-fake-support
