@@ -1,5 +1,5 @@
 use super::*;
-use crate::manifest::OperationCase;
+use crate::manifest::{ActiveBinary, OperationCase};
 
 #[test]
 fn operation_request_uses_manifest_case_operation_payload_and_deadlines() {
@@ -35,4 +35,54 @@ fn operation_request_can_use_manifest_invalid_payload() {
         req.payload,
         serde_json::json!({"path": "/library/example.mkv", "target_codec": "bad_codec"})
     );
+}
+
+#[test]
+fn operation_case_checks_include_invalid_payload_for_every_operation() {
+    let entry = ActiveBinary {
+        name: "fake-transcoder".to_owned(),
+        target: "fake-transcoder".to_owned(),
+        status: "active".to_owned(),
+        required: true,
+        operations: vec![
+            OperationCase {
+                operation: voom_worker_protocol::OperationKind::TranscodeVideo,
+                valid_payload: serde_json::json!({
+                    "path": "/library/example.mkv",
+                    "target_codec": "h265"
+                }),
+                invalid_payload: serde_json::json!({
+                    "path": "/library/example.mkv",
+                    "target_codec": "bad_codec"
+                }),
+            },
+            OperationCase {
+                operation: voom_worker_protocol::OperationKind::ExtractAudio,
+                valid_payload: serde_json::json!({
+                    "path": "/library/example.mkv",
+                    "target_codec": "h265"
+                }),
+                invalid_payload: serde_json::json!({
+                    "path": "/library/example.mkv",
+                    "target_codec": "bad_codec"
+                }),
+            },
+        ],
+        path: None,
+    };
+
+    let names = operation_case_check_names(&entry);
+
+    assert!(names.contains(
+        &"fake-transcoder::transcode_video::operation_case_accepts_valid_payload".to_owned()
+    ));
+    assert!(names.contains(
+        &"fake-transcoder::transcode_video::operation_case_rejects_invalid_payload".to_owned()
+    ));
+    assert!(names.contains(
+        &"fake-transcoder::extract_audio::operation_case_accepts_valid_payload".to_owned()
+    ));
+    assert!(names.contains(
+        &"fake-transcoder::extract_audio::operation_case_rejects_invalid_payload".to_owned()
+    ));
 }

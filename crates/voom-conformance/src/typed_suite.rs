@@ -29,6 +29,39 @@ pub(crate) fn operation_request(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperationCaseCheckNames {
+    valid: String,
+    invalid: String,
+}
+
+pub(crate) fn operation_case_check_names(entry: &ActiveBinary) -> Vec<String> {
+    operation_case_checks(entry)
+        .into_iter()
+        .flat_map(|check| [check.valid, check.invalid])
+        .collect()
+}
+
+fn operation_case_checks(entry: &ActiveBinary) -> Vec<OperationCaseCheckNames> {
+    entry
+        .operations
+        .iter()
+        .map(|case| {
+            let operation = operation_name(case.operation);
+            OperationCaseCheckNames {
+                valid: format!(
+                    "{}::{operation}::operation_case_accepts_valid_payload",
+                    entry.name
+                ),
+                invalid: format!(
+                    "{}::{operation}::operation_case_rejects_invalid_payload",
+                    entry.name
+                ),
+            }
+        })
+        .collect()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "suite assembly stays explicit so each conformance check has a stable name"
@@ -54,26 +87,6 @@ pub async fn run(launch: &mut crate::WorkerLaunch, entry: &ActiveBinary) -> crat
         &mut result,
         format!("{}::handshake_rejects_below_supported_min", entry.name),
         handshake_rejects_below_supported_min(&client),
-    )
-    .await;
-    record(
-        &mut result,
-        format!(
-            "{}::{}::accepts_valid_payload",
-            entry.name,
-            operation_name(primary_case.operation)
-        ),
-        accepts_valid_payload(&client, launch, primary_case),
-    )
-    .await;
-    record(
-        &mut result,
-        format!(
-            "{}::{}::rejects_invalid_payload",
-            entry.name,
-            operation_name(primary_case.operation)
-        ),
-        rejects_invalid_payload(&client, launch, primary_case),
     )
     .await;
     record(
@@ -153,15 +166,18 @@ pub async fn run(launch: &mut crate::WorkerLaunch, entry: &ActiveBinary) -> crat
     )
     .await;
 
-    for case in &entry.operations {
+    let check_names = operation_case_check_names(entry);
+    for (case, names) in entry.operations.iter().zip(check_names.chunks_exact(2)) {
         record(
             &mut result,
-            format!(
-                "{}::{}::operation_case_progress_terminal",
-                entry.name,
-                operation_name(case.operation)
-            ),
+            names[0].clone(),
             accepts_valid_payload(&client, launch, case),
+        )
+        .await;
+        record(
+            &mut result,
+            names[1].clone(),
+            rejects_invalid_payload(&client, launch, case),
         )
         .await;
     }
@@ -215,7 +231,7 @@ async fn rejects_invalid_payload(
         client
             .dispatch(
                 &launch.credentials,
-                "typed-missing-path",
+                &format!("typed-invalid-{}", operation_name(case.operation)),
                 operation_request(LeaseId(11), case, PayloadKind::Invalid),
             )
             .await,

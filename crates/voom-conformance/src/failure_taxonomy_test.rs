@@ -31,3 +31,20 @@ fn every_fixture_matches_failure_class_error_code_and_retry_mapping() {
         assert_eq!(fixture.retry, fixture.class.retry_class());
     }
 }
+
+#[test]
+fn run_reports_registry_checks_not_unexecuted_fixture_names() {
+    let result = run();
+
+    assert!(
+        result
+            .passed
+            .contains(&"failure_taxonomy_registry_complete".to_owned())
+    );
+    assert!(
+        result
+            .passed
+            .contains(&"failure_taxonomy_registry_mappings_current".to_owned())
+    );
+    assert!(!result.passed.contains(&registry()[0].name.to_owned()));
+}

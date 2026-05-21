@@ -30,6 +30,10 @@ struct ProviderCase {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "table-driven integration test keeps each protocol assertion in one worker lifecycle"
+)]
 async fn fake_providers_follow_worker_protocol() {
     for case in provider_cases() {
         let mut launch = spawn_provider(&case).await;
@@ -86,6 +90,18 @@ async fn fake_providers_follow_worker_protocol() {
             )
             .await;
             assert_two_frame_success(&case, secondary, &frames);
+
+            let invalid =
+                operation_request(250 + index as u64, secondary, case.invalid_payload.clone());
+            let err = client
+                .dispatch(
+                    &launch.credentials,
+                    &format!("{}-secondary-invalid-{index}", case.name),
+                    invalid,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
         }
 
         let replay = operation_request(301, case.primary, case.valid_payload.clone());

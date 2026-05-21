@@ -4,16 +4,16 @@ use thiserror::Error;
 use voom_core::{ErrorCode, FailureClass, FailureRetryClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FailureFixture {
+pub struct FailureTaxonomyEntry {
     pub name: &'static str,
     pub class: FailureClass,
     pub code: ErrorCode,
     pub retry: FailureRetryClass,
-    pub source: FixtureSource,
+    pub planned_source: PlannedCoverageSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FixtureSource {
+pub enum PlannedCoverageSource {
     FakeProviderErrorFrame,
     ChaosWorkerScenario,
     SyntheticFrame,
@@ -25,128 +25,128 @@ pub enum FailureTaxonomyError {
     Missing { missing: Vec<FailureClass> },
     #[error("failure taxonomy duplicate coverage: {duplicates:?}")]
     Duplicate { duplicates: Vec<FailureClass> },
-    #[error("failure taxonomy fixture {name} has stale mapping for {class:?}")]
+    #[error("failure taxonomy entry {name} has stale mapping for {class:?}")]
     StaleMapping {
         name: &'static str,
         class: FailureClass,
     },
 }
 
-const REGISTRY: &[FailureFixture] = &[
-    fixture(
+const REGISTRY: &[FailureTaxonomyEntry] = &[
+    entry(
         "failure_taxonomy_worker_timeout",
         FailureClass::WorkerTimeout,
-        FixtureSource::ChaosWorkerScenario,
+        PlannedCoverageSource::ChaosWorkerScenario,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_worker_crash",
         FailureClass::WorkerCrash,
-        FixtureSource::ChaosWorkerScenario,
+        PlannedCoverageSource::ChaosWorkerScenario,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_no_eligible_worker",
         FailureClass::NoEligibleWorker,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_artifact_unavailable",
         FailureClass::ArtifactUnavailable,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_artifact_checksum_mismatch",
         FailureClass::ArtifactChecksumMismatch,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_external_system_unavailable",
         FailureClass::ExternalSystemUnavailable,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_external_system_rate_limited",
         FailureClass::ExternalSystemRateLimited,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_verification_failure",
         FailureClass::VerificationFailure,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_backup_failure",
         FailureClass::BackupFailure,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_commit_failure",
         FailureClass::CommitFailure,
-        FixtureSource::FakeProviderErrorFrame,
+        PlannedCoverageSource::FakeProviderErrorFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_policy_parse_error",
         FailureClass::PolicyParseError,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_policy_validation_error",
         FailureClass::PolicyValidationError,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_missing_capability",
         FailureClass::MissingCapability,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_malformed_worker_result",
         FailureClass::MalformedWorkerResult,
-        FixtureSource::ChaosWorkerScenario,
+        PlannedCoverageSource::ChaosWorkerScenario,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_user_cancellation",
         FailureClass::UserCancellation,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_stale_identity_evidence",
         FailureClass::StaleIdentityEvidence,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_closure_resolution_incomplete",
         FailureClass::ClosureResolutionIncomplete,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_blocked_by_active_use_lease",
         FailureClass::BlockedByActiveUseLease,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_approval_required",
         FailureClass::ApprovalRequired,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_priority_policy_conflict",
         FailureClass::PriorityPolicyConflict,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_progress_timeout",
         FailureClass::ProgressTimeout,
-        FixtureSource::ChaosWorkerScenario,
+        PlannedCoverageSource::ChaosWorkerScenario,
     ),
-    fixture(
+    entry(
         "failure_taxonomy_ambiguous_worker_selection",
         FailureClass::AmbiguousWorkerSelection,
-        FixtureSource::SyntheticFrame,
+        PlannedCoverageSource::SyntheticFrame,
     ),
 ];
 
 #[must_use]
-pub fn registry() -> &'static [FailureFixture] {
+pub fn registry() -> &'static [FailureTaxonomyEntry] {
     REGISTRY
 }
 
@@ -164,52 +164,35 @@ pub fn run() -> crate::SuiteResult {
             return result;
         }
     }
-    for fixture in REGISTRY {
-        if fixture.code == fixture.class.into_error_code()
-            && fixture.retry == fixture.class.retry_class()
-        {
-            result.pass(fixture.name);
-        } else {
-            result.fail(
-                fixture.name,
-                format!(
-                    "expected {:?}/{:?}, got {:?}/{:?}",
-                    fixture.class.into_error_code(),
-                    fixture.class.retry_class(),
-                    fixture.code,
-                    fixture.retry
-                ),
-            );
-        }
-    }
+    result.pass("failure_taxonomy_registry_mappings_current");
     result
 }
 
 #[cfg(test)]
 pub(crate) fn validate_registry_with(
-    fixtures: &[FailureFixture],
+    entries: &[FailureTaxonomyEntry],
 ) -> Result<(), FailureTaxonomyError> {
-    validate_registry_with_inner(fixtures)
+    validate_registry_with_inner(entries)
 }
 
 #[cfg(not(test))]
-fn validate_registry_with(fixtures: &[FailureFixture]) -> Result<(), FailureTaxonomyError> {
-    validate_registry_with_inner(fixtures)
+fn validate_registry_with(entries: &[FailureTaxonomyEntry]) -> Result<(), FailureTaxonomyError> {
+    validate_registry_with_inner(entries)
 }
 
-fn validate_registry_with_inner(fixtures: &[FailureFixture]) -> Result<(), FailureTaxonomyError> {
+fn validate_registry_with_inner(
+    entries: &[FailureTaxonomyEntry],
+) -> Result<(), FailureTaxonomyError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
-    for fixture in fixtures {
-        if !seen.insert(fixture.class) {
-            duplicates.push(fixture.class);
+    for entry in entries {
+        if !seen.insert(entry.class) {
+            duplicates.push(entry.class);
         }
-        if fixture.code != fixture.class.into_error_code()
-            || fixture.retry != fixture.class.retry_class()
-        {
+        if entry.code != entry.class.into_error_code() || entry.retry != entry.class.retry_class() {
             return Err(FailureTaxonomyError::StaleMapping {
-                name: fixture.name,
-                class: fixture.class,
+                name: entry.name,
+                class: entry.class,
             });
         }
     }
@@ -229,13 +212,17 @@ fn validate_registry_with_inner(fixtures: &[FailureFixture]) -> Result<(), Failu
     }
 }
 
-const fn fixture(name: &'static str, class: FailureClass, source: FixtureSource) -> FailureFixture {
-    FailureFixture {
+const fn entry(
+    name: &'static str,
+    class: FailureClass,
+    planned_source: PlannedCoverageSource,
+) -> FailureTaxonomyEntry {
+    FailureTaxonomyEntry {
         name,
         class,
         code: class.into_error_code(),
         retry: class.retry_class(),
-        source,
+        planned_source,
     }
 }
 
