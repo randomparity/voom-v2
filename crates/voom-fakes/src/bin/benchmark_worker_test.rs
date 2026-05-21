@@ -126,6 +126,13 @@ fn baseline_dispatch_emits_progress_and_result() {
 }
 
 #[test]
+fn baseline_dispatch_rejects_generated_body_above_limit() {
+    let req = request(10, serde_json::json!({}));
+    let err = baseline_dispatch_with_body_limit(&req, "/library/example.mkv", 1).unwrap_err();
+    assert!(err.to_string().contains("response body"));
+}
+
+#[test]
 fn benchmark_dispatch_emits_cadence_and_final_totals() {
     let req = request(8, serde_json::json!({}));
     let config = BenchmarkConfig {
@@ -185,7 +192,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
 #[test]
 fn body_size_guard_accepts_at_or_below_limit() {
     let body = vec![b'x'; MAX_BENCHMARK_RESPONSE_BODY_BYTES];
-    enforce_benchmark_body_size(&body, MAX_BENCHMARK_RESPONSE_BODY_BYTES).unwrap();
+    enforce_response_body_size(&body, MAX_BENCHMARK_RESPONSE_BODY_BYTES).unwrap();
 }
 
 #[test]
@@ -198,5 +205,5 @@ fn benchmark_dispatch_rejects_generated_body_above_limit() {
         progress_frames: 1,
     };
     let err = benchmark_dispatch_with_body_limit(&req, &config, 1).unwrap_err();
-    assert!(err.to_string().contains("benchmark response body"));
+    assert!(err.to_string().contains("response body"));
 }

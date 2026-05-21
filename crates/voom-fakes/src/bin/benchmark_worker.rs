@@ -185,6 +185,14 @@ fn baseline_dispatch(
     req: &OperationRequest,
     path: &str,
 ) -> Result<OperationDispatch, ProtocolError> {
+    baseline_dispatch_with_body_limit(req, path, MAX_BENCHMARK_RESPONSE_BODY_BYTES)
+}
+
+fn baseline_dispatch_with_body_limit(
+    req: &OperationRequest,
+    path: &str,
+    max_body_bytes: usize,
+) -> Result<OperationDispatch, ProtocolError> {
     let now = Utc::now();
     let progress = ProgressFrame::Progress {
         lease_id: req.lease_id,
@@ -201,6 +209,7 @@ fn baseline_dispatch(
         payload: serde_json::json!({"mode": "baseline", "path": path}),
     };
     let body = body_from_frames(&[progress, result])?;
+    enforce_response_body_size(&body, max_body_bytes)?;
     Ok(OperationDispatch {
         response: OperationResponse {
             lease_id: req.lease_id,
@@ -271,7 +280,7 @@ fn benchmark_dispatch_with_body_limit(
         ),
     });
     let body = body_from_frames(&frames)?;
-    enforce_benchmark_body_size(&body, max_body_bytes)?;
+    enforce_response_body_size(&body, max_body_bytes)?;
     Ok(OperationDispatch {
         response: OperationResponse {
             lease_id: req.lease_id,
@@ -328,10 +337,10 @@ fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> 
     Ok(body)
 }
 
-fn enforce_benchmark_body_size(body: &[u8], max_body_bytes: usize) -> Result<(), ProtocolError> {
+fn enforce_response_body_size(body: &[u8], max_body_bytes: usize) -> Result<(), ProtocolError> {
     if body.len() > max_body_bytes {
         Err(ProtocolError::InvalidPayload {
-            detail: format!("benchmark response body {} > {max_body_bytes}", body.len()),
+            detail: format!("response body {} > {max_body_bytes}", body.len()),
         })
     } else {
         Ok(())

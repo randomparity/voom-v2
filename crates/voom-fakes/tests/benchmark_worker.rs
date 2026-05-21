@@ -49,6 +49,20 @@ async fn invalid_payload_returns_protocol_error_and_worker_stays_alive() {
 }
 
 #[tokio::test]
+async fn oversized_baseline_response_is_rejected_without_crashing() {
+    let mut launch = spawn_benchmark().await;
+    let client = HttpClient::new(launch.bound);
+    let req = operation_request(103, serde_json::json!({"path": "x".repeat(64 * 1024)}));
+    let err = client
+        .dispatch(&launch.credentials, "oversized-baseline", req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    assert!(launch.child.try_wait().unwrap().is_none());
+    launch.shutdown().await;
+}
+
+#[tokio::test]
 async fn benchmark_mode_returns_cadence_progress_and_summary() {
     let mut launch = spawn_benchmark().await;
     let client = HttpClient::new(launch.bound);
