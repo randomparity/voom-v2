@@ -253,7 +253,7 @@ async fn handshake_version_skew_returns_structured_error(
 async fn idempotency_exact_byte_replay_returns_cached_response(
     launch: &crate::WorkerLaunch,
 ) -> Result<(), String> {
-    let request = operation_request(35, "/library/raw-replay.mkv", Some("raw-replay".to_owned()))?;
+    let request = operation_request(35, "/library/raw-replay.mkv", "raw-replay")?;
     let first = send_raw(launch.bound, request.clone()).await?;
     let second = send_raw(launch.bound, request).await?;
     let first = RawHttpResponse::parse(&first)?;
@@ -310,18 +310,14 @@ async fn send_operation_with_creds(
     .await
 }
 
-fn operation_request(
-    lease_id: u64,
-    path: &str,
-    idempotency_key: Option<String>,
-) -> Result<Bytes, String> {
+fn operation_request(lease_id: u64, path: &str, idempotency_key: &str) -> Result<Bytes, String> {
     let body = operation_body(lease_id, path)?;
     let creds = WorkerCredentials {
         worker_id: voom_core::WorkerId(1),
         worker_epoch: 0,
         secret: secrecy::SecretString::from("phase1-bootstrap-secret"),
     };
-    let headers = auth_headers(&creds, idempotency_key.as_deref().unwrap_or("raw"));
+    let headers = auth_headers(&creds, idempotency_key);
     let header_refs = headers
         .iter()
         .map(|(k, v)| (*k, v.as_str()))
