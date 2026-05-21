@@ -1,6 +1,6 @@
 ---
-name: voom-sprint-2-phase-6-fake-providers-conformance-closeout-design
-description: Sprint 2 Phase 6 closeout design — implement the deferred eleven fake providers, promote them into manifest-driven conformance, and complete the final Sprint 2 active-worker integration gate.
+name: voom-sprint-2-phase-6-fake-providers-conformance-foundation-design
+description: Sprint 2 Phase 6 design — implement the deferred eleven fake providers and promote them into manifest-driven conformance as the foundation for Phase 7's simulated scheduler workflow.
 status: proposed
 date: 2026-05-21
 sprint: 2
@@ -13,27 +13,34 @@ predecessor_specs:
   - docs/superpowers/specs/2026-05-21-voom-sprint-2-phase-4-chaos-worker-design.md
   - docs/superpowers/specs/2026-05-21-voom-sprint-2-phase-5-benchmark-worker-design.md
   - docs/superpowers/specs/2026-05-21-voom-sprint-2-phase-5-control-plane-benchmark-harness-design.md
-scope: implement and promote the eleven fake-provider workers plus final active-worker conformance; real media tooling and supervisor DAG orchestration remain deferred
+scope: implement and promote the eleven fake-provider workers plus active-worker conformance; real media tooling, supervisor DAG orchestration, and the Phase 7 simulated scheduler workflow remain deferred
 ---
 
-# Sprint 2 Phase 6 — Fake Providers And Conformance Closeout
+# Sprint 2 Phase 6 — Fake Providers And Conformance Foundation
 
 ## 1. Goal
 
 Sprint 2 has active conformance coverage for `echo-worker`,
 `chaos-worker`, and `benchmark-worker`, but the eleven promised
 Phase 3 fake providers still exist only as placeholder binaries. Phase
-6 closes that gap by turning those placeholders into real synthetic
-workers and making the conformance harness validate every Sprint 2
-provider binary as an active manifest entry.
+6 turns those placeholders into real synthetic workers and makes the
+conformance harness validate every Sprint 2 provider binary as an
+active manifest entry.
 
-The closeout goal is practical, not production-like media behavior:
+The foundation goal is practical, not production-like media behavior:
 each fake provider must be a deterministic, process-backed worker that
 speaks the public worker protocol, validates its own provider payload,
-emits stable progress/result frames, and rejects invalid or unsupported
-requests predictably. The suite remains synthetic. No real media tools,
-external services, policy DAG compiler, or production supervisor
-orchestration land in this phase.
+emits stable progress/result frames, and rejects invalid or
+unsupported requests predictably. The suite remains synthetic. No real
+media tools, external services, policy DAG compiler, production
+supervisor orchestration, or fully simulated scheduler workflow lands
+in this phase.
+
+Phase 6 does not by itself satisfy the three Sprint 2 scheduler exit
+criteria: synthetic end-to-end plan through the real scheduler,
+supervisor-side chaos recovery, and benchmark scheduler throughput.
+Those are Phase 7's responsibility. Phase 6 provides the active fake
+workers and conformance guarantees Phase 7 consumes.
 
 ## 2. Scope
 
@@ -61,6 +68,8 @@ Out of scope:
 - Supervisor DAG or policy-compiler orchestration.
 - Durable multi-step workflow execution through the supervisor.
 - Performance thresholds beyond the existing benchmark harness.
+- Phase 7's scanner → prober → orchestrator → remux/transcode →
+  downstream validation workflow through the real scheduler.
 
 Exit criteria:
 
@@ -77,27 +86,31 @@ Exit criteria:
   fixture/assertion, and `cargo test -p voom-conformance
   --all-features` fails when the registry is missing a variant,
   contains a duplicate class, or contains an unknown class.
-- Every parent Phase 6 requirement is either covered by this phase or
-  explicitly marked as deferred with a successor owner in §3.
+- Phase 7 has enough active fake workers and conformance guarantees to
+  build the scanner → prober → orchestrator → remux/transcode →
+  downstream validation workflow.
 - `just ci` passes.
 
-## 3. Parent Phase 6 Coverage
+## 3. Phase 6 To Phase 7 Handoff
 
-The Sprint 2 overview defines Phase 6 as the final conformance
-expansion. This slice closes the parts that can be tested at the
-current worker-protocol and process-launch boundary, and explicitly
-names the parent requirements that remain outside that boundary.
+The Sprint 2 overview originally placed conformance expansion and
+integration validation in Phase 6. This spec narrows Phase 6 to the
+worker suite and active-worker conformance foundation. Phase 7 will
+own the fully simulated workflow and the direct Sprint 2 scheduler
+exit validation.
 
-| Parent Phase 6 requirement | Status in this spec |
+| Requirement or dependency | Phase 6 / Phase 7 ownership |
 |---|---|
-| Every operation kind from the fixed vocabulary | Covered by manifest-backed primary and secondary fake-provider operations in §4. |
-| Every error category from the failure taxonomy | Covered by a mechanically checked `voom-conformance` fixture registry keyed by `FailureClass`. The registry must contain one named fixture/assertion for every variant in the authoritative `voom_core::FailureClass` list, and the conformance test suite must fail on missing, duplicate, or unknown classes. Durable retry and terminal-issue classification remains owned by control-plane/store tests. |
-| Cancellation | Deferred. The current worker protocol has no cancel route; lease/job cancellation exists in store/control-plane APIs, not the worker transport. A later cancellation-transport slice must add the route before worker conformance can test it. |
-| Registration replay | Covered at the process-launch boundary by relaunching active workers with the same worker id/epoch/secret shape and requiring deterministic startup, auth, and stdin EOF shutdown. Durable worker-incarnation replay remains a control-plane supervisor concern. |
-| Capability mismatch | Covered as manifest-declared operation mismatch: conformance sends an unsupported operation to each active worker and requires `UnknownOperation`. Full scheduler capability scoring remains deferred to the scheduler/control-plane phase that introduces multi-worker scoring. |
-| Worker re-registration after crash | Covered at the black-box process boundary by chaos-worker crash scenarios plus relaunching a fresh process and re-running conformance. Durable incarnation retirement/reconciliation remains a control-plane supervisor concern. |
-| Supervisor-side recovery from each chaos scenario | Deferred from this fake-provider closeout spec. The worker-side chaos modes are already implemented; durable supervisor recovery belongs in the control-plane chaos integration plan. |
-| Final integration across Phase 3/4/5 binaries | Covered by requiring all eleven fake providers, `chaos-worker`, and `benchmark-worker` to be active conformance manifest entries. |
+| Fake-provider implementation | Phase 6 implements and process-tests all eleven fake providers. |
+| Active-worker conformance | Phase 6 promotes all fake providers, `chaos-worker`, and `benchmark-worker` to active conformance manifest entries. |
+| Every operation kind from the fixed vocabulary | Phase 6 covers these with manifest-backed primary and secondary fake-provider operations in §4. |
+| Every error category from the failure taxonomy | Phase 6 covers these with a mechanically checked `voom-conformance` fixture registry keyed by `FailureClass`. The registry must contain one named fixture/assertion for every variant in the authoritative `voom_core::FailureClass` list, and the conformance test suite must fail on missing, duplicate, or unknown classes. Durable retry and terminal-issue classification remains owned by control-plane/store tests. |
+| Synthetic end-to-end plan through the real scheduler | Phase 7 owns the scanner → prober → orchestrator → remux/transcode → downstream validation workflow through the real scheduler. Phase 6 only provides active workers and conformance guarantees. |
+| Supervisor-side recovery from each chaos scenario | Phase 7 owns durable control-plane assertions for worker crash, timeout, malformed result, and missed heartbeat. Phase 6 keeps worker-side chaos modes active and conformant where applicable. |
+| Benchmark worker reports scheduler throughput | Phase 7 owns scheduler-throughput reporting through the real scheduler path. Phase 6 keeps `benchmark-worker` active and conformant. |
+| Registration replay and worker re-registration after crash | Phase 6 covers process-boundary relaunch behavior. Phase 7 owns durable worker-incarnation behavior when exercising the real scheduler/supervisor. |
+| Capability mismatch | Phase 6 covers manifest-declared operation mismatch with `UnknownOperation`. Full scheduler capability scoring remains deferred to the scheduler/control-plane phase that introduces multi-worker scoring. |
+| Cancellation | Deferred unless Phase 7 explicitly chooses to add cancellation transport. The current worker protocol has no cancel route; lease/job cancellation exists in store/control-plane APIs, not the worker transport. |
 
 ## 4. Architecture
 
@@ -339,6 +352,11 @@ pieces that do not need a child process:
   manifest-declared operation cases and payloads;
 - keep the existing conformance-owned protocol-negative fixture checks.
 
+Phase 7 tests should consume the Phase 6 active manifest instead of
+hard-coding worker paths. Phase 7 should fail fast if scanner, prober,
+remuxer, transcoder, quality, issue, external-system, use-lease,
+chaos, or benchmark workers are absent from the active manifest.
+
 Primary verification:
 
 ```bash
@@ -381,7 +399,7 @@ The implementation should proceed provider-support first:
    `TranscribeAudio`, and `DeleteArtifact`.
 6. Add the failure taxonomy fixture registry and coverage test before
    declaring Phase 6 conformance complete.
-7. Promote all eleven fake providers to active and enforce the final
+7. Promote all eleven fake providers to active and enforce the Phase 6
    no-Sprint-2-scaffold and all-operation-coverage rules.
 
 Each commit should keep `cargo test -p voom-fake-support
