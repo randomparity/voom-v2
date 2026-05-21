@@ -44,6 +44,7 @@ Replace `crates/voom-fakes/src/bin/benchmark_worker.rs` with this parser/frame-b
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::hint::black_box;
 use std::time::Instant;
 use voom_worker_protocol::{
     OperationKind, OperationRequest, OperationResponse, ProgressFrame, ProtocolError,
@@ -191,8 +192,13 @@ fn benchmark_dispatch_with_body_limit(
     let mut frames = Vec::new();
     let mut completed = 0_u64;
     let mut sample_index = 0_u64;
+    let mut operation_accumulator = 0_u64;
     while completed < config.operations {
-        completed = (completed + config.emit_every).min(config.operations);
+        let next_completed = (completed + config.emit_every).min(config.operations);
+        for operation_index in completed..next_completed {
+            operation_accumulator = operation_accumulator.wrapping_add(black_box(operation_index));
+        }
+        completed = next_completed;
         let elapsed_worker_ns = elapsed_worker_ns(started_instant);
         frames.push(ProgressFrame::Progress {
             lease_id: req.lease_id,
@@ -223,6 +229,7 @@ fn benchmark_dispatch_with_body_limit(
             config,
             sample_index,
             elapsed_worker_ns,
+            operation_accumulator,
             started_at,
             completed_at,
         ),
@@ -242,18 +249,20 @@ fn benchmark_result_payload(
     config: &BenchmarkConfig,
     progress_frames: u64,
     elapsed_worker_ns: u64,
+    operation_accumulator: u64,
     started_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
 ) -> serde_json::Value {
-    let elapsed_ns = elapsed_worker_ns.max(1);
     let worker_ops_per_second_milli =
-        ((u128::from(config.operations) * 1_000_000_000_000_u128) / u128::from(elapsed_ns))
+        ((u128::from(config.operations) * 1_000_000_000_000_u128)
+            / u128::from(elapsed_worker_ns))
             .min(u128::from(u64::MAX)) as u64;
     serde_json::json!({
         "mode": "benchmark",
         "operations_total": config.operations,
         "progress_frames": progress_frames,
         "elapsed_worker_ns": elapsed_worker_ns,
+        "operation_accumulator": operation_accumulator,
         "worker_ops_per_second_milli": worker_ops_per_second_milli,
         "first_operation_started_at": started_at,
         "completed_at": completed_at,
@@ -261,10 +270,11 @@ fn benchmark_result_payload(
 }
 
 fn elapsed_worker_ns(started_instant: Instant) -> u64 {
-    started_instant
+    (started_instant
         .elapsed()
         .as_nanos()
-        .min(u128::from(u64::MAX)) as u64
+        .min(u128::from(u64::MAX)) as u64)
+        .max(1)
 }
 
 fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> {
@@ -443,6 +453,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
         .collect();
     let mut progress_elapsed = Vec::new();
     let mut result_elapsed = None;
+    let mut result_accumulator = None;
     let mut result_throughput = None;
 
     for frame in frames {
@@ -452,6 +463,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
                 let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                assert!(elapsed > 0);
                 if let Some(previous) = progress_elapsed.last() {
                     assert!(elapsed >= *previous);
                 }
@@ -462,6 +474,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
                 assert_eq!(payload["operations_total"], 25);
                 assert_eq!(payload["progress_frames"], 3);
                 result_elapsed = Some(payload["elapsed_worker_ns"].as_u64().unwrap());
+                result_accumulator = Some(payload["operation_accumulator"].as_u64().unwrap());
                 result_throughput = Some(payload["worker_ops_per_second_milli"].as_u64().unwrap());
             }
             ProgressFrame::Error { message, .. } => panic!("unexpected error frame: {message}"),
@@ -469,7 +482,10 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
     }
 
     assert_eq!(progress_elapsed.len(), 3);
-    assert!(result_elapsed.unwrap() >= *progress_elapsed.last().unwrap());
+    let result_elapsed = result_elapsed.unwrap();
+    assert!(result_elapsed > 0);
+    assert!(result_elapsed >= *progress_elapsed.last().unwrap());
+    assert_eq!(result_accumulator.unwrap(), (0_u64..25).sum::<u64>());
     assert!(result_throughput.unwrap() > 0);
 }
 
@@ -898,6 +914,7 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
                 let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                assert!(elapsed > 0);
                 if let Some(previous) = last_progress_elapsed {
                     assert!(elapsed >= previous);
                 }
@@ -911,9 +928,12 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
                 assert_eq!(payload["progress_frames"], 3);
-                assert!(
-                    payload["elapsed_worker_ns"].as_u64().unwrap()
-                        >= last_progress_elapsed.unwrap()
+                let result_elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                assert!(result_elapsed > 0);
+                assert!(result_elapsed >= last_progress_elapsed.unwrap());
+                assert_eq!(
+                    payload["operation_accumulator"].as_u64().unwrap(),
+                    (0_u64..25).sum::<u64>()
                 );
                 assert!(payload["worker_ops_per_second_milli"].as_u64().unwrap() > 0);
                 break;
