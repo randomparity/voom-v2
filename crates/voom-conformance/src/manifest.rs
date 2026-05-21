@@ -63,10 +63,13 @@ impl Manifest {
 }
 
 pub fn resolve_active(entry: &ActiveBinary) -> Result<PathBuf, ManifestError> {
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(default_target_dir);
-    resolve_active_with_sources(entry, |key| std::env::var_os(key), Some(target_dir.as_path()))
+    let target_dir =
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, PathBuf::from);
+    resolve_active_with_sources(
+        entry,
+        |key| std::env::var_os(key),
+        Some(target_dir.as_path()),
+    )
 }
 
 pub fn resolve_active_with<F>(entry: &ActiveBinary, env: F) -> Result<PathBuf, ManifestError>
@@ -107,8 +110,10 @@ pub fn default_target_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .map(|workspace| workspace.join("target"))
-        .unwrap_or_else(|| PathBuf::from("target"))
+        .map_or_else(
+            || PathBuf::from("target"),
+            |workspace| workspace.join("target"),
+        )
 }
 
 fn validate(raw: RawManifest) -> Result<Manifest, ManifestError> {

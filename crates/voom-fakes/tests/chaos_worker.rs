@@ -201,11 +201,7 @@ async fn read_until_headers(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
     read_until_contains_bytes(stream, b"\r\n\r\n", Duration::from_secs(1)).await
 }
 
-async fn read_until_contains(
-    stream: &mut tokio::net::TcpStream,
-    out: &mut Vec<u8>,
-    needle: &str,
-) {
+async fn read_until_contains(stream: &mut tokio::net::TcpStream, out: &mut Vec<u8>, needle: &str) {
     let needle = needle.as_bytes();
     loop {
         if out.windows(needle.len()).any(|window| window == needle) {

@@ -81,12 +81,9 @@ fn explicit_path_takes_precedence_over_target_dir_fallback() {
         required: true,
         path: Some(std::path::PathBuf::from("/explicit/chaos-worker")),
     };
-    let path = resolve_active_with_sources(
-        &entry,
-        |_| None,
-        Some(std::path::Path::new("/tmp/target")),
-    )
-    .unwrap();
+    let path =
+        resolve_active_with_sources(&entry, |_| None, Some(std::path::Path::new("/tmp/target")))
+            .unwrap();
     assert_eq!(path, std::path::PathBuf::from("/explicit/chaos-worker"));
 }
 
@@ -99,13 +96,13 @@ fn resolves_cross_package_binary_from_target_dir_fallback() {
         required: true,
         path: None,
     };
-    let path = resolve_active_with_sources(
-        &entry,
-        |_| None,
-        Some(std::path::Path::new("/tmp/target")),
-    )
-    .unwrap();
-    assert_eq!(path, std::path::PathBuf::from("/tmp/target/debug/chaos-worker"));
+    let path =
+        resolve_active_with_sources(&entry, |_| None, Some(std::path::Path::new("/tmp/target")))
+            .unwrap();
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("/tmp/target/debug/chaos-worker")
+    );
 }
 
 #[test]

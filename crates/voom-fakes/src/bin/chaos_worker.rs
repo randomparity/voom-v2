@@ -327,7 +327,7 @@ fn dispatch_operation(req: &OperationRequest) -> Result<ChaosResponse, ProtocolE
         Err(err) => return Ok(json_response("400 Bad Request", &err)),
     };
     match payload.mode {
-        ChaosMode::Baseline => fixed_operation_response(req, baseline_body(req, &payload)?),
+        ChaosMode::Baseline => fixed_operation_response(req, &baseline_body(req, &payload)?),
         mode => streaming_or_fault_response(req, &payload, mode),
     }
 }
@@ -362,12 +362,16 @@ fn parse_payload(value: serde_json::Value) -> Result<ChaosPayload, ProtocolError
             detail: "progress_count > 128".to_owned(),
         });
     }
+    let progress_count =
+        usize::try_from(progress_count).map_err(|_| ProtocolError::InvalidPayload {
+            detail: "progress_count cannot fit usize".to_owned(),
+        })?;
     let progress_interval = checked_duration("progress_interval_ms", raw.progress_interval_ms, 50)?;
     let stall = checked_duration("stall_ms", raw.stall_ms, 500)?;
     Ok(ChaosPayload {
         path,
         mode,
-        progress_count: progress_count as usize,
+        progress_count,
         progress_interval,
         stall,
     })
@@ -578,10 +582,10 @@ fn progress_body(req: &OperationRequest, count: usize) -> Result<Vec<u8>, Protoc
 
 fn fixed_operation_response(
     req: &OperationRequest,
-    body: Vec<u8>,
+    body: &[u8],
 ) -> Result<ChaosResponse, ProtocolError> {
     let mut framed = operation_response_line(req)?;
-    framed.extend_from_slice(&body);
+    framed.extend_from_slice(body);
     Ok(ChaosResponse::Fixed {
         status: "200 OK",
         content_type: "application/x-ndjson",
@@ -615,8 +619,11 @@ async fn write_response(
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            stream.write_all(head.as_bytes()).await.map_err(write_err)?;
-            stream.write_all(&body).await.map_err(write_err)?;
+            stream
+                .write_all(head.as_bytes())
+                .await
+                .map_err(|e| write_err(&e))?;
+            stream.write_all(&body).await.map_err(|e| write_err(&e))?;
         }
         ChaosResponse::Open {
             prefix,
@@ -626,13 +633,13 @@ async fn write_response(
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: keep-alive\r\n\r\n")
                 .await
-                .map_err(write_err)?;
-            stream.write_all(&prefix).await.map_err(write_err)?;
+                .map_err(|e| write_err(&e))?;
+            stream.write_all(&prefix).await.map_err(|e| write_err(&e))?;
             for (chunk, delay) in chunks {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
                 }
-                stream.write_all(&chunk).await.map_err(write_err)?;
+                stream.write_all(&chunk).await.map_err(|e| write_err(&e))?;
             }
             tokio::time::sleep(hold).await;
         }
@@ -641,7 +648,7 @@ async fn write_response(
     Ok(())
 }
 
-fn write_err(e: std::io::Error) -> ProtocolError {
+fn write_err(e: &std::io::Error) -> ProtocolError {
     ProtocolError::MalformedFrame {
         detail: format!("write: {e}"),
     }
@@ -675,10 +682,13 @@ fn streaming_or_fault_response(
         }),
         ChaosMode::DeadlineExceeded => Ok(ChaosResponse::Open {
             prefix: operation_response_line(req)?,
-            chunks: vec![(progress_body(req, payload.progress_count)?, payload.progress_interval)],
+            chunks: vec![(
+                progress_body(req, payload.progress_count)?,
+                payload.progress_interval,
+            )],
             hold: payload.stall,
         }),
-        ChaosMode::Baseline => fixed_operation_response(req, baseline_body(req, payload)?),
+        ChaosMode::Baseline => fixed_operation_response(req, &baseline_body(req, payload)?),
     }
 }
 

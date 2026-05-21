@@ -16,7 +16,12 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
             return;
         }
     };
-    assert!(manifest.active.iter().any(|entry| entry.name == "echo-worker"));
+    assert!(
+        manifest
+            .active
+            .iter()
+            .any(|entry| entry.name == "echo-worker")
+    );
     assert!(
         manifest
             .active
