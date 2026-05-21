@@ -452,6 +452,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
         .map(|line| serde_json::from_slice(line).unwrap())
         .collect();
     let mut progress_elapsed = Vec::new();
+    let mut progress_cadence = Vec::new();
     let mut result_elapsed = None;
     let mut result_accumulator = None;
     let mut result_throughput = None;
@@ -468,6 +469,10 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
                     assert!(elapsed >= *previous);
                 }
                 progress_elapsed.push(elapsed);
+                progress_cadence.push((
+                    payload["sample_index"].as_u64().unwrap(),
+                    payload["operations_completed"].as_u64().unwrap(),
+                ));
             }
             ProgressFrame::Result { payload, .. } => {
                 assert_eq!(payload["mode"], "benchmark");
@@ -482,6 +487,7 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
     }
 
     assert_eq!(progress_elapsed.len(), 3);
+    assert_eq!(progress_cadence, vec![(0, 10), (1, 20), (2, 25)]);
     let result_elapsed = result_elapsed.unwrap();
     assert!(result_elapsed > 0);
     assert!(result_elapsed >= *progress_elapsed.last().unwrap());
@@ -901,18 +907,21 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
         .dispatch(&launch.credentials, "benchmark-mode", req)
         .await
         .unwrap();
-    let mut progress = 0;
+    let mut progress_cadence = Vec::new();
     let mut last_progress_elapsed = None;
     loop {
         match stream.frames.next_frame().await.unwrap() {
             NdjsonOutcome::Frame(frame) => {
-                progress += 1;
                 let ProgressFrame::Progress { payload, .. } = frame else {
                     panic!("expected progress frame");
                 };
                 let payload = payload.unwrap();
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
+                progress_cadence.push((
+                    payload["sample_index"].as_u64().unwrap(),
+                    payload["operations_completed"].as_u64().unwrap(),
+                ));
                 let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
                 assert!(elapsed > 0);
                 if let Some(previous) = last_progress_elapsed {
@@ -924,7 +933,7 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 let ProgressFrame::Result { payload, .. } = frame else {
                     panic!("expected result frame");
                 };
-                assert_eq!(progress, 3);
+                assert_eq!(progress_cadence, vec![(0, 10), (1, 20), (2, 25)]);
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
                 assert_eq!(payload["progress_frames"], 3);
