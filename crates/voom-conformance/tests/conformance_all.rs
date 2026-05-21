@@ -4,18 +4,19 @@ use voom_conformance::manifest::{Manifest, resolve_active};
 use voom_conformance::{Harness, SuiteResult};
 
 #[tokio::test]
-async fn echo_worker_and_negative_fixtures_pass_conformance() {
+async fn echo_worker_and_negative_fixtures_pass_conformance()
+-> Result<(), Box<dyn std::error::Error>> {
     let manifest_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("voom-fakes-manifest.toml");
-    let manifest = Manifest::load(manifest_path).unwrap();
+    let manifest = Manifest::load(manifest_path)?;
     assert_eq!(manifest.active.len(), 1);
     assert!(manifest.scaffold.iter().any(|s| s == "chaos-worker"));
 
     let mut combined = SuiteResult::default();
     for entry in &manifest.active {
-        let path = resolve_active(entry).unwrap();
+        let path = resolve_active(entry)?;
         let harness = Harness::new(path);
-        let mut launch = harness.launch().await.unwrap();
+        let mut launch = harness.launch().await?;
         let result = harness.run_all(&mut launch).await;
         let shutdown_name = format!("{}::shutdown_after_suites", entry.name);
         record_shutdown(
@@ -37,6 +38,7 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
         combined.failed
     );
     assert!(!combined.is_empty());
+    Ok(())
 }
 
 async fn stdin_eof_terminates_worker() -> SuiteResult {
