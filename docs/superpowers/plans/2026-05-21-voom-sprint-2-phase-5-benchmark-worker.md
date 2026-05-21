@@ -44,6 +44,7 @@ Replace `crates/voom-fakes/src/bin/benchmark_worker.rs` with this parser/frame-b
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use std::time::Instant;
 use voom_worker_protocol::{
     OperationKind, OperationRequest, OperationResponse, ProgressFrame, ProtocolError,
 };
@@ -186,12 +187,13 @@ fn benchmark_dispatch_with_body_limit(
 ) -> Result<OperationDispatch, ProtocolError> {
     let accepted_at = Utc::now();
     let started_at = Utc::now();
-    let completed_at = Utc::now();
+    let started_instant = Instant::now();
     let mut frames = Vec::new();
     let mut completed = 0_u64;
     let mut sample_index = 0_u64;
     while completed < config.operations {
         completed = (completed + config.emit_every).min(config.operations);
+        let elapsed_worker_ns = elapsed_worker_ns(started_instant);
         frames.push(ProgressFrame::Progress {
             lease_id: req.lease_id,
             seq: sample_index,
@@ -205,17 +207,25 @@ fn benchmark_dispatch_with_body_limit(
                 "mode": "benchmark",
                 "operations_total": config.operations,
                 "operations_completed": completed,
-                "elapsed_worker_ns": 0_u64,
+                "elapsed_worker_ns": elapsed_worker_ns,
                 "sample_index": sample_index,
             })),
         });
         sample_index += 1;
     }
+    let completed_at = Utc::now();
+    let elapsed_worker_ns = elapsed_worker_ns(started_instant);
     frames.push(ProgressFrame::Result {
         lease_id: req.lease_id,
         seq: sample_index,
         emitted_at: completed_at,
-        payload: benchmark_result_payload(config, sample_index, started_at, completed_at),
+        payload: benchmark_result_payload(
+            config,
+            sample_index,
+            elapsed_worker_ns,
+            started_at,
+            completed_at,
+        ),
     });
     let body = body_from_frames(&frames)?;
     enforce_benchmark_body_size(&body, max_body_bytes)?;
@@ -231,18 +241,30 @@ fn benchmark_dispatch_with_body_limit(
 fn benchmark_result_payload(
     config: &BenchmarkConfig,
     progress_frames: u64,
+    elapsed_worker_ns: u64,
     started_at: DateTime<Utc>,
     completed_at: DateTime<Utc>,
 ) -> serde_json::Value {
+    let elapsed_ns = elapsed_worker_ns.max(1);
+    let worker_ops_per_second_milli =
+        ((u128::from(config.operations) * 1_000_000_000_000_u128) / u128::from(elapsed_ns))
+            .min(u128::from(u64::MAX)) as u64;
     serde_json::json!({
         "mode": "benchmark",
         "operations_total": config.operations,
         "progress_frames": progress_frames,
-        "elapsed_worker_ns": 0_u64,
-        "worker_ops_per_second_milli": config.operations * 1000,
+        "elapsed_worker_ns": elapsed_worker_ns,
+        "worker_ops_per_second_milli": worker_ops_per_second_milli,
         "first_operation_started_at": started_at,
         "completed_at": completed_at,
     })
+}
+
+fn elapsed_worker_ns(started_instant: Instant) -> u64 {
+    started_instant
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> {
@@ -413,12 +435,42 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
         progress_frames: 3,
     };
     let dispatch = benchmark_dispatch(&req, &config).unwrap();
-    let body = String::from_utf8(dispatch.body).unwrap();
-    assert_eq!(body.matches("\"kind\":\"progress\"").count(), 3);
-    assert!(body.contains("\"operations_total\":25"));
-    assert!(body.contains("\"operations_completed\":25"));
-    assert!(body.contains("\"progress_frames\":3"));
-    assert!(body.contains("\"kind\":\"result\""));
+    let frames: Vec<ProgressFrame> = dispatch
+        .body
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let mut progress_elapsed = Vec::new();
+    let mut result_elapsed = None;
+    let mut result_throughput = None;
+
+    for frame in frames {
+        match frame {
+            ProgressFrame::Progress { payload, .. } => {
+                let payload = payload.unwrap();
+                assert_eq!(payload["mode"], "benchmark");
+                assert_eq!(payload["operations_total"], 25);
+                let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                if let Some(previous) = progress_elapsed.last() {
+                    assert!(elapsed >= *previous);
+                }
+                progress_elapsed.push(elapsed);
+            }
+            ProgressFrame::Result { payload, .. } => {
+                assert_eq!(payload["mode"], "benchmark");
+                assert_eq!(payload["operations_total"], 25);
+                assert_eq!(payload["progress_frames"], 3);
+                result_elapsed = Some(payload["elapsed_worker_ns"].as_u64().unwrap());
+                result_throughput = Some(payload["worker_ops_per_second_milli"].as_u64().unwrap());
+            }
+            ProgressFrame::Error { message, .. } => panic!("unexpected error frame: {message}"),
+        }
+    }
+
+    assert_eq!(progress_elapsed.len(), 3);
+    assert!(result_elapsed.unwrap() >= *progress_elapsed.last().unwrap());
+    assert!(result_throughput.unwrap() > 0);
 }
 
 #[test]
@@ -834,6 +886,7 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
         .await
         .unwrap();
     let mut progress = 0;
+    let mut last_progress_elapsed = None;
     loop {
         match stream.frames.next_frame().await.unwrap() {
             NdjsonOutcome::Frame(frame) => {
@@ -844,6 +897,11 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 let payload = payload.unwrap();
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
+                let elapsed = payload["elapsed_worker_ns"].as_u64().unwrap();
+                if let Some(previous) = last_progress_elapsed {
+                    assert!(elapsed >= previous);
+                }
+                last_progress_elapsed = Some(elapsed);
             }
             NdjsonOutcome::Terminated(frame) => {
                 let ProgressFrame::Result { payload, .. } = frame else {
@@ -853,6 +911,10 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 assert_eq!(payload["mode"], "benchmark");
                 assert_eq!(payload["operations_total"], 25);
                 assert_eq!(payload["progress_frames"], 3);
+                assert!(
+                    payload["elapsed_worker_ns"].as_u64().unwrap()
+                        >= last_progress_elapsed.unwrap()
+                );
                 assert!(payload["worker_ops_per_second_milli"].as_u64().unwrap() > 0);
                 break;
             }
