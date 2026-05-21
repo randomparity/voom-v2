@@ -171,10 +171,14 @@ The terminal result payload must include:
 Every progress frame must include:
 
 - `mode = "benchmark"`;
-- `progress_index` matching zero-based frame order;
+- `sample_index` matching zero-based frame order;
 - `operations_completed` equal to `100, 200, ..., 1000`;
 - `elapsed_worker_ns` greater than or equal to the previous progress
   frame's elapsed value.
+
+`sample_index` is the benchmark-worker's progress-frame index within
+one benchmark operation. It is not the outer warmup/measured sample
+number used by the control-plane harness.
 
 The harness records local timings as observational values only. The
 worker's own elapsed time and throughput remain the worker-reported
