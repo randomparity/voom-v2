@@ -20,6 +20,8 @@ hyper-util.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "process", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true

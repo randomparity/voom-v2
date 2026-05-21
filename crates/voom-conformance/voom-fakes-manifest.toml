@@ -9,8 +9,10 @@
 
 [[binaries]]
 name = "echo-worker"
-purpose = "bootstrap conformance — validates the harness against itself"
+target = "echo-worker"
+purpose = "bootstrap conformance - validates the harness against itself"
 status = "active"
+required = true
 
 [scaffold]
 binaries = [

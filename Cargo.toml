@@ -63,6 +63,7 @@ hyper = { version = "1.5", features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1.10", features = ["client-legacy", "tokio", "server", "server-auto", "http1"] }
 secrecy = "0.10"
 thiserror = "2"
+toml = "0.8"
 tokio-util = { version = "0.7.13", features = ["io"] }
 trybuild = "1.0.108"
 
