@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+use voom_worker_protocol::OperationKind;
 
 #[derive(Debug, Error)]
 pub enum ManifestError {
@@ -16,6 +17,23 @@ pub enum ManifestError {
     ActiveAndScaffold { name: String },
     #[error("active binary {name} missing {env_key}")]
     MissingActiveBinary { name: String, env_key: String },
+    #[error("active binary {name} must declare at least one operation case")]
+    MissingOperationCases { name: String },
+    #[error("active binary {name} operation {operation:?} {field} must be a JSON object")]
+    PayloadNotObject {
+        name: String,
+        operation: OperationKind,
+        field: &'static str,
+    },
+    #[error("operation coverage missing: {missing:?}")]
+    MissingOperationCoverage { missing: Vec<OperationKind> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OperationCase {
+    pub operation: OperationKind,
+    pub valid_payload: serde_json::Value,
+    pub invalid_payload: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -24,6 +42,8 @@ pub struct ActiveBinary {
     pub target: String,
     pub status: String,
     pub required: bool,
+    #[serde(default)]
+    pub operations: Vec<OperationCase>,
     #[serde(default)]
     pub path: Option<PathBuf>,
 }
@@ -116,6 +136,28 @@ pub fn default_target_dir() -> PathBuf {
         )
 }
 
+pub fn validate_operation_coverage(manifest: &Manifest) -> Result<(), ManifestError> {
+    let covered = operation_coverage(manifest);
+    let missing = OperationKind::ALL
+        .iter()
+        .copied()
+        .filter(|operation| !covered.contains(operation))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(ManifestError::MissingOperationCoverage { missing })
+    }
+}
+
+fn operation_coverage(manifest: &Manifest) -> HashSet<OperationKind> {
+    manifest
+        .active
+        .iter()
+        .flat_map(|entry| entry.operations.iter().map(|case| case.operation))
+        .collect()
+}
+
 fn validate(raw: RawManifest) -> Result<Manifest, ManifestError> {
     let scaffold: HashSet<&str> = raw.scaffold.binaries.iter().map(String::as_str).collect();
     for entry in &raw.active {
@@ -134,11 +176,54 @@ fn validate(raw: RawManifest) -> Result<Manifest, ManifestError> {
                 name: entry.name.clone(),
             });
         }
+        validate_operations(entry)?;
     }
     Ok(Manifest {
         active: raw.active,
         scaffold: raw.scaffold.binaries,
     })
+}
+
+fn validate_operations(entry: &ActiveBinary) -> Result<(), ManifestError> {
+    if entry.operations.is_empty() {
+        return Err(ManifestError::MissingOperationCases {
+            name: entry.name.clone(),
+        });
+    }
+    for case in &entry.operations {
+        require_object_payload(entry, case, "valid_payload", &case.valid_payload)?;
+        require_object_payload(entry, case, "invalid_payload", &case.invalid_payload)?;
+    }
+    if matches!(
+        entry.name.as_str(),
+        "echo-worker" | "chaos-worker" | "benchmark-worker"
+    ) && !entry
+        .operations
+        .iter()
+        .any(|case| case.operation == OperationKind::ProbeFile)
+    {
+        return Err(ManifestError::MissingOperationCoverage {
+            missing: vec![OperationKind::ProbeFile],
+        });
+    }
+    Ok(())
+}
+
+fn require_object_payload(
+    entry: &ActiveBinary,
+    case: &OperationCase,
+    field: &'static str,
+    payload: &serde_json::Value,
+) -> Result<(), ManifestError> {
+    if payload.is_object() {
+        Ok(())
+    } else {
+        Err(ManifestError::PayloadNotObject {
+            name: entry.name.clone(),
+            operation: case.operation,
+            field,
+        })
+    }
 }
 
 #[cfg(test)]

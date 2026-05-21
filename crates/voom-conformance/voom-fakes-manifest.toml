@@ -14,6 +14,11 @@ purpose = "bootstrap conformance - validates the harness against itself"
 status = "active"
 required = true
 
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+
 [[binaries]]
 name = "chaos-worker"
 target = "chaos-worker"
@@ -21,12 +26,22 @@ purpose = "phase 4 chaos worker - baseline conformance and process-backed fault 
 status = "active"
 required = true
 
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+
 [[binaries]]
 name = "benchmark-worker"
 target = "benchmark-worker"
 purpose = "phase 5 benchmark worker - baseline conformance and bounded worker-level metric frames"
 status = "active"
 required = true
+
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
 
 [scaffold]
 binaries = [
