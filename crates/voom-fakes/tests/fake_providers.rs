@@ -3,6 +3,7 @@
     reason = "integration tests use direct process assertions"
 )]
 #![expect(
+    clippy::expect_used,
     clippy::panic,
     reason = "integration tests fail fast on unexpected stream shapes"
 )]
@@ -176,8 +177,7 @@ async fn timed_fake_provider_streams_progress_before_terminal() {
             "progress_interval_ms": 50_u64
         }),
     );
-    let stream = client
-        .dispatch(&launch.credentials, "fake-scanner-timed", req);
+    let stream = client.dispatch(&launch.credentials, "fake-scanner-timed", req);
     let mut stream = tokio::time::timeout(Duration::from_secs(2), stream)
         .await
         .expect("timed dispatch should expose response before terminal")

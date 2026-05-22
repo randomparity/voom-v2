@@ -38,7 +38,8 @@ fn scanner_fan_out_count_controls_file_count() {
         serde_json::json!({"path": "/library", "fan_out_count": 3}),
     );
     let result = dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req).unwrap();
-    let frames = decode_frames(body_bytes_for_test(result));
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
     let terminal = terminal_payload(&frames);
     assert_eq!(terminal["files"].as_array().unwrap().len(), 3);
     assert_eq!(terminal["files"][0]["path"], "/library/file-000.mkv");
@@ -52,8 +53,8 @@ fn scanner_rejects_zero_and_over_cap_fan_out_count() {
             OperationKind::ScanLibrary,
             serde_json::json!({"path": "/library", "fan_out_count": fan_out_count}),
         );
-        let err = dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req)
-            .unwrap_err();
+        let err =
+            dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req).unwrap_err();
         assert!(matches!(
             err,
             voom_worker_protocol::ProtocolError::InvalidPayload { .. }
@@ -90,7 +91,8 @@ fn quality_needs_transcode_from_bound_codec() {
     );
     let result =
         dispatch_provider(&provider_definition("fake-quality-scorer").unwrap(), &req).unwrap();
-    let frames = decode_frames(body_bytes_for_test(result));
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
     let payload = terminal_payload(&frames);
     assert_eq!(payload["needs_transcode"], true);
 }
@@ -107,7 +109,8 @@ fn remux_and_transcode_emit_output_path() {
     );
     for (provider, req) in [("fake-remuxer", remux), ("fake-transcoder", transcode)] {
         let result = dispatch_provider(&provider_definition(provider).unwrap(), &req).unwrap();
-        let frames = decode_frames(body_bytes_for_test(result));
+        let body = body_bytes_for_test(result);
+        let frames = decode_frames(&body);
         let payload = terminal_payload(&frames);
         assert!(
             payload["output_path"]
@@ -154,8 +157,8 @@ fn body_bytes_for_test(dispatch: OperationDispatch) -> Vec<u8> {
     }
 }
 
-fn decode_frames(body: Vec<u8>) -> Vec<ProgressFrame> {
-    std::str::from_utf8(&body)
+fn decode_frames(body: &[u8]) -> Vec<ProgressFrame> {
+    std::str::from_utf8(body)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

@@ -94,12 +94,9 @@ fn streaming_handler(calls: Arc<AtomicUsize>) -> OperationHandler {
                 accepted_at: fixed_time(),
             });
             tokio::spawn(async move {
-                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
-                writer
-                    .write_frame(result_frame(req.lease_id, 1))
-                    .await
-                    .unwrap();
-                writer.finish().await.unwrap();
+                writer.write_frame(&progress(req.lease_id, 0)).unwrap();
+                writer.write_frame(&result_frame(req.lease_id, 1)).unwrap();
+                writer.finish().unwrap();
             });
             Ok(dispatch)
         })
@@ -120,13 +117,10 @@ fn slow_streaming_handler(
                 accepted_at: fixed_time(),
             });
             tokio::spawn(async move {
-                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                writer.write_frame(&progress(req.lease_id, 0)).unwrap();
                 gate.notified().await;
-                writer
-                    .write_frame(result_frame(req.lease_id, 1))
-                    .await
-                    .unwrap();
-                writer.finish().await.unwrap();
+                writer.write_frame(&result_frame(req.lease_id, 1)).unwrap();
+                writer.finish().unwrap();
             });
             Ok(dispatch)
         })
@@ -147,11 +141,11 @@ fn client_aborts_before_worker_finishes_handler(
                 accepted_at: fixed_time(),
             });
             tokio::spawn(async move {
-                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                writer.write_frame(&progress(req.lease_id, 0)).unwrap();
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                let _ = writer.write_frame(result_frame(req.lease_id, 1)).await;
+                let _ = writer.write_frame(&result_frame(req.lease_id, 1));
                 worker_finished.store(true, Ordering::SeqCst);
-                let _ = writer.finish().await;
+                let _ = writer.finish();
             });
             Ok(dispatch)
         })
@@ -172,7 +166,7 @@ fn worker_aborts_after_response_handler(
                 accepted_at: fixed_time(),
             });
             tokio::spawn(async move {
-                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                writer.write_frame(&progress(req.lease_id, 0)).unwrap();
                 worker_finished.store(true, Ordering::SeqCst);
             });
             Ok(dispatch)
@@ -234,13 +228,10 @@ async fn server_streaming_dispatch_returns_before_terminal_frame() {
                 accepted_at: fixed_time(),
             });
             tokio::spawn(async move {
-                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                writer.write_frame(&progress(req.lease_id, 0)).unwrap();
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                writer
-                    .write_frame(result_frame(req.lease_id, 1))
-                    .await
-                    .unwrap();
-                writer.finish().await.unwrap();
+                writer.write_frame(&result_frame(req.lease_id, 1)).unwrap();
+                writer.finish().unwrap();
             });
             Ok(body)
         })
@@ -394,7 +385,8 @@ async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() 
 async fn dropped_client_stream_replays_after_worker_terminal() {
     let calls = Arc::new(AtomicUsize::new(0));
     let worker_finished = Arc::new(AtomicBool::new(false));
-    let handler = client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
+    let handler =
+        client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
     let (addr, running) = running_server(handler).await;
     let client = HttpClient::new(addr);
     let req = request(LeaseId(15), serde_json::json!({"path": "/tmp/a"}));

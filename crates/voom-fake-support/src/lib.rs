@@ -2,6 +2,7 @@
     test,
     expect(
         clippy::unwrap_used,
+        clippy::panic,
         reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
@@ -376,7 +377,9 @@ impl TimingControls {
         if duration_ms > 0 {
             let frame_count = duration_ms.div_ceil(progress_interval_ms);
             if frame_count > MAX_FAKE_PROGRESS_FRAMES {
-                return Err(invalid("timed progress frame count exceeds fake-provider cap"));
+                return Err(invalid(
+                    "timed progress frame count exceeds fake-provider cap",
+                ));
             }
         }
 
@@ -414,7 +417,7 @@ impl TimedDispatch {
                 self.operation,
                 &self.scenario,
             );
-            if self.writer.write_frame(frame).await.is_err() {
+            if self.writer.write_frame(&frame).is_err() {
                 return;
             }
             seq += 1;
@@ -431,8 +434,8 @@ impl TimedDispatch {
             emitted_at: Utc::now(),
             payload: self.result_payload,
         };
-        if self.writer.write_frame(result).await.is_ok() {
-            let _ = self.writer.finish().await;
+        if self.writer.write_frame(&result).is_ok() {
+            let _ = self.writer.finish();
         }
     }
 }

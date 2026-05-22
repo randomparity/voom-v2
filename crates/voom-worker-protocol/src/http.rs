@@ -121,7 +121,7 @@ pub struct StreamingFrameWriter {
 }
 
 impl StreamingFrameWriter {
-    pub async fn write_frame(&mut self, frame: ProgressFrame) -> Result<(), ProtocolError> {
+    pub fn write_frame(&mut self, frame: &ProgressFrame) -> Result<(), ProtocolError> {
         let terminal = frame.is_terminal();
         let mut bytes = serde_json::to_vec(&frame).map_err(|e| ProtocolError::MalformedFrame {
             detail: format!("json encode: {e}"),
@@ -148,7 +148,7 @@ impl StreamingFrameWriter {
         Ok(())
     }
 
-    pub async fn finish(&mut self) -> Result<(), ProtocolError> {
+    pub fn finish(&mut self) -> Result<(), ProtocolError> {
         Ok(())
     }
 }
@@ -548,7 +548,7 @@ async fn handle_operations(
             if let Err(e) = body.set_finalizer(finalizer) {
                 return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
             }
-            operation_streaming_response(response, body)
+            operation_streaming_response(&response, body)
         }
     }
 }
@@ -571,10 +571,10 @@ fn operation_response(response: &OperationResponse, body_bytes: &[u8]) -> Respon
 }
 
 fn operation_streaming_response(
-    response: OperationResponse,
+    response: &OperationResponse,
     body: StreamingBody,
 ) -> Response<ResponseBody> {
-    let Ok(mut response_line) = serde_json::to_vec(&response) else {
+    let Ok(mut response_line) = serde_json::to_vec(response) else {
         return plain_status(StatusCode::INTERNAL_SERVER_ERROR, "encode failed");
     };
     response_line.push(b'\n');
@@ -791,18 +791,14 @@ impl IdempotencyCache {
     }
 
     fn clear_active(&mut self, key: &str, hash: [u8; 32]) {
-        let should_remove = self
-            .entries
-            .get(key)
-            .map(|entry| {
-                matches!(
-                    entry.status,
-                    IdempotencyStatus::Active {
-                        hash: active_hash
-                    } if active_hash == hash
-                )
-            })
-            .unwrap_or(false);
+        let should_remove = self.entries.get(key).is_some_and(|entry| {
+            matches!(
+                entry.status,
+                IdempotencyStatus::Active {
+                    hash: active_hash
+                } if active_hash == hash
+            )
+        });
         if should_remove {
             self.entries.remove(key);
             self.order.retain(|queued| queued != key);
@@ -817,8 +813,7 @@ impl IdempotencyCache {
             let remove = self
                 .entries
                 .get(&oldest)
-                .map(|entry| matches!(entry.status, IdempotencyStatus::Completed { .. }))
-                .unwrap_or(false);
+                .is_some_and(|entry| matches!(entry.status, IdempotencyStatus::Completed { .. }));
             if remove {
                 self.entries.remove(&oldest);
             } else {
