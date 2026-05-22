@@ -23,7 +23,7 @@ pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
     CompiledRule, CompiledValue, DefaultStrategy, ErrorStrategy, PolicyProvenance, RuleMatchMode,
-    TrackFilter, TrackTarget, compile_ast, deterministic_json, source_hash,
+    TrackFilter, TrackTarget, deterministic_json, source_hash,
 };
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, RelatedSpan,

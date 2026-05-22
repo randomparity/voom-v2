@@ -232,7 +232,7 @@ pub fn deterministic_json(
         .map_err(|e| voom_core::VoomError::Internal(format!("compiled policy serialize: {e}")))
 }
 
-pub fn compile_ast(
+pub(crate) fn compile_ast(
     source: &str,
     ast: &PolicyAst,
     warnings: Vec<PolicyDiagnostic>,

@@ -1,5 +1,5 @@
 use crate::{
-    DiagnosticSeverity, PolicyAst, PolicyDiagnostic, ValidationResult, compile_ast,
+    DiagnosticSeverity, PolicyAst, PolicyDiagnostic, ValidationResult, compiled::compile_ast,
     parse_policy_source, validate_policy_ast,
 };
 
