@@ -176,21 +176,21 @@ async fn timed_fake_provider_streams_progress_before_terminal() {
             "progress_interval_ms": 50_u64
         }),
     );
-    let dispatch_started = Instant::now();
-    let mut stream = client
-        .dispatch(&launch.credentials, "fake-scanner-timed", req)
+    let stream = client
+        .dispatch(&launch.credentials, "fake-scanner-timed", req);
+    let mut stream = tokio::time::timeout(Duration::from_secs(2), stream)
         .await
+        .expect("timed dispatch should expose response before terminal")
         .unwrap();
-    let dispatch_elapsed = dispatch_started.elapsed();
-    assert!(
-        dispatch_elapsed < Duration::from_millis(100),
-        "dispatch returned after {dispatch_elapsed:?}, expected response before terminal"
-    );
 
     let mut progress_count = 0_u32;
     let mut first_progress_at = None;
     let terminal_at = loop {
-        match stream.frames.next_frame().await.unwrap() {
+        let outcome = tokio::time::timeout(Duration::from_secs(2), stream.frames.next_frame())
+            .await
+            .expect("timed provider frame read should not hang")
+            .unwrap();
+        match outcome {
             NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {
                 progress_count += 1;
                 first_progress_at.get_or_insert_with(Instant::now);

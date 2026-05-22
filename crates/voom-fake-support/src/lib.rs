@@ -28,6 +28,8 @@ use voom_worker_protocol::{
 };
 
 const MAX_FAKE_DURATION_MS: u64 = 30_000;
+const MAX_FAKE_FAN_OUT_COUNT: u32 = 1_000;
+const MAX_FAKE_PROGRESS_FRAMES: u64 = 1_000;
 
 #[derive(Debug, Error)]
 pub enum ScenarioError {
@@ -357,6 +359,12 @@ impl TimingControls {
             .transpose()
             .map_err(|_| invalid("fan_out_count out of range"))?;
 
+        if matches!(fan_out_count, Some(0)) {
+            return Err(invalid("fan_out_count must be positive"));
+        }
+        if fan_out_count.is_some_and(|count| count > MAX_FAKE_FAN_OUT_COUNT) {
+            return Err(invalid("fan_out_count exceeds fake-provider cap"));
+        }
         if duration_ms > MAX_FAKE_DURATION_MS {
             return Err(invalid("duration_ms exceeds fake-provider cap"));
         }
@@ -364,6 +372,12 @@ impl TimingControls {
             return Err(invalid(
                 "progress_interval_ms must be positive for timed runs",
             ));
+        }
+        if duration_ms > 0 {
+            let frame_count = duration_ms.div_ceil(progress_interval_ms);
+            if frame_count > MAX_FAKE_PROGRESS_FRAMES {
+                return Err(invalid("timed progress frame count exceeds fake-provider cap"));
+            }
         }
 
         Ok(Self {

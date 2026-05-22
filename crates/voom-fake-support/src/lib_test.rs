@@ -46,6 +46,39 @@ fn scanner_fan_out_count_controls_file_count() {
 }
 
 #[test]
+fn scanner_rejects_zero_and_over_cap_fan_out_count() {
+    for fan_out_count in [0_u64, u64::from(MAX_FAKE_FAN_OUT_COUNT) + 1] {
+        let req = request(
+            OperationKind::ScanLibrary,
+            serde_json::json!({"path": "/library", "fan_out_count": fan_out_count}),
+        );
+        let err = dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            voom_worker_protocol::ProtocolError::InvalidPayload { .. }
+        ));
+    }
+}
+
+#[test]
+fn timed_request_rejects_excessive_progress_frame_count() {
+    let req = request(
+        OperationKind::ScanLibrary,
+        serde_json::json!({
+            "path": "/library",
+            "duration_ms": MAX_FAKE_DURATION_MS,
+            "progress_interval_ms": 1_u64
+        }),
+    );
+    let err = dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req).unwrap_err();
+    assert!(matches!(
+        err,
+        voom_worker_protocol::ProtocolError::InvalidPayload { .. }
+    ));
+}
+
+#[test]
 fn quality_needs_transcode_from_bound_codec() {
     let req = request(
         OperationKind::ScoreQuality,
