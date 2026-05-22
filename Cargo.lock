@@ -2644,6 +2644,7 @@ dependencies = [
  "voom-control-plane",
  "voom-core",
  "voom-events",
+ "voom-policy",
 ]
 
 [[package]]

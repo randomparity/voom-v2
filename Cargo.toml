@@ -32,6 +32,7 @@ repository = "https://github.com/randomparity/voom-v2"
 # Internal crates.
 voom-core = { version = "0.1.0-dev", path = "crates/voom-core" }
 voom-events = { version = "0.1.0-dev", path = "crates/voom-events" }
+voom-policy = { version = "0.1.0-dev", path = "crates/voom-policy" }
 voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
 voom-worker-protocol = { version = "0.1.0-dev", path = "crates/voom-worker-protocol" }
