@@ -86,6 +86,28 @@ fn compile_policy_preserves_boolean_conditions() {
 }
 
 #[test]
+fn compile_policy_preserves_quoted_condition_comparison_value() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { when video.title contains \"Director or Commentary\" { clear_tags } } }",
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].operations[0],
+        CompiledOperation::Conditional {
+            condition: CompiledCondition::FieldComparison {
+                path: vec!["video".to_owned(), "title".to_owned()],
+                op: crate::ComparisonOp::Contains,
+                value: crate::CompiledValue::String {
+                    value: "Director or Commentary".to_owned(),
+                },
+            },
+            operations: vec![CompiledOperation::ClearTags],
+        }
+    );
+}
+
+#[test]
 fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
     let out =
         compile_policy("policy \"p\" { phase a { set_tag \"title\" \"Movie.Name\" } }").unwrap();

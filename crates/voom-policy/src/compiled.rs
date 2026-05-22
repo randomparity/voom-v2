@@ -539,7 +539,10 @@ fn condition_from_text(text: &str) -> CompiledCondition {
             .first()
             .map_or_else(Vec::new, |path| field_path_segments(path));
         let op = comparison_op(tokens.get(index).copied()).unwrap_or(ComparisonOp::Eq);
-        let value = compiled_value(tokens.get(index + 1).copied().unwrap_or_default());
+        let value = comparison_rhs(text, tokens[index]).map_or_else(
+            || compiled_value(tokens.get(index + 1).copied().unwrap_or_default()),
+            compiled_value,
+        );
         return CompiledCondition::FieldComparison { path, op, value };
     }
     if let Some(path) = tokens.first().filter(|token| token.contains('.')) {
@@ -835,6 +838,15 @@ fn title_filter_value<'a>(text: &'a str, op: &str) -> Option<&'a str> {
     let prefix = format!("title {op} ");
     let value = text.trim().strip_prefix(&prefix)?.trim();
     if value.is_empty() { None } else { Some(value) }
+}
+
+fn comparison_rhs<'a>(text: &'a str, op: &str) -> Option<&'a str> {
+    let spaced_op = format!(" {op} ");
+    let rhs = text
+        .split_once(&spaced_op)
+        .map(|(_, rhs)| rhs.trim())
+        .or_else(|| text.split_once(op).map(|(_, rhs)| rhs.trim()))?;
+    if rhs.is_empty() { None } else { Some(rhs) }
 }
 
 fn field_path_segments(path: &str) -> Vec<String> {
