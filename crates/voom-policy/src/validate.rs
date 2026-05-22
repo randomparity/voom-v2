@@ -265,13 +265,12 @@ impl<'a> Validator<'a> {
                 }
                 "set_tag" => {
                     saw_set_tag = true;
-                    if let Some(key) = quoted_value(text.as_ref()) {
+                    if let Some(key) = self.validate_set_tag(operation, text.as_ref()) {
                         set_tags.insert(key);
                     }
-                    self.validate_field_paths(operation, text.as_ref());
                 }
                 "delete_tag" => {
-                    if let Some(key) = quoted_value(text.as_ref()) {
+                    if let Some(key) = self.validate_delete_tag(operation, text.as_ref()) {
                         delete_tags.insert(key);
                     }
                 }
@@ -326,7 +325,15 @@ impl<'a> Validator<'a> {
             }
             "actions" | "clear_tags" | "set_tag" | "delete_tag" => {
                 let text = statement_text(statement);
-                self.validate_field_paths(statement, text.as_ref());
+                match statement.keyword().value.as_str() {
+                    "set_tag" => {
+                        let _ = self.validate_set_tag(statement, text.as_ref());
+                    }
+                    "delete_tag" => {
+                        let _ = self.validate_delete_tag(statement, text.as_ref());
+                    }
+                    _ => self.validate_field_paths(statement, text.as_ref()),
+                }
             }
             "when" => {
                 let text = statement_text(statement);
@@ -414,6 +421,38 @@ impl<'a> Validator<'a> {
                 "on_error must be abort, continue, or skip",
             );
         }
+    }
+
+    fn validate_set_tag(&mut self, statement: &StatementAst, text: &str) -> Option<String> {
+        let Some(key) = quoted_value(text) else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "set_tag requires a quoted tag key",
+            );
+            return None;
+        };
+        if text_after_quoted_value(text).is_none_or(str::is_empty) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "set_tag requires a value",
+            );
+        }
+        self.validate_field_paths(statement, text);
+        Some(key)
+    }
+
+    fn validate_delete_tag(&mut self, statement: &StatementAst, text: &str) -> Option<String> {
+        let key = quoted_value(text);
+        if key.is_none() {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "delete_tag requires a quoted tag key",
+            );
+        }
+        key
     }
 
     fn validate_rules(&mut self, statement: &StatementAst, text: &str) {
@@ -624,6 +663,13 @@ fn quoted_value(text: &str) -> Option<String> {
     let start = text.find('"')?;
     let end = text[start + 1..].find('"')?;
     Some(text[start + 1..start + 1 + end].to_owned())
+}
+
+#[must_use]
+fn text_after_quoted_value(text: &str) -> Option<&str> {
+    let start = text.find('"')?;
+    let end = text[start + 1..].find('"')?;
+    Some(text[start + 1 + end + 1..].trim())
 }
 
 #[must_use]

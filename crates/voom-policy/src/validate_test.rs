@@ -180,3 +180,19 @@ fn reports_nested_when_diagnostic_once() {
         1
     );
 }
+
+#[test]
+fn rejects_set_tag_without_value() {
+    assert!(
+        codes("policy \"p\" { phase a { set_tag \"title\" } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_delete_tag_without_key() {
+    assert!(
+        codes("policy \"p\" { phase a { delete_tag } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
