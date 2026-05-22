@@ -2,7 +2,11 @@ use super::*;
 
 use serde_json::json;
 use time::Duration;
+use voom_core::PolicyVersionId;
 
+use crate::repo::{
+    NewPolicyDocumentVersion, PolicyInputRepo, PolicyRepo, SqlitePolicyInputRepo, SqlitePolicyRepo,
+};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 async fn fresh() -> (SqliteIdentityRepo, tempfile::NamedTempFile) {
@@ -215,6 +219,7 @@ async fn accept_then_re_accept_returns_conflict() {
                 file_version_ids: Some(json!([])),
                 hashes: None,
                 locations: None,
+                ..AcceptedPin::default()
             },
         )
         .await
@@ -295,6 +300,121 @@ async fn accept_rejects_superseded_evidence() {
         .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
     tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn accept_rejects_policy_input_set_id_as_policy_version_id() {
+    let (repo, _tmp) = fresh().await;
+    let policy_inputs = SqlitePolicyInputRepo::new(repo.pool.clone());
+    let input_set = policy_inputs
+        .create_input_set(
+            voom_policy::load_fixture(voom_policy::FixtureName::SyntheticCompliantBaseline)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let evidence = repo
+        .record_identity_evidence_in_tx(
+            &mut tx,
+            NewIdentityEvidence {
+                target_type: IdentityEvidenceTarget::FileAsset,
+                target_id: asset.id.0,
+                assertion_type: voom_events::AssertionKind::PathRuleMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "1".to_owned(),
+                confidence: 0.8,
+                provenance: json!({}),
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+
+    let err = repo
+        .accept_identity_evidence_in_tx(
+            &mut tx,
+            evidence.id,
+            Some("operator".to_owned()),
+            T0 + Duration::seconds(1),
+            AcceptedPin {
+                policy_version_id: Some(PolicyVersionId(input_set.id.0)),
+                ..AcceptedPin::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    tx.commit().await.unwrap();
+    let reloaded = repo
+        .get_identity_evidence(evidence.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reloaded.accepted_policy_id.is_none());
+    assert!(reloaded.accepted_at.is_none());
+}
+
+#[tokio::test]
+async fn accept_stamps_real_policy_version_id() {
+    let (repo, _tmp) = fresh().await;
+    let policies = SqlitePolicyRepo::new(repo.pool.clone());
+    let created = policies
+        .create_document_with_version(NewPolicyDocumentVersion {
+            slug: "identity-policy".to_owned(),
+            display_name: None,
+            source_text: "policy \"identity-policy\" { phase a {} }".to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    let evidence = repo
+        .record_identity_evidence_in_tx(
+            &mut tx,
+            NewIdentityEvidence {
+                target_type: IdentityEvidenceTarget::FileAsset,
+                target_id: asset.id.0,
+                assertion_type: voom_events::AssertionKind::PathRuleMatch,
+                candidate_id: None,
+                candidate_value: None,
+                provider: "test".to_owned(),
+                provider_version: "1".to_owned(),
+                confidence: 0.8,
+                provenance: json!({}),
+                observed_at: T0,
+            },
+        )
+        .await
+        .unwrap();
+
+    let accepted = repo
+        .accept_identity_evidence_in_tx(
+            &mut tx,
+            evidence.id,
+            Some("operator".to_owned()),
+            T0 + Duration::seconds(1),
+            AcceptedPin {
+                policy_version_id: Some(created.version.id),
+                ..AcceptedPin::default()
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let reloaded = repo
+        .get_identity_evidence(evidence.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(accepted.accepted_policy_id, Some(created.version.id.0));
+    assert_eq!(reloaded.accepted_policy_id, Some(created.version.id.0));
 }
 
 #[tokio::test]

@@ -14,7 +14,7 @@ use sqlx::{Acquire, Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{
     EvidenceId, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId, MediaVariantId,
-    MediaWorkId, VoomError, WorkerId,
+    MediaWorkId, PolicyVersionId, VoomError, WorkerId,
 };
 use voom_events::AssertionKind;
 
@@ -455,6 +455,7 @@ pub struct AcceptedPin {
     pub file_version_ids: Option<JsonValue>,
     pub hashes: Option<JsonValue>,
     pub locations: Option<JsonValue>,
+    pub policy_version_id: Option<PolicyVersionId>,
 }
 
 #[derive(Debug, Clone)]
@@ -1568,13 +1569,21 @@ impl IdentityRepo for SqliteIdentityRepo {
             .as_ref()
             .map(|v| serialize_json(v, "pinned_locations"))
             .transpose()?;
+        let accepted_policy_id = if let Some(id) = pinned.policy_version_id {
+            ensure_policy_version_exists(tx, id).await?;
+            Some(i64_from_u64(id.0))
+        } else {
+            None
+        };
         let res = sqlx::query(
             "UPDATE identity_evidence SET accepted_at = ?, accepted_user_id = ?, \
-                 pinned_file_version_ids = ?, pinned_hashes = ?, pinned_locations = ? \
+                 accepted_policy_id = ?, pinned_file_version_ids = ?, pinned_hashes = ?, \
+                 pinned_locations = ? \
              WHERE id = ? AND accepted_at IS NULL AND superseded_at IS NULL",
         )
         .bind(&ts)
         .bind(&actor)
+        .bind(accepted_policy_id)
         .bind(pinned_fv)
         .bind(pinned_hashes)
         .bind(pinned_locations)
@@ -2433,6 +2442,23 @@ async fn get_identity_evidence_in_tx(
         .await
         .map_err(|e| VoomError::Database(format!("identity_evidence get_in_tx: {e}")))?;
     row.as_ref().map(row_to_identity_evidence).transpose()
+}
+
+async fn ensure_policy_version_exists(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: PolicyVersionId,
+) -> Result<(), VoomError> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM policy_versions WHERE id = ?")
+        .bind(i64_from_u64(id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("policy_versions existence check: {e}")))?;
+    if exists.is_none() {
+        return Err(VoomError::PolicyValidationError(format!(
+            "accepted_policy_id {id} is not a policy version"
+        )));
+    }
+    Ok(())
 }
 
 fn row_to_identity_evidence(row: &sqlx::sqlite::SqliteRow) -> Result<IdentityEvidence, VoomError> {
