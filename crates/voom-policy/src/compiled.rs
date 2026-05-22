@@ -546,19 +546,33 @@ fn track_filter(text: &str) -> Option<TrackFilter> {
     let where_text = text
         .split_once(" where ")
         .map(|(_, filter)| filter.trim())?;
-    let tokens = words(where_text);
+    filter_from_text(where_text)
+}
+
+fn filter_from_text(text: &str) -> Option<TrackFilter> {
+    if let Some(parts) = split_bool_filter(text, " or ") {
+        return Some(TrackFilter::Or {
+            filters: parts
+                .into_iter()
+                .filter_map(filter_from_text)
+                .collect::<Vec<_>>(),
+        });
+    }
+    if let Some(parts) = split_bool_filter(text, " and ") {
+        return Some(TrackFilter::And {
+            filters: parts
+                .into_iter()
+                .filter_map(filter_from_text)
+                .collect::<Vec<_>>(),
+        });
+    }
+    let tokens = words(text);
     match tokens.as_slice() {
         ["lang" | "language", "in", ..] => Some(TrackFilter::LanguageIn {
-            values: list_values(where_text)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            values: list_values(text).into_iter().map(str::to_owned).collect(),
         }),
         ["codec", "in", ..] => Some(TrackFilter::CodecIn {
-            values: list_values(where_text)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            values: list_values(text).into_iter().map(str::to_owned).collect(),
         }),
         ["not", rest @ ..] => {
             filter_predicate(rest.first().copied()).map(|inner| TrackFilter::Not {
@@ -574,6 +588,15 @@ fn track_filter(text: &str) -> Option<TrackFilter> {
         [first, ..] => filter_predicate(Some(first)),
         [] => None,
     }
+}
+
+fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    let parts = text
+        .split(delimiter)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() > 1 { Some(parts) } else { None }
 }
 
 fn filter_predicate(token: Option<&str>) -> Option<TrackFilter> {
