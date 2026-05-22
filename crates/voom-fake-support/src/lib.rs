@@ -542,7 +542,13 @@ fn result_payload(
         }
         "fake-prober" => {
             object.insert("duration_ms".to_owned(), serde_json::json!(7_200_000_u64));
-            object.insert("codec".to_owned(), serde_json::json!("h264"));
+            object.insert(
+                "codec".to_owned(),
+                payload
+                    .get("codec")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("h264")),
+            );
             object.insert("hash".to_owned(), serde_json::json!("sha256:fake-prober"));
         }
         "fake-transcoder" => {

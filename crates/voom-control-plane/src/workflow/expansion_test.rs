@@ -47,6 +47,18 @@ async fn scanner_completion_creates_only_probe_hash_identity() {
         let payload = parse_workflow_payload(ticket);
         ["probe", "hash", "identity"].contains(&payload.node_id.as_str())
     }));
+    let probe_000 = fixture.ticket("probe", "file-000").await;
+    let probe_001 = fixture.ticket("probe", "file-001").await;
+    let probe_002 = fixture.ticket("probe", "file-002").await;
+    assert_eq!(probe_000.rendered_payload["codec"], "h265");
+    assert_eq!(probe_001.rendered_payload["codec"], "h264");
+    assert_eq!(probe_002.rendered_payload["codec"], "h265");
+    assert_eq!(
+        probe_000.source_file.as_ref().unwrap()["size_bytes"],
+        serde_json::json!(4_200_000_000_u64)
+    );
+    assert!((25..=35).contains(&probe_001.timing.duration_ms));
+    assert_ne!(probe_000.timing, probe_001.timing);
     fixture.assert_no_ticket("quality", "file-000").await;
     fixture.assert_ticket_count(10).await;
     fixture.assert_dependency_count(9).await;
@@ -225,6 +237,31 @@ async fn expansion_promotes_existing_pending_ticket_after_restart() {
 }
 
 #[tokio::test]
+async fn expansion_rejects_pre_existing_duplicate_workflow_tickets() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let probe = fixture
+        .seed_succeeded_ticket(
+            "probe",
+            "file-001",
+            OperationKind::ProbeFile,
+            serde_json::json!({"codec": "h264"}),
+        )
+        .await;
+    fixture
+        .seed_pending_ticket("quality", "file-001", OperationKind::ScoreQuality)
+        .await;
+    fixture
+        .seed_pending_ticket("quality", "file-001", OperationKind::ScoreQuality)
+        .await;
+
+    let err = expand_probe_completion(&fixture.ctx(), "file-001", &probe)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("duplicate workflow tickets"));
+}
+
+#[tokio::test]
 async fn scanner_completion_dedupes_duplicate_file_outputs() {
     let fixture = WorkflowExpansionFixture::new().await;
     let scanner = fixture
@@ -346,6 +383,11 @@ impl WorkflowExpansionFixture {
             branch_id: branch_id.to_owned(),
             operation,
             rendered_payload,
+            timing: timing(),
+            source_file: Some(serde_json::json!({
+                "path": format!("/library/{branch_id}.mkv"),
+                "size_bytes": 4_200_000_000_u64,
+            })),
         }
         .to_ticket_payload()
         .unwrap();
@@ -380,6 +422,11 @@ impl WorkflowExpansionFixture {
             branch_id: branch_id.to_owned(),
             operation,
             rendered_payload,
+            timing: timing(),
+            source_file: Some(serde_json::json!({
+                "path": format!("/library/{branch_id}.mkv"),
+                "size_bytes": 4_200_000_000_u64,
+            })),
         }
         .to_ticket_payload()
         .unwrap();
@@ -506,9 +553,9 @@ fn node_ids(tickets: &[Ticket]) -> Vec<String> {
 fn scanner_result_with_three_files() -> Value {
     serde_json::json!({
         "files": [
-            "/library/file-000.mkv",
-            "/library/file-001.mkv",
-            "/library/file-002.mkv"
+            {"path": "/library/file-000.mkv", "size_bytes": 4_200_000_000_u64},
+            {"path": "/library/file-001.mkv", "size_bytes": 4_200_000_001_u64},
+            {"path": "/library/file-002.mkv", "size_bytes": 4_200_000_002_u64}
         ]
     })
 }
@@ -521,6 +568,7 @@ fn branch_for_seed(branch_id: &str, operation: OperationKind) -> BranchContext {
             branch_id: branch_id.to_owned(),
             path: format!("/library/{branch_id}.mkv"),
             probe_codec: Some("h264".to_owned()),
+            source_file: None,
         }
     }
 }

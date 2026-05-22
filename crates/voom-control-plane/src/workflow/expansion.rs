@@ -13,7 +13,7 @@ use voom_worker_protocol::OperationKind;
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{WorkflowNode, WorkflowPlan};
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
-use super::timing::EffectiveTiming;
+use super::timing::{EffectiveTiming, branch_codec, seeded_timing};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 
@@ -56,13 +56,14 @@ pub async fn expand_scanner_completion(
     let files = files.into_iter().take(ctx.plan.fan_out.max_files);
     let mut specs = Vec::new();
     let mut paths_by_branch = HashMap::new();
-    for path in files {
-        let branch_id = branch_id_from_path(&path)?;
-        if let Some(existing_path) = paths_by_branch.insert(branch_id.clone(), path.clone())
-            && existing_path != path
+    for file in files {
+        let branch_id = branch_id_from_path(&file.path)?;
+        if let Some(existing_path) = paths_by_branch.insert(branch_id.clone(), file.path.clone())
+            && existing_path != file.path
         {
             return Err(VoomError::Config(format!(
-                "scanner paths `{existing_path}` and `{path}` both derive branch id `{branch_id}`"
+                "scanner paths `{existing_path}` and `{}` both derive branch id `{branch_id}`",
+                file.path
             )));
         }
         for node_id in ["probe", "hash", "identity"] {
@@ -71,8 +72,10 @@ pub async fn expand_scanner_completion(
                 node_id,
                 &BranchContext {
                     branch_id: branch_id.clone(),
-                    path: path.clone(),
-                    probe_codec: None,
+                    path: file.path.clone(),
+                    probe_codec: (node_id == "probe")
+                        .then(|| branch_codec(ctx.plan.seed, &branch_id).to_owned()),
+                    source_file: Some(file.source_file.clone()),
                 },
                 scanner_ticket.id,
                 scanner_ticket,
@@ -89,7 +92,8 @@ pub async fn expand_probe_completion(
 ) -> Result<Vec<Ticket>, VoomError> {
     let probe_payload = parse_workflow_payload(probe_ticket)?;
     let path = rendered_path(&probe_payload)?;
-    let codec = string_result_field(probe_ticket, "codec")?;
+    let codec = string_result_field(probe_ticket, "codec")
+        .unwrap_or_else(|_| branch_codec(ctx.plan.seed, branch_id).to_owned());
     let spec = spec_for_branch(
         ctx,
         "quality",
@@ -97,6 +101,7 @@ pub async fn expand_probe_completion(
             branch_id: branch_id.to_owned(),
             path,
             probe_codec: Some(codec),
+            source_file: probe_payload.source_file,
         },
         probe_ticket.id,
         probe_ticket,
@@ -123,6 +128,7 @@ pub async fn expand_quality_completion(
             branch_id: branch_id.to_owned(),
             path: rendered_path(&quality_payload)?,
             probe_codec: None,
+            source_file: quality_payload.source_file,
         },
         quality_ticket.id,
         quality_ticket,
@@ -140,6 +146,7 @@ pub async fn expand_transform_completion(
         branch_id: branch_id.to_owned(),
         path: output_path,
         probe_codec: None,
+        source_file: parse_workflow_payload(transform_ticket)?.source_file,
     };
     let mut specs = Vec::new();
     for node_id in ["backup", "external-sync", "issue", "use-lease"] {
@@ -167,6 +174,7 @@ pub async fn expand_backup_completion(
             branch_id: branch_id.to_owned(),
             path: local_backup_id,
             probe_codec: None,
+            source_file: parse_workflow_payload(backup_ticket)?.source_file,
         },
         backup_ticket.id,
         backup_ticket,
@@ -193,7 +201,8 @@ fn spec_for_branch(
     parent_ticket: &Ticket,
 ) -> Result<TicketSpec, VoomError> {
     let operation = operation_for_node(ctx.plan, node_id)?;
-    let rendered_payload = render_default_payload(operation, branch, timing(ctx))
+    let timing = timing(ctx, node_id, &branch.branch_id);
+    let rendered_payload = render_default_payload(operation, branch, timing)
         .map_err(|e| VoomError::Config(format!("workflow payload binding: {e}")))?;
     let payload = WorkflowTicketPayload {
         workflow_id: ctx.workflow_id.to_owned(),
@@ -202,6 +211,8 @@ fn spec_for_branch(
         branch_id: branch.branch_id.clone(),
         operation,
         rendered_payload,
+        timing,
+        source_file: branch.source_file.clone(),
     }
     .to_ticket_payload()
     .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
@@ -318,27 +329,31 @@ async fn find_existing_ticket_id_in_tx(
     branch_id: &str,
     node_id: &str,
 ) -> Result<Option<TicketId>, VoomError> {
-    let row: Option<(i64,)> = sqlx::query_as(
+    let rows: Vec<(i64,)> = sqlx::query_as(
         "SELECT id FROM tickets \
          WHERE job_id = ? \
            AND kind = ? \
            AND json_extract(payload, '$.branch_id') = ? \
            AND json_extract(payload, '$.node_id') = ? \
          ORDER BY id ASC \
-         LIMIT 1",
+         LIMIT 2",
     )
     .bind(sqlite_i64(job_id.0, "job id")?)
     .bind(kind)
     .bind(branch_id)
     .bind(node_id)
-    .fetch_optional(&mut **tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("workflow ticket lookup: {e}")))?;
 
-    let Some((id,)) = row else {
-        return Ok(None);
-    };
-    Ok(Some(TicketId(sqlite_u64(id, "ticket id")?)))
+    match rows.as_slice() {
+        [] => Ok(None),
+        [(id,)] => Ok(Some(TicketId(sqlite_u64(*id, "ticket id")?))),
+        [(first,), (second,)] => Err(VoomError::Conflict(format!(
+            "duplicate workflow tickets for job {job_id} kind `{kind}` branch `{branch_id}` node `{node_id}`: ids {first}, {second}"
+        ))),
+        _ => unreachable!("lookup query is limited to two rows"),
+    }
 }
 
 async fn ensure_dependency_in_tx(
@@ -379,7 +394,13 @@ async fn ensure_dependency_in_tx(
     }
 }
 
-fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<String>, VoomError> {
+#[derive(Debug, Clone)]
+struct ScannerFile {
+    path: String,
+    source_file: Value,
+}
+
+fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError> {
     let result = scanner_ticket
         .result
         .as_ref()
@@ -391,14 +412,23 @@ fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<String>, VoomError> {
     files
         .iter()
         .map(|file| match file {
-            Value::String(path) => Ok(path.clone()),
-            Value::Object(object) => object
-                .get("path")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| {
-                    VoomError::Config("scanner result file object requires path".to_owned())
-                }),
+            Value::String(path) => Ok(ScannerFile {
+                path: path.clone(),
+                source_file: serde_json::json!({ "path": path }),
+            }),
+            Value::Object(object) => {
+                let path = object
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        VoomError::Config("scanner result file object requires path".to_owned())
+                    })?;
+                Ok(ScannerFile {
+                    path,
+                    source_file: file.clone(),
+                })
+            }
             _ => Err(VoomError::Config(
                 "scanner result files must be strings or objects".to_owned(),
             )),
@@ -470,11 +500,14 @@ fn bool_result_field(ticket: &Ticket, field: &str) -> Result<bool, VoomError> {
         })
 }
 
-fn timing(ctx: &ExpansionContext<'_>) -> EffectiveTiming {
-    EffectiveTiming {
-        duration_ms: ctx.plan.timing.base_duration_ms,
-        progress_interval_ms: ctx.plan.timing.jitter_ms,
-    }
+fn timing(ctx: &ExpansionContext<'_>, node_id: &str, branch_id: &str) -> EffectiveTiming {
+    seeded_timing(
+        ctx.plan.seed,
+        node_id,
+        branch_id,
+        ctx.plan.timing.base_duration_ms,
+        ctx.plan.timing.jitter_ms,
+    )
 }
 
 fn ticket_kind(operation: OperationKind) -> String {

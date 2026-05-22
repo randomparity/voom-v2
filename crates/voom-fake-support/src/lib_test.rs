@@ -98,6 +98,19 @@ fn quality_needs_transcode_from_bound_codec() {
 }
 
 #[test]
+fn prober_result_preserves_bound_codec_when_present() {
+    let req = request(
+        OperationKind::ProbeFile,
+        serde_json::json!({"path": "/library/file-000.mkv", "codec": "h265"}),
+    );
+    let result = dispatch_provider(&provider_definition("fake-prober").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames);
+    assert_eq!(payload["codec"], "h265");
+}
+
+#[test]
 fn remux_and_transcode_emit_output_path() {
     let remux = request(
         OperationKind::Remux,

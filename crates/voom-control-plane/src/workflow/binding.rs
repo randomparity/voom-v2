@@ -9,6 +9,7 @@ pub struct BranchContext {
     pub branch_id: String,
     pub path: String,
     pub probe_codec: Option<String>,
+    pub source_file: Option<Value>,
 }
 
 pub fn render_default_payload(
@@ -30,8 +31,14 @@ pub fn render_default_payload_with_fan_out(
             "path": "/library",
             "fan_out_count": fan_out_count,
         }),
-        OperationKind::ProbeFile
-        | OperationKind::HashFile
+        OperationKind::ProbeFile => {
+            let mut payload = json!({ "path": branch.path });
+            if let Some(codec) = &branch.probe_codec {
+                payload["codec"] = json!(codec);
+            }
+            payload
+        }
+        OperationKind::HashFile
         | OperationKind::IdentifyMedia
         | OperationKind::BackUpFile
         | OperationKind::VerifyArtifact
@@ -95,6 +102,7 @@ pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchCo
         branch_id: branch_id.to_owned(),
         path: format!("/library/{branch_id}.mkv"),
         probe_codec: Some(codec.to_owned()),
+        source_file: None,
     }
 }
 

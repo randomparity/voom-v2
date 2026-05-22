@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use voom_worker_protocol::OperationKind;
 
+use super::timing::EffectiveTiming;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowTicketPayload {
     pub workflow_id: String,
@@ -10,6 +12,9 @@ pub struct WorkflowTicketPayload {
     pub branch_id: String,
     pub operation: OperationKind,
     pub rendered_payload: Value,
+    pub timing: EffectiveTiming,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +32,7 @@ impl WorkflowTicketPayload {
         operation: OperationKind,
         rendered_payload: Value,
     ) -> Self {
+        let timing = EffectiveTiming::for_test(25, 10);
         Self {
             workflow_id: workflow_id.to_owned(),
             plan_id: plan_id.to_owned(),
@@ -34,6 +40,8 @@ impl WorkflowTicketPayload {
             branch_id: branch_id.to_owned(),
             operation,
             rendered_payload,
+            timing,
+            source_file: None,
         }
     }
 
