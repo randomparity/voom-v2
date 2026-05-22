@@ -92,8 +92,7 @@ pub async fn expand_probe_completion(
 ) -> Result<Vec<Ticket>, VoomError> {
     let probe_payload = parse_workflow_payload(probe_ticket)?;
     let path = rendered_path(&probe_payload)?;
-    let codec = string_result_field(probe_ticket, "codec")
-        .unwrap_or_else(|_| branch_codec(ctx.plan.seed, branch_id).to_owned());
+    let codec = string_result_field(probe_ticket, "codec")?;
     let spec = spec_for_branch(
         ctx,
         "quality",

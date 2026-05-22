@@ -94,6 +94,26 @@ async fn probe_completion_creates_quality_after_probe_output_provides_codec() {
 }
 
 #[tokio::test]
+async fn probe_completion_requires_codec_result() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let probe = fixture
+        .seed_succeeded_ticket(
+            "probe",
+            "file-001",
+            OperationKind::ProbeFile,
+            serde_json::json!({"hash": "sha256:missing-codec"}),
+        )
+        .await;
+
+    let err = expand_probe_completion(&fixture.ctx(), "file-001", &probe)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("result field `codec`"));
+    fixture.assert_no_ticket("quality", "file-001").await;
+}
+
+#[tokio::test]
 async fn quality_completion_creates_exactly_selected_transform_based_on_needs_transcode() {
     let fixture = WorkflowExpansionFixture::new().await;
     let needs_transcode = fixture
