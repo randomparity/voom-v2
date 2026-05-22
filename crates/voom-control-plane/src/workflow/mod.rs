@@ -1,4 +1,5 @@
 pub mod binding;
+pub mod expansion;
 pub mod model;
 pub mod ticket_payload;
 pub mod timing;
@@ -22,3 +23,7 @@ mod binding_tests;
 #[cfg(test)]
 #[path = "timing_test.rs"]
 mod timing_tests;
+
+#[cfg(test)]
+#[path = "expansion_test.rs"]
+mod expansion_tests;
