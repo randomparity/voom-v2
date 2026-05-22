@@ -36,6 +36,14 @@ fn rejects_unknown_bare_dependency() {
 }
 
 #[test]
+fn rejects_depends_on_with_extra_tokens_after_list() {
+    assert!(
+        codes("policy \"p\" { phase a {} phase b { depends_on: [a] later } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_deferred_execution_operations() {
     assert!(
         codes("policy \"p\" { phase a { transcode video to hevc {} } }")

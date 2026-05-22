@@ -139,6 +139,15 @@ impl<'a> Validator<'a> {
             for control in &phase.controls {
                 if control.keyword().value == "depends_on" {
                     let text = statement_text(control);
+                    if text.contains('[')
+                        && text_after_list(text.as_ref()).is_some_and(|value| !value.is_empty())
+                    {
+                        self.error(
+                            DiagnosticCode::UnknownPhaseStatementOrOperation,
+                            control.span(),
+                            "depends_on does not accept extra arguments after the dependency list",
+                        );
+                    }
                     for dependency in dependency_values(text.as_ref()) {
                         self.validate_phase_reference(
                             &phase.name.value,
