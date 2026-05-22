@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
+use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
@@ -105,6 +107,35 @@ async fn progress_timeout_fails_terminally() {
 }
 
 #[tokio::test]
+async fn retriable_dispatch_failure_retries_before_terminal_failure() {
+    let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Crash).await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.max_attempts = 2;
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.summary.dispatch_count, 2);
+    assert_eq!(err.summary.retry_count, 1);
+    assert_eq!(err.summary.failure_count, 1);
+}
+
+#[tokio::test]
+async fn retriable_pre_lease_failure_retries_before_terminal_failure() {
+    let fixture = ExecutorFixture::without_workers(1).await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.max_attempts = 2;
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    assert_eq!(err.summary.dispatch_count, 0);
+    assert_eq!(err.summary.retry_count, 1);
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(fixture.lease_count().await, 0);
+}
+
+#[tokio::test]
 async fn heartbeat_timeout_fails_terminally() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
@@ -116,6 +147,22 @@ async fn heartbeat_timeout_fails_terminally() {
     assert_eq!(err.source.error_code(), ErrorCode::WorkerTimeout);
     assert_eq!(err.summary.dispatch_count, 1);
     assert_eq!(err.summary.failure_count, 1);
+}
+
+#[tokio::test]
+async fn heartbeat_timeout_wins_when_watchdog_deadlines_tie() {
+    let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
+    let mut options = timeout_options();
+    options.progress_idle_timeout = Duration::from_millis(20);
+    options.heartbeat_timeout = Duration::from_millis(20);
+    options.heartbeat_interval = Duration::from_secs(1);
+    options.chaos.disable_heartbeat_ticks = true;
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerTimeout);
+    let failed_class = fixture.first_ticket_failed_class().await;
+    assert_eq!(failed_class, "worker_timeout");
 }
 
 #[tokio::test]
@@ -241,9 +288,13 @@ impl ExecutorFixture {
         let url = format!("sqlite://{}", tmp.path().display());
         let _ = voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();
-        let cp = crate::ControlPlane::open_with_pool(pool, Arc::new(SystemClock))
-            .await
-            .unwrap();
+        let cp = crate::ControlPlane::open_with_pool_and_rng(
+            pool,
+            Arc::new(SystemClock),
+            Arc::new(Mutex::new(FrozenRng::new(0))),
+        )
+        .await
+        .unwrap();
         Self {
             cp,
             _tmp: tmp,
@@ -428,6 +479,21 @@ impl ExecutorFixture {
             .fetch_one(&self.cp.pool)
             .await
             .unwrap()
+    }
+
+    async fn first_ticket_failed_class(&self) -> String {
+        let payload: String = sqlx::query_scalar(
+            "SELECT payload FROM events \
+             WHERE kind = 'ticket.failed_terminal' \
+             ORDER BY event_id ASC LIMIT 1",
+        )
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap();
+        serde_json::from_str::<Value>(&payload).unwrap()["class"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 }
 

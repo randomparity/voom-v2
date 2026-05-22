@@ -10,7 +10,7 @@ use voom_core::{ErrorCode, FailureClass, JobId, LeaseId, TicketId, VoomError, Wo
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
@@ -47,6 +47,7 @@ pub struct WorkflowExecutorOptions {
     pub heartbeat_timeout: Duration,
     pub progress_idle_timeout: Duration,
     pub ready_batch_size: u32,
+    pub max_attempts: u32,
     pub chaos: WorkflowChaosOptions,
 }
 
@@ -58,6 +59,7 @@ impl Default for WorkflowExecutorOptions {
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
             progress_idle_timeout: DEFAULT_PROGRESS_IDLE_TIMEOUT,
             ready_batch_size: 64,
+            max_attempts: 1,
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -72,6 +74,7 @@ impl WorkflowExecutorOptions {
             heartbeat_timeout: Duration::from_millis(250),
             progress_idle_timeout: Duration::from_millis(250),
             ready_batch_size: 64,
+            max_attempts: 1,
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -288,6 +291,13 @@ where
             }
 
             if active.is_empty() {
+                if let Some(delay) = self
+                    .retry_delay(job.id, &workflow_id, self.control_plane.clock().now())
+                    .await
+                {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
                 let source = VoomError::Internal(format!(
                     "workflow {} has no dispatchable work but is not finished",
                     job.id
@@ -371,7 +381,7 @@ where
                     kind: ticket_kind(operation),
                     priority: 0,
                     payload,
-                    max_attempts: 1,
+                    max_attempts: self.options.max_attempts,
                     created_at: now,
                 })
                 .await?;
@@ -491,7 +501,21 @@ where
             }
             DispatchTerminal::Failure { source } => {
                 summary.record_failure(outcome.operation);
-                *terminal_error = Some(source);
+                match self.control_plane.tickets.get(outcome.ticket_id).await {
+                    Ok(Some(ticket)) if ticket.state == TicketState::Failed => {
+                        *terminal_error = Some(source);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        *terminal_error = Some(VoomError::NotFound(format!(
+                            "ticket {} vanished after dispatch failure",
+                            outcome.ticket_id
+                        )));
+                    }
+                    Err(err) => {
+                        *terminal_error = Some(err);
+                    }
+                }
             }
         }
     }
@@ -603,6 +627,36 @@ where
             "workflow ticket {} failed",
             workflow_payload.node_id
         )))
+    }
+
+    async fn retry_delay(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+        now: OffsetDateTime,
+    ) -> Option<Duration> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT MIN(next_eligible_at) FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'ready' \
+               AND next_eligible_at > ? \
+               AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(format_time(now).ok()?)
+        .bind(workflow_id)
+        .fetch_optional(&self.control_plane.pool)
+        .await
+        .ok()?;
+        let (next_eligible,) = row?;
+        let next_eligible = next_eligible?;
+        let next_eligible = OffsetDateTime::parse(
+            &next_eligible,
+            &time::format_description::well_known::Iso8601::DEFAULT,
+        )
+        .ok()?;
+        let wait = next_eligible - now;
+        Duration::try_from(wait).ok()
     }
 
     async fn candidate_workers(
@@ -875,11 +929,47 @@ async fn consume_dispatch_stream(
     let mut last_heartbeat = Instant::now();
     let mut heartbeat = tokio::time::interval(options.heartbeat_interval);
     loop {
+        let now = Instant::now();
+        if now.duration_since(last_heartbeat) >= options.heartbeat_timeout {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                FailureClass::WorkerTimeout,
+                VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
+            )
+            .await;
+        }
+        if now.duration_since(last_progress) >= options.progress_idle_timeout {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                FailureClass::ProgressTimeout,
+                VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+            )
+            .await;
+        }
         let progress_deadline = sleep_until(last_progress + options.progress_idle_timeout);
         let heartbeat_deadline = sleep_until(last_heartbeat + options.heartbeat_timeout);
         tokio::pin!(progress_deadline);
         tokio::pin!(heartbeat_deadline);
         tokio::select! {
+            biased;
+            () = &mut heartbeat_deadline => {
+                return fail_lease_and_return(
+                    control,
+                    lease_id,
+                    FailureClass::WorkerTimeout,
+                    VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
+                ).await;
+            }
+            () = &mut progress_deadline => {
+                return fail_lease_and_return(
+                    control,
+                    lease_id,
+                    FailureClass::ProgressTimeout,
+                    VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+                ).await;
+            }
             frame = dispatch.frames.next_frame() => {
                 match frame {
                     Ok(NdjsonOutcome::Frame(frame)) => {
@@ -911,22 +1001,6 @@ async fn consume_dispatch_stream(
             }
             _ = heartbeat.tick(), if !options.chaos.disable_heartbeat_ticks => {
                 heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
-            }
-            () = &mut progress_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::ProgressTimeout,
-                    VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
-                ).await;
-            }
-            () = &mut heartbeat_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::WorkerTimeout,
-                    VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
-                ).await;
             }
         }
     }
