@@ -16,9 +16,12 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Row, SqlitePool};
 use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin};
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::workflow::executor::WorkflowExecutorOptions;
+use voom_control_plane::workflow::executor::{WorkflowChaosOptions, WorkflowExecutorOptions};
 use voom_control_plane::workflow::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
@@ -26,7 +29,7 @@ use voom_control_plane::workflow::expansion::{
 use voom_control_plane::workflow::ticket_payload::WorkflowTicketPayload;
 use voom_control_plane::workflow::{WorkerRuntimeRegistry, WorkflowExecutor, WorkflowPlan};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, JobId, SystemClock, TicketId, WorkerId};
+use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
@@ -67,6 +70,270 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
         fixture
             .assert_all_workflow_tickets_succeeded(summary.job_id)
             .await
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
+    let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
+        OperationKind::ProbeFile,
+        ChaosWorkerMode::Crash,
+    )
+    .await?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .unwrap_err()
+            .summary;
+
+        fixture
+            .assert_ticket_failed_with(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::WorkerCrash,
+            )
+            .await?;
+        fixture
+            .assert_no_success_for_operation(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture.assert_failure_summary(
+            &summary,
+            OperationKind::ProbeFile,
+            FailureClass::WorkerCrash,
+        )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
+    let fixture =
+        DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::ProbeFile)
+            .await?;
+
+    let summary = fixture
+        .executor()
+        .submit_and_run(WorkflowPlan::default_ci())
+        .await
+        .unwrap_err()
+        .summary;
+
+    fixture
+        .assert_ticket_failed_with(
+            summary.job_id,
+            OperationKind::ProbeFile,
+            FailureClass::WorkerTimeout,
+        )
+        .await?;
+    fixture
+        .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
+        .await?;
+    fixture.assert_failure_summary(
+        &summary,
+        OperationKind::ProbeFile,
+        FailureClass::WorkerTimeout,
+    )
+}
+
+#[tokio::test]
+async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<()> {
+    let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
+        OperationKind::ProbeFile,
+        ChaosWorkerMode::MalformedResult,
+    )
+    .await?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .unwrap_err()
+            .summary;
+
+        fixture
+            .assert_ticket_failed_with(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::MalformedWorkerResult,
+            )
+            .await?;
+        fixture
+            .assert_no_failure_class(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::WorkerCrash,
+            )
+            .await?;
+        fixture.assert_failure_summary(
+            &summary,
+            OperationKind::ProbeFile,
+            FailureClass::MalformedWorkerResult,
+        )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
+    let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
+        OperationKind::ProbeFile,
+        ChaosWorkerMode::DeadlineExceeded,
+    )
+    .await?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .unwrap_err()
+            .summary;
+
+        fixture
+            .assert_ticket_failed_with(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::ProgressTimeout,
+            )
+            .await?;
+        fixture
+            .assert_heartbeat_events_exist(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture.assert_failure_summary(
+            &summary,
+            OperationKind::ProbeFile,
+            FailureClass::ProgressTimeout,
+        )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
+    let chaos = WorkflowChaosOptions::suppress_heartbeats_for_operation(OperationKind::ProbeFile);
+    let mut fixture = DurableWorkflowFixture::start_with_chaos_override_and_options(
+        OperationKind::ProbeFile,
+        ChaosWorkerMode::Stall,
+        chaos,
+        DeadlineFixture {
+            heartbeat_deadline_ms: 100,
+            progress_idle_deadline_ms: 1_000,
+        },
+    )
+    .await?;
+    fixture.assert_heartbeat_deadline_precedes_progress_timeout()?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .unwrap_err()
+            .summary;
+
+        fixture
+            .assert_ticket_failed_with(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::WorkerTimeout,
+            )
+            .await?;
+        fixture
+            .assert_no_expire_due_path(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture
+            .assert_no_progress_triggered_heartbeat(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture
+            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture
+            .assert_no_malformed_frame(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        fixture.assert_failure_summary(
+            &summary,
+            OperationKind::ProbeFile,
+            FailureClass::WorkerTimeout,
+        )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<()> {
+    let mut fixture = DurableWorkflowFixture::start_all_fake_providers().await?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
+
+        expect(
+            "durable workflow throughput should be non-zero",
+            summary.throughput_per_second > 0.0,
+        )?;
+        let scan = summary
+            .per_operation
+            .get(&OperationKind::ScanLibrary)
+            .ok_or_else(|| io_error("scan operation summary missing"))?;
+        expect(
+            "scan dispatch count should be populated",
+            scan.dispatch_count > 0,
+        )?;
+        expect(
+            "scan success count should be populated",
+            scan.success_count > 0,
+        )?;
+        expect("scan elapsed should be populated", !scan.elapsed.is_zero())?;
+        expect(
+            "scan throughput should be non-zero",
+            scan.throughput_per_second > 0.0,
+        )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
+}
+
+#[tokio::test]
+async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() -> TestResult<()> {
+    let mut fixture = DurableWorkflowFixture::start_all_fake_providers_with_max_parallel(2).await?;
+    let result = async {
+        let mut plan = WorkflowPlan::default_ci();
+        plan.concurrency.max_in_flight_dispatches = 3;
+        plan.timing.base_duration_ms = 80;
+        plan.timing.jitter_ms = 0;
+        let summary = fixture
+            .executor()
+            .submit_and_run(plan)
+            .await
+            .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
+
+        expect(
+            "stress peak active leases should exceed one",
+            summary.peak_active_workflow_leases > 1,
+        )?;
+        expect(
+            "max_in_flight_dispatches should be respected",
+            summary.peak_active_workflow_leases <= 3,
+        )?;
+        fixture.assert_worker_parallel_limits(&summary)?;
+        expect(
+            "stress throughput should be non-zero",
+            summary.throughput_per_second > 0.0,
+        )
     }
     .await;
 
@@ -296,15 +563,103 @@ struct DurableWorkflowFixture {
     job_id: JobId,
     registry: WorkerRuntimeRegistry,
     launches: Vec<ProviderLaunch>,
+    no_response_runtimes: Vec<NoResponseRuntime>,
+    registered_workers: Vec<(WorkerId, u32)>,
+    executor_options: WorkflowExecutorOptions,
+    deadline_fixture: Option<DeadlineFixture>,
 }
 
 impl DurableWorkflowFixture {
     async fn start_all_fake_providers() -> TestResult<Self> {
+        Self::start_all_fake_providers_with_max_parallel(4).await
+    }
+
+    async fn start_all_fake_providers_with_max_parallel(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
         for provider in provider_specs() {
-            if let Err(err) = fixture.register_process_provider(provider).await {
+            if let Err(err) = fixture
+                .register_process_provider(provider, max_parallel)
+                .await
+            {
                 return combine_result_and_cleanup(Err(err), fixture.shutdown().await);
             }
+        }
+        Ok(fixture)
+    }
+
+    async fn start_with_chaos_override(
+        operation: OperationKind,
+        mode: ChaosWorkerMode,
+    ) -> TestResult<Self> {
+        let mut options = WorkflowExecutorOptions::for_tests();
+        options.heartbeat_interval = Duration::from_millis(20);
+        options.heartbeat_timeout = Duration::from_millis(500);
+        options.progress_idle_timeout = Duration::from_millis(150);
+        Self::start_with_chaos_override_and_executor_options(operation, mode, options, None).await
+    }
+
+    async fn start_with_chaos_override_and_options(
+        operation: OperationKind,
+        mode: ChaosWorkerMode,
+        mut chaos: WorkflowChaosOptions,
+        deadlines: DeadlineFixture,
+    ) -> TestResult<Self> {
+        let mut options = WorkflowExecutorOptions::for_tests();
+        options.heartbeat_interval = Duration::from_millis(20);
+        options.heartbeat_timeout =
+            Duration::from_millis(u64::from(deadlines.heartbeat_deadline_ms));
+        options.progress_idle_timeout =
+            Duration::from_millis(u64::from(deadlines.progress_idle_deadline_ms));
+        chaos.set_payload_mode_for_operation(operation, mode.payload_mode());
+        options.chaos = chaos;
+        Self::start_with_chaos_override_and_executor_options(
+            operation,
+            mode,
+            options,
+            Some(deadlines),
+        )
+        .await
+    }
+
+    async fn start_with_chaos_override_and_executor_options(
+        operation: OperationKind,
+        mode: ChaosWorkerMode,
+        mut options: WorkflowExecutorOptions,
+        deadline_fixture: Option<DeadlineFixture>,
+    ) -> TestResult<Self> {
+        options
+            .chaos
+            .set_payload_mode_for_operation(operation, mode.payload_mode());
+        let mut fixture = Self::without_fake_providers().await?;
+        fixture.executor_options = options;
+        fixture.deadline_fixture = deadline_fixture;
+        let setup = async {
+            fixture
+                .register_process_providers_except(operation, 4)
+                .await?;
+            fixture.register_chaos_provider(operation, mode).await
+        }
+        .await;
+        if let Err(err) = setup {
+            return combine_result_and_cleanup(Err(err), fixture.shutdown().await);
+        }
+        Ok(fixture)
+    }
+
+    async fn start_with_unreachable_runtime_override(operation: OperationKind) -> TestResult<Self> {
+        let mut fixture = Self::without_fake_providers().await?;
+        fixture.executor_options.heartbeat_interval = Duration::from_millis(20);
+        fixture.executor_options.heartbeat_timeout = Duration::from_millis(120);
+        fixture.executor_options.progress_idle_timeout = Duration::from_millis(120);
+        let setup = async {
+            fixture
+                .register_process_providers_except(operation, 4)
+                .await?;
+            fixture.register_no_response_runtime(operation).await
+        }
+        .await;
+        if let Err(err) = setup {
+            return combine_result_and_cleanup(Err(err), fixture.shutdown().await);
         }
         Ok(fixture)
     }
@@ -339,11 +694,15 @@ impl DurableWorkflowFixture {
             job_id: job.id,
             registry: WorkerRuntimeRegistry::new(),
             launches: Vec::new(),
+            no_response_runtimes: Vec::new(),
+            registered_workers: Vec::new(),
+            executor_options: WorkflowExecutorOptions::for_tests(),
+            deadline_fixture: None,
         })
     }
 
     fn executor(&self) -> WorkflowExecutor<SingleWorkerPerKindSelector> {
-        self.executor_with_options(WorkflowExecutorOptions::for_tests())
+        self.executor_with_options(self.executor_options.clone())
     }
 
     fn executor_with_options(
@@ -369,18 +728,99 @@ impl DurableWorkflowFixture {
         )
     }
 
-    async fn register_process_provider(&mut self, provider: ProviderSpec) -> TestResult<()> {
-        let secret = format!("durable-workflow-{}-secret", provider.name);
+    async fn register_process_provider(
+        &mut self,
+        provider: ProviderSpec,
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        self.register_process_provider_operations(provider.name, provider.operations, max_parallel)
+            .await
+    }
+
+    async fn register_process_providers_except(
+        &mut self,
+        skipped: OperationKind,
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        for provider in provider_specs() {
+            let operations = provider
+                .operations
+                .iter()
+                .copied()
+                .filter(|operation| *operation != skipped)
+                .collect::<Vec<_>>();
+            if operations.is_empty() {
+                continue;
+            }
+            self.register_process_provider_operations(provider.name, &operations, max_parallel)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn register_process_provider_operations(
+        &mut self,
+        name: &'static str,
+        operations: &[OperationKind],
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        let secret = format!("durable-workflow-{name}-secret");
         let worker = self
-            .register_worker_without_runtime(provider.name, provider.operations, 4, &secret)
+            .register_worker_without_runtime(name, operations, max_parallel, &secret)
             .await?;
-        let launch = ProviderLaunch::spawn(provider, worker, &secret).await?;
+        self.registered_workers.push((worker, max_parallel));
+        let launch = ProviderLaunch::spawn(name, worker, &secret, false).await?;
         self.registry.register_in_process_runtime(
             worker,
             Arc::new(HttpClient::new(launch.bound)),
             launch.credentials.clone(),
         );
         self.launches.push(launch);
+        Ok(())
+    }
+
+    async fn register_chaos_provider(
+        &mut self,
+        operation: OperationKind,
+        _mode: ChaosWorkerMode,
+    ) -> TestResult<()> {
+        expect_eq(
+            "chaos worker operation",
+            &operation,
+            &OperationKind::ProbeFile,
+        )?;
+        let secret = "durable-workflow-chaos-secret";
+        let worker = self
+            .register_worker_without_runtime("chaos-probe", &[operation], 1, secret)
+            .await?;
+        self.registered_workers.push((worker, 1));
+        let launch = ProviderLaunch::spawn("chaos-worker", worker, secret, true).await?;
+        self.registry.register_in_process_runtime(
+            worker,
+            Arc::new(HttpClient::new(launch.bound)),
+            launch.credentials.clone(),
+        );
+        self.launches.push(launch);
+        Ok(())
+    }
+
+    async fn register_no_response_runtime(&mut self, operation: OperationKind) -> TestResult<()> {
+        let secret = "durable-workflow-no-response-secret";
+        let worker = self
+            .register_worker_without_runtime("no-response-probe", &[operation], 1, secret)
+            .await?;
+        self.registered_workers.push((worker, 1));
+        let runtime = NoResponseRuntime::spawn().await?;
+        self.registry.register_in_process_runtime(
+            worker,
+            Arc::new(HttpClient::new(runtime.bound)),
+            WorkerCredentials {
+                worker_id: worker,
+                worker_epoch: 0,
+                secret: SecretString::from(secret.to_owned()),
+            },
+        );
+        self.no_response_runtimes.push(runtime);
         Ok(())
     }
 
@@ -605,8 +1045,215 @@ impl DurableWorkflowFixture {
         Ok(())
     }
 
+    async fn assert_ticket_failed_with(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+        class: FailureClass,
+    ) -> TestResult<()> {
+        let count = self.failure_class_count(job_id, operation, class).await?;
+        expect(
+            &format!(
+                "expected failed {operation:?} ticket with class {}",
+                failure_class_name(class)
+            ),
+            count > 0,
+        )
+    }
+
+    async fn assert_no_failure_class(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+        class: FailureClass,
+    ) -> TestResult<()> {
+        let count = self.failure_class_count(job_id, operation, class).await?;
+        expect_eq(
+            &format!(
+                "unexpected {operation:?} failure class {}",
+                failure_class_name(class)
+            ),
+            &count,
+            &0,
+        )
+    }
+
+    async fn failure_class_count(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+        class: FailureClass,
+    ) -> TestResult<i64> {
+        Ok(sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM tickets t \
+             JOIN events e ON e.subject_type = 'ticket' AND e.subject_id = t.id \
+             WHERE t.job_id = ? \
+               AND json_extract(t.payload, '$.operation') = ? \
+               AND e.kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+               AND json_extract(e.payload, '$.class') = ?",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .bind(failure_class_name(class))
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    async fn assert_no_success_for_operation(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'succeeded' \
+               AND json_extract(payload, '$.operation') = ?",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .fetch_one(&self.pool)
+        .await?;
+        expect_eq("operation success count", &count, &0)
+    }
+
+    async fn assert_no_terminal_frame_accepted(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        self.assert_no_success_for_operation(job_id, operation)
+            .await
+    }
+
+    async fn assert_heartbeat_events_exist(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM leases l \
+             JOIN tickets t ON t.id = l.ticket_id \
+             WHERE t.job_id = ? \
+               AND json_extract(t.payload, '$.operation') = ? \
+               AND l.last_heartbeat_at > l.acquired_at",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .fetch_one(&self.pool)
+        .await?;
+        expect("expected heartbeat-updated lease row", count > 0)
+    }
+
+    async fn assert_no_expire_due_path(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM leases l \
+             JOIN tickets t ON t.id = l.ticket_id \
+             JOIN events e ON e.subject_type = 'lease' AND e.subject_id = l.id \
+             WHERE t.job_id = ? \
+               AND json_extract(t.payload, '$.operation') = ? \
+               AND e.kind = 'lease.expired'",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .fetch_one(&self.pool)
+        .await?;
+        expect_eq("lease.expired event count", &count, &0)
+    }
+
+    async fn assert_no_progress_triggered_heartbeat(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM leases l \
+             JOIN tickets t ON t.id = l.ticket_id \
+             WHERE t.job_id = ? \
+               AND json_extract(t.payload, '$.operation') = ? \
+               AND l.last_heartbeat_at != l.acquired_at",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .fetch_one(&self.pool)
+        .await?;
+        expect_eq("heartbeat mutation count", &count, &0)
+    }
+
+    async fn assert_no_malformed_frame(
+        &self,
+        job_id: JobId,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        self.assert_no_failure_class(job_id, operation, FailureClass::MalformedWorkerResult)
+            .await
+    }
+
+    fn assert_failure_summary(
+        &self,
+        summary: &voom_control_plane::workflow::WorkflowRunSummary,
+        operation: OperationKind,
+        class: FailureClass,
+    ) -> TestResult<()> {
+        let operation_summary = summary
+            .per_operation
+            .get(&operation)
+            .ok_or_else(|| io_error(format!("{operation:?} summary missing")))?;
+        expect(
+            &format!("{operation:?} summary failure count"),
+            operation_summary.failure_count > 0,
+        )?;
+        expect_eq(
+            &format!("{operation:?} summary failure class"),
+            &operation_summary.last_failure_class,
+            &Some(class),
+        )
+    }
+
+    fn assert_worker_parallel_limits(
+        &self,
+        summary: &voom_control_plane::workflow::WorkflowRunSummary,
+    ) -> TestResult<()> {
+        for (worker_id, max_parallel) in &self.registered_workers {
+            expect(
+                &format!("worker {worker_id} exceeded max_parallel {max_parallel}"),
+                summary.max_active_for_worker(*worker_id) <= *max_parallel,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn assert_heartbeat_deadline_precedes_progress_timeout(&self) -> TestResult<()> {
+        let fixture = self
+            .deadline_fixture
+            .ok_or_else(|| io_error("deadline fixture missing"))?;
+        expect(
+            "heartbeat deadline should precede progress timeout",
+            fixture.heartbeat_deadline_ms < fixture.progress_idle_deadline_ms,
+        )
+    }
+
     async fn shutdown(&mut self) -> TestResult<()> {
         let mut cleanup_error: Option<String> = None;
+        while let Some(runtime) = self.no_response_runtimes.pop() {
+            if let Err(err) = runtime.shutdown().await {
+                match &mut cleanup_error {
+                    Some(existing) => {
+                        existing.push_str("; ");
+                        existing.push_str(&err.to_string());
+                    }
+                    None => cleanup_error = Some(err.to_string()),
+                }
+            }
+        }
         while let Some(mut launch) = self.launches.pop() {
             if let Err(err) = launch.shutdown().await {
                 match &mut cleanup_error {
@@ -629,6 +1276,31 @@ impl DurableWorkflowFixture {
 struct ProviderSpec {
     name: &'static str,
     operations: &'static [OperationKind],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChaosWorkerMode {
+    Crash,
+    MalformedResult,
+    DeadlineExceeded,
+    Stall,
+}
+
+impl ChaosWorkerMode {
+    fn payload_mode(self) -> &'static str {
+        match self {
+            Self::Crash => "crash",
+            Self::MalformedResult => "malformed_result",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::Stall => "stall",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeadlineFixture {
+    heartbeat_deadline_ms: u32,
+    progress_idle_deadline_ms: u32,
 }
 
 fn provider_specs() -> Vec<ProviderSpec> {
@@ -690,11 +1362,17 @@ struct ProviderLaunch {
     bound: std::net::SocketAddr,
     credentials: WorkerCredentials,
     name: &'static str,
+    allow_nonzero_exit: bool,
 }
 
 impl ProviderLaunch {
-    async fn spawn(provider: ProviderSpec, worker_id: WorkerId, secret: &str) -> TestResult<Self> {
-        let bin = provider_binary(provider.name)?;
+    async fn spawn(
+        name: &'static str,
+        worker_id: WorkerId,
+        secret: &str,
+        allow_nonzero_exit: bool,
+    ) -> TestResult<Self> {
+        let bin = provider_binary(name)?;
         let mut child = tokio::process::Command::new(&bin)
             .env("VOOM_WORKER_SECRET", secret)
             .env("VOOM_WORKER_ID", worker_id.0.to_string())
@@ -710,7 +1388,7 @@ impl ProviderLaunch {
             worker_epoch: 0,
             secret: SecretString::from(secret.to_owned()),
         };
-        let bound = match read_bound_addr(&mut child, provider.name).await {
+        let bound = match read_bound_addr(&mut child, name).await {
             Ok(bound) => bound,
             Err(err) => {
                 let mut launch = Self {
@@ -718,7 +1396,8 @@ impl ProviderLaunch {
                     stdin,
                     bound: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
                     credentials,
-                    name: provider.name,
+                    name,
+                    allow_nonzero_exit,
                 };
                 return combine_result_and_cleanup(Err(err), launch.terminate().await);
             }
@@ -728,7 +1407,8 @@ impl ProviderLaunch {
             stdin,
             bound,
             credentials,
-            name: provider.name,
+            name,
+            allow_nonzero_exit,
         })
     }
 
@@ -742,7 +1422,7 @@ impl ProviderLaunch {
             self.terminate().await?;
             return Err(io_error(format!("{} cleanup timed out", self.name)));
         };
-        if !status.success() {
+        if !status.success() && !self.allow_nonzero_exit {
             return Err(io_error(format!("{} exited with {status}", self.name)));
         }
         Ok(())
@@ -753,6 +1433,60 @@ impl ProviderLaunch {
         let _ = self.child.start_kill();
         tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await??;
         Ok(())
+    }
+}
+
+struct NoResponseRuntime {
+    bound: std::net::SocketAddr,
+    shutdown: Option<oneshot::Sender<()>>,
+    joined: Option<JoinHandle<()>>,
+}
+
+impl NoResponseRuntime {
+    async fn spawn() -> TestResult<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let bound = listener.local_addr()?;
+        let (shutdown, mut shutdown_rx) = oneshot::channel();
+        let joined = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { continue };
+                        tokio::spawn(async move {
+                            let _stream = stream;
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        });
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            bound,
+            shutdown: Some(shutdown),
+            joined: Some(joined),
+        })
+    }
+
+    async fn shutdown(mut self) -> TestResult<()> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(joined) = self.joined.take() {
+            tokio::time::timeout(Duration::from_secs(5), joined).await??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NoResponseRuntime {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(joined) = &self.joined {
+            joined.abort();
+        }
     }
 }
 
@@ -903,6 +1637,14 @@ fn ticket_kind(operation: OperationKind) -> String {
 
 fn operation_name(operation: OperationKind) -> String {
     serde_json::to_value(operation)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn failure_class_name(class: FailureClass) -> String {
+    serde_json::to_value(class)
         .unwrap()
         .as_str()
         .unwrap()

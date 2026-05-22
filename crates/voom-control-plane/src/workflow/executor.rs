@@ -83,6 +83,34 @@ impl WorkflowExecutorOptions {
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowChaosOptions {
     pub disable_heartbeat_ticks: bool,
+    pub suppress_heartbeat_operation: Option<OperationKind>,
+    pub payload_modes: BTreeMap<OperationKind, String>,
+}
+
+impl WorkflowChaosOptions {
+    #[must_use]
+    pub fn suppress_heartbeats_for_operation(operation: OperationKind) -> Self {
+        Self {
+            suppress_heartbeat_operation: Some(operation),
+            ..Self::default()
+        }
+    }
+
+    pub fn set_payload_mode_for_operation(
+        &mut self,
+        operation: OperationKind,
+        mode: impl Into<String>,
+    ) {
+        self.payload_modes.insert(operation, mode.into());
+    }
+
+    fn suppresses_heartbeats_for(&self, operation: OperationKind) -> bool {
+        self.disable_heartbeat_ticks || self.suppress_heartbeat_operation == Some(operation)
+    }
+
+    fn payload_mode_for(&self, operation: OperationKind) -> Option<&str> {
+        self.payload_modes.get(&operation).map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +123,7 @@ pub struct WorkflowRunSummary {
     pub failure_count: u64,
     pub peak_active_workflow_leases: u32,
     pub elapsed: Duration,
+    pub throughput_per_second: f64,
     pub per_operation: BTreeMap<OperationKind, OperationSummary>,
     max_active_by_worker: BTreeMap<WorkerId, u32>,
 }
@@ -123,6 +152,9 @@ pub struct OperationSummary {
     pub success_count: u64,
     pub retry_count: u64,
     pub failure_count: u64,
+    pub last_failure_class: Option<FailureClass>,
+    pub elapsed: Duration,
+    pub throughput_per_second: f64,
 }
 
 #[derive(Debug)]
@@ -500,7 +532,11 @@ where
                 }
             }
             DispatchTerminal::Failure { source } => {
-                summary.record_failure(outcome.operation);
+                let class = self
+                    .ticket_failure_class(outcome.ticket_id)
+                    .await
+                    .unwrap_or_else(|| failure_class_for_error(&source));
+                summary.record_failure(outcome.operation, class);
                 match self.control_plane.tickets.get(outcome.ticket_id).await {
                     Ok(Some(ticket)) if ticket.state == TicketState::Failed => {
                         *terminal_error = Some(source);
@@ -629,6 +665,23 @@ where
         )))
     }
 
+    async fn ticket_failure_class(&self, ticket_id: TicketId) -> Option<FailureClass> {
+        let row = sqlx::query(
+            "SELECT payload FROM events \
+             WHERE kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
+               AND subject_type = 'ticket' \
+               AND subject_id = ? \
+             ORDER BY event_id DESC LIMIT 1",
+        )
+        .bind(sqlite_i64(ticket_id.0))
+        .fetch_optional(&self.control_plane.pool)
+        .await
+        .ok()??;
+        let payload: String = row.try_get("payload").ok()?;
+        let payload: Value = serde_json::from_str(&payload).ok()?;
+        serde_json::from_value(payload.get("class")?.clone()).ok()
+    }
+
     async fn retry_delay(
         &self,
         job_id: JobId,
@@ -729,6 +782,7 @@ impl WorkflowRunSummary {
             failure_count: 0,
             peak_active_workflow_leases: 0,
             elapsed,
+            throughput_per_second: 0.0,
             per_operation: BTreeMap::new(),
             max_active_by_worker: BTreeMap::new(),
         }
@@ -758,15 +812,15 @@ impl WorkflowRunSummary {
             .success_count += 1;
     }
 
-    fn record_failure(&mut self, operation: OperationKind) {
-        self.per_operation
-            .entry(operation)
-            .or_default()
-            .failure_count += 1;
+    fn record_failure(&mut self, operation: OperationKind, class: FailureClass) {
+        let summary = self.per_operation.entry(operation).or_default();
+        summary.failure_count += 1;
+        summary.last_failure_class = Some(class);
     }
 
     async fn refresh_counts(&mut self, control: &ControlPlane, job_id: JobId, elapsed: Duration) {
         self.elapsed = elapsed;
+        self.throughput_per_second = throughput(self.dispatch_count, elapsed);
         if let Ok((ticket_count, retry_count, failure_count)) = sqlx::query_as::<_, (i64, i64, i64)>(
             "SELECT COUNT(*), COALESCE(SUM(CASE WHEN attempt > 1 THEN attempt - 1 ELSE 0 END), 0), \
                     SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) \
@@ -808,10 +862,11 @@ impl WorkflowRunSummary {
             }
             self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
             for (operation, count) in ticket_counts {
-                self.per_operation
-                    .entry(operation)
-                    .or_default()
-                    .ticket_count = count;
+                let operation_summary = self.per_operation.entry(operation).or_default();
+                operation_summary.ticket_count = count;
+                operation_summary.elapsed = elapsed;
+                operation_summary.throughput_per_second =
+                    throughput(operation_summary.dispatch_count, elapsed);
             }
         }
     }
@@ -885,25 +940,33 @@ async fn dispatch_ticket_inner(
     lease_id: LeaseId,
     options: WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
+    let mut payload = workflow_payload.rendered_payload.clone();
+    apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
     let request = OperationRequest {
         operation: workflow_payload.operation,
         lease_id,
-        payload: workflow_payload.rendered_payload.clone(),
+        payload,
         heartbeat_deadline_ms: duration_millis_u32(options.heartbeat_timeout),
         progress_idle_deadline_ms: duration_millis_u32(options.progress_idle_timeout),
     };
     let idempotency_key = format!("ticket-{}-lease-{}", ticket.id.0, lease_id.0);
-    let dispatch = runtime
-        .client
-        .dispatch(&runtime.credentials, &idempotency_key, request)
-        .await
-        .map_err(|err| {
-            let source = map_protocol_error(&err);
-            (err, source)
-        });
+    let dispatch_timeout = no_response_timeout(&options);
+    let dispatch = tokio::time::timeout(
+        dispatch_timeout,
+        runtime
+            .client
+            .dispatch(&runtime.credentials, &idempotency_key, request),
+    )
+    .await
+    .map_err(|_| {
+        VoomError::WorkerTimeout(format!(
+            "dispatch response timeout for lease {lease_id} after {dispatch_timeout:?}"
+        ))
+    })
+    .and_then(|result| result.map_err(|err| map_dispatch_setup_protocol_error(&err)));
     let dispatch = match dispatch {
         Ok(dispatch) => dispatch,
-        Err((_err, source)) => {
+        Err(source) => {
             return fail_lease_and_return(
                 control,
                 lease_id,
@@ -925,12 +988,20 @@ async fn dispatch_ticket_inner(
         )
         .await;
     }
-    consume_dispatch_stream(control, lease_id, dispatch, options).await
+    consume_dispatch_stream(
+        control,
+        lease_id,
+        workflow_payload.operation,
+        dispatch,
+        options,
+    )
+    .await
 }
 
 async fn consume_dispatch_stream(
     control: &ControlPlane,
     lease_id: LeaseId,
+    operation: OperationKind,
     mut dispatch: DispatchStream,
     options: WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
@@ -984,7 +1055,9 @@ async fn consume_dispatch_stream(
                     Ok(NdjsonOutcome::Frame(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
                         last_progress = Instant::now();
-                        heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
+                        if !options.chaos.suppresses_heartbeats_for(operation) {
+                            heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
+                        }
                     }
                     Ok(NdjsonOutcome::Terminated(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
@@ -1008,7 +1081,7 @@ async fn consume_dispatch_stream(
                     }
                 }
             }
-            _ = heartbeat.tick(), if !options.chaos.disable_heartbeat_ticks => {
+            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
                 heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
             }
         }
@@ -1099,6 +1172,23 @@ fn map_protocol_error(err: &ProtocolError) -> VoomError {
     }
 }
 
+fn map_dispatch_setup_protocol_error(err: &ProtocolError) -> VoomError {
+    match err {
+        ProtocolError::MalformedFrame { detail }
+            if detail.contains("missing response/body separator")
+                || detail.contains("response read") =>
+        {
+            VoomError::WorkerCrash(err.to_string())
+        }
+        ProtocolError::InvalidPayload { detail }
+            if detail.contains("request:") || detail.contains("body:") =>
+        {
+            VoomError::WorkerCrash(err.to_string())
+        }
+        _ => map_protocol_error(err),
+    }
+}
+
 fn voom_error_for_failure_class(class: FailureClass, message: String) -> VoomError {
     match class.into_error_code() {
         ErrorCode::WorkerTimeout => VoomError::WorkerTimeout(message),
@@ -1151,6 +1241,41 @@ fn failure_class_for_error(source: &VoomError) -> FailureClass {
         ErrorCode::PriorityPolicyConflict => FailureClass::PriorityPolicyConflict,
         ErrorCode::AmbiguousWorkerSelection => FailureClass::AmbiguousWorkerSelection,
         _ => FailureClass::WorkerCrash,
+    }
+}
+
+fn apply_chaos_payload_override(
+    payload: &mut Value,
+    operation: OperationKind,
+    chaos: &WorkflowChaosOptions,
+) -> Result<(), VoomError> {
+    let Some(mode) = chaos.payload_mode_for(operation) else {
+        return Ok(());
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return Err(VoomError::Config(format!(
+            "workflow chaos payload for {operation:?} must be an object"
+        )));
+    };
+    object.insert("mode".to_owned(), Value::String(mode.to_owned()));
+    Ok(())
+}
+
+fn no_response_timeout(options: &WorkflowExecutorOptions) -> Duration {
+    options
+        .heartbeat_timeout
+        .min(options.progress_idle_timeout)
+        .max(Duration::from_millis(1))
+}
+
+fn throughput(count: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds > 0.0 {
+        count as f64 / seconds
+    } else if count > 0 {
+        f64::INFINITY
+    } else {
+        0.0
     }
 }
 
