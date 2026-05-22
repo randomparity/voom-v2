@@ -602,7 +602,8 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_language_tokens(&mut self, statement: &StatementAst, text: &str) {
-        if !(text.contains(" lang ") || text.contains("languages ")) {
+        if !(text.contains(" lang ") || text.contains(" language ") || text.contains("languages "))
+        {
             return;
         }
         for value in list_values(text) {

@@ -80,6 +80,14 @@ fn rejects_invalid_config_language() {
 }
 
 #[test]
+fn rejects_invalid_language_filter_alias() {
+    assert!(
+        codes("policy \"p\" { phase a { keep audio where language in [english] } }")
+            .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
 fn rejects_invalid_on_error() {
     assert!(
         codes("policy \"p\" { config { on_error: retry } phase a {} }")
