@@ -24,13 +24,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
+voom-scheduler = { version = "0.1.0-dev", path = "../voom-scheduler" }
 voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
 secrecy = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time"] }

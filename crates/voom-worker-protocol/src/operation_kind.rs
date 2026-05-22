@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// One variant per architectural-spec fixed-operation. Plugin-defined
 /// operations are out of Sprint 2 scope (Sprint 8 plugin SDK).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
     ScanLibrary,

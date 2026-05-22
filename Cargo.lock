@@ -2535,6 +2535,8 @@ dependencies = [
 name = "voom-control-plane"
 version = "0.1.0-dev"
 dependencies = [
+ "async-trait",
+ "chrono",
  "rand 0.9.4",
  "secrecy",
  "serde",
@@ -2545,6 +2547,7 @@ dependencies = [
  "tokio",
  "voom-core",
  "voom-events",
+ "voom-scheduler",
  "voom-store",
  "voom-worker-protocol",
 ]
