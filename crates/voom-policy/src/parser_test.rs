@@ -61,3 +61,15 @@ fn keeps_skip_when_as_one_phase_control() {
     assert_eq!(ast.phases[0].operations.len(), 1);
     assert_eq!(ast.phases[0].operations[0].keyword().value, "container");
 }
+
+#[test]
+fn parses_multiple_metadata_settings_separated_by_spaces() {
+    let ast = parse_policy_source(
+        "policy \"p\" { metadata { version: \"1\" description: \"x\" } phase inspect {} }",
+    )
+    .unwrap();
+
+    assert_eq!(ast.metadata.len(), 2);
+    assert_eq!(ast.metadata[0].key.value, "version");
+    assert_eq!(ast.metadata[1].key.value, "description");
+}

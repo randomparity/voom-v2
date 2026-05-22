@@ -137,7 +137,6 @@ impl<'a> Parser<'a> {
             self.expect_byte(b':')?;
             let value = self.parse_expr()?;
             settings.push(SettingAst { key, value });
-            self.consume_statement_tail();
         }
         Ok(settings)
     }
@@ -400,15 +399,6 @@ impl<'a> Parser<'a> {
             while self.peek_byte().is_some_and(|byte| byte != b'\n') {
                 self.cursor += 1;
             }
-        }
-    }
-
-    fn consume_statement_tail(&mut self) {
-        while self
-            .peek_byte()
-            .is_some_and(|byte| byte != b'\n' && byte != b'}')
-        {
-            self.cursor += 1;
         }
     }
 
