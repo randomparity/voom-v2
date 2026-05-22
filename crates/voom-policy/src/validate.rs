@@ -354,14 +354,19 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_container(&mut self, statement: &StatementAst, text: &str) {
-        if words(text)
-            .get(1)
-            .is_none_or(|container| *container != "mkv")
-        {
+        let tokens = words(text);
+        if tokens.get(1).is_none_or(|container| *container != "mkv") {
             self.error(
                 DiagnosticCode::UnsupportedContainer,
                 statement.span(),
                 "Sprint 4 only supports mkv containers",
+            );
+        }
+        if tokens.len() > 2 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "container operation does not accept extra arguments",
             );
         }
     }
@@ -422,6 +427,13 @@ impl<'a> Validator<'a> {
                 "default strategy must be first, best, none, or preserve",
             );
         }
+        if tokens.len() > 3 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "defaults operation does not accept extra arguments",
+            );
+        }
     }
 
     fn validate_actions(&mut self, statement: &StatementAst, text: &str) {
@@ -432,6 +444,13 @@ impl<'a> Validator<'a> {
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "track actions operation must use `clear`",
+            );
+        }
+        if tokens.len() > 3 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "track actions operation does not accept extra arguments",
             );
         }
     }

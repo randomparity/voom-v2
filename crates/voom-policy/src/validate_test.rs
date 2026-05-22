@@ -143,6 +143,14 @@ fn rejects_container_without_value() {
 }
 
 #[test]
+fn rejects_container_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { container mkv mp4 } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_keep_without_track_target() {
     assert!(
         codes("policy \"p\" { phase a { keep } }").contains(&"invalid_track_target".to_owned())
@@ -154,6 +162,14 @@ fn rejects_defaults_without_strategy() {
     assert!(
         codes("policy \"p\" { phase a { defaults audio } }")
             .contains(&"invalid_default_strategy".to_owned())
+    );
+}
+
+#[test]
+fn rejects_defaults_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { defaults audio first forced } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
 
@@ -209,6 +225,14 @@ fn rejects_delete_tag_without_key() {
 fn rejects_actions_without_clear_verb() {
     assert!(
         codes("policy \"p\" { phase a { actions audio retain } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_actions_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { actions audio clear now } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
