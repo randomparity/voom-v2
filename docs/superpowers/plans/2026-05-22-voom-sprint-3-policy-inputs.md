@@ -17,6 +17,7 @@
 - `crates/voom-policy/src/model.rs` and `model_test.rs`: domain types and validation tests.
 - `crates/voom-policy/src/fixtures.rs` and `fixtures_test.rs`: embedded fixture loader and round-trip tests.
 - `crates/voom-policy/fixtures/*.json`: required compliant and noncompliant fixtures.
+- `crates/voom-core/src/ids.rs`, `lib.rs`, and `ids_test.rs`: add and export `PolicyInputSetId` and `PolicySyntheticTargetId`.
 - `migrations/0006_policy_inputs.sql`: policy input persistence schema.
 - `crates/voom-store/src/migrator.rs`: register migration 0006.
 - `crates/voom-store/src/repo/policy_inputs.rs` and `policy_inputs_test.rs`: repository trait, SQLite implementation, DB round-trip and raw SQL constraint tests.
@@ -25,7 +26,7 @@
 - `crates/voom-control-plane/src/lib.rs`: add `SqlitePolicyInputRepo` field and accessor.
 - `crates/voom-control-plane/src/cases/policy_inputs.rs` and `policy_inputs_test.rs`: control-plane use cases and tests.
 - `crates/voom-control-plane/src/cases/mod.rs`: expose the new case module.
-- `crates/voom-control-plane/Cargo.toml`: add `voom-policy` dependency if tests or signatures need public model types directly.
+- `crates/voom-control-plane/Cargo.toml`: add `voom-policy` dependency.
 
 ## Task 1: `voom-policy` Domain Model
 
@@ -121,7 +122,99 @@ pub struct PolicyInputSetDraft {
 }
 ```
 
-Add child structs with fields from the spec: each child has `ordinal: u32`, `target: TargetRef`, and the relevant payload fields (`container`, `stream_summary`, `provenance`, `artifact_expectation`, `dimension_weights`) as `serde_json::Value`.
+Add these child structs and enums in the same module:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicySyntheticTarget {
+    pub synthetic_key: String,
+    pub target_kind: TargetKind,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MediaSnapshotInput {
+    pub ordinal: u32,
+    pub target: TargetRef,
+    pub container: Option<String>,
+    pub stream_summary: serde_json::Value,
+    pub video_codec: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub hdr: Option<String>,
+    pub bitrate: Option<u64>,
+    pub duration_millis: Option<u64>,
+    pub audio_languages: Vec<String>,
+    pub subtitle_languages: Vec<String>,
+    pub health_flags: Vec<String>,
+    pub existing_media_snapshot_id: Option<voom_core::MediaSnapshotId>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IdentityEvidenceInput {
+    pub ordinal: u32,
+    pub target: TargetRef,
+    pub assertion_type: String,
+    pub provider: String,
+    pub provider_version: String,
+    pub confidence: f64,
+    pub provenance: serde_json::Value,
+    pub observed_at: time::OffsetDateTime,
+    pub existing_evidence_id: Option<voom_core::EvidenceId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundleTargetState {
+    Required,
+    Allowed,
+    Forbidden,
+    Preferred,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BundleTargetInput {
+    pub ordinal: u32,
+    pub target: TargetRef,
+    pub role: String,
+    pub desired_state: BundleTargetState,
+    pub language: Option<String>,
+    pub label: Option<String>,
+    pub disposition: Option<String>,
+    pub artifact_expectation: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QualityProfileSelection {
+    pub ordinal: u32,
+    pub target: TargetRef,
+    pub profile_name: String,
+    pub profile_version: String,
+    pub dimension_weights: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueInputState {
+    Open,
+    Accepted,
+    Suppressed,
+    Planned,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IssueInput {
+    pub ordinal: u32,
+    pub target: TargetRef,
+    pub kind: String,
+    pub severity: voom_core::IssueSeverity,
+    pub priority: voom_core::IssuePriority,
+    pub state: IssueInputState,
+    pub reason: String,
+    pub provenance: serde_json::Value,
+    pub existing_issue_id: Option<voom_core::IssueId>,
+}
+```
 
 - [ ] **Step 4: Add validation**
 
@@ -237,11 +330,17 @@ git commit -m "test: add deterministic policy input fixtures"
 ## Task 3: Migration 0006
 
 **Files:**
+- Modify: `crates/voom-core/src/ids.rs`
+- Modify: `crates/voom-core/src/ids_test.rs`
 - Create: `migrations/0006_policy_inputs.sql`
 - Modify: `crates/voom-store/src/migrator.rs`
 - Modify: `crates/voom-store/tests/migration_inventory.rs` only if the expected migration list is explicit in the current file
 
-- [ ] **Step 1: Add schema**
+- [ ] **Step 1: Add policy input ids**
+
+Add `define_id!(PolicyInputSetId);` and `define_id!(PolicySyntheticTargetId);` to `voom-core/src/ids.rs`, export them from `voom-core/src/lib.rs`, and add display/JSON round-trip tests in `ids_test.rs`.
+
+- [ ] **Step 2: Add schema**
 
 Create these tables:
 
@@ -275,20 +374,20 @@ For every child input table, include:
 - composite FK `(policy_input_set_id, synthetic_target_id) REFERENCES policy_input_synthetic_targets(policy_input_set_id, id)`;
 - a `CHECK` that exactly one durable target id or `synthetic_target_id` is non-null.
 
-- [ ] **Step 2: Register migration**
+- [ ] **Step 3: Register migration**
 
 Add migration 0006 to `crates/voom-store/src/migrator.rs` in ascending version order.
 
-- [ ] **Step 3: Verify migration inventory**
+- [ ] **Step 4: Verify migration inventory**
 
 Run: `cargo test -p voom-store --test migration_inventory --all-features`
 
 Expected: migration inventory tests pass.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add migrations/0006_policy_inputs.sql crates/voom-store/src/migrator.rs crates/voom-store/tests/migration_inventory.rs
+git add crates/voom-core migrations/0006_policy_inputs.sql crates/voom-store/src/migrator.rs crates/voom-store/tests/migration_inventory.rs
 git commit -m "feat: add policy input persistence schema"
 ```
 
@@ -328,7 +427,7 @@ pub trait PolicyInputRepo: Repository {
 }
 ```
 
-Define `PolicyInputSetId(pub u64)` locally in this repo unless a shared id is added to `voom-core`. Keep Sprint 3 scoped: do not add policy document/version ids.
+Use `voom_core::PolicyInputSetId` for persisted input-set ids and `voom_core::PolicySyntheticTargetId` for persisted synthetic-target ids. Keep Sprint 3 scoped: do not add policy document/version ids.
 
 - [ ] **Step 3: Implement SQLite round trip**
 
@@ -373,6 +472,8 @@ git commit -m "feat: add policy input repository"
 
 - [ ] **Step 1: Add repo field**
 
+Add `voom-policy = { workspace = true }` to `crates/voom-control-plane/Cargo.toml`.
+
 Add `SqlitePolicyInputRepo` to `ControlPlane`, initialize it in `new_unchecked`, include it in `Debug`, and add a test-support accessor following existing repo accessor style.
 
 - [ ] **Step 2: Add use cases**
@@ -387,7 +488,7 @@ pub async fn create_policy_input_set(
 
 pub async fn get_policy_input_set(
     &self,
-    id: voom_store::repo::policy_inputs::PolicyInputSetId,
+    id: voom_core::PolicyInputSetId,
 ) -> Result<Option<voom_store::repo::policy_inputs::PolicyInputSet>, VoomError>
 
 pub async fn list_policy_input_sets(
@@ -437,11 +538,11 @@ Expected: all commands exit 0.
 - [ ] **Step 2: Run documentation scans**
 
 ```bash
-rg -n "<incomplete-work-marker-regex>" docs/superpowers/specs/2026-05-22-voom-sprint-3-design.md docs/superpowers/plans/2026-05-22-voom-sprint-3-policy-inputs.md
+rg -n "TBD|FIXME|unresolved|\\?\\?" docs/superpowers/specs/2026-05-22-voom-sprint-3-design.md
 git diff --check
 ```
 
-Expected: marker scan has no output; diff check exits 0.
+Expected: marker scan has no output in the Sprint 3 design spec; diff check exits 0.
 
 - [ ] **Step 3: Run full CI**
 
