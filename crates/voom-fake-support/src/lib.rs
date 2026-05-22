@@ -15,6 +15,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use secrecy::SecretString;
@@ -25,6 +26,8 @@ use voom_worker_protocol::{
     HttpServer, OperationDispatch, OperationFuture, OperationKind, OperationRequest,
     OperationResponse, PercentBps, ProgressFrame, ProtocolError, ServerHandle, WorkerCredentials,
 };
+
+const MAX_FAKE_DURATION_MS: u64 = 30_000;
 
 #[derive(Debug, Error)]
 pub enum ScenarioError {
@@ -238,36 +241,59 @@ pub fn dispatch_provider(
 
     let scenario = scenario(&req.payload);
     validate_payload(entry.kind, req)?;
+    let timing = TimingControls::from_payload(&req.payload)?;
     let now = Utc::now();
-    let progress = ProgressFrame::Progress {
+    let response = OperationResponse {
         lease_id: req.lease_id,
-        seq: 0,
-        emitted_at: now,
-        percent: Some(PercentBps::ZERO),
-        message: Some(format!(
-            "{} handling {}",
+        accepted_at: now,
+    };
+    let result_payload = result_payload(
+        provider.provider,
+        req.operation,
+        scenario,
+        &req.payload,
+        timing.fan_out_count,
+    )?;
+
+    if timing.duration_ms == 0 {
+        let progress = progress_frame(
+            req.lease_id,
+            0,
+            now,
+            PercentBps::ZERO,
             provider.provider,
-            operation_name(req.operation)
-        )),
-        payload: Some(serde_json::json!({
-            "provider": provider.provider,
-            "operation": operation_name(req.operation),
-            "scenario": scenario,
-        })),
-    };
-    let result = ProgressFrame::Result {
-        lease_id: req.lease_id,
-        seq: 1,
-        emitted_at: now,
-        payload: result_payload(provider.provider, req.operation, scenario, &req.payload)?,
-    };
-    Ok(OperationDispatch {
-        response: OperationResponse {
+            req.operation,
+            scenario,
+        );
+        let result = ProgressFrame::Result {
             lease_id: req.lease_id,
-            accepted_at: now,
-        },
-        body: body_from_frames(&[progress, result])?,
-    })
+            seq: 1,
+            emitted_at: now,
+            payload: result_payload,
+        };
+        return Ok(OperationDispatch::buffered(
+            response,
+            body_from_frames(&[progress, result])?,
+        ));
+    }
+
+    let handle = tokio::runtime::Handle::try_current()
+        .map_err(|_| invalid("timed fake dispatch requires tokio runtime"))?;
+    let (writer, dispatch) = OperationDispatch::streaming(response);
+    let timed = TimedDispatch {
+        writer,
+        lease_id: req.lease_id,
+        provider: provider.provider.to_owned(),
+        operation: req.operation,
+        scenario: scenario.to_owned(),
+        result_payload,
+        duration_ms: timing.duration_ms,
+        progress_interval_ms: timing.progress_interval_ms,
+    };
+    handle.spawn(async move {
+        timed.emit().await;
+    });
+    Ok(dispatch)
 }
 
 pub async fn run_provider(binary_name: &'static str) -> Result<(), Box<dyn std::error::Error>> {
@@ -312,6 +338,89 @@ fn provider_entry(binary_name: &str) -> Option<ProviderCatalogEntry> {
 
 fn supports_operation(provider: &ProviderDefinition, operation: OperationKind) -> bool {
     provider.primary == operation || provider.secondary.contains(&operation)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingControls {
+    duration_ms: u64,
+    progress_interval_ms: u64,
+    fan_out_count: Option<u32>,
+}
+
+impl TimingControls {
+    fn from_payload(payload: &serde_json::Value) -> Result<Self, ProtocolError> {
+        let duration_ms = optional_u64(payload, "duration_ms")?.unwrap_or(0);
+        let progress_interval_ms =
+            optional_u64(payload, "progress_interval_ms")?.unwrap_or(duration_ms);
+        let fan_out_count = optional_u64(payload, "fan_out_count")?
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| invalid("fan_out_count out of range"))?;
+
+        if duration_ms > MAX_FAKE_DURATION_MS {
+            return Err(invalid("duration_ms exceeds fake-provider cap"));
+        }
+        if progress_interval_ms == 0 && duration_ms > 0 {
+            return Err(invalid(
+                "progress_interval_ms must be positive for timed runs",
+            ));
+        }
+
+        Ok(Self {
+            duration_ms,
+            progress_interval_ms,
+            fan_out_count,
+        })
+    }
+}
+
+struct TimedDispatch {
+    writer: voom_worker_protocol::http::StreamingFrameWriter,
+    lease_id: voom_core::LeaseId,
+    provider: String,
+    operation: OperationKind,
+    scenario: String,
+    result_payload: serde_json::Value,
+    duration_ms: u64,
+    progress_interval_ms: u64,
+}
+
+impl TimedDispatch {
+    async fn emit(mut self) {
+        let mut seq = 0_u64;
+        let mut elapsed_ms = 0_u64;
+        while elapsed_ms < self.duration_ms {
+            let percent = percent_for(elapsed_ms, self.duration_ms);
+            let frame = progress_frame(
+                self.lease_id,
+                seq,
+                Utc::now(),
+                percent,
+                &self.provider,
+                self.operation,
+                &self.scenario,
+            );
+            if self.writer.write_frame(frame).await.is_err() {
+                return;
+            }
+            seq += 1;
+
+            let remaining_ms = self.duration_ms - elapsed_ms;
+            let sleep_ms = self.progress_interval_ms.min(remaining_ms);
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            elapsed_ms += sleep_ms;
+        }
+
+        let result = ProgressFrame::Result {
+            lease_id: self.lease_id,
+            seq,
+            emitted_at: Utc::now(),
+            payload: self.result_payload,
+        };
+        if self.writer.write_frame(result).await.is_ok() {
+            let _ = self.writer.finish().await;
+        }
+    }
 }
 
 fn validate_payload(kind: ProviderKind, req: &OperationRequest) -> Result<(), ProtocolError> {
@@ -400,6 +509,7 @@ fn result_payload(
     operation: OperationKind,
     scenario: &str,
     payload: &serde_json::Value,
+    fan_out_count: Option<u32>,
 ) -> Result<serde_json::Value, ProtocolError> {
     let mut result = serde_json::json!({
         "provider": provider,
@@ -411,13 +521,7 @@ fn result_payload(
         .ok_or_else(|| invalid("internal result payload must be object"))?;
     match provider {
         "fake-scanner" => {
-            object.insert(
-                "files".to_owned(),
-                serde_json::json!([{
-                    "path": "/library/movie.mkv",
-                    "size_bytes": 4_200_000_000_u64,
-                }]),
-            );
+            object.insert("files".to_owned(), scanner_files(payload, fan_out_count)?);
         }
         "fake-prober" => {
             object.insert("duration_ms".to_owned(), serde_json::json!(7_200_000_u64));
@@ -427,7 +531,7 @@ fn result_payload(
         "fake-transcoder" => {
             object.insert(
                 "output_path".to_owned(),
-                serde_json::json!("/library/movie.h265.mkv"),
+                serde_json::json!(transform_output_path(payload, "h265")),
             );
             object.insert(
                 "target_codec".to_owned(),
@@ -438,6 +542,10 @@ fn result_payload(
             );
         }
         "fake-remuxer" => {
+            object.insert(
+                "output_path".to_owned(),
+                serde_json::json!(transform_output_path(payload, "remuxed")),
+            );
             object.insert(
                 "container".to_owned(),
                 payload
@@ -466,6 +574,10 @@ fn result_payload(
         }
         "fake-quality-scorer" => {
             object.insert("score".to_owned(), serde_json::json!(93));
+            object.insert(
+                "needs_transcode".to_owned(),
+                serde_json::json!(needs_transcode(payload)),
+            );
         }
         "fake-issue-provider" => {
             object.insert("issue_key".to_owned(), serde_json::json!("VOOM-FAKE-1"));
@@ -476,6 +588,100 @@ fn result_payload(
         _ => return Err(invalid(format!("unknown provider {provider}"))),
     }
     Ok(result)
+}
+
+fn optional_u64(
+    payload: &serde_json::Value,
+    field: &'static str,
+) -> Result<Option<u64>, ProtocolError> {
+    match payload.as_object().and_then(|object| object.get(field)) {
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| invalid(format!("{field} must be an unsigned integer"))),
+        None => Ok(None),
+    }
+}
+
+fn progress_frame(
+    lease_id: voom_core::LeaseId,
+    seq: u64,
+    emitted_at: chrono::DateTime<Utc>,
+    percent: PercentBps,
+    provider: &str,
+    operation: OperationKind,
+    scenario: &str,
+) -> ProgressFrame {
+    ProgressFrame::Progress {
+        lease_id,
+        seq,
+        emitted_at,
+        percent: Some(percent),
+        message: Some(format!(
+            "{} handling {}",
+            provider,
+            operation_name(operation)
+        )),
+        payload: Some(serde_json::json!({
+            "provider": provider,
+            "operation": operation_name(operation),
+            "scenario": scenario,
+        })),
+    }
+}
+
+fn percent_for(elapsed_ms: u64, duration_ms: u64) -> PercentBps {
+    if duration_ms == 0 {
+        return PercentBps::FULL;
+    }
+    let bps = elapsed_ms.saturating_mul(10_000) / duration_ms;
+    PercentBps::try_from(u16::try_from(bps).unwrap_or(10_000)).unwrap_or(PercentBps::FULL)
+}
+
+fn scanner_files(
+    payload: &serde_json::Value,
+    fan_out_count: Option<u32>,
+) -> Result<serde_json::Value, ProtocolError> {
+    let base = string_field(payload, "path")?.trim_end_matches('/');
+    let count = fan_out_count.unwrap_or(1);
+    let files = (0..count)
+        .map(|index| {
+            serde_json::json!({
+                "path": format!("{base}/file-{index:03}.mkv"),
+                "size_bytes": 4_200_000_000_u64 + u64::from(index),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::Value::Array(files))
+}
+
+fn needs_transcode(payload: &serde_json::Value) -> bool {
+    payload
+        .get("codec")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|codec| codec != "h265")
+}
+
+fn transform_output_path(payload: &serde_json::Value, marker: &str) -> String {
+    let path = payload
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("/library/movie.mkv");
+    let input = Path::new(path);
+    let parent = input
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|parent| !parent.is_empty())
+        .unwrap_or("/library");
+    let stem = input
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("movie");
+    if parent == "/" {
+        format!("/{stem}.{marker}.mkv")
+    } else {
+        format!("{}/{stem}.{marker}.mkv", parent.trim_end_matches('/'))
+    }
 }
 
 fn body_from_frames(frames: &[ProgressFrame]) -> Result<Vec<u8>, ProtocolError> {

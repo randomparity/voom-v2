@@ -115,12 +115,12 @@ fn handle_operation(req: OperationRequest) -> OperationFuture {
             }
         })?);
         body.push(b'\n');
-        Ok(OperationDispatch {
-            response: OperationResponse {
+        Ok(OperationDispatch::buffered(
+            OperationResponse {
                 lease_id: req.lease_id,
                 accepted_at: now,
             },
             body,
-        })
+        ))
     })
 }

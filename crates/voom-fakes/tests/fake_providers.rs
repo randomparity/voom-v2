@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -151,6 +151,62 @@ async fn fake_providers_follow_worker_protocol() {
 
         launch.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn timed_fake_provider_streams_progress_before_terminal() {
+    let case = ProviderCase {
+        bin_env: "CARGO_BIN_EXE_fake-scanner",
+        name: "fake-scanner",
+        primary: OperationKind::ScanLibrary,
+        secondary: &[],
+        valid_payload: serde_json::json!({"path": "/library", "scenario": "timed"}),
+        invalid_payload: serde_json::json!({"scenario": "missing_path"}),
+        expected_field: "files",
+    };
+    let mut launch = spawn_provider(&case).await;
+    let client = HttpClient::new(launch.bound);
+
+    let req = operation_request(
+        401,
+        OperationKind::ScanLibrary,
+        serde_json::json!({
+            "path": "/library",
+            "duration_ms": 150_u64,
+            "progress_interval_ms": 50_u64
+        }),
+    );
+    let dispatch_started = Instant::now();
+    let mut stream = client
+        .dispatch(&launch.credentials, "fake-scanner-timed", req)
+        .await
+        .unwrap();
+    let dispatch_elapsed = dispatch_started.elapsed();
+    assert!(
+        dispatch_elapsed < Duration::from_millis(100),
+        "dispatch returned after {dispatch_elapsed:?}, expected response before terminal"
+    );
+
+    let mut progress_count = 0_u32;
+    let mut first_progress_at = None;
+    let terminal_at = loop {
+        match stream.frames.next_frame().await.unwrap() {
+            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {
+                progress_count += 1;
+                first_progress_at.get_or_insert_with(Instant::now);
+            }
+            NdjsonOutcome::Terminated(ProgressFrame::Result { .. }) => break Instant::now(),
+            other => panic!("unexpected timed frame outcome {other:?}"),
+        }
+    };
+
+    assert!(
+        progress_count >= 2,
+        "expected at least two progress frames before terminal, got {progress_count}"
+    );
+    assert!(terminal_at > first_progress_at.unwrap());
+
+    launch.shutdown().await;
 }
 
 #[expect(

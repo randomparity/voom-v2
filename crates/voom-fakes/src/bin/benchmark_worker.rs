@@ -199,13 +199,13 @@ fn baseline_dispatch_with_body_limit(
     };
     let body = body_from_frames(&[progress, result])?;
     enforce_response_body_size(&body, max_body_bytes)?;
-    Ok(OperationDispatch {
-        response: OperationResponse {
+    Ok(OperationDispatch::buffered(
+        OperationResponse {
             lease_id: req.lease_id,
             accepted_at: now,
         },
         body,
-    })
+    ))
 }
 
 fn benchmark_dispatch(
@@ -270,13 +270,13 @@ fn benchmark_dispatch_with_body_limit(
     });
     let body = body_from_frames(&frames)?;
     enforce_response_body_size(&body, max_body_bytes)?;
-    Ok(OperationDispatch {
-        response: OperationResponse {
+    Ok(OperationDispatch::buffered(
+        OperationResponse {
             lease_id: req.lease_id,
             accepted_at,
         },
         body,
-    })
+    ))
 }
 
 fn benchmark_result_payload(

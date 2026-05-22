@@ -1,5 +1,5 @@
 use super::*;
-use voom_worker_protocol::OperationKind;
+use voom_worker_protocol::{OperationDispatch, OperationKind, ProgressFrame, http::OperationBody};
 
 #[test]
 fn provider_definition_rejects_unsupported_operation() {
@@ -25,10 +25,64 @@ fn provider_definition_accepts_secondary_operation() {
     let dispatch = dispatch_provider(&provider, &req).unwrap();
     assert_eq!(dispatch.response.lease_id, voom_core::LeaseId(42));
     assert!(
-        String::from_utf8(dispatch.body)
+        String::from_utf8(body_bytes_for_test(dispatch))
             .unwrap()
             .contains("\"operation\":\"hash_file\"")
     );
+}
+
+#[test]
+fn scanner_fan_out_count_controls_file_count() {
+    let req = request(
+        OperationKind::ScanLibrary,
+        serde_json::json!({"path": "/library", "fan_out_count": 3}),
+    );
+    let result = dispatch_provider(&provider_definition("fake-scanner").unwrap(), &req).unwrap();
+    let frames = decode_frames(body_bytes_for_test(result));
+    let terminal = terminal_payload(&frames);
+    assert_eq!(terminal["files"].as_array().unwrap().len(), 3);
+    assert_eq!(terminal["files"][0]["path"], "/library/file-000.mkv");
+    assert_eq!(terminal["files"][2]["path"], "/library/file-002.mkv");
+}
+
+#[test]
+fn quality_needs_transcode_from_bound_codec() {
+    let req = request(
+        OperationKind::ScoreQuality,
+        serde_json::json!({
+            "path": "/library/file-001.mkv",
+            "profile": "default",
+            "codec": "h264"
+        }),
+    );
+    let result =
+        dispatch_provider(&provider_definition("fake-quality-scorer").unwrap(), &req).unwrap();
+    let frames = decode_frames(body_bytes_for_test(result));
+    let payload = terminal_payload(&frames);
+    assert_eq!(payload["needs_transcode"], true);
+}
+
+#[test]
+fn remux_and_transcode_emit_output_path() {
+    let remux = request(
+        OperationKind::Remux,
+        serde_json::json!({"path": "/library/file-000.mkv", "container": "mkv"}),
+    );
+    let transcode = request(
+        OperationKind::TranscodeVideo,
+        serde_json::json!({"path": "/library/file-001.mkv", "target_codec": "h265"}),
+    );
+    for (provider, req) in [("fake-remuxer", remux), ("fake-transcoder", transcode)] {
+        let result = dispatch_provider(&provider_definition(provider).unwrap(), &req).unwrap();
+        let frames = decode_frames(body_bytes_for_test(result));
+        let payload = terminal_payload(&frames);
+        assert!(
+            payload["output_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/library/")
+        );
+    }
 }
 
 #[test]
@@ -56,4 +110,28 @@ fn request(
         heartbeat_deadline_ms: 1_000,
         progress_idle_deadline_ms: 1_000,
     }
+}
+
+fn body_bytes_for_test(dispatch: OperationDispatch) -> Vec<u8> {
+    match dispatch.body {
+        OperationBody::Buffered(body) => body,
+        OperationBody::Streaming(_) => {
+            panic!("expected buffered fake dispatch for no-duration unit test")
+        }
+    }
+}
+
+fn decode_frames(body: Vec<u8>) -> Vec<ProgressFrame> {
+    std::str::from_utf8(&body)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn terminal_payload(frames: &[ProgressFrame]) -> &serde_json::Value {
+    let Some(ProgressFrame::Result { payload, .. }) = frames.last() else {
+        panic!("expected terminal result frame");
+    };
+    payload
 }

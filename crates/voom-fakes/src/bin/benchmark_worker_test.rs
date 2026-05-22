@@ -4,6 +4,7 @@
 )]
 
 use super::*;
+use voom_worker_protocol::http::OperationBody;
 
 fn request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
     OperationRequest {
@@ -12,6 +13,13 @@ fn request(lease_id: u64, payload: serde_json::Value) -> OperationRequest {
         payload,
         heartbeat_deadline_ms: 1000,
         progress_idle_deadline_ms: 1000,
+    }
+}
+
+fn body_bytes_for_test(dispatch: OperationDispatch) -> Vec<u8> {
+    match dispatch.body {
+        OperationBody::Buffered(body) => body,
+        OperationBody::Streaming(_) => panic!("benchmark worker unit tests expect buffered bodies"),
     }
 }
 
@@ -134,7 +142,7 @@ fn rejects_max_operations_with_one_frame_per_operation() {
 fn baseline_dispatch_emits_progress_and_result() {
     let req = request(7, serde_json::json!({"path": "/library/example.mkv"}));
     let dispatch = baseline_dispatch(&req, "/library/example.mkv").unwrap();
-    let body = String::from_utf8(dispatch.body).unwrap();
+    let body = String::from_utf8(body_bytes_for_test(dispatch)).unwrap();
     assert!(body.contains("\"kind\":\"progress\""));
     assert!(body.contains("\"kind\":\"result\""));
     assert!(body.contains("\"mode\":\"baseline\""));
@@ -155,8 +163,8 @@ fn benchmark_dispatch_emits_cadence_and_final_totals() {
         emit_every: 10,
     };
     let dispatch = benchmark_dispatch(&req, &config).unwrap();
-    let frames: Vec<ProgressFrame> = dispatch
-        .body
+    let body = body_bytes_for_test(dispatch);
+    let frames: Vec<ProgressFrame> = body
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice(line).unwrap())
