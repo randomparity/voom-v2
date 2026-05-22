@@ -126,3 +126,7 @@ impl std::fmt::Display for BindingError {
 }
 
 impl std::error::Error for BindingError {}
+
+#[cfg(test)]
+#[path = "binding_test.rs"]
+mod tests;

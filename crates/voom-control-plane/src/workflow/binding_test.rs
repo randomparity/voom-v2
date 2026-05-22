@@ -1,8 +1,8 @@
-use super::binding::{
+use crate::workflow::binding::{
     branch_context_with_probe_codec, render_default_payload, render_default_payload_with_fan_out,
 };
-use super::model::WorkflowPlan;
-use super::timing::EffectiveTiming;
+use crate::workflow::model::WorkflowPlan;
+use crate::workflow::timing::EffectiveTiming;
 use voom_worker_protocol::OperationKind;
 
 #[test]

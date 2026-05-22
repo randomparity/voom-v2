@@ -21,13 +21,13 @@ use voom_worker_protocol::{
     OperationResponse, PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
-use super::executor::{
+use crate::workflow::executor::{
     WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary, is_synthetic_root_ticket,
 };
-use super::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
-use super::runtime::WorkerRuntimeRegistry;
-use super::ticket_payload::WorkflowTicketPayload;
-use super::timing::EffectiveTiming;
+use crate::workflow::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
+use crate::workflow::runtime::WorkerRuntimeRegistry;
+use crate::workflow::ticket_payload::WorkflowTicketPayload;
+use crate::workflow::timing::EffectiveTiming;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -415,7 +415,7 @@ impl ExecutorFixture {
         self.first_worker_id.unwrap()
     }
 
-    async fn run(&self) -> Result<WorkflowRunSummary, super::executor::WorkflowRunError> {
+    async fn run(&self) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
         self.run_with_options(WorkflowExecutorOptions::for_tests())
             .await
     }
@@ -423,7 +423,7 @@ impl ExecutorFixture {
     async fn run_with_policy(
         &self,
         concurrency: ConcurrencyPolicy,
-    ) -> Result<WorkflowRunSummary, super::executor::WorkflowRunError> {
+    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
         let mut plan = self.plan.clone();
         plan.concurrency = concurrency;
         self.executor_with_options(WorkflowExecutorOptions::for_tests())
@@ -434,7 +434,7 @@ impl ExecutorFixture {
     async fn run_with_options(
         &self,
         options: WorkflowExecutorOptions,
-    ) -> Result<WorkflowRunSummary, super::executor::WorkflowRunError> {
+    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
         self.executor_with_options(options)
             .submit_and_run(self.plan.clone())
             .await
@@ -679,11 +679,11 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
                 })
             })
             .collect(),
-        fan_out: super::model::FanOutPolicy { max_files: 3 },
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 3 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 4,
         },
-        timing: super::model::TimingPolicy {
+        timing: crate::workflow::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },

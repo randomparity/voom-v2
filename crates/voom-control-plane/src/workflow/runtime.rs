@@ -59,3 +59,7 @@ impl WorkerRuntimeRegistry {
             .ok_or_else(|| VoomError::Config(format!("missing runtime for worker {worker_id}")))
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_test.rs"]
+mod tests;

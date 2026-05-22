@@ -1,4 +1,4 @@
-use super::ticket_payload::WorkflowTicketPayload;
+use crate::workflow::ticket_payload::WorkflowTicketPayload;
 use voom_worker_protocol::OperationKind;
 
 #[test]

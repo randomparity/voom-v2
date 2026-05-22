@@ -173,3 +173,7 @@ fn operation_mismatch(
         operation_name(payload_operation)
     ))
 }
+
+#[cfg(test)]
+#[path = "ticket_payload_test.rs"]
+mod tests;

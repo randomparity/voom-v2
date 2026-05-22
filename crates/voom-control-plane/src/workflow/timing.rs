@@ -59,3 +59,7 @@ fn stable_hash(seed: u64, node_id: &str, branch_id: &str) -> u64 {
     }
     hash
 }
+
+#[cfg(test)]
+#[path = "timing_test.rs"]
+mod tests;

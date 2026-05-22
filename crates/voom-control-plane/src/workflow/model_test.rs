@@ -1,4 +1,4 @@
-use super::model::{
+use crate::workflow::model::{
     ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
 };
 use voom_worker_protocol::OperationKind;

@@ -7,18 +7,18 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
 use voom_worker_protocol::OperationKind;
 
-use super::binding::{
+use crate::ControlPlane;
+use crate::workflow::binding::{
     BranchContext, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out,
 };
-use super::expansion::{
+use crate::workflow::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
 };
-use super::model::WorkflowPlan;
-use super::ticket_payload::WorkflowTicketPayload;
-use super::timing::EffectiveTiming;
-use crate::ControlPlane;
+use crate::workflow::model::WorkflowPlan;
+use crate::workflow::ticket_payload::WorkflowTicketPayload;
+use crate::workflow::timing::EffectiveTiming;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 

@@ -290,3 +290,7 @@ fn visit<'a>(
     visited.insert(id);
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "model_test.rs"]
+mod tests;

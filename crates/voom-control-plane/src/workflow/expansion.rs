@@ -522,3 +522,7 @@ fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
         .map_err(|e| VoomError::Database(format!("{field} {value} does not fit u64: {e}")))
 }
+
+#[cfg(test)]
+#[path = "expansion_test.rs"]
+mod tests;

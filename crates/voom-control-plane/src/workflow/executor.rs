@@ -1483,3 +1483,7 @@ fn sqlite_u64(value: i64) -> u64 {
 fn sqlite_u32(value: i64) -> u32 {
     u32::try_from(value).unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "executor_test.rs"]
+mod tests;
