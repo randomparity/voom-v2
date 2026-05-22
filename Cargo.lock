@@ -2548,6 +2548,7 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-fake-support",
+ "voom-policy",
  "voom-scheduler",
  "voom-store",
  "voom-worker-protocol",
@@ -2612,6 +2613,12 @@ version = "0.1.0-dev"
 [[package]]
 name = "voom-policy"
 version = "0.1.0-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+ "time",
+ "voom-core",
+]
 
 [[package]]
 name = "voom-scheduler"
@@ -2638,6 +2645,7 @@ dependencies = [
  "voom-control-plane",
  "voom-core",
  "voom-events",
+ "voom-policy",
 ]
 
 [[package]]

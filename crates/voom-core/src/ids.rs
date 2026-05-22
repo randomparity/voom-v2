@@ -41,6 +41,10 @@ define_id!(FileLocationId);
 define_id!(EvidenceId);
 define_id!(MediaSnapshotId);
 
+// Policy input layer (Sprint 3).
+define_id!(PolicyInputSetId);
+define_id!(PolicySyntheticTargetId);
+
 // Issue layer (M3 issues table; the `IssueId` newtype lands in M1 so
 // `TicketFailedTerminal` event payloads can already carry the optional
 // auto-opened issue id — it serializes as `null` in M1 because no

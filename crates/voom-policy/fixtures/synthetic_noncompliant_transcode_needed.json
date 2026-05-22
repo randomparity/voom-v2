@@ -1,0 +1,163 @@
+{
+  "slug": "synthetic-noncompliant-transcode-needed",
+  "display_name": "Synthetic noncompliant transcode needed",
+  "schema_version": 1,
+  "source_kind": "fixture",
+  "created_at": [2026,142,0,0,0,0,0,0,0],
+  "description": "Deterministic noncompliant policy input requiring transcode.",
+  "fixture_labels": [
+    "synthetic_noncompliant_transcode_needed"
+  ],
+  "synthetic_targets": [
+    {
+      "synthetic_key": "work-1",
+      "target_kind": "media_work",
+      "display_name": "Synthetic Work"
+    },
+    {
+      "synthetic_key": "variant-1",
+      "target_kind": "media_variant",
+      "display_name": "Synthetic Variant"
+    },
+    {
+      "synthetic_key": "bundle-1",
+      "target_kind": "asset_bundle",
+      "display_name": "Synthetic Bundle"
+    },
+    {
+      "synthetic_key": "asset-1",
+      "target_kind": "file_asset",
+      "display_name": "Synthetic Asset"
+    },
+    {
+      "synthetic_key": "version-1",
+      "target_kind": "file_version",
+      "display_name": "Synthetic Version"
+    },
+    {
+      "synthetic_key": "location-1",
+      "target_kind": "file_location",
+      "display_name": "Synthetic Location"
+    }
+  ],
+  "media_snapshots": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "container": "mp4",
+      "stream_summary": {
+        "streams": [
+          {
+            "type": "video",
+            "codec": "h264",
+            "language": null
+          },
+          {
+            "type": "audio",
+            "codec": "aac",
+            "language": "en"
+          }
+        ],
+        "facts": {
+          "has_english_audio": true,
+          "has_english_subtitle": false,
+          "missing_english_subtitle": true
+        }
+      },
+      "video_codec": "h264",
+      "width": 1920,
+      "height": 1080,
+      "hdr": null,
+      "bitrate": 8000000,
+      "duration_millis": 7200000,
+      "audio_languages": [
+        "en"
+      ],
+      "subtitle_languages": [],
+      "health_flags": [
+        "missing_english_subtitle"
+      ],
+      "existing_media_snapshot_id": null
+    }
+  ],
+  "identity_evidence": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "work-1",
+        "kind": "media_work"
+      },
+      "assertion_type": "identity_match",
+      "provider": "synthetic-fixture",
+      "provider_version": "1",
+      "confidence": 0.91,
+      "provenance": {
+        "fixture": "synthetic_noncompliant_transcode_needed"
+      },
+      "observed_at": [2026,142,0,0,0,0,0,0,0],
+      "existing_evidence_id": null
+    }
+  ],
+  "bundle_targets": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "bundle-1",
+        "kind": "asset_bundle"
+      },
+      "role": "external_subtitle",
+      "desired_state": "required",
+      "language": "en",
+      "label": "English subtitles",
+      "disposition": "external",
+      "artifact_expectation": {
+        "format": "srt",
+        "language": "en",
+        "required": true
+      }
+    }
+  ],
+  "quality_profiles": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "profile_name": "balanced-home",
+      "profile_version": "1",
+      "dimension_weights": {
+        "compatibility": 0.4,
+        "quality": 0.4,
+        "storage": 0.2
+      }
+    }
+  ],
+  "issues": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "kind": "policy_noncompliant",
+      "severity": "medium",
+      "priority": "normal",
+      "state": "open",
+      "reason": "English subtitle is required but missing.",
+      "provenance": {
+        "fixture": "synthetic_noncompliant_transcode_needed",
+        "fact": "missing_english_subtitle"
+      },
+      "existing_issue_id": null
+    }
+  ]
+}

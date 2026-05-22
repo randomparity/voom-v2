@@ -23,6 +23,7 @@ pub mod bundles;
 pub mod identity;
 pub mod jobs;
 pub mod leases;
+pub mod policy_inputs;
 pub mod tickets;
 pub mod use_leases;
 pub mod workers;
