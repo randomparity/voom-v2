@@ -96,17 +96,7 @@ impl<'a> Validator<'a> {
             let text = statement_text(statement);
             match statement.keyword().value.as_str() {
                 "languages" => self.validate_language_tokens(statement, text.as_ref()),
-                "on_error" => {
-                    if let Some(value) = setting_value(text.as_ref())
-                        && !matches!(value, "abort" | "continue" | "skip")
-                    {
-                        self.error(
-                            DiagnosticCode::InvalidOnErrorValue,
-                            statement.span(),
-                            "on_error must be abort, continue, or skip",
-                        );
-                    }
-                }
+                "on_error" => self.validate_on_error(statement, text.as_ref()),
                 _ => self.error(
                     DiagnosticCode::UnknownTopLevelBlock,
                     statement.span(),
@@ -247,17 +237,7 @@ impl<'a> Validator<'a> {
             match control.keyword().value.as_str() {
                 "depends_on" | "run_if" => {}
                 "skip" => self.validate_field_paths(control, text.as_ref()),
-                "on_error" => {
-                    if let Some(value) = setting_value(text.as_ref())
-                        && !matches!(value, "abort" | "continue" | "skip")
-                    {
-                        self.error(
-                            DiagnosticCode::InvalidOnErrorValue,
-                            control.span(),
-                            "on_error must be abort, continue, or skip",
-                        );
-                    }
-                }
+                "on_error" => self.validate_on_error(control, text.as_ref()),
                 _ => self.error(
                     DiagnosticCode::UnknownPhaseStatementOrOperation,
                     control.span(),
@@ -373,7 +353,7 @@ impl<'a> Validator<'a> {
     fn validate_container(&mut self, statement: &StatementAst, text: &str) {
         if words(text)
             .get(1)
-            .is_some_and(|container| *container != "mkv")
+            .is_none_or(|container| *container != "mkv")
         {
             self.error(
                 DiagnosticCode::UnsupportedContainer,
@@ -385,26 +365,36 @@ impl<'a> Validator<'a> {
 
     fn validate_track_operation(&mut self, statement: &StatementAst, text: &str) {
         let tokens = words(text);
-        if let Some(target) = tokens.get(1) {
-            self.validate_track_target(statement.span(), target);
-        }
+        self.validate_track_target(statement.span(), tokens.get(1).copied().unwrap_or_default());
         self.validate_language_tokens(statement, text);
         self.validate_field_paths(statement, text);
     }
 
     fn validate_order(&mut self, statement: &StatementAst, text: &str) {
-        for target in list_values(text) {
+        let targets = list_values(text);
+        if targets.is_empty() {
+            self.error(
+                DiagnosticCode::InvalidTrackTarget,
+                statement.span(),
+                "order tracks requires at least one track target",
+            );
+        }
+        for target in targets {
             self.validate_track_target(statement.span(), target);
         }
     }
 
     fn validate_defaults(&mut self, statement: &StatementAst, text: &str) {
         let tokens = words(text);
-        if let Some(target) = tokens.get(1).map(|value| value.trim_end_matches(':')) {
-            self.validate_track_target(statement.span(), target);
-        }
-        if let Some(strategy) = tokens.get(2)
-            && !matches!(*strategy, "first" | "best" | "none" | "preserve")
+        self.validate_track_target(
+            statement.span(),
+            tokens
+                .get(1)
+                .map_or("", |value| value.trim_end_matches(':')),
+        );
+        if tokens
+            .get(2)
+            .is_none_or(|strategy| !matches!(*strategy, "first" | "best" | "none" | "preserve"))
         {
             self.error(
                 DiagnosticCode::InvalidDefaultStrategy,
@@ -415,8 +405,19 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_actions(&mut self, statement: &StatementAst, text: &str) {
-        if let Some(target) = words(text).get(1) {
-            self.validate_track_target(statement.span(), target);
+        self.validate_track_target(
+            statement.span(),
+            words(text).get(1).copied().unwrap_or_default(),
+        );
+    }
+
+    fn validate_on_error(&mut self, statement: &StatementAst, text: &str) {
+        if setting_value(text).is_none_or(|value| !matches!(value, "abort" | "continue" | "skip")) {
+            self.error(
+                DiagnosticCode::InvalidOnErrorValue,
+                statement.span(),
+                "on_error must be abort, continue, or skip",
+            );
         }
     }
 

@@ -117,3 +117,34 @@ fn rejects_unknown_core_field_root_in_skip_when() {
             .contains(&"invalid_core_field_path".to_owned())
     );
 }
+
+#[test]
+fn rejects_container_without_value() {
+    assert!(
+        codes("policy \"p\" { phase a { container } }")
+            .contains(&"unsupported_container".to_owned())
+    );
+}
+
+#[test]
+fn rejects_keep_without_track_target() {
+    assert!(
+        codes("policy \"p\" { phase a { keep } }").contains(&"invalid_track_target".to_owned())
+    );
+}
+
+#[test]
+fn rejects_defaults_without_strategy() {
+    assert!(
+        codes("policy \"p\" { phase a { defaults audio } }")
+            .contains(&"invalid_default_strategy".to_owned())
+    );
+}
+
+#[test]
+fn rejects_on_error_without_value() {
+    assert!(
+        codes("policy \"p\" { phase a { on_error: } }")
+            .contains(&"invalid_on_error_value".to_owned())
+    );
+}
