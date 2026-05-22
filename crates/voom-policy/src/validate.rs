@@ -660,7 +660,8 @@ impl<'a> Validator<'a> {
                 if let Some(index) = tokens.iter().position(|token| is_comparison_op(token)) {
                     return index > 0
                         && tokens.get(index + 1).is_some_and(|value| !value.is_empty())
-                        && tokens.first().is_some_and(|path| path.contains('.'));
+                        && tokens.first().is_some_and(|path| path.contains('.'))
+                        && comparison_rhs(text, tokens[index]).is_some_and(is_single_value);
                 }
                 tokens.len() == 1
                     && tokens
@@ -833,6 +834,16 @@ fn setting_value(text: &str) -> Option<&str> {
     text.split_once(':')
         .map(|(_, value)| value.trim())
         .or_else(|| words(text).get(1).copied())
+}
+
+#[must_use]
+fn comparison_rhs<'a>(text: &'a str, op: &str) -> Option<&'a str> {
+    let spaced_op = format!(" {op} ");
+    let rhs = text
+        .split_once(&spaced_op)
+        .map(|(_, rhs)| rhs.trim())
+        .or_else(|| text.split_once(op).map(|(_, rhs)| rhs.trim()))?;
+    if rhs.is_empty() { None } else { Some(rhs) }
 }
 
 #[must_use]
