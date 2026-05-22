@@ -114,32 +114,36 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
 
 #[tokio::test]
 async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
-    let fixture =
+    let mut fixture =
         DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::ProbeFile)
             .await?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .unwrap_err()
+            .summary;
 
-    let summary = fixture
-        .executor()
-        .submit_and_run(WorkflowPlan::default_ci())
-        .await
-        .unwrap_err()
-        .summary;
-
-    fixture
-        .assert_ticket_failed_with(
-            summary.job_id,
+        fixture
+            .assert_ticket_failed_with(
+                summary.job_id,
+                OperationKind::ProbeFile,
+                FailureClass::WorkerTimeout,
+            )
+            .await?;
+        fixture
+            .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
+            .await?;
+        DurableWorkflowFixture::assert_failure_summary(
+            &summary,
             OperationKind::ProbeFile,
             FailureClass::WorkerTimeout,
         )
-        .await?;
-    fixture
-        .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
-        .await?;
-    DurableWorkflowFixture::assert_failure_summary(
-        &summary,
-        OperationKind::ProbeFile,
-        FailureClass::WorkerTimeout,
-    )
+    }
+    .await;
+
+    combine_result_and_cleanup(result, fixture.shutdown().await)
 }
 
 #[tokio::test]
@@ -782,7 +786,7 @@ impl DurableWorkflowFixture {
     async fn register_chaos_provider(
         &mut self,
         operation: OperationKind,
-        _mode: ChaosWorkerMode,
+        mode: ChaosWorkerMode,
     ) -> TestResult<()> {
         expect_eq(
             "chaos worker operation",
@@ -794,7 +798,13 @@ impl DurableWorkflowFixture {
             .register_worker_without_runtime("chaos-probe", &[operation], 1, secret)
             .await?;
         self.registered_workers.push((worker, 1));
-        let launch = ProviderLaunch::spawn("chaos-worker", worker, secret, true).await?;
+        let launch = ProviderLaunch::spawn(
+            "chaos-worker",
+            worker,
+            secret,
+            mode == ChaosWorkerMode::Crash,
+        )
+        .await?;
         self.registry.register_in_process_runtime(
             worker,
             Arc::new(HttpClient::new(launch.bound)),

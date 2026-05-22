@@ -18,7 +18,7 @@ use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, ProgressFrame, ProtocolError, WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
 use super::executor::{
@@ -156,6 +156,22 @@ async fn heartbeat_timeout_wins_when_watchdog_deadlines_tie() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
     options.progress_idle_timeout = Duration::from_millis(20);
+    options.heartbeat_timeout = Duration::from_millis(20);
+    options.heartbeat_interval = Duration::from_secs(1);
+    options.chaos.disable_heartbeat_ticks = true;
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerTimeout);
+    let failed_class = fixture.first_ticket_failed_class().await;
+    assert_eq!(failed_class, "worker_timeout");
+}
+
+#[tokio::test]
+async fn heartbeat_watchdog_is_not_starved_by_progress_frames() {
+    let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::ProgressFlood).await;
+    let mut options = timeout_options();
+    options.progress_idle_timeout = Duration::from_secs(1);
     options.heartbeat_timeout = Duration::from_millis(20);
     options.heartbeat_interval = Duration::from_secs(1);
     options.chaos.disable_heartbeat_ticks = true;
@@ -552,6 +568,7 @@ enum FakeBehavior {
     Success,
     MalformedFrame,
     Hang,
+    ProgressFlood,
     Crash,
     DispatchError,
 }
@@ -610,6 +627,13 @@ async fn write_behavior(
         FakeBehavior::Hang => {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+        FakeBehavior::ProgressFlood => {
+            for seq in 0..128 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                write_frame(&mut writer, progress_frame(&request, seq)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
         FakeBehavior::Crash | FakeBehavior::DispatchError => {}
     }
 }
@@ -626,6 +650,17 @@ fn result_frame(request: &OperationRequest, payload: Value) -> ProgressFrame {
         seq: 0,
         emitted_at: Utc::now(),
         payload,
+    }
+}
+
+fn progress_frame(request: &OperationRequest, seq: u64) -> ProgressFrame {
+    ProgressFrame::Progress {
+        lease_id: request.lease_id,
+        seq,
+        emitted_at: Utc::now(),
+        percent: Some(PercentBps::try_from(100).unwrap()),
+        message: None,
+        payload: None,
     }
 }
 

@@ -123,6 +123,7 @@ pub struct WorkflowRunSummary {
     pub failure_count: u64,
     pub peak_active_workflow_leases: u32,
     pub elapsed: Duration,
+    /// Total dispatch throughput across the workflow run.
     pub throughput_per_second: f64,
     pub per_operation: BTreeMap<OperationKind, OperationSummary>,
     max_active_by_worker: BTreeMap<WorkerId, u32>,
@@ -153,7 +154,9 @@ pub struct OperationSummary {
     pub retry_count: u64,
     pub failure_count: u64,
     pub last_failure_class: Option<FailureClass>,
+    /// Workflow run duration used as the measurement window for this operation summary.
     pub elapsed: Duration,
+    /// Dispatch throughput for this operation over the full workflow run window.
     pub throughput_per_second: f64,
 }
 
@@ -1019,6 +1022,14 @@ async fn consume_dispatch_stream(
                 match frame {
                     Ok(NdjsonOutcome::Frame(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
+                        fail_if_watchdog_elapsed(
+                            control,
+                            lease_id,
+                            last_heartbeat,
+                            last_progress,
+                            &options,
+                        )
+                        .await?;
                         last_progress = Instant::now();
                         if !options.chaos.suppresses_heartbeats_for(operation) {
                             heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
@@ -1026,6 +1037,14 @@ async fn consume_dispatch_stream(
                     }
                     Ok(NdjsonOutcome::Terminated(frame)) => {
                         validate_frame_lease(&frame, lease_id)?;
+                        fail_if_watchdog_elapsed(
+                            control,
+                            lease_id,
+                            last_heartbeat,
+                            last_progress,
+                            &options,
+                        )
+                        .await?;
                         return handle_terminal_frame(control, lease_id, frame).await;
                     }
                     Ok(NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed) => {
@@ -1067,6 +1086,35 @@ async fn consume_dispatch_stream(
             }
         }
     }
+}
+
+async fn fail_if_watchdog_elapsed(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    last_heartbeat: Instant,
+    last_progress: Instant,
+    options: &WorkflowExecutorOptions,
+) -> Result<(), VoomError> {
+    let now = Instant::now();
+    if now.duration_since(last_heartbeat) >= options.heartbeat_timeout {
+        return fail_lease_and_return(
+            control,
+            lease_id,
+            FailureClass::WorkerTimeout,
+            VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
+        )
+        .await;
+    }
+    if now.duration_since(last_progress) >= options.progress_idle_timeout {
+        return fail_lease_and_return(
+            control,
+            lease_id,
+            FailureClass::ProgressTimeout,
+            VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn handle_terminal_frame(
