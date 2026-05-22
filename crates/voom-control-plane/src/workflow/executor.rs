@@ -801,7 +801,9 @@ impl WorkflowRunSummary {
                 else {
                     continue;
                 };
-                branches.insert(workflow_payload.branch_id);
+                if workflow_payload.branch_id != "root" {
+                    branches.insert(workflow_payload.branch_id);
+                }
                 *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
             }
             self.branch_count = u32::try_from(branches.len()).unwrap_or(u32::MAX);
