@@ -255,6 +255,7 @@ impl<'a> Validator<'a> {
                 "defaults" => self.validate_defaults(operation, text.as_ref()),
                 "actions" => self.validate_actions(operation, text.as_ref()),
                 "clear_tags" => {
+                    self.validate_clear_tags(operation, text.as_ref());
                     if saw_set_tag {
                         self.error(
                             DiagnosticCode::TagOrderingError,
@@ -333,7 +334,7 @@ impl<'a> Validator<'a> {
                     "delete_tag" => {
                         let _ = self.validate_delete_tag(statement, text.as_ref());
                     }
-                    _ => self.validate_field_paths(statement, text.as_ref()),
+                    _ => self.validate_clear_tags(statement, text.as_ref()),
                 }
             }
             "when" => {
@@ -463,6 +464,13 @@ impl<'a> Validator<'a> {
                 "on_error must be abort, continue, or skip",
             );
         }
+        if !text.contains(':') && words(text).len() > 2 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "on_error does not accept extra arguments",
+            );
+        }
     }
 
     fn validate_set_tag(&mut self, statement: &StatementAst, text: &str) -> Option<String> {
@@ -480,6 +488,12 @@ impl<'a> Validator<'a> {
                 statement.span(),
                 "set_tag requires a value",
             );
+        } else if text_after_quoted_value(text).is_some_and(|value| !is_single_value(value)) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "set_tag accepts exactly one value",
+            );
         }
         self.validate_field_paths(statement, text);
         Some(key)
@@ -493,8 +507,24 @@ impl<'a> Validator<'a> {
                 statement.span(),
                 "delete_tag requires a quoted tag key",
             );
+        } else if text_after_quoted_value(text).is_some_and(|value| !value.is_empty()) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "delete_tag does not accept extra arguments",
+            );
         }
         key
+    }
+
+    fn validate_clear_tags(&mut self, statement: &StatementAst, text: &str) {
+        if words(text).len() > 1 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "clear_tags does not accept extra arguments",
+            );
+        }
     }
 
     fn validate_rules(&mut self, statement: &StatementAst, text: &str) {
@@ -780,6 +810,39 @@ fn text_after_quoted_value(text: &str) -> Option<&str> {
     let start = text.find('"')?;
     let end = text[start + 1..].find('"')?;
     Some(text[start + 1 + end + 1..].trim())
+}
+
+#[must_use]
+fn is_single_value(text: &str) -> bool {
+    let text = text.trim();
+    if text.starts_with('"') {
+        return quoted_text_end(text).is_some_and(|end| text[end..].trim().is_empty());
+    }
+    words(text).len() == 1
+}
+
+#[must_use]
+fn quoted_text_end(text: &str) -> Option<usize> {
+    let mut cursor = 1usize;
+    let mut escaped = false;
+    while cursor < text.len() {
+        let ch = text[cursor..].chars().next()?;
+        if escaped {
+            escaped = false;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        cursor += ch.len_utf8();
+        if ch == '"' {
+            return Some(cursor);
+        }
+    }
+    None
 }
 
 #[must_use]

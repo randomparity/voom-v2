@@ -182,6 +182,14 @@ fn rejects_on_error_without_value() {
 }
 
 #[test]
+fn rejects_on_error_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { on_error abort retry } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_deferred_execution_inside_rule_block() {
     assert!(
         codes(
@@ -214,9 +222,33 @@ fn rejects_set_tag_without_value() {
 }
 
 #[test]
+fn rejects_set_tag_with_extra_tokens_after_value() {
+    assert!(
+        codes("policy \"p\" { phase a { set_tag \"title\" \"one\" \"two\" } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_delete_tag_without_key() {
     assert!(
         codes("policy \"p\" { phase a { delete_tag } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_delete_tag_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { delete_tag \"title\" identity.title } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_clear_tags_with_extra_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { clear_tags now } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
