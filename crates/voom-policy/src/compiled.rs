@@ -255,11 +255,7 @@ pub fn compile_ast(
         schema_version: 2,
         metadata: metadata_map(&ast.metadata),
         config: config_map(&ast.config),
-        phase_order: ast
-            .phases
-            .iter()
-            .map(|phase| phase.name.value.clone())
-            .collect(),
+        phase_order: phase_order(ast),
         phases,
         warnings,
         provenance: PolicyProvenance::default(),
@@ -298,19 +294,23 @@ fn lower_operation(
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
             filter: track_filter(text.as_ref()),
         }),
-        "order" => Ok(CompiledOperation::ReorderTracks {
-            targets: list_values(text.as_ref())
-                .into_iter()
-                .filter_map(|target| track_target(Some(target)))
-                .collect(),
-        }),
+        "order" if tokens.get(1).copied() == Some("tracks") => {
+            Ok(CompiledOperation::ReorderTracks {
+                targets: list_values(text.as_ref())
+                    .into_iter()
+                    .filter_map(|target| track_target(Some(target)))
+                    .collect(),
+            })
+        }
         "defaults" => Ok(CompiledOperation::SetDefaults {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
             strategy: default_strategy(tokens.get(2).copied()).unwrap_or(DefaultStrategy::First),
         }),
-        "actions" => Ok(CompiledOperation::ClearTrackActions {
-            target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
-        }),
+        "actions" if tokens.get(2).copied() == Some("clear") => {
+            Ok(CompiledOperation::ClearTrackActions {
+                target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
+            })
+        }
         "clear_tags" => Ok(CompiledOperation::ClearTags),
         "set_tag" => Ok(CompiledOperation::SetTag {
             key: quoted_value(text.as_ref()).unwrap_or_default(),
@@ -415,6 +415,51 @@ fn phase_dependencies(controls: &[StatementAst]) -> Vec<String> {
             dependency_values(text.as_ref())
         })
         .collect()
+}
+
+fn phase_order(ast: &PolicyAst) -> Vec<String> {
+    let dependencies_by_phase = ast
+        .phases
+        .iter()
+        .map(|phase| {
+            (
+                phase.name.value.as_str(),
+                phase_dependencies(&phase.controls),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut order = Vec::with_capacity(ast.phases.len());
+
+    for phase in &ast.phases {
+        visit_phase(
+            phase.name.value.as_str(),
+            &dependencies_by_phase,
+            &mut visited,
+            &mut order,
+        );
+    }
+
+    order
+}
+
+fn visit_phase(
+    name: &str,
+    dependencies_by_phase: &BTreeMap<&str, Vec<String>>,
+    visited: &mut std::collections::BTreeSet<String>,
+    order: &mut Vec<String>,
+) {
+    if !visited.insert(name.to_owned()) {
+        return;
+    }
+    if let Some(dependencies) = dependencies_by_phase.get(name) {
+        for dependency in dependencies {
+            if dependencies_by_phase.contains_key(dependency.as_str()) {
+                visit_phase(dependency, dependencies_by_phase, visited, order);
+            }
+        }
+    }
+    order.push(name.to_owned());
 }
 
 fn phase_run_if(controls: &[StatementAst]) -> Option<CompiledCondition> {

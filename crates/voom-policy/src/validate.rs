@@ -326,6 +326,7 @@ impl<'a> Validator<'a> {
             "actions" | "clear_tags" | "set_tag" | "delete_tag" => {
                 let text = statement_text(statement);
                 match statement.keyword().value.as_str() {
+                    "actions" => self.validate_actions(statement, text.as_ref()),
                     "set_tag" => {
                         let _ = self.validate_set_tag(statement, text.as_ref());
                     }
@@ -373,6 +374,14 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_order(&mut self, statement: &StatementAst, text: &str) {
+        if words(text).get(1).copied() != Some("tracks") {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "order operation must use `order tracks`",
+            );
+            return;
+        }
         let targets = list_values(text);
         if targets.is_empty() {
             self.error(
@@ -407,10 +416,15 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_actions(&mut self, statement: &StatementAst, text: &str) {
-        self.validate_track_target(
-            statement.span(),
-            words(text).get(1).copied().unwrap_or_default(),
-        );
+        let tokens = words(text);
+        self.validate_track_target(statement.span(), tokens.get(1).copied().unwrap_or_default());
+        if tokens.get(2).copied() != Some("clear") {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "track actions operation must use `clear`",
+            );
+        }
     }
 
     fn validate_on_error(&mut self, statement: &StatementAst, text: &str) {

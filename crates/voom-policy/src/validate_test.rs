@@ -196,3 +196,19 @@ fn rejects_delete_tag_without_key() {
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
+
+#[test]
+fn rejects_actions_without_clear_verb() {
+    assert!(
+        codes("policy \"p\" { phase a { actions audio retain } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_order_without_tracks_keyword() {
+    assert!(
+        codes("policy \"p\" { phase a { order [video, audio] } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
