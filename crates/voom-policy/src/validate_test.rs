@@ -94,3 +94,26 @@ fn rejects_tag_ordering_conflict() {
             .contains(&"tag_ordering_error".to_owned())
     );
 }
+
+#[test]
+fn accepts_rules_first_mode() {
+    let diagnostics = codes("policy \"p\" { phase a { rules first { rule \"r\" {} } } }");
+
+    assert!(!diagnostics.contains(&"invalid_rule_match_mode".to_owned()));
+}
+
+#[test]
+fn rejects_policy_without_phases() {
+    let ast = parse_policy_source("policy \"p\" {}").unwrap();
+    let result = validate_policy_ast("policy \"p\" {}", &ast);
+
+    assert!(result.has_errors());
+}
+
+#[test]
+fn rejects_unknown_core_field_root_in_skip_when() {
+    assert!(
+        codes("policy \"p\" { phase a { skip when vidio.codec == hevc container mkv } }")
+            .contains(&"invalid_core_field_path".to_owned())
+    );
+}

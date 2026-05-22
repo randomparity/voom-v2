@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{
     DiagnosticCode, DiagnosticSeverity, DiagnosticStage, PhaseAst, PolicyAst, PolicyDiagnostic,
@@ -58,6 +61,13 @@ impl<'a> Validator<'a> {
                 "policy source exceeds the maximum supported size",
             );
         }
+        if self.ast.phases.is_empty() {
+            self.error(
+                DiagnosticCode::UnexpectedToken,
+                self.ast.name.span,
+                "policy must declare at least one phase",
+            );
+        }
         if let Some(parent) = &self.ast.extends {
             self.error(
                 DiagnosticCode::DeferredComposition,
@@ -85,9 +95,9 @@ impl<'a> Validator<'a> {
         for statement in &self.ast.config {
             let text = statement_text(statement);
             match statement.keyword().value.as_str() {
-                "languages" => self.validate_language_tokens(statement, text),
+                "languages" => self.validate_language_tokens(statement, text.as_ref()),
                 "on_error" => {
-                    if let Some(value) = setting_value(text)
+                    if let Some(value) = setting_value(text.as_ref())
                         && !matches!(value, "abort" | "continue" | "skip")
                     {
                         self.error(
@@ -132,20 +142,21 @@ impl<'a> Validator<'a> {
             .iter()
             .map(|phase| phase.name.value.as_str())
             .collect::<BTreeSet<_>>();
-        let mut graph = BTreeMap::<&str, Vec<&str>>::new();
+        let mut graph = BTreeMap::<&str, Vec<String>>::new();
 
         for phase in &self.ast.phases {
             let mut deps = Vec::new();
             for control in &phase.controls {
                 if control.keyword().value == "depends_on" {
-                    for dependency in list_values(statement_text(control)) {
+                    let text = statement_text(control);
+                    for dependency in list_values(text.as_ref()) {
                         self.validate_phase_reference(
                             &phase.name.value,
                             dependency,
                             &phase_names,
                             control.span(),
                         );
-                        deps.push(dependency);
+                        deps.push(dependency.to_owned());
                     }
                 }
                 if control.keyword().value == "run_if" {
@@ -197,7 +208,8 @@ impl<'a> Validator<'a> {
         statement: &StatementAst,
         phase_names: &BTreeSet<&str>,
     ) {
-        let tokens = words(statement_text(statement));
+        let text = statement_text(statement);
+        let tokens = words(text.as_ref());
         let Some(trigger) = tokens.get(1).or_else(|| tokens.get(2)) else {
             self.error(
                 DiagnosticCode::InvalidRunIfTrigger,
@@ -233,9 +245,10 @@ impl<'a> Validator<'a> {
         for control in &phase.controls {
             let text = statement_text(control);
             match control.keyword().value.as_str() {
-                "depends_on" | "run_if" | "skip" => {}
+                "depends_on" | "run_if" => {}
+                "skip" => self.validate_field_paths(control, text.as_ref()),
                 "on_error" => {
-                    if let Some(value) = setting_value(text)
+                    if let Some(value) = setting_value(text.as_ref())
                         && !matches!(value, "abort" | "continue" | "skip")
                     {
                         self.error(
@@ -256,11 +269,11 @@ impl<'a> Validator<'a> {
         for operation in &phase.operations {
             let text = statement_text(operation);
             match operation.keyword().value.as_str() {
-                "container" => self.validate_container(operation, text),
-                "keep" | "remove" => self.validate_track_operation(operation, text),
-                "order" => self.validate_order(operation, text),
-                "defaults" => self.validate_defaults(operation, text),
-                "actions" => self.validate_actions(operation, text),
+                "container" => self.validate_container(operation, text.as_ref()),
+                "keep" | "remove" => self.validate_track_operation(operation, text.as_ref()),
+                "order" => self.validate_order(operation, text.as_ref()),
+                "defaults" => self.validate_defaults(operation, text.as_ref()),
+                "actions" => self.validate_actions(operation, text.as_ref()),
                 "clear_tags" => {
                     if saw_set_tag {
                         self.error(
@@ -272,25 +285,25 @@ impl<'a> Validator<'a> {
                 }
                 "set_tag" => {
                     saw_set_tag = true;
-                    if let Some(key) = quoted_value(text) {
+                    if let Some(key) = quoted_value(text.as_ref()) {
                         set_tags.insert(key);
                     }
-                    self.validate_field_paths(operation, text);
+                    self.validate_field_paths(operation, text.as_ref());
                 }
                 "delete_tag" => {
-                    if let Some(key) = quoted_value(text) {
+                    if let Some(key) = quoted_value(text.as_ref()) {
                         delete_tags.insert(key);
                     }
                 }
                 "when" => {
-                    self.validate_condition(operation, text);
+                    self.validate_condition(operation, text.as_ref());
                     if let StatementAst::Block { statements, .. } = operation {
                         for statement in statements {
                             self.validate_nested_operation(statement);
                         }
                     }
                 }
-                "rules" => self.validate_rules(operation, text),
+                "rules" => self.validate_rules(operation, text.as_ref()),
                 "extend" => self.error(
                     DiagnosticCode::DeferredPhaseInheritance,
                     operation.span(),
@@ -320,16 +333,30 @@ impl<'a> Validator<'a> {
 
     fn validate_nested_operation(&mut self, statement: &StatementAst) {
         match statement.keyword().value.as_str() {
-            "container" => self.validate_container(statement, statement_text(statement)),
+            "container" => {
+                let text = statement_text(statement);
+                self.validate_container(statement, text.as_ref());
+            }
             "keep" | "remove" => {
-                self.validate_track_operation(statement, statement_text(statement));
+                let text = statement_text(statement);
+                self.validate_track_operation(statement, text.as_ref());
             }
-            "order" => self.validate_order(statement, statement_text(statement)),
-            "defaults" => self.validate_defaults(statement, statement_text(statement)),
+            "order" => {
+                let text = statement_text(statement);
+                self.validate_order(statement, text.as_ref());
+            }
+            "defaults" => {
+                let text = statement_text(statement);
+                self.validate_defaults(statement, text.as_ref());
+            }
             "actions" | "clear_tags" | "set_tag" | "delete_tag" => {
-                self.validate_field_paths(statement, statement_text(statement));
+                let text = statement_text(statement);
+                self.validate_field_paths(statement, text.as_ref());
             }
-            "when" => self.validate_condition(statement, statement_text(statement)),
+            "when" => {
+                let text = statement_text(statement);
+                self.validate_condition(statement, text.as_ref());
+            }
             "transcode" | "synthesize" | "verify" => self.error(
                 DiagnosticCode::DeferredExecutionOperation,
                 statement.span(),
@@ -510,35 +537,39 @@ impl<'a> Validator<'a> {
 }
 
 #[must_use]
-fn has_cycle<'a>(
-    graph: &BTreeMap<&'a str, Vec<&'a str>>,
-    node: &'a str,
-    visiting: &mut BTreeSet<&'a str>,
-    visited: &mut BTreeSet<&'a str>,
+fn has_cycle(
+    graph: &BTreeMap<&str, Vec<String>>,
+    node: &str,
+    visiting: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<String>,
 ) -> bool {
     if visited.contains(node) {
         return false;
     }
-    if !visiting.insert(node) {
+    if !visiting.insert(node.to_owned()) {
         return true;
     }
-    for dependency in graph.get(node).into_iter().flatten().copied() {
-        if has_cycle(graph, dependency, visiting, visited) {
+    for dependency in graph.get(node).into_iter().flatten() {
+        if has_cycle(graph, dependency.as_str(), visiting, visited) {
             return true;
         }
     }
     visiting.remove(node);
-    visited.insert(node);
+    visited.insert(node.to_owned());
     false
 }
 
 #[must_use]
-fn statement_text(statement: &StatementAst) -> &str {
+fn statement_text(statement: &StatementAst) -> Cow<'_, str> {
     match statement {
-        StatementAst::Raw { text, .. } => text,
-        StatementAst::Block { keyword, name, .. } => name
-            .as_ref()
-            .map_or(keyword.value.as_str(), |name| name.value.as_str()),
+        StatementAst::Raw { text, .. } => Cow::Borrowed(text),
+        StatementAst::Block { keyword, name, .. } => {
+            if let Some(name) = name {
+                Cow::Owned(format!("{} {}", keyword.value, name.value))
+            } else {
+                Cow::Borrowed(keyword.value.as_str())
+            }
+        }
     }
 }
 

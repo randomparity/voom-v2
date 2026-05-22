@@ -169,6 +169,12 @@ impl<'a> Parser<'a> {
         let mut block_end = None;
 
         while idx < self.source.len() {
+            if nested == 0
+                && idx > self.cursor
+                && self.starts_statement_keyword_at(idx, keyword.value.as_str())
+            {
+                break;
+            }
             match self.source.as_bytes()[idx] {
                 b'"' => idx = self.skip_string_at(idx)?,
                 b'/' if self.source.as_bytes().get(idx + 1) == Some(&b'/') && nested == 0 => break,
@@ -426,6 +432,57 @@ impl<'a> Parser<'a> {
             }
         }
         Err(self.error_at(start, "unterminated string"))
+    }
+
+    fn starts_statement_keyword_at(&self, idx: usize, current_keyword: &str) -> bool {
+        if !self
+            .source
+            .as_bytes()
+            .get(idx.wrapping_sub(1))
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            return false;
+        }
+        let Some(first) = self.source.as_bytes().get(idx).copied() else {
+            return false;
+        };
+        if !is_ident_start(first) {
+            return false;
+        }
+        let mut end = idx + 1;
+        while let Some(byte) = self.source.as_bytes().get(end).copied() {
+            if !is_ident_continue(byte) {
+                break;
+            }
+            end += 1;
+        }
+        let candidate = &self.source[idx..end];
+        if current_keyword == "skip" && candidate == "when" {
+            return false;
+        }
+        matches!(
+            candidate,
+            "depends_on"
+                | "skip"
+                | "run_if"
+                | "on_error"
+                | "container"
+                | "keep"
+                | "remove"
+                | "order"
+                | "defaults"
+                | "actions"
+                | "clear_tags"
+                | "set_tag"
+                | "delete_tag"
+                | "when"
+                | "rules"
+                | "rule"
+                | "extend"
+                | "transcode"
+                | "synthesize"
+                | "verify"
+        )
     }
 
     fn consume_byte(&mut self, byte: u8) -> bool {

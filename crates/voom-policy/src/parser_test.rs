@@ -38,3 +38,26 @@ fn preserves_nested_phase_block_statements() {
     assert_eq!(statements.len(), 1);
     assert_eq!(statements[0].keyword().value, "keep");
 }
+
+#[test]
+fn parses_multiple_phase_statements_separated_by_spaces() {
+    let ast =
+        parse_policy_source("policy \"p\" { phase inspect { container mkv keep audio } }").unwrap();
+
+    assert_eq!(ast.phases[0].operations.len(), 2);
+    assert_eq!(ast.phases[0].operations[0].keyword().value, "container");
+    assert_eq!(ast.phases[0].operations[1].keyword().value, "keep");
+}
+
+#[test]
+fn keeps_skip_when_as_one_phase_control() {
+    let ast = parse_policy_source(
+        "policy \"p\" { phase inspect { skip when video.codec == h264 container mkv } }",
+    )
+    .unwrap();
+
+    assert_eq!(ast.phases[0].controls.len(), 1);
+    assert_eq!(ast.phases[0].controls[0].keyword().value, "skip");
+    assert_eq!(ast.phases[0].operations.len(), 1);
+    assert_eq!(ast.phases[0].operations[0].keyword().value, "container");
+}
