@@ -1,3 +1,11 @@
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::float_cmp,
+        reason = "policy tests assert deterministic fixtures directly and use unwrap for concise failures"
+    )
+)]
 //! Policy-domain inputs for Sprint 3.
 
 pub mod fixtures;
@@ -9,11 +17,3 @@ pub use model::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSetValidationError, PolicyInputSourceKind,
     PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef, validate_input_set,
 };
-
-#[cfg(test)]
-#[path = "model_test.rs"]
-mod tests;
-
-#[cfg(test)]
-#[path = "fixtures_test.rs"]
-mod fixture_tests;

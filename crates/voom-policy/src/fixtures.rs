@@ -16,3 +16,7 @@ pub fn load_fixture(name: FixtureName) -> Result<PolicyInputSetDraft, serde_json
         }
     })
 }
+
+#[cfg(test)]
+#[path = "fixtures_test.rs"]
+mod tests;

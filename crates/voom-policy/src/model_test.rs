@@ -1,4 +1,4 @@
-use super::model::{
+use super::{
     BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, PolicySyntheticTarget,
     QualityProfileSelection, TargetKind, TargetRef, validate_input_set,
@@ -131,7 +131,7 @@ fn empty_provider_and_profile_names_are_rejected() {
                 kind: TargetKind::MediaWork,
             },
             assertion_type: "match".to_owned(),
-            provider: "".to_owned(),
+            provider: String::new(),
             provider_version: "1".to_owned(),
             confidence: 0.5,
             provenance: serde_json::json!({"source": "test"}),

@@ -1,4 +1,5 @@
-use super::{BundleTargetState, FixtureName, IssueInputState, load_fixture, validate_input_set};
+use super::{FixtureName, load_fixture};
+use crate::{BundleTargetState, IssueInputState, validate_input_set};
 
 #[test]
 fn compliant_fixture_loads_and_validates() {

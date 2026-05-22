@@ -302,3 +302,7 @@ fn validate_quality_profiles(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "model_test.rs"]
+mod tests;

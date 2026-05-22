@@ -227,7 +227,7 @@ async fn sqlite_round_trip_matches_fixture_projection() {
     assert_eq!(evidence.assertion_type, "identity_match");
     assert_eq!(evidence.provider, "synthetic-fixture");
     assert_eq!(evidence.provider_version, "1");
-    assert_eq!(evidence.confidence, 0.91);
+    assert!((evidence.confidence - draft.identity_evidence[0].confidence).abs() < f64::EPSILON);
     assert_eq!(evidence.provenance, draft.identity_evidence[0].provenance);
     assert_eq!(evidence.observed_at, draft.identity_evidence[0].observed_at);
     assert_eq!(evidence.existing_evidence_id, None);
