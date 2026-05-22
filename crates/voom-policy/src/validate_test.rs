@@ -28,6 +28,14 @@ fn rejects_unknown_dependency() {
 }
 
 #[test]
+fn rejects_unknown_bare_dependency() {
+    assert!(
+        codes("policy \"p\" { phase a { depends_on: missing } }")
+            .contains(&"unknown_phase_reference".to_owned())
+    );
+}
+
+#[test]
 fn rejects_deferred_execution_operations() {
     assert!(
         codes("policy \"p\" { phase a { transcode video to hevc {} } }")

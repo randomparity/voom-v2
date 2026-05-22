@@ -139,14 +139,14 @@ impl<'a> Validator<'a> {
             for control in &phase.controls {
                 if control.keyword().value == "depends_on" {
                     let text = statement_text(control);
-                    for dependency in list_values(text.as_ref()) {
+                    for dependency in dependency_values(text.as_ref()) {
                         self.validate_phase_reference(
                             &phase.name.value,
-                            dependency,
+                            &dependency,
                             &phase_names,
                             control.span(),
                         );
-                        deps.push(dependency.to_owned());
+                        deps.push(dependency);
                     }
                 }
                 if control.keyword().value == "run_if" {
@@ -601,6 +601,15 @@ fn list_values(text: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+#[must_use]
+fn dependency_values(text: &str) -> Vec<String> {
+    let list = list_values(text);
+    if !list.is_empty() || text.contains('[') {
+        return list.into_iter().map(str::to_owned).collect();
+    }
+    words(text).into_iter().skip(1).map(str::to_owned).collect()
 }
 
 #[must_use]
