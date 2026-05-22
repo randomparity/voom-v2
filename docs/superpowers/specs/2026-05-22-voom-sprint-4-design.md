@@ -89,6 +89,8 @@ policy "production-normalize" {
 The accepted Sprint 4 syntax includes:
 
 - `policy "<name>" { ... }`;
+- `//` line comments, v1 identifier tokens, strings, numbers, booleans,
+  lists, colon-delimited settings, and free-form whitespace;
 - optional `metadata` block;
 - optional `config` block;
 - one or more `phase` blocks;
@@ -103,11 +105,29 @@ The accepted Sprint 4 syntax includes:
   font, title contains, title matches, and boolean composition;
 - primitive values: strings, numbers, booleans, identifiers, and lists.
 
+Core field-path roots in Sprint 4 are limited to media facts already
+represented by Sprint 3 policy inputs, including `video`, `audio`,
+`subtitle`, `subtitles`, `attachment`, `attachments`, `container`,
+`identity`, `quality`, `issue`, and `bundle`. Extension paths must start
+with a reserved extension root such as `plugin` or `external`. Unknown
+core-looking roots are errors; unknown namespaces below a reserved
+extension root warn so later plugin and external-system registries can
+tighten them without changing the parser.
+
 Sprint 4 should parse and compile `when` and `rules` because they are
 policy intent, not execution infrastructure. It should reject
 `transcode`, `synthesize`, and `verify` with stable deferred-feature
 diagnostics. Those operations imply planner or worker semantics and
 belong in later sprints.
+
+The accepted subset is a compatibility contract, not an invitation to
+accept every v1 token. Parser tests must prove the examples above plus
+the named valid fixtures parse, and invalid fixture tests must prove
+unsupported v1-only forms fail with stable diagnostics. Unknown
+top-level blocks, unknown phase statements, and unknown operation names
+must be validation errors unless this design explicitly lists them as
+warnings. `extend` inside a phase is invalid in Sprint 4 because parent
+composition is deferred with `extends`.
 
 `extends` is reserved. Bundled and `file://` composition are useful v1
 features, but Sprint 4 should not load parent policies. A policy using
@@ -166,11 +186,14 @@ The schema should add:
 `policy_documents` contains stable policy identity:
 
 - id;
-- slug;
-- display name or policy name;
+- globally unique slug using the same stable-token rules as Sprint 3
+  input-set slugs;
+- display name copied from the policy name unless explicitly overridden
+  by a control-plane creation draft;
 - created timestamp;
 - optional current accepted version id;
-- epoch if mutable fields are present.
+- epoch for optimistic concurrency on current-version and display-name
+  updates.
 
 `policy_versions` contains immutable accepted source:
 
@@ -183,14 +206,52 @@ The schema should add:
 - compiled JSON projection;
 - created timestamp.
 
+Migration `0007_policy_registry.sql` must enforce the identity model in
+SQLite, not only in Rust:
+
+- `policy_documents.slug` is unique;
+- `policy_versions(policy_document_id, version_number)` is unique;
+- `policy_versions(policy_document_id, source_hash)` is unique so a
+  repeated source for the same document returns or reports the existing
+  version instead of creating duplicates;
+- `policy_versions.policy_document_id` references `policy_documents(id)`
+  with `ON DELETE RESTRICT`;
+- `policy_documents.current_accepted_version_id`, when present, must
+  reference an existing `policy_versions(id)` for the same document.
+
+If the same-document current-version rule cannot be represented as a
+single SQLite foreign key, the repository must enforce it in the same
+transaction that creates or advances the version and tests must cover a
+cross-document current-version attempt. Adding a version must be atomic:
+insert the immutable version row, advance the document's current version,
+and increment the document epoch in one transaction. Concurrent
+add-version calls for the same document must produce one monotonically
+next version and one deterministic conflict/duplicate outcome; they must
+not create two rows with the same version number or leave the document
+pointing at an older accepted version.
+
 The compiled JSON projection must be deterministic. Source text and
 source hash should both be stored so CLI/API tools can inspect policy
 content, deduplicate submissions, and prove exactly what was compiled.
+The source hash is computed over the exact UTF-8 source bytes accepted by
+the compiler, before any parser normalization. The compiled projection is
+serialized with deterministic object-key ordering and stable enum wire
+values; warnings persisted in the projection must also be deterministic.
 
 Rejected source should not be persisted by default in Sprint 4. Compile
 diagnostics are returned by control-plane use cases and covered by
 golden tests. A durable failed-attempt history can be added later as an
 explicit audit feature.
+
+Sprint 4 must also close the placeholder left by
+`identity_evidence.accepted_policy_id`: accepted identity evidence may
+refer only to policy versions, not policy documents or Sprint 3 input
+sets. If migration compatibility prevents adding a direct foreign key to
+`identity_evidence.accepted_policy_id` in Sprint 4, the design must leave
+that column nullable and repositories must reject writes that would store
+anything other than a real `PolicyVersionId`. Tests must cover the
+negative case where a `PolicyInputSetId` value is supplied as an accepted
+policy id.
 
 ## 6. Compiled Model
 
@@ -260,6 +321,9 @@ consumers. Required diagnostic codes include stable variants for:
 
 - unexpected token or malformed syntax;
 - source size exceeded;
+- unknown top-level block;
+- unknown phase statement or operation;
+- deferred phase inheritance via `extend`;
 - duplicate phase name;
 - unknown phase reference;
 - self-dependency;
@@ -270,9 +334,11 @@ consumers. Required diagnostic codes include stable variants for:
 - invalid track target;
 - invalid default strategy;
 - invalid language code;
+- invalid core field path;
+- invalid rule match mode;
 - tag ordering error;
 - ambiguous tag operation conflict;
-- deferred composition via `extends`.
+- deferred composition via `extends`;
 - deferred execution operations: `transcode`, `synthesize`, and
   `verify`.
 
@@ -296,14 +362,19 @@ Validation rejects:
 - invalid track targets;
 - invalid default strategies;
 - invalid language codes in config and language filters;
+- unknown core field roots or core field paths;
+- invalid `rules` match modes;
 - `set_tag` before `clear_tags` in the same phase;
 - conflicting tag operations in the same phase when the final result is
   ambiguous;
+- unknown top-level blocks, unknown phase statements, and unknown
+  operation names not listed in the Sprint 4 accepted subset;
+- phase inheritance through `extend`;
 - policy composition through `extends`.
 
 Validation warns, but does not reject, for:
 
-- unknown external or plugin field roots such as
+- unknown namespaces below reserved external or plugin roots such as
   `plugin.radarr.title`;
 - metadata `requires_tools` entries that are not yet represented as
   worker capabilities.
@@ -340,15 +411,17 @@ Sprint 4 verification includes:
 - `voom-policy` parser unit tests for policy, metadata, config, phase,
   operation, condition, and filter syntax;
 - validator unit tests for phase references, cycles, invalid enum
-  values, language codes, tag ordering, and source-size limit;
+  values, language codes, core field paths, extension field warnings,
+  rule match modes, tag ordering, and source-size limit;
 - compiler tests for normalized compiled IR and phase order;
 - golden valid policy fixture tests;
 - golden invalid diagnostic fixture tests;
 - deterministic compiled JSON projection tests;
 - `voom-store` migration inventory test including migration 0007;
 - policy registry repository tests for create, get, list, add-version,
-  immutability, source hash, version ordering, and policy id/input-set id
-  separation;
+  immutability, source hash, duplicate-source handling, same-document
+  current-version integrity, version ordering, concurrent add-version
+  conflict behavior, and policy id/input-set id separation;
 - `voom-control-plane` use-case tests for create, add-version, get,
   list, and compile-without-persist;
 - documentation scan for incomplete-work markers;
@@ -365,9 +438,10 @@ remain under `crates/*/tests/`.
 | Policy identity | `policy_documents` and immutable `policy_versions`. | Policy binding to libraries, schedules, or input sets. |
 | Stable diagnostics | Structured diagnostics with codes, stages, severities, spans, messages, and suggestions. | Durable failed-attempt history. |
 | Compiled policy model | Typed v2 IR for metadata, config, phases, conditions, filters, and accepted operations. | Plan DAG generation and worker payloads. |
+| Deterministic persistence | Unique slugs, unique per-document version numbers, duplicate-source handling, atomic current-version advancement, and exact-byte source hashing. | Cross-node policy-authoring conflict resolution beyond deterministic duplicate/conflict errors. |
 | V1 examples | Golden fixtures adapted from `minimal`, `container-metadata`, and reduced `production-normalize`. | Runtime equivalence with v1 evaluator. |
 | Composition | `extends` recognized and rejected with stable deferred diagnostic. | Bundled parent policies and `file://` loading. |
-| External/plugin fields | Field paths parse and unknown roots warn. | External-system registry validation and plugin-defined operation schemas. |
+| External/plugin fields | Reserved extension roots parse, unknown extension namespaces warn, and unknown core-looking roots reject. | External-system registry validation and plugin-defined operation schemas. |
 | CLI/API readiness | Control-plane use cases and durable data shape support future surfaces. | User-facing policy commands and UI editing. |
 | Control-plane invariants | Policies compile and persist in control-plane/store boundaries; workers do not read `.voom` source. | Orchestrator use of compiled policies. |
 
