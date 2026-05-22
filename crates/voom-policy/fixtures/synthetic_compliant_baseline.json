@@ -1,0 +1,164 @@
+{
+  "slug": "synthetic-compliant-baseline",
+  "display_name": "Synthetic compliant baseline",
+  "schema_version": 1,
+  "source_kind": "fixture",
+  "created_at": [2026,142,0,0,0,0,0,0,0],
+  "description": "Deterministic compliant policy input baseline.",
+  "fixture_labels": [
+    "synthetic_compliant_baseline"
+  ],
+  "synthetic_targets": [
+    {
+      "synthetic_key": "work-1",
+      "target_kind": "media_work",
+      "display_name": "Synthetic Work"
+    },
+    {
+      "synthetic_key": "variant-1",
+      "target_kind": "media_variant",
+      "display_name": "Synthetic Variant"
+    },
+    {
+      "synthetic_key": "bundle-1",
+      "target_kind": "asset_bundle",
+      "display_name": "Synthetic Bundle"
+    },
+    {
+      "synthetic_key": "asset-1",
+      "target_kind": "file_asset",
+      "display_name": "Synthetic Asset"
+    },
+    {
+      "synthetic_key": "version-1",
+      "target_kind": "file_version",
+      "display_name": "Synthetic Version"
+    },
+    {
+      "synthetic_key": "location-1",
+      "target_kind": "file_location",
+      "display_name": "Synthetic Location"
+    }
+  ],
+  "media_snapshots": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "container": "mkv",
+      "stream_summary": {
+        "streams": [
+          {
+            "type": "video",
+            "codec": "hevc",
+            "language": null
+          },
+          {
+            "type": "audio",
+            "codec": "aac",
+            "language": "en"
+          },
+          {
+            "type": "subtitle",
+            "codec": "srt",
+            "language": "en"
+          }
+        ],
+        "facts": {
+          "has_english_audio": true,
+          "has_english_subtitle": true
+        }
+      },
+      "video_codec": "hevc",
+      "width": 3840,
+      "height": 2160,
+      "hdr": "hdr10",
+      "bitrate": 18000000,
+      "duration_millis": 7200000,
+      "audio_languages": [
+        "en"
+      ],
+      "subtitle_languages": [
+        "en"
+      ],
+      "health_flags": [],
+      "existing_media_snapshot_id": null
+    }
+  ],
+  "identity_evidence": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "work-1",
+        "kind": "media_work"
+      },
+      "assertion_type": "identity_match",
+      "provider": "synthetic-fixture",
+      "provider_version": "1",
+      "confidence": 0.99,
+      "provenance": {
+        "fixture": "synthetic_compliant_baseline"
+      },
+      "observed_at": [2026,142,0,0,0,0,0,0,0],
+      "existing_evidence_id": null
+    }
+  ],
+  "bundle_targets": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "bundle-1",
+        "kind": "asset_bundle"
+      },
+      "role": "primary_video",
+      "desired_state": "required",
+      "language": null,
+      "label": "Primary video",
+      "disposition": "default",
+      "artifact_expectation": {
+        "container": "mkv",
+        "video_codec": "hevc"
+      }
+    },
+    {
+      "ordinal": 1,
+      "target": {
+        "type": "synthetic",
+        "key": "bundle-1",
+        "kind": "asset_bundle"
+      },
+      "role": "external_subtitle",
+      "desired_state": "required",
+      "language": "en",
+      "label": "English subtitles",
+      "disposition": "external",
+      "artifact_expectation": {
+        "format": "srt",
+        "language": "en"
+      }
+    }
+  ],
+  "quality_profiles": [
+    {
+      "ordinal": 0,
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "profile_name": "balanced-home",
+      "profile_version": "1",
+      "dimension_weights": {
+        "compatibility": 0.4,
+        "quality": 0.4,
+        "storage": 0.2
+      }
+    }
+  ],
+  "issues": []
+}
