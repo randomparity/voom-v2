@@ -16,14 +16,29 @@ pub fn render_default_payload(
     branch: &BranchContext,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
+    render_default_payload_with_fan_out(operation, branch, timing, 3)
+}
+
+pub fn render_default_payload_with_fan_out(
+    operation: OperationKind,
+    branch: &BranchContext,
+    timing: EffectiveTiming,
+    fan_out_count: usize,
+) -> Result<Value, BindingError> {
     let mut payload = match operation {
         OperationKind::ScanLibrary => json!({
             "path": "/library",
-            "fan_out_count": 3,
+            "fan_out_count": fan_out_count,
         }),
-        OperationKind::ProbeFile | OperationKind::HashFile | OperationKind::IdentifyMedia => {
-            json!({ "path": branch.path })
-        }
+        OperationKind::ProbeFile
+        | OperationKind::HashFile
+        | OperationKind::IdentifyMedia
+        | OperationKind::BackUpFile
+        | OperationKind::VerifyArtifact
+        | OperationKind::EditTracks
+        | OperationKind::ExtractAudio
+        | OperationKind::TranscribeAudio
+        | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
         OperationKind::ScoreQuality => {
             let codec = branch.probe_codec.as_ref().ok_or_else(|| {
                 BindingError::new(format!(
@@ -46,14 +61,15 @@ pub fn render_default_payload(
             "profile": "default",
             "target_codec": "h265",
         }),
-        OperationKind::BackUpFile
-        | OperationKind::VerifyArtifact
-        | OperationKind::CommitArtifact
-        | OperationKind::SyncExternalSystem
-        | OperationKind::EditTracks
-        | OperationKind::ExtractAudio
-        | OperationKind::TranscribeAudio
-        | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
+        OperationKind::CommitArtifact => json!({
+            "path": branch.path,
+            "reason": "quality_regression",
+        }),
+        OperationKind::SyncExternalSystem => json!({
+            "path": branch.path,
+            "system": "plex",
+            "action": "refresh",
+        }),
     };
 
     let Some(object) = payload.as_object_mut() else {

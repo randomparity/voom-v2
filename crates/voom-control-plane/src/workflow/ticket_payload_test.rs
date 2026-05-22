@@ -17,3 +17,21 @@ fn workflow_ticket_payload_rejects_operation_mismatch() {
             .unwrap_err();
     assert!(err.to_string().contains("operation mismatch"));
 }
+
+#[test]
+fn workflow_ticket_payload_rejects_rendered_operation_mismatch_on_encode() {
+    let payload = WorkflowTicketPayload::new_for_test(
+        "workflow-1",
+        "plan-1",
+        "probe",
+        "file-000",
+        OperationKind::ProbeFile,
+        serde_json::json!({
+            "operation": "scan_library",
+            "path": "/library/file-000.mkv"
+        }),
+    );
+
+    let err = payload.to_ticket_payload().unwrap_err();
+    assert!(err.to_string().contains("operation mismatch"));
+}

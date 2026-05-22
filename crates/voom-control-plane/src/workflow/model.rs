@@ -231,17 +231,31 @@ fn operation_after_selected(
 }
 
 fn reject_cycles(nodes: &HashMap<&str, &WorkflowNode>) -> Result<(), WorkflowPlanError> {
+    let selected_providers = selected_providers(nodes.values().copied());
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
     for id in nodes.keys().copied() {
-        visit(id, nodes, &mut visiting, &mut visited)?;
+        visit(id, nodes, &selected_providers, &mut visiting, &mut visited)?;
     }
     Ok(())
+}
+
+fn selected_providers<'a>(
+    nodes: impl Iterator<Item = &'a WorkflowNode>,
+) -> HashMap<&'a str, Vec<&'a str>> {
+    let mut providers: HashMap<&str, Vec<&str>> = HashMap::new();
+    for node in nodes {
+        if let Some(group) = node.provides_selected() {
+            providers.entry(group).or_default().push(node.id());
+        }
+    }
+    providers
 }
 
 fn visit<'a>(
     id: &'a str,
     nodes: &HashMap<&'a str, &'a WorkflowNode>,
+    selected_providers: &HashMap<&'a str, Vec<&'a str>>,
     visiting: &mut HashSet<&'a str>,
     visited: &mut HashSet<&'a str>,
 ) -> Result<(), WorkflowPlanError> {
@@ -258,7 +272,14 @@ fn visit<'a>(
         return Ok(());
     };
     for dependency in node.depends_on() {
-        visit(dependency, nodes, visiting, visited)?;
+        visit(dependency, nodes, selected_providers, visiting, visited)?;
+    }
+    for selected_dependency in node.depends_on_selected() {
+        if let Some(providers) = selected_providers.get(selected_dependency.as_str()) {
+            for provider in providers {
+                visit(provider, nodes, selected_providers, visiting, visited)?;
+            }
+        }
     }
     visiting.remove(id);
     visited.insert(id);

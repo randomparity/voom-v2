@@ -66,6 +66,17 @@ fn validation_rejects_cycles() {
 }
 
 #[test]
+fn validation_rejects_cycles_through_selected_dependency_groups() {
+    let plan = plan_with_nodes([
+        selected_node("transform", OperationKind::Remux, ["backup"], "transform"),
+        node_after_selected("backup", OperationKind::BackUpFile, ["transform"]),
+    ]);
+
+    let err = plan.validate().unwrap_err();
+    assert!(err.to_string().contains("cycle"));
+}
+
+#[test]
 fn validation_rejects_invalid_fan_out() {
     let mut plan = valid_plan();
     plan.fan_out.max_files = 0;
@@ -127,5 +138,20 @@ fn node_after_selected<const N: usize>(
         depends_on: Vec::new(),
         depends_on_selected: depends_on_selected.into_iter().map(str::to_owned).collect(),
         provides_selected: None,
+    })
+}
+
+fn selected_node<const N: usize>(
+    id: &str,
+    operation: OperationKind,
+    depends_on: [&str; N],
+    provides_selected: &str,
+) -> WorkflowNode {
+    WorkflowNode::Operation(OperationNode {
+        id: id.to_owned(),
+        operation,
+        depends_on: depends_on.into_iter().map(str::to_owned).collect(),
+        depends_on_selected: Vec::new(),
+        provides_selected: Some(provides_selected.to_owned()),
     })
 }

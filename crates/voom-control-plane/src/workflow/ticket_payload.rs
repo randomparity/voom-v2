@@ -50,9 +50,20 @@ impl WorkflowTicketPayload {
                 "rendered_payload must be a JSON object",
             ));
         };
-        rendered_payload
-            .entry("operation".to_owned())
-            .or_insert_with(|| json!(operation));
+        match rendered_payload.get("operation").and_then(Value::as_str) {
+            Some(rendered_operation) if rendered_operation == operation => {}
+            Some(rendered_operation) => {
+                let rendered_operation = parse_operation_name(rendered_operation)?;
+                return Err(operation_mismatch(
+                    "rendered_payload.operation",
+                    rendered_operation,
+                    self.operation,
+                ));
+            }
+            None => {
+                rendered_payload.insert("operation".to_owned(), json!(operation));
+            }
+        }
         Ok(value)
     }
 
