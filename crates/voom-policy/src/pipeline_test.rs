@@ -49,6 +49,24 @@ fn compile_policy_preserves_boolean_track_filters() {
 }
 
 #[test]
+fn compile_policy_preserves_quoted_title_filter_with_boolean_words() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { keep subtitle where title contains \"Director or Commentary\" } }",
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].operations[0],
+        crate::CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Subtitle,
+            filter: Some(crate::TrackFilter::TitleContains {
+                value: "Director or Commentary".to_owned(),
+            }),
+        }
+    );
+}
+
+#[test]
 fn compile_policy_preserves_boolean_conditions() {
     let out = compile_policy(
         "policy \"p\" { phase a { when exists audio or exists subtitle { container mkv } } }",

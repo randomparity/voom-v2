@@ -583,6 +583,11 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
                 .collect::<Vec<_>>(),
         });
     }
+    if let Some(inner) = text.trim().strip_prefix("not ") {
+        return filter_from_text(inner.trim()).map(|inner| TrackFilter::Not {
+            inner: Box::new(inner),
+        });
+    }
     let tokens = words(text);
     match tokens.as_slice() {
         ["lang" | "language", "in", ..] => Some(TrackFilter::LanguageIn {
@@ -591,17 +596,16 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
         ["codec", "in", ..] => Some(TrackFilter::CodecIn {
             values: list_values(text).into_iter().map(str::to_owned).collect(),
         }),
-        ["not", rest @ ..] => {
-            filter_predicate(rest.first().copied()).map(|inner| TrackFilter::Not {
-                inner: Box::new(inner),
+        ["title", "contains", ..] => {
+            title_filter_value(text, "contains").map(|value| TrackFilter::TitleContains {
+                value: strip_quotes(value),
             })
         }
-        ["title", "contains", value, ..] => Some(TrackFilter::TitleContains {
-            value: strip_quotes(value),
-        }),
-        ["title", "matches", value, ..] => Some(TrackFilter::TitleMatches {
-            value: strip_quotes(value),
-        }),
+        ["title", "matches", ..] => {
+            title_filter_value(text, "matches").map(|value| TrackFilter::TitleMatches {
+                value: strip_quotes(value),
+            })
+        }
         [first, ..] => filter_predicate(Some(first)),
         [] => None,
     }
@@ -612,12 +616,53 @@ fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>>
 }
 
 fn split_bool_expression<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
-    let parts = text
-        .split(delimiter)
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
+    let parts = split_outside_quotes(text, delimiter);
     if parts.len() > 1 { Some(parts) } else { None }
+}
+
+fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while cursor < text.len() {
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
+        if escaped {
+            escaped = false;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if !in_string && text[cursor..].starts_with(delimiter) {
+            let part = text[start..cursor].trim();
+            if !part.is_empty() {
+                parts.push(part);
+            }
+            cursor += delimiter.len();
+            start = cursor;
+            continue;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    let part = text[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
 }
 
 fn filter_predicate(token: Option<&str>) -> Option<TrackFilter> {
@@ -784,6 +829,12 @@ fn token_string(tokens: &[&str], index: usize, fallback: &str) -> String {
         .get(index)
         .map_or(fallback, |value| *value)
         .to_owned()
+}
+
+fn title_filter_value<'a>(text: &'a str, op: &str) -> Option<&'a str> {
+    let prefix = format!("title {op} ");
+    let value = text.trim().strip_prefix(&prefix)?.trim();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn field_path_segments(path: &str) -> Vec<String> {

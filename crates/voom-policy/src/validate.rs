@@ -861,7 +861,8 @@ fn is_valid_track_filter(text: &str) -> bool {
     match tokens.as_slice() {
         ["lang" | "language" | "codec", "in", ..] => !list_values(text).is_empty(),
         ["commentary" | "forced" | "default" | "font"] => true,
-        ["title", "contains" | "matches", value, ..] => !value.is_empty(),
+        ["title", "contains", ..] => title_filter_value(text, "contains").is_some(),
+        ["title", "matches", ..] => title_filter_value(text, "matches").is_some(),
         _ => false,
     }
 }
@@ -881,12 +882,61 @@ fn split_bool_condition<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a st
 
 #[must_use]
 fn split_bool_expression<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
-    let parts = text
-        .split(delimiter)
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
+    let parts = split_outside_quotes(text, delimiter);
     if parts.len() > 1 { Some(parts) } else { None }
+}
+
+#[must_use]
+fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while cursor < text.len() {
+        let Some(ch) = text[cursor..].chars().next() else {
+            break;
+        };
+        if escaped {
+            escaped = false;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            cursor += ch.len_utf8();
+            continue;
+        }
+        if !in_string && text[cursor..].starts_with(delimiter) {
+            let part = text[start..cursor].trim();
+            if !part.is_empty() {
+                parts.push(part);
+            }
+            cursor += delimiter.len();
+            start = cursor;
+            continue;
+        }
+        cursor += ch.len_utf8();
+    }
+
+    let part = text[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
+}
+
+#[must_use]
+fn title_filter_value<'a>(text: &'a str, op: &str) -> Option<&'a str> {
+    let prefix = format!("title {op} ");
+    let value = text.trim().strip_prefix(&prefix)?.trim();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]

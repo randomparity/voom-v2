@@ -8,6 +8,7 @@ CREATE TABLE policy_documents (
     current_accepted_version_id INTEGER,
     epoch                       INTEGER NOT NULL DEFAULT 0,
     CHECK (length(trim(slug)) > 0),
+    CHECK (slug NOT GLOB '*[^a-z0-9_-]*'),
     CHECK (length(trim(display_name)) > 0),
     CHECK (epoch >= 0)
 ) STRICT;

@@ -141,6 +141,23 @@ async fn cross_document_current_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn raw_sql_rejects_unstable_policy_document_slug() {
+    let (pool, _tmp) = pool().await;
+
+    let err = sqlx::query(
+        "INSERT INTO policy_documents (slug, display_name, created_at) VALUES (?, ?, ?)",
+    )
+    .bind("Bad Slug")
+    .bind("bad")
+    .bind("1970-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("CHECK"));
+}
+
+#[tokio::test]
 async fn concurrent_add_version_has_one_winner() {
     let (pool, _tmp) = pool().await;
     let repo_a = SqlitePolicyRepo::new(pool.clone());
