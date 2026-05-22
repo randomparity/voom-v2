@@ -10,6 +10,13 @@ fn default_ci_plan_has_seed_two_three_files_and_parallel_dispatches() {
     assert_eq!(plan.seed, 2);
     assert_eq!(plan.fan_out.max_files, 3);
     assert!(plan.concurrency.max_in_flight_dispatches > 1);
+    let backup = plan
+        .nodes
+        .iter()
+        .find(|node| node.id() == "backup")
+        .unwrap();
+    assert_eq!(backup.depends_on(), &[] as &[String]);
+    assert_eq!(backup.depends_on_selected(), &["transform".to_owned()]);
     plan.validate().unwrap();
 }
 
@@ -30,6 +37,20 @@ fn validation_rejects_missing_dependencies() {
 
     let err = plan.validate().unwrap_err();
     assert!(err.to_string().contains("missing dependency"));
+}
+
+#[test]
+fn validation_rejects_missing_selected_dependency_groups() {
+    let plan = plan_with_nodes([
+        node("scan", OperationKind::ScanLibrary, []),
+        node_after_selected("backup", OperationKind::BackUpFile, ["transform"]),
+    ]);
+
+    let err = plan.validate().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("missing selected dependency group")
+    );
 }
 
 #[test]
@@ -90,5 +111,21 @@ fn node<const N: usize>(id: &str, operation: OperationKind, depends_on: [&str; N
         id: id.to_owned(),
         operation,
         depends_on: depends_on.into_iter().map(str::to_owned).collect(),
+        depends_on_selected: Vec::new(),
+        provides_selected: None,
+    })
+}
+
+fn node_after_selected<const N: usize>(
+    id: &str,
+    operation: OperationKind,
+    depends_on_selected: [&str; N],
+) -> WorkflowNode {
+    WorkflowNode::Operation(OperationNode {
+        id: id.to_owned(),
+        operation,
+        depends_on: Vec::new(),
+        depends_on_selected: depends_on_selected.into_iter().map(str::to_owned).collect(),
+        provides_selected: None,
     })
 }

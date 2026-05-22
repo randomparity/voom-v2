@@ -22,6 +22,8 @@ pub struct OperationNode {
     pub id: String,
     pub operation: OperationKind,
     pub depends_on: Vec<String>,
+    pub depends_on_selected: Vec<String>,
+    pub provides_selected: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,9 +67,14 @@ impl WorkflowPlan {
                 operation("hash", OperationKind::HashFile, &["scan"]),
                 operation("identity", OperationKind::IdentifyMedia, &["scan"]),
                 operation("quality", OperationKind::ScoreQuality, &["probe"]),
-                operation("remux", OperationKind::Remux, &["quality"]),
-                operation("transcode", OperationKind::TranscodeVideo, &["quality"]),
-                operation("backup", OperationKind::BackUpFile, &["remux", "transcode"]),
+                selected_operation("remux", OperationKind::Remux, &["quality"], "transform"),
+                selected_operation(
+                    "transcode",
+                    OperationKind::TranscodeVideo,
+                    &["quality"],
+                    "transform",
+                ),
+                operation_after_selected("backup", OperationKind::BackUpFile, &["transform"]),
                 operation("verify", OperationKind::VerifyArtifact, &["backup"]),
                 operation("commit", OperationKind::CommitArtifact, &["verify"]),
                 operation("sync", OperationKind::SyncExternalSystem, &["commit"]),
@@ -114,6 +121,21 @@ impl WorkflowPlan {
                     )));
                 }
             }
+            for selected_dependency in node.depends_on_selected() {
+                let providers = self
+                    .nodes
+                    .iter()
+                    .filter(|provider| {
+                        provider.provides_selected() == Some(selected_dependency.as_str())
+                    })
+                    .count();
+                if providers == 0 {
+                    return Err(WorkflowPlanError::new(format!(
+                        "missing selected dependency group `{selected_dependency}` for node `{}`",
+                        node.id()
+                    )));
+                }
+            }
         }
 
         reject_cycles(&by_id)?;
@@ -142,6 +164,20 @@ impl WorkflowNode {
             Self::Operation(node) => &node.depends_on,
         }
     }
+
+    #[must_use]
+    pub fn depends_on_selected(&self) -> &[String] {
+        match self {
+            Self::Operation(node) => &node.depends_on_selected,
+        }
+    }
+
+    #[must_use]
+    pub fn provides_selected(&self) -> Option<&str> {
+        match self {
+            Self::Operation(node) => node.provides_selected.as_deref(),
+        }
+    }
 }
 
 impl WorkflowPlanError {
@@ -157,6 +193,40 @@ fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> Workflo
         id: id.to_owned(),
         operation,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
+        depends_on_selected: Vec::new(),
+        provides_selected: None,
+    })
+}
+
+fn selected_operation(
+    id: &str,
+    operation: OperationKind,
+    depends_on: &[&str],
+    provides_selected: &str,
+) -> WorkflowNode {
+    WorkflowNode::Operation(OperationNode {
+        id: id.to_owned(),
+        operation,
+        depends_on: depends_on.iter().map(ToString::to_string).collect(),
+        depends_on_selected: Vec::new(),
+        provides_selected: Some(provides_selected.to_owned()),
+    })
+}
+
+fn operation_after_selected(
+    id: &str,
+    operation: OperationKind,
+    depends_on_selected: &[&str],
+) -> WorkflowNode {
+    WorkflowNode::Operation(OperationNode {
+        id: id.to_owned(),
+        operation,
+        depends_on: Vec::new(),
+        depends_on_selected: depends_on_selected
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        provides_selected: None,
     })
 }
 
