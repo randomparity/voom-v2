@@ -8,10 +8,17 @@ phase: 2
 branch: feat/sprint-2
 parent_spec: docs/superpowers/specs/2026-05-19-voom-sprint-2-design.md
 parent_sections: §2 Phase 2, §3 (voom-control-plane + voom-scheduler + voom-store rows), §4.8 incarnation outbox, §4.9 watchdog
-scope: Phase 2 architectural surface + minimal scaffold; deep recovery tests deferred
+scope: Historical Phase 2 architectural surface + minimal scaffold; final Sprint 2 closeout uses Phase 7 WorkflowExecutor while the standalone supervisor/outbox/incarnation design remains deferred
 ---
 
 # Sprint 2 Phase 2 — Local Worker Supervisor (combined design + plan)
+
+> Supersession note: this is a historical scaffold design. Sprint 2
+> closeout does not require the standalone `LocalWorkerSupervisor`,
+> `worker_incarnations`, or `lease_dispatch_intents` surface described
+> here. The implemented Sprint 2 scheduler exit surface is the Phase 7
+> `WorkflowExecutor`; the standalone supervisor/outbox/incarnation work
+> remains later-sprint design context.
 
 ## 1. Goal
 
@@ -45,6 +52,11 @@ Out of scope for this phase (deferred to follow-up sessions):
   single-arbiter mpsc skeleton + exit/heartbeat/progress events
   but only one paired race test. Five additional race-precedence
   tests are deferred TODOs.
+
+Historical acceptance for this scaffold was limited to landing the
+`WorkerSelector` boundary and keeping `just ci` green. Sprint 2 release
+acceptance is now owned by the Phase 6 conformance closeout and Phase 7
+durable workflow docs.
 
 ## 3. Migration 0005
 

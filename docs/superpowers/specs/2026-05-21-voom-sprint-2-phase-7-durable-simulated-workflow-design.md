@@ -711,9 +711,32 @@ Integration tests:
 - direct `expire_due` coverage treats lease expiry as abandoned-lease
   crash recovery, not active missed-heartbeat classification.
 
+## 9. Exit Criteria
+
+Phase 7 is complete when:
+
+- the default three-file workflow runs through `WorkflowExecutor` with
+  durable job success, ticket success, lease release, dependency
+  promotion, three branch summaries, thirty-one total dispatches, and
+  per-operation summary counts;
+- every Phase 6 fake provider used by the default workflow is dispatched
+  as a process-backed worker over `voom-worker-protocol` with a valid
+  rendered payload;
+- chaos workflow cases run through the same executor path and cover
+  worker crash, dispatch timeout, watchdog-observed missed heartbeat,
+  malformed result, and progress timeout with stable failure classes;
+- missed-heartbeat coverage is watchdog-owned and not produced by a
+  direct `expire_due` call;
+- the benchmark workflow case reports non-zero scheduler throughput from
+  the durable execution path;
+- retry/restart expansion cases preserve workflow, node, and branch
+  identity without duplicating downstream tickets;
+- Phase 6 conformance remains green for the active provider manifest;
+- `just ci` passes.
+
 Final verification is `just ci`.
 
-## 9. Out Of Scope
+## 10. Out Of Scope
 
 - External JSON/TOML workflow plan parser.
 - Policy compiler or high-level node expansion.

@@ -8,10 +8,15 @@ phase: 3
 branch: feat/sprint-2
 parent_spec: docs/superpowers/specs/2026-05-19-voom-sprint-2-design.md
 parent_sections: §2 Phase 3, §3 (voom-fake-support + voom-fakes rows)
-scope: Phase 3 architectural surface + one representative fake; other ten fakes deferred to follow-up commits
+scope: Historical Phase 3 architectural surface + one representative fake; all eleven Sprint 2 fake providers are completed and accepted by the Phase 6 closeout doc
 ---
 
 # Sprint 2 Phase 3 — Fake Provider Suite (combined design + plan)
+
+> Supersession note: this is a historical scaffold design. The TODO fake
+> binaries described here were follow-up placeholders only. The current
+> Sprint 2 acceptance source for active fake-provider behavior is
+> `docs/superpowers/specs/2026-05-21-voom-sprint-2-phase-6-fake-providers-conformance-closeout-design.md`.
 
 ## 1. Goal
 
@@ -55,6 +60,11 @@ Each TODO scaffold is a one-line `fn main()` that prints
 this keeps the binary targets compilable without false-passing as
 real workers. The conformance harness (Phase 6 expansion) will skip
 these scaffolds based on a `voom-fakes.toml` manifest.
+
+Historical acceptance for this phase was limited to landing the crate
+layout plus `fake-scanner`. Sprint 2 release acceptance requires all
+eleven fake providers to be active manifest-backed workers under the
+Phase 6 closeout criteria.
 
 ## 3. Scenario format (voom-fake-support)
 

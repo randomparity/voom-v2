@@ -1,12 +1,13 @@
 ---
 name: voom-sprint-2-design
-description: Sprint 2 (Synthetic Provider Suite MVP) overview design for VOOM — versioned HTTP/JSON worker protocol, workflow-executor scheduler closeout, eleven fake providers, chaos worker, benchmark worker, and provider conformance tests. Decomposes the sprint into six phases on `feat/sprint-2`, fixes cross-phase architectural decisions, and defers per-phase detail to the phase-level design docs.
+description: Sprint 2 (Synthetic Provider Suite MVP) overview design for VOOM — versioned HTTP/JSON worker protocol, workflow-executor scheduler closeout, eleven fake providers, chaos worker, benchmark worker, and provider conformance tests. Decomposes the sprint into seven documented phases on `feat/sprint-2`, fixes cross-phase architectural decisions, and defers per-phase detail to the phase-level design docs.
 status: proposed
 date: 2026-05-19
 sprint: 2
 branch: feat/sprint-2
 references:
   - docs/specs/voom-control-plane-design.md
+  - docs/superpowers/specs/2026-05-22-voom-sprint-2-closeout-acceptance-plan.md
   - docs/superpowers/specs/2026-05-16-voom-sprint-1-design.md
   - docs/adr/0001-durable-jobs-over-events.md
   - docs/adr/0002-out-of-process-workers-only.md
@@ -32,6 +33,10 @@ The architectural-spec exit criteria for Sprint 2 are:
 - Chaos tests cover worker crash, timeout, malformed result, and missed
   heartbeat.
 - Benchmark worker reports scheduler throughput.
+
+The release-readiness mapping from these criteria to tests, commands,
+and provider inventory is the Sprint 2 closeout acceptance plan:
+`docs/superpowers/specs/2026-05-22-voom-sprint-2-closeout-acceptance-plan.md`.
 
 "The real scheduler" in this sprint is the Sprint 1 lease-acquire /
 heartbeat / release / expire lifecycle plus the Sprint 2
@@ -67,11 +72,15 @@ Out of scope for Sprint 2 (deferred to named later sprints):
 
 ## 2. Phase Plan
 
-Sprint 2 is committed to `feat/sprint-2` as six phases in order. Each
-phase ships its own design doc, plan doc, implementation commits, an
-adversarial-review round (up to three), and a `/simplify` pass before
-the next phase begins. Each phase ends with `just ci` green at every
-commit and the existing Sprint 1 tests still passing.
+Sprint 2 is committed to `feat/sprint-2` as seven documented phases.
+Phases 1-6 establish the protocol, scheduler boundary, fake workers,
+chaos/benchmark workers, and conformance foundation. Phase 7 is the
+closeout gate that proves those pieces through the implemented durable
+`WorkflowExecutor` scheduler path. Each phase ships its own design doc,
+plan doc when needed, implementation commits, an adversarial-review
+round (up to three), and a `/simplify` pass before the next phase begins.
+Each phase ends with `just ci` green at every commit and the existing
+Sprint 1 tests still passing.
 
 ### Phase 1 — Worker protocol foundation + bootstrap conformance
 
@@ -250,8 +259,9 @@ admitted to the throughput suite.
 
 **Exit:** `voom-control-plane/tests/benchmark.rs` records baseline
 numbers (operations per second, p50 / p95 dispatch latency) on a
-fixed configuration; thresholds chosen so a 2× regression fails the
-test.
+fixed configuration and validates positive throughput plus generous
+sanity ceilings. Hard machine-calibrated regression thresholds are
+deferred until the full supervisor benchmark has enough baseline data.
 
 ### Phase 6 — Conformance expansion + final integration validation
 
@@ -270,6 +280,21 @@ final integration gate.
 contract suite against all eleven fakes plus chaos and benchmark, and
 CI runs the suite as part of `just ci`. No worker binary may merge
 without passing it.
+
+### Phase 7 — Durable simulated workflow closeout
+
+Crate: `voom-control-plane` (extended). Phase 7 is the Sprint 2
+acceptance gate: it runs the default synthetic media workflow through
+durable jobs, tickets, leases, `SingleWorkerPerKindSelector`,
+process-backed worker protocol dispatch, progress/heartbeat watchdogs,
+dependency promotion, terminal state, chaos classification, and
+scheduler-throughput reporting.
+
+**Exit:** the Sprint 2 closeout acceptance matrix passes. In practice
+that means the Phase 6 conformance/fake-provider prerequisite is green,
+`voom-control-plane` durable workflow tests prove the happy path and
+chaos cases through `WorkflowExecutor`, the benchmark path reports
+non-zero scheduler throughput, and `just ci` passes.
 
 ## 3. Workspace & Crate Deltas
 

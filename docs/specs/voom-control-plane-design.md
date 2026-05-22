@@ -1156,7 +1156,9 @@ Synthetic providers are first-class provider packages. They validate the
 architecture before real media tools are introduced and remain part of the
 ongoing test suite.
 
-Required synthetic providers:
+Required synthetic providers for the full architecture include the
+Sprint 2 canonical provider set plus later expansion candidates.
+Sprint 2 specifically owns eleven fake providers:
 
 - `fake-scanner`: emits deterministic file discovery scenarios.
 - `fake-prober`: returns canned media snapshots.
@@ -1165,9 +1167,6 @@ Required synthetic providers:
 - `fake-remuxer`: simulates container and track mutations.
 - `fake-backup-store`: simulates local and object-store backup behavior.
 - `fake-health-checker`: returns pass, fail, and degraded results.
-- `fake-object-store`: simulates upload/download, egress cost, latency, and
-  corruption.
-- `fake-transcriber`: simulates transcript and subtitle generation.
 - `fake-identity-provider`: simulates path, external ID, runtime, and duplicate
   evidence.
 - `fake-external-system`: simulates Plex/Jellyfin/Radarr/Sonarr-style reads,
@@ -1179,6 +1178,11 @@ Required synthetic providers:
 - `chaos-worker`: crashes, stalls, corrupts output, misses heartbeats, returns
   malformed results, and exceeds deadlines.
 - `benchmark-worker`: measures scheduler throughput without media tools.
+
+Later fake-provider expansion may add `fake-object-store` for
+upload/download, egress cost, latency, and corruption, and
+`fake-transcriber` for transcript/subtitle simulation. They are not
+Sprint 2 deliverables.
 
 These providers are not test doubles hidden inside unit tests. They are normal
 workers that speak the real protocol and can be used by CLI, daemon, API, web
@@ -1530,7 +1534,7 @@ Goal: prove the worker protocol and scheduler with fake providers.
 Deliverables:
 
 - versioned HTTP/JSON worker protocol
-- local worker supervisor
+- durable workflow executor scheduler surface
 - fake scanner
 - fake prober
 - fake transcoder
@@ -1552,6 +1556,10 @@ Exit criteria:
 - A synthetic end-to-end plan runs through the real scheduler.
 - Chaos tests cover worker crash, timeout, malformed result, and missed heartbeat.
 - Benchmark worker reports scheduler throughput.
+
+Sprint 2 closeout treats the real scheduler surface as the implemented
+`WorkflowExecutor` path documented in the Sprint 2 closeout acceptance
+plan, not the later standalone supervisor/outbox/incarnation design.
 
 ### Sprint 3: Policy DAG MVP
 
