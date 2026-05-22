@@ -2537,6 +2537,7 @@ version = "0.1.0-dev"
 dependencies = [
  "rand 0.9.4",
  "secrecy",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",

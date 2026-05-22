@@ -20,6 +20,7 @@ test-support = ["voom-store/test-support"]
 
 [dependencies]
 rand = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 time = { workspace = true }
@@ -27,6 +28,7 @@ tokio = { workspace = true, features = ["sync"] }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 voom-store = { workspace = true }
+voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
 secrecy = { workspace = true }
@@ -35,4 +37,3 @@ tokio = { workspace = true, features = ["io-util", "process", "time"] }
 # FrozenRng/SeededRng from voom-core::rng_test_support, used by lease
 # case tests to pin the backoff jitter.
 voom-core = { workspace = true, features = ["test-support"] }
-voom-worker-protocol = { workspace = true }

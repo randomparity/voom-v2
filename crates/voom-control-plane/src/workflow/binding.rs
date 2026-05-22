@@ -1,0 +1,100 @@
+use serde_json::{Value, json};
+use voom_worker_protocol::OperationKind;
+
+use super::ticket_payload::operation_name;
+use super::timing::EffectiveTiming;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchContext {
+    pub branch_id: String,
+    pub path: String,
+    pub probe_codec: Option<String>,
+}
+
+pub fn render_default_payload(
+    operation: OperationKind,
+    branch: &BranchContext,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    let mut payload = match operation {
+        OperationKind::ScanLibrary => json!({
+            "path": "/library",
+            "fan_out_count": 3,
+        }),
+        OperationKind::ProbeFile | OperationKind::HashFile | OperationKind::IdentifyMedia => {
+            json!({ "path": branch.path })
+        }
+        OperationKind::ScoreQuality => {
+            let codec = branch.probe_codec.as_ref().ok_or_else(|| {
+                BindingError::new(format!(
+                    "probe codec missing for branch `{}`",
+                    branch.branch_id
+                ))
+            })?;
+            json!({
+                "path": branch.path,
+                "profile": "default",
+                "codec": codec,
+            })
+        }
+        OperationKind::Remux => json!({
+            "path": branch.path,
+            "container": "mkv",
+        }),
+        OperationKind::TranscodeVideo => json!({
+            "path": branch.path,
+            "profile": "default",
+            "target_codec": "h265",
+        }),
+        OperationKind::BackUpFile
+        | OperationKind::VerifyArtifact
+        | OperationKind::CommitArtifact
+        | OperationKind::SyncExternalSystem
+        | OperationKind::EditTracks
+        | OperationKind::ExtractAudio
+        | OperationKind::TranscribeAudio
+        | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
+    };
+
+    let Some(object) = payload.as_object_mut() else {
+        return Err(BindingError::new("rendered payload must be a JSON object"));
+    };
+    object.insert("operation".to_owned(), json!(operation_name(operation)));
+    object.insert("branch_id".to_owned(), json!(branch.branch_id));
+    object.insert("duration_ms".to_owned(), json!(timing.duration_ms));
+    object.insert(
+        "progress_interval_ms".to_owned(),
+        json!(timing.progress_interval_ms),
+    );
+    Ok(payload)
+}
+
+#[must_use]
+pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
+    BranchContext {
+        branch_id: branch_id.to_owned(),
+        path: format!("/library/{branch_id}.mkv"),
+        probe_codec: Some(codec.to_owned()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingError {
+    detail: String,
+}
+
+impl BindingError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for BindingError {}

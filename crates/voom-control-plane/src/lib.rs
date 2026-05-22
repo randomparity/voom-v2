@@ -28,6 +28,7 @@ use voom_store::repo::{
 use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod cases;
+pub mod workflow;
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
 /// `LeaseRepo::fail` (and any future caller that needs full-jitter
