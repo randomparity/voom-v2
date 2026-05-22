@@ -226,7 +226,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
         .bind(&input.slug)
         .bind(&input.display_name)
         .bind(i64::from(input.schema_version))
-        .bind(source_kind_as_str(input.source_kind))
+        .bind(input.source_kind.as_str())
         .bind(&created_at)
         .bind(&input.description)
         .execute(&mut **tx)
@@ -257,7 +257,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
             )
             .bind(i64_from_u64(set_id.0))
             .bind(&target.synthetic_key)
-            .bind(target_kind_as_str(target.target_kind))
+            .bind(target.target_kind.as_str())
             .bind(&target.display_name)
             .execute(&mut **tx)
             .await
@@ -355,7 +355,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
             .bind(ids.file_location_id)
             .bind(ids.synthetic_target_id)
             .bind(&bundle.role)
-            .bind(bundle_target_state_as_str(bundle.desired_state))
+            .bind(bundle.desired_state.as_str())
             .bind(&bundle.language)
             .bind(&bundle.label)
             .bind(&bundle.disposition)
@@ -420,7 +420,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
             .bind(&issue.kind)
             .bind(issue.severity.as_str())
             .bind(issue.priority.as_str())
-            .bind(issue_input_state_as_str(issue.state))
+            .bind(issue.state.as_str())
             .bind(&issue.reason)
             .bind(serialize_json(&issue.provenance, "provenance")?)
             .bind(issue.existing_issue_id.map(|id| i64_from_u64(id.0)))
@@ -464,36 +464,43 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
     }
 
     async fn list_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError> {
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| VoomError::Database(format!("acquire: {e}")))?;
         let rows = sqlx::query(
             "SELECT id, slug, display_name, schema_version, source_kind, created_at, description, epoch \
              FROM policy_input_sets ORDER BY slug ASC, id ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| VoomError::Database(format!("policy_input_sets list: {e}")))?;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let root = row_to_root(row)?;
-            let mut conn = self
-                .pool
-                .acquire()
-                .await
-                .map_err(|e| VoomError::Database(format!("acquire: {e}")))?;
-            let fixture_labels = load_fixture_labels(&mut conn, root.id).await?;
-            out.push(PolicyInputSetSummary {
-                id: root.id,
-                slug: root.slug,
-                display_name: root.display_name,
-                schema_version: root.schema_version,
-                source_kind: root.source_kind,
-                created_at: root.created_at,
-                description: root.description,
-                epoch: root.epoch,
-                fixture_labels,
-            });
-        }
-        Ok(out)
+        let roots = rows
+            .iter()
+            .map(row_to_root)
+            .collect::<Result<Vec<_>, _>>()?;
+        let labels_by_set =
+            load_fixture_labels_for_sets(&mut conn, roots.iter().map(|root| root.id)).await?;
+
+        Ok(roots
+            .into_iter()
+            .map(|root| {
+                let fixture_labels = labels_by_set.get(&root.id).cloned().unwrap_or_default();
+                PolicyInputSetSummary {
+                    id: root.id,
+                    slug: root.slug,
+                    display_name: root.display_name,
+                    schema_version: root.schema_version,
+                    source_kind: root.source_kind,
+                    created_at: root.created_at,
+                    description: root.description,
+                    epoch: root.epoch,
+                    fixture_labels,
+                }
+            })
+            .collect())
     }
 }
 
@@ -586,6 +593,52 @@ async fn load_fixture_labels(
                 .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))
         })
         .collect()
+}
+
+async fn load_fixture_labels_for_sets<I>(
+    conn: &mut SqliteConnection,
+    set_ids: I,
+) -> Result<HashMap<PolicyInputSetId, Vec<String>>, VoomError>
+where
+    I: IntoIterator<Item = PolicyInputSetId>,
+{
+    let set_ids = set_ids.into_iter().collect::<Vec<_>>();
+    if set_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = (0..set_ids.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT policy_input_set_id, label FROM policy_input_set_fixture_labels \
+         WHERE policy_input_set_id IN ({placeholders}) \
+         ORDER BY policy_input_set_id ASC, label ASC"
+    );
+    let mut query = sqlx::query(&sql);
+    for set_id in &set_ids {
+        query = query.bind(i64_from_u64(set_id.0));
+    }
+
+    let rows = query
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| VoomError::Database(format!("policy_input_set_fixture_labels list: {e}")))?;
+    let mut labels = HashMap::<PolicyInputSetId, Vec<String>>::new();
+    for row in &rows {
+        let set_id: i64 = row
+            .try_get("policy_input_set_id")
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+        let label = row
+            .try_get("label")
+            .map_err(|e| map_row_err("policy_input_set_fixture_labels", &e))?;
+        labels
+            .entry(PolicyInputSetId(u64_from_i64(set_id)))
+            .or_default()
+            .push(label);
+    }
+    Ok(labels)
 }
 
 async fn load_synthetic_targets(
@@ -1057,44 +1110,6 @@ fn json_string<T: serde::Serialize>(value: &T, field: &'static str) -> Result<St
 fn parse_wire<T: DeserializeOwned>(value: &str, field: &'static str) -> Result<T, VoomError> {
     serde_json::from_value(JsonValue::String(value.to_owned()))
         .map_err(|e| VoomError::Database(format!("{field} {value:?} not in vocab: {e}")))
-}
-
-fn source_kind_as_str(value: PolicyInputSourceKind) -> &'static str {
-    match value {
-        PolicyInputSourceKind::Fixture => "fixture",
-        PolicyInputSourceKind::Test => "test",
-        PolicyInputSourceKind::Imported => "imported",
-        PolicyInputSourceKind::Manual => "manual",
-    }
-}
-
-fn target_kind_as_str(value: TargetKind) -> &'static str {
-    match value {
-        TargetKind::MediaWork => "media_work",
-        TargetKind::MediaVariant => "media_variant",
-        TargetKind::AssetBundle => "asset_bundle",
-        TargetKind::FileAsset => "file_asset",
-        TargetKind::FileVersion => "file_version",
-        TargetKind::FileLocation => "file_location",
-    }
-}
-
-fn bundle_target_state_as_str(value: BundleTargetState) -> &'static str {
-    match value {
-        BundleTargetState::Required => "required",
-        BundleTargetState::Allowed => "allowed",
-        BundleTargetState::Forbidden => "forbidden",
-        BundleTargetState::Preferred => "preferred",
-    }
-}
-
-fn issue_input_state_as_str(value: IssueInputState) -> &'static str {
-    match value {
-        IssueInputState::Open => "open",
-        IssueInputState::Accepted => "accepted",
-        IssueInputState::Suppressed => "suppressed",
-        IssueInputState::Planned => "planned",
-    }
 }
 
 #[cfg(test)]

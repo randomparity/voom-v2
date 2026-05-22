@@ -9,6 +9,18 @@ pub enum PolicyInputSourceKind {
     Manual,
 }
 
+impl PolicyInputSourceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixture => "fixture",
+            Self::Test => "test",
+            Self::Imported => "imported",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
@@ -18,6 +30,20 @@ pub enum TargetKind {
     FileAsset,
     FileVersion,
     FileLocation,
+}
+
+impl TargetKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MediaWork => "media_work",
+            Self::MediaVariant => "media_variant",
+            Self::AssetBundle => "asset_bundle",
+            Self::FileAsset => "file_asset",
+            Self::FileVersion => "file_version",
+            Self::FileLocation => "file_location",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -96,6 +122,18 @@ pub enum BundleTargetState {
     Preferred,
 }
 
+impl BundleTargetState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Allowed => "allowed",
+            Self::Forbidden => "forbidden",
+            Self::Preferred => "preferred",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BundleTargetInput {
     pub ordinal: u32,
@@ -124,6 +162,18 @@ pub enum IssueInputState {
     Accepted,
     Suppressed,
     Planned,
+}
+
+impl IssueInputState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Accepted => "accepted",
+            Self::Suppressed => "suppressed",
+            Self::Planned => "planned",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

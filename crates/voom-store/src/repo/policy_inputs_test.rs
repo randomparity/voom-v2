@@ -40,6 +40,29 @@ async fn create_get_and_list_policy_input_set() {
 }
 
 #[tokio::test]
+async fn list_policy_input_sets_groups_fixture_labels_for_all_sets() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqlitePolicyInputRepo::new(pool);
+    let mut b = compliant_fixture();
+    b.slug = "b-summary".to_owned();
+    b.fixture_labels = vec!["z_label".to_owned(), "b_label".to_owned()];
+    let mut a = load_fixture(FixtureName::SyntheticNoncompliantTranscodeNeeded).unwrap();
+    a.slug = "a-summary".to_owned();
+    a.fixture_labels = vec!["m_label".to_owned(), "a_label".to_owned()];
+
+    repo.create_input_set(b).await.unwrap();
+    repo.create_input_set(a).await.unwrap();
+
+    let listed = repo.list_input_sets().await.unwrap();
+
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].slug, "a-summary");
+    assert_eq!(listed[0].fixture_labels, ["a_label", "m_label"]);
+    assert_eq!(listed[1].slug, "b-summary");
+    assert_eq!(listed[1].fixture_labels, ["b_label", "z_label"]);
+}
+
+#[tokio::test]
 async fn duplicate_slug_is_rejected() {
     let (pool, _tmp) = pool().await;
     let repo = SqlitePolicyInputRepo::new(pool);

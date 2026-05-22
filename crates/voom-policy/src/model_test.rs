@@ -52,6 +52,31 @@ fn valid_minimal_input_set_passes() {
 }
 
 #[test]
+fn policy_enum_as_str_returns_wire_values() {
+    assert_eq!(PolicyInputSourceKind::Fixture.as_str(), "fixture");
+    assert_eq!(PolicyInputSourceKind::Test.as_str(), "test");
+    assert_eq!(PolicyInputSourceKind::Imported.as_str(), "imported");
+    assert_eq!(PolicyInputSourceKind::Manual.as_str(), "manual");
+
+    assert_eq!(TargetKind::MediaWork.as_str(), "media_work");
+    assert_eq!(TargetKind::MediaVariant.as_str(), "media_variant");
+    assert_eq!(TargetKind::AssetBundle.as_str(), "asset_bundle");
+    assert_eq!(TargetKind::FileAsset.as_str(), "file_asset");
+    assert_eq!(TargetKind::FileVersion.as_str(), "file_version");
+    assert_eq!(TargetKind::FileLocation.as_str(), "file_location");
+
+    assert_eq!(BundleTargetState::Required.as_str(), "required");
+    assert_eq!(BundleTargetState::Allowed.as_str(), "allowed");
+    assert_eq!(BundleTargetState::Forbidden.as_str(), "forbidden");
+    assert_eq!(BundleTargetState::Preferred.as_str(), "preferred");
+
+    assert_eq!(IssueInputState::Open.as_str(), "open");
+    assert_eq!(IssueInputState::Accepted.as_str(), "accepted");
+    assert_eq!(IssueInputState::Suppressed.as_str(), "suppressed");
+    assert_eq!(IssueInputState::Planned.as_str(), "planned");
+}
+
+#[test]
 fn empty_slug_is_rejected() {
     let mut input = minimal_input_set();
     input.slug = "   ".to_owned();
