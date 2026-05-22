@@ -277,11 +277,6 @@ impl<'a> Validator<'a> {
                 }
                 "when" => {
                     self.validate_condition(operation, text.as_ref());
-                    if let StatementAst::Block { statements, .. } = operation {
-                        for statement in statements {
-                            self.validate_nested_operation(statement);
-                        }
-                    }
                 }
                 "rules" => self.validate_rules(operation, text.as_ref()),
                 "extend" => self.error(

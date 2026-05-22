@@ -158,3 +158,17 @@ fn rejects_deferred_execution_inside_rule_block() {
         .contains(&"deferred_execution_operation".to_owned())
     );
 }
+
+#[test]
+fn reports_nested_when_diagnostic_once() {
+    let diagnostics =
+        codes("policy \"p\" { phase a { when exists audio { transcode video to hevc {} } } }");
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|code| *code == "deferred_execution_operation")
+            .count(),
+        1
+    );
+}
