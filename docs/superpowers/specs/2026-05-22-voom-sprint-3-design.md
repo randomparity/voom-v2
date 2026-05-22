@@ -255,13 +255,18 @@ per input set. Child rows should preserve deterministic ordering with an
 integer `ordinal` column or insertion-order query rule, so JSON and DB
 round trips produce stable fixture output.
 
-Synthetic targets must use a `(policy_input_set_id, synthetic_key)`
-unique constraint. Child tables that support synthetic targets must
-store enough shape to enforce same-input-set lookup of the declared
-target kind. The implementation may enforce that cross-table reference
-through a foreign-key-friendly synthetic-target id or through repository
-validation plus SQL uniqueness, but it must be impossible for persisted
-fixture data to use an undeclared synthetic key.
+Synthetic targets must have their own stable `id` plus a
+`(policy_input_set_id, synthetic_key)` unique constraint. Child tables
+that support synthetic targets must store `synthetic_target_id` when
+using a synthetic target, with a foreign key to
+`policy_input_synthetic_targets(id)`. Repository validation alone is not
+acceptable for this invariant.
+
+Each child input row must use a SQL-enforced exclusive target shape:
+either exactly one durable target id of the correct target kind, or
+exactly one `synthetic_target_id`, never both. Persisted fixture data
+must be unable to reference an undeclared synthetic target or mix a
+durable target id with a synthetic target id.
 
 ## 6. Validation
 
@@ -317,6 +322,8 @@ Sprint 3 verification includes:
 - `PolicyInputRepo` repository round-trip tests.
 - Transaction rollback test proving an invalid child row leaves no
   partial input set.
+- Raw SQL constraint tests proving undeclared synthetic target ids and
+  mixed durable/synthetic target shapes fail at SQLite constraint time.
 - `voom-control-plane` use-case tests for create/get/list.
 - Documentation scan for incomplete-work markers.
 - `just ci`.
