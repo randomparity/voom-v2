@@ -184,7 +184,11 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::BlockedByPendingCommit
         | ErrorCode::BlockedByClosureGrew
         | ErrorCode::StaleIdentityEvidence
-        | ErrorCode::ClosureResolutionIncomplete => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::ClosureResolutionIncomplete
+        // Worker-protocol codes (Sprint 2) — not on the health path.
+        | ErrorCode::WorkerRetired
+        | ErrorCode::WorkerIncarnationStale
+        | ErrorCode::AmbiguousWorkerSelection => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, err.code(), err.to_string(), hint)
 }

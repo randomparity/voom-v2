@@ -7,5 +7,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+voom-core.workspace = true
+voom-worker-protocol.workspace = true
+
 [lints]
 workspace = true

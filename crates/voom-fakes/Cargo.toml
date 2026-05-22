@@ -1,0 +1,77 @@
+[package]
+name = "voom-fakes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+autobins = false
+
+[dependencies]
+voom-core.workspace = true
+voom-worker-protocol.workspace = true
+voom-fake-support.workspace = true
+
+chrono.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time", "process"] }
+
+[[bin]]
+name = "fake-scanner"
+path = "src/bin/fake_scanner.rs"
+
+[[bin]]
+name = "fake-prober"
+path = "src/bin/fake_prober.rs"
+
+[[bin]]
+name = "fake-transcoder"
+path = "src/bin/fake_transcoder.rs"
+
+[[bin]]
+name = "fake-remuxer"
+path = "src/bin/fake_remuxer.rs"
+
+[[bin]]
+name = "fake-backup-store"
+path = "src/bin/fake_backup_store.rs"
+
+[[bin]]
+name = "fake-health-checker"
+path = "src/bin/fake_health_checker.rs"
+
+[[bin]]
+name = "fake-identity-provider"
+path = "src/bin/fake_identity_provider.rs"
+
+[[bin]]
+name = "fake-external-system"
+path = "src/bin/fake_external_system.rs"
+
+[[bin]]
+name = "fake-quality-scorer"
+path = "src/bin/fake_quality_scorer.rs"
+
+[[bin]]
+name = "fake-issue-provider"
+path = "src/bin/fake_issue_provider.rs"
+
+[[bin]]
+name = "fake-use-lease-provider"
+path = "src/bin/fake_use_lease_provider.rs"
+
+[[bin]]
+name = "chaos-worker"
+path = "src/bin/chaos_worker.rs"
+
+[[bin]]
+name = "benchmark-worker"
+path = "src/bin/benchmark_worker.rs"
+
+[lints]
+workspace = true

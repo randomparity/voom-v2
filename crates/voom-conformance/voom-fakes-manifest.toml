@@ -1,0 +1,199 @@
+# Conformance harness manifest — Sprint 2 Phase 6 scaffold.
+#
+# Lists worker binaries the conformance suite runs against. Binaries
+# in [scaffold] are placeholders (Phase 3 / 4 / 5 stubs) and are
+# skipped until their real implementations land.
+#
+# `voom-conformance::Harness` will consume this file in a follow-up
+# commit to gate Phase 3 / 4 / 5 / 6 follow-up work.
+
+[[binaries]]
+name = "echo-worker"
+target = "echo-worker"
+purpose = "bootstrap conformance - validates the harness against itself"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+
+[[binaries]]
+name = "chaos-worker"
+target = "chaos-worker"
+purpose = "phase 4 chaos worker - baseline conformance and process-backed fault modes"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+
+[[binaries]]
+name = "benchmark-worker"
+target = "benchmark-worker"
+purpose = "phase 5 benchmark worker - baseline conformance and bounded worker-level metric frames"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/example.mkv" }
+invalid_payload = { }
+
+[[binaries]]
+name = "fake-scanner"
+target = "fake-scanner"
+purpose = "phase 6 scanner fake - deterministic library discovery"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "scan_library"
+valid_payload = { path = "/library", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries]]
+name = "fake-prober"
+target = "fake-prober"
+purpose = "phase 6 prober fake - deterministic media probing"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "probe_file"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries.operations]]
+operation = "hash_file"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries]]
+name = "fake-transcoder"
+target = "fake-transcoder"
+purpose = "phase 6 transcoder fake - deterministic transform reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "transcode_video"
+valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+
+[[binaries.operations]]
+operation = "extract_audio"
+valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+
+[[binaries.operations]]
+operation = "transcribe_audio"
+valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+
+[[binaries]]
+name = "fake-remuxer"
+target = "fake-remuxer"
+purpose = "phase 6 remuxer fake - deterministic container changes"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "remux"
+valid_payload = { path = "/library/movie.mkv", container = "mkv", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", container = "bad_container" }
+
+[[binaries]]
+name = "fake-backup-store"
+target = "fake-backup-store"
+purpose = "phase 6 backup fake - deterministic artifact store reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "back_up_file"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries.operations]]
+operation = "delete_artifact"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries]]
+name = "fake-health-checker"
+target = "fake-health-checker"
+purpose = "phase 6 health fake - deterministic artifact verification"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "verify_artifact"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries]]
+name = "fake-identity-provider"
+target = "fake-identity-provider"
+purpose = "phase 6 identity fake - deterministic media identity reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "identify_media"
+valid_payload = { path = "/library/movie.mkv", scenario = "default" }
+invalid_payload = { scenario = "missing_path" }
+
+[[binaries]]
+name = "fake-external-system"
+target = "fake-external-system"
+purpose = "phase 6 external-system fake - deterministic sync reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "sync_external_system"
+valid_payload = { path = "/library/movie.mkv", system = "plex", action = "refresh", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", system = "unknown", action = "refresh" }
+
+[[binaries]]
+name = "fake-quality-scorer"
+target = "fake-quality-scorer"
+purpose = "phase 6 quality fake - deterministic quality scoring"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "score_quality"
+valid_payload = { path = "/library/movie.mkv", profile = "default", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", profile = "unknown" }
+
+[[binaries]]
+name = "fake-issue-provider"
+target = "fake-issue-provider"
+purpose = "phase 6 issue fake - deterministic commit reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "commit_artifact"
+valid_payload = { path = "/library/movie.mkv", reason = "quality_regression", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", reason = "unknown" }
+
+[[binaries]]
+name = "fake-use-lease-provider"
+target = "fake-use-lease-provider"
+purpose = "phase 6 use-lease fake - deterministic edit-track lease reports"
+status = "active"
+required = true
+
+[[binaries.operations]]
+operation = "edit_tracks"
+valid_payload = { path = "/library/movie.mkv", holder = "manual", reason = "playback", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", holder = "manual", reason = "unknown" }
+
+[scaffold]
+binaries = []

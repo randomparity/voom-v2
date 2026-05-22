@@ -97,7 +97,11 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::BlockedByPendingCommit
         | ErrorCode::BlockedByClosureGrew
         | ErrorCode::StaleIdentityEvidence
-        | ErrorCode::ClosureResolutionIncomplete => None,
+        | ErrorCode::ClosureResolutionIncomplete
+        // Worker-protocol codes (Sprint 2) — health command never reaches these.
+        | ErrorCode::WorkerRetired
+        | ErrorCode::WorkerIncarnationStale
+        | ErrorCode::AmbiguousWorkerSelection => None,
     }
 }
 
