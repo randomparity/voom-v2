@@ -550,12 +550,20 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_rules(&mut self, statement: &StatementAst, text: &str) {
-        let mode = words(text).get(1).copied().unwrap_or_default();
+        let tokens = words(text);
+        let mode = tokens.get(1).copied().unwrap_or_default();
         if !matches!(mode, "first" | "all") {
             self.error(
                 DiagnosticCode::InvalidRuleMatchMode,
                 statement.span(),
                 "rules mode must be first or all",
+            );
+        }
+        if tokens.len() > 2 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "rules mode does not accept extra arguments",
             );
         }
         if let StatementAst::Block { statements, .. } = statement {

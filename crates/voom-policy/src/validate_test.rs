@@ -119,6 +119,14 @@ fn accepts_rules_first_mode() {
 }
 
 #[test]
+fn rejects_rules_with_extra_mode_tokens() {
+    assert!(
+        codes("policy \"p\" { phase a { rules first all { rule \"r\" {} } } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_policy_without_phases() {
     let ast = parse_policy_source("policy \"p\" {}").unwrap();
     let result = validate_policy_ast("policy \"p\" {}", &ast);
