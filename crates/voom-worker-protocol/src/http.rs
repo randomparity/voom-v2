@@ -16,13 +16,16 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::Buf;
 use bytes::Bytes;
-use http_body::Body;
+use http_body::{Body, Frame};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
@@ -34,9 +37,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use tokio::io::AsyncRead;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
-use crate::envelope::{OperationRequest, OperationResponse, ProtocolError};
+use crate::envelope::{OperationRequest, OperationResponse, ProgressFrame, ProtocolError};
 use crate::handshake::{HandshakeRequest, HandshakeResponse, negotiate};
 use crate::ndjson::NdjsonReader;
 use crate::transport::{ClientHandle, DispatchStream, ServerHandle, ServerRunning};
@@ -54,16 +58,229 @@ pub(crate) type ResponseBody = http_body_util::combinators::BoxBody<Bytes, Infal
 /// What the worker's handler returns from one `/v1/operations` call.
 pub struct OperationDispatch {
     pub response: OperationResponse,
-    /// NDJSON body bytes (concatenated frames, each terminated by `\n`).
-    pub body: Vec<u8>,
+    pub body: OperationBody,
+}
+
+impl OperationDispatch {
+    /// Build a dispatch with already-buffered NDJSON frame bytes.
+    #[must_use]
+    pub fn buffered(response: OperationResponse, body: Vec<u8>) -> Self {
+        Self {
+            response,
+            body: OperationBody::Buffered(body),
+        }
+    }
+
+    /// Build a dispatch whose NDJSON frame bytes are written live.
+    #[must_use]
+    pub fn streaming(response: OperationResponse) -> (StreamingFrameWriter, Self) {
+        let (writer, body) = StreamingBody::new();
+        (
+            writer,
+            Self {
+                response,
+                body: OperationBody::Streaming(body),
+            },
+        )
+    }
+}
+
+/// NDJSON frame body returned by an operation handler.
+pub enum OperationBody {
+    Buffered(Vec<u8>),
+    Streaming(StreamingBody),
 }
 
 impl std::fmt::Debug for OperationDispatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OperationDispatch")
             .field("response", &self.response)
-            .field("body_len", &self.body.len())
+            .field("body", &self.body)
             .finish()
+    }
+}
+
+impl std::fmt::Debug for OperationBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Buffered(body) => f
+                .debug_struct("OperationBody::Buffered")
+                .field("body_len", &body.len())
+                .finish(),
+            Self::Streaming(_) => f
+                .debug_struct("OperationBody::Streaming")
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Writer half for a live operation response stream.
+pub struct StreamingFrameWriter {
+    sender: UnboundedSender<StreamingMessage>,
+    shared: Arc<StreamingShared>,
+}
+
+impl StreamingFrameWriter {
+    pub async fn write_frame(&mut self, frame: ProgressFrame) -> Result<(), ProtocolError> {
+        let terminal = frame.is_terminal();
+        let mut bytes = serde_json::to_vec(&frame).map_err(|e| ProtocolError::MalformedFrame {
+            detail: format!("json encode: {e}"),
+        })?;
+        bytes.push(b'\n');
+        self.sender
+            .send(StreamingMessage::Frame {
+                bytes: Bytes::from(bytes.clone()),
+                terminal,
+            })
+            .map_err(|_| ProtocolError::MalformedFrame {
+                detail: "stream receiver closed".to_owned(),
+            })?;
+        {
+            let mut cached = self
+                .shared
+                .cached_body
+                .lock()
+                .map_err(|_| ProtocolError::InternalServerError)?;
+            cached.extend_from_slice(&bytes);
+        }
+        if terminal {
+            self.shared.terminal_sent.store(true, Ordering::SeqCst);
+            self.shared.complete_if_ready()?;
+        }
+        Ok(())
+    }
+
+    pub async fn finish(&mut self) -> Result<(), ProtocolError> {
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for StreamingFrameWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingFrameWriter")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for StreamingFrameWriter {
+    fn drop(&mut self) {
+        if self.shared.terminal_sent.load(Ordering::SeqCst) {
+            return;
+        }
+        let _ = self.sender.send(StreamingMessage::Abort);
+        self.shared.clear_active();
+    }
+}
+
+/// Receiver half for a live operation response stream.
+pub struct StreamingBody {
+    receiver: UnboundedReceiver<StreamingMessage>,
+    shared: Arc<StreamingShared>,
+}
+
+impl StreamingBody {
+    fn new() -> (StreamingFrameWriter, Self) {
+        let (sender, receiver) = unbounded_channel();
+        let shared = Arc::new(StreamingShared {
+            terminal_sent: AtomicBool::new(false),
+            cached_body: Mutex::new(Vec::new()),
+            finalizer: Mutex::new(None),
+        });
+        (
+            StreamingFrameWriter {
+                sender,
+                shared: shared.clone(),
+            },
+            Self { receiver, shared },
+        )
+    }
+
+    fn set_finalizer(&self, finalizer: StreamingFinalizer) -> Result<(), ProtocolError> {
+        {
+            let mut current = self
+                .shared
+                .finalizer
+                .lock()
+                .map_err(|_| ProtocolError::InternalServerError)?;
+            *current = Some(finalizer);
+        }
+        if self.shared.terminal_sent.load(Ordering::SeqCst) {
+            self.shared.complete_if_ready()?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for StreamingBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingBody").finish_non_exhaustive()
+    }
+}
+
+enum StreamingMessage {
+    Frame { bytes: Bytes, terminal: bool },
+    Abort,
+}
+
+struct StreamingShared {
+    terminal_sent: AtomicBool,
+    cached_body: Mutex<Vec<u8>>,
+    finalizer: Mutex<Option<StreamingFinalizer>>,
+}
+
+impl StreamingShared {
+    fn complete_if_ready(&self) -> Result<(), ProtocolError> {
+        let finalizer = self
+            .finalizer
+            .lock()
+            .map_err(|_| ProtocolError::InternalServerError)?
+            .clone();
+        let Some(finalizer) = finalizer else {
+            return Ok(());
+        };
+        let body = self
+            .cached_body
+            .lock()
+            .map_err(|_| ProtocolError::InternalServerError)?
+            .clone();
+        finalizer.complete(body)
+    }
+
+    fn clear_active(&self) {
+        if let Ok(finalizer) = self.finalizer.lock()
+            && let Some(finalizer) = finalizer.as_ref()
+        {
+            finalizer.clear_active();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StreamingFinalizer {
+    cache: Arc<Mutex<IdempotencyCache>>,
+    key: String,
+    hash: [u8; 32],
+    response: OperationResponse,
+}
+
+impl StreamingFinalizer {
+    fn complete(&self, body: Vec<u8>) -> Result<(), ProtocolError> {
+        let cached = CachedResponse {
+            response: self.response.clone(),
+            body,
+        };
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| ProtocolError::InternalServerError)?;
+        cache.complete(&self.key, self.hash, cached);
+        Ok(())
+    }
+
+    fn clear_active(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear_active(&self.key, self.hash);
+        }
     }
 }
 
@@ -261,59 +478,81 @@ async fn handle_operations(
     }
     let body_hash = blake3::hash(body);
     let body_hash_bytes = *body_hash.as_bytes();
-    let cached = match cache.lock() {
-        Ok(cache) => cache.lookup(&idempotency_key, body_hash_bytes),
-        Err(_) => {
-            return json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &ProtocolError::InternalServerError,
-            );
-        }
-    };
-    match cached {
-        IdempotencyLookup::Hit(cached) => {
-            return operation_response(&cached.response, &cached.body);
-        }
-        IdempotencyLookup::Duplicate { key } => {
-            return json_error(
-                StatusCode::BAD_REQUEST,
-                &ProtocolError::DuplicateIdempotencyKey {
-                    key,
-                    original_status: "completed".to_owned(),
-                },
-            );
-        }
-        IdempotencyLookup::Miss => {}
-    }
 
     let req: OperationRequest = match decode_body(body) {
         Ok(r) => r,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
     };
-    let dispatched = match (handler)(req).await {
-        Ok(d) => d,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e),
-    };
-    let cached_response = CachedResponse {
-        response: dispatched.response.clone(),
-        body: dispatched.body.clone(),
-    };
-    match cache.lock() {
-        Ok(mut cache) => {
-            if let Err(e) =
-                cache.record_miss(idempotency_key, body_hash_bytes, cached_response.clone())
-            {
-                return json_error(StatusCode::BAD_REQUEST, &e);
-            }
-        }
+    let begin = match cache.lock() {
+        Ok(mut cache) => cache.begin(idempotency_key.clone(), body_hash_bytes),
         Err(_) => {
             return json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &ProtocolError::InternalServerError,
             );
         }
+    };
+    match begin {
+        IdempotencyBegin::Replay(cached) => {
+            return operation_response(&cached.response, &cached.body);
+        }
+        IdempotencyBegin::Duplicate {
+            key,
+            original_status,
+        } => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                &ProtocolError::DuplicateIdempotencyKey {
+                    key,
+                    original_status,
+                },
+            );
+        }
+        IdempotencyBegin::Started => {}
     }
-    operation_response(&dispatched.response, &dispatched.body)
+
+    let dispatched = match (handler)(req).await {
+        Ok(d) => d,
+        Err(e) => {
+            if let Ok(mut cache) = cache.lock() {
+                cache.clear_active(&idempotency_key, body_hash_bytes);
+            }
+            return json_error(StatusCode::BAD_REQUEST, &e);
+        }
+    };
+    match dispatched.body {
+        OperationBody::Buffered(body) => {
+            let cached_response = CachedResponse {
+                response: dispatched.response.clone(),
+                body: body.clone(),
+            };
+            match cache.lock() {
+                Ok(mut cache) => {
+                    cache.complete(&idempotency_key, body_hash_bytes, cached_response);
+                }
+                Err(_) => {
+                    return json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &ProtocolError::InternalServerError,
+                    );
+                }
+            }
+            operation_response(&dispatched.response, &body)
+        }
+        OperationBody::Streaming(body) => {
+            let response = dispatched.response;
+            let finalizer = StreamingFinalizer {
+                cache: cache.clone(),
+                key: idempotency_key,
+                hash: body_hash_bytes,
+                response: response.clone(),
+            };
+            if let Err(e) = body.set_finalizer(finalizer) {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, &e);
+            }
+            operation_streaming_response(response, body)
+        }
+    }
 }
 
 fn operation_response(response: &OperationResponse, body_bytes: &[u8]) -> Response<ResponseBody> {
@@ -331,6 +570,75 @@ fn operation_response(response: &OperationResponse, body_bytes: &[u8]) -> Respon
         .header(CONTENT_TYPE, "application/x-ndjson")
         .body(body)
         .unwrap_or_else(|_| plain_status(StatusCode::INTERNAL_SERVER_ERROR, "build failed"))
+}
+
+fn operation_streaming_response(
+    response: OperationResponse,
+    body: StreamingBody,
+) -> Response<ResponseBody> {
+    let Ok(mut response_line) = serde_json::to_vec(&response) else {
+        return plain_status(StatusCode::INTERNAL_SERVER_ERROR, "encode failed");
+    };
+    response_line.push(b'\n');
+    let body = LiveOperationBody {
+        response_line: Some(Bytes::from(response_line)),
+        streaming: body,
+        aborted: false,
+    }
+    .boxed();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/x-ndjson")
+        .body(body)
+        .unwrap_or_else(|_| plain_status(StatusCode::INTERNAL_SERVER_ERROR, "build failed"))
+}
+
+struct LiveOperationBody {
+    response_line: Option<Bytes>,
+    streaming: StreamingBody,
+    aborted: bool,
+}
+
+impl Body for LiveOperationBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if let Some(response_line) = self.response_line.take() {
+            return Poll::Ready(Some(Ok(Frame::data(response_line))));
+        }
+        if self.aborted {
+            return Poll::Ready(None);
+        }
+
+        match self.streaming.receiver.poll_recv(cx) {
+            Poll::Ready(Some(StreamingMessage::Frame { bytes, terminal })) => {
+                if terminal {
+                    let _ = self.streaming.shared.complete_if_ready();
+                }
+                Poll::Ready(Some(Ok(Frame::data(bytes))))
+            }
+            Poll::Ready(Some(StreamingMessage::Abort)) => {
+                self.streaming.shared.clear_active();
+                self.aborted = true;
+                Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"worker aborted")))))
+            }
+            Poll::Ready(None) => {
+                if !self.streaming.shared.terminal_sent.load(Ordering::SeqCst) {
+                    self.streaming.shared.clear_active();
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.aborted
+    }
 }
 
 fn require_idempotency_key(headers: &hyper::HeaderMap) -> Result<String, ProtocolError> {
@@ -373,17 +681,30 @@ struct CachedResponse {
     body: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-enum IdempotencyLookup {
-    Hit(CachedResponse),
-    Duplicate { key: String },
-    Miss,
+#[derive(Debug)]
+enum IdempotencyBegin {
+    Replay(CachedResponse),
+    Duplicate {
+        key: String,
+        original_status: String,
+    },
+    Started,
+}
+
+#[derive(Debug)]
+enum IdempotencyStatus {
+    Active {
+        hash: [u8; 32],
+    },
+    Completed {
+        hash: [u8; 32],
+        response: CachedResponse,
+    },
 }
 
 #[derive(Debug)]
 struct CacheEntry {
-    hash: [u8; 32],
-    response: CachedResponse,
+    status: IdempotencyStatus,
 }
 
 #[derive(Debug)]
@@ -402,47 +723,111 @@ impl IdempotencyCache {
         }
     }
 
-    fn lookup(&self, key: &str, hash: [u8; 32]) -> IdempotencyLookup {
+    fn lookup(&self, key: &str, hash: [u8; 32]) -> IdempotencyBegin {
         let Some(entry) = self.entries.get(key) else {
-            return IdempotencyLookup::Miss;
+            return IdempotencyBegin::Started;
         };
-        if entry.hash == hash {
-            IdempotencyLookup::Hit(entry.response.clone())
-        } else {
-            IdempotencyLookup::Duplicate {
+        match &entry.status {
+            IdempotencyStatus::Active { .. } => IdempotencyBegin::Duplicate {
                 key: key.to_owned(),
-            }
+                original_status: "active".to_owned(),
+            },
+            IdempotencyStatus::Completed {
+                hash: existing_hash,
+                response,
+            } if *existing_hash == hash => IdempotencyBegin::Replay(response.clone()),
+            IdempotencyStatus::Completed { .. } => IdempotencyBegin::Duplicate {
+                key: key.to_owned(),
+                original_status: "completed".to_owned(),
+            },
         }
     }
 
-    fn record_miss(
-        &mut self,
-        key: String,
-        hash: [u8; 32],
-        response: CachedResponse,
-    ) -> Result<(), ProtocolError> {
-        if let Some(entry) = self.entries.get(&key) {
-            if entry.hash == hash {
-                return Ok(());
-            }
-            return Err(ProtocolError::DuplicateIdempotencyKey {
-                key,
-                original_status: "completed".to_owned(),
-            });
+    fn begin(&mut self, key: String, hash: [u8; 32]) -> IdempotencyBegin {
+        match self.lookup(&key, hash) {
+            IdempotencyBegin::Started => {}
+            other => return other,
         }
         if self.capacity == 0 {
-            return Ok(());
+            return IdempotencyBegin::Started;
         }
+        self.make_room();
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CacheEntry {
+                status: IdempotencyStatus::Active { hash },
+            },
+        );
+        IdempotencyBegin::Started
+    }
+
+    fn complete(&mut self, key: &str, hash: [u8; 32], response: CachedResponse) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(entry) = self.entries.get_mut(key) {
+            match &entry.status {
+                IdempotencyStatus::Active {
+                    hash: existing_hash,
+                }
+                | IdempotencyStatus::Completed {
+                    hash: existing_hash,
+                    ..
+                } if *existing_hash == hash => {
+                    entry.status = IdempotencyStatus::Completed { hash, response };
+                }
+                _ => {}
+            }
+            return;
+        }
+        self.make_room();
+        let key = key.to_owned();
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CacheEntry {
+                status: IdempotencyStatus::Completed { hash, response },
+            },
+        );
+    }
+
+    fn clear_active(&mut self, key: &str, hash: [u8; 32]) {
+        let should_remove = self
+            .entries
+            .get(key)
+            .map(|entry| {
+                matches!(
+                    entry.status,
+                    IdempotencyStatus::Active {
+                        hash: active_hash
+                    } if active_hash == hash
+                )
+            })
+            .unwrap_or(false);
+        if should_remove {
+            self.entries.remove(key);
+            self.order.retain(|queued| queued != key);
+        }
+    }
+
+    fn make_room(&mut self) {
         while self.entries.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            let remove = self
+                .entries
+                .get(&oldest)
+                .map(|entry| matches!(entry.status, IdempotencyStatus::Completed { .. }))
+                .unwrap_or(false);
+            if remove {
                 self.entries.remove(&oldest);
             } else {
+                self.order.push_back(oldest);
                 break;
             }
         }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, CacheEntry { hash, response });
-        Ok(())
     }
 }
 

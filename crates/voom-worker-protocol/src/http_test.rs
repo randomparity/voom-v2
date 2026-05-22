@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -73,15 +73,138 @@ fn operation_handler(calls: Arc<AtomicUsize>, response_lease: Option<LeaseId>) -
             calls.fetch_add(1, Ordering::SeqCst);
             let lease_id = req.lease_id;
             let response_lease = response_lease.unwrap_or(lease_id);
-            Ok(OperationDispatch {
-                response: OperationResponse {
+            Ok(OperationDispatch::buffered(
+                OperationResponse {
                     lease_id: response_lease,
                     accepted_at: fixed_time(),
                 },
-                body: ndjson_bytes(&[progress(lease_id, 0), result_frame(lease_id, 1)]),
-            })
+                ndjson_bytes(&[progress(lease_id, 0), result_frame(lease_id, 1)]),
+            ))
         })
     })
+}
+
+fn streaming_handler(calls: Arc<AtomicUsize>) -> OperationHandler {
+    Arc::new(move |req: OperationRequest| {
+        let calls = calls.clone();
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
+                lease_id: req.lease_id,
+                accepted_at: fixed_time(),
+            });
+            tokio::spawn(async move {
+                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                writer
+                    .write_frame(result_frame(req.lease_id, 1))
+                    .await
+                    .unwrap();
+                writer.finish().await.unwrap();
+            });
+            Ok(dispatch)
+        })
+    })
+}
+
+fn slow_streaming_handler(
+    calls: Arc<AtomicUsize>,
+    gate: Arc<tokio::sync::Notify>,
+) -> OperationHandler {
+    Arc::new(move |req: OperationRequest| {
+        let calls = calls.clone();
+        let gate = gate.clone();
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
+                lease_id: req.lease_id,
+                accepted_at: fixed_time(),
+            });
+            tokio::spawn(async move {
+                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                gate.notified().await;
+                writer
+                    .write_frame(result_frame(req.lease_id, 1))
+                    .await
+                    .unwrap();
+                writer.finish().await.unwrap();
+            });
+            Ok(dispatch)
+        })
+    })
+}
+
+fn client_aborts_before_worker_finishes_handler(
+    calls: Arc<AtomicUsize>,
+    worker_finished: Arc<AtomicBool>,
+) -> OperationHandler {
+    Arc::new(move |req: OperationRequest| {
+        let calls = calls.clone();
+        let worker_finished = worker_finished.clone();
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
+                lease_id: req.lease_id,
+                accepted_at: fixed_time(),
+            });
+            tokio::spawn(async move {
+                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let _ = writer.write_frame(result_frame(req.lease_id, 1)).await;
+                worker_finished.store(true, Ordering::SeqCst);
+                let _ = writer.finish().await;
+            });
+            Ok(dispatch)
+        })
+    })
+}
+
+fn worker_aborts_after_response_handler(
+    calls: Arc<AtomicUsize>,
+    worker_finished: Arc<AtomicBool>,
+) -> OperationHandler {
+    Arc::new(move |req: OperationRequest| {
+        let calls = calls.clone();
+        let worker_finished = worker_finished.clone();
+        Box::pin(async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
+                lease_id: req.lease_id,
+                accepted_at: fixed_time(),
+            });
+            tokio::spawn(async move {
+                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                worker_finished.store(true, Ordering::SeqCst);
+            });
+            Ok(dispatch)
+        })
+    })
+}
+
+async fn collect_body(mut dispatch: DispatchStream) -> Vec<NdjsonOutcome> {
+    let mut outcomes = Vec::new();
+    loop {
+        let outcome = dispatch.frames.next_frame().await.unwrap();
+        let done = matches!(
+            outcome,
+            NdjsonOutcome::Terminated(_) | NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed
+        );
+        outcomes.push(outcome);
+        if done {
+            break;
+        }
+    }
+    outcomes
+}
+
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while !condition() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition was not met before timeout"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn running_server(handler: OperationHandler) -> (SocketAddr, ServerRunning) {
@@ -96,6 +219,201 @@ async fn write_chunk(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> std::i
         .await?;
     stream.write_all(bytes).await?;
     stream.write_all(b"\r\n").await
+}
+
+#[tokio::test]
+async fn server_streaming_dispatch_returns_before_terminal_frame() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = calls.clone();
+    let handler: OperationHandler = Arc::new(move |req| {
+        let calls_for_handler = calls_for_handler.clone();
+        Box::pin(async move {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            let (mut writer, body) = OperationDispatch::streaming(OperationResponse {
+                lease_id: req.lease_id,
+                accepted_at: fixed_time(),
+            });
+            tokio::spawn(async move {
+                writer.write_frame(progress(req.lease_id, 0)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                writer
+                    .write_frame(result_frame(req.lease_id, 1))
+                    .await
+                    .unwrap();
+                writer.finish().await.unwrap();
+            });
+            Ok(body)
+        })
+    });
+
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let start = std::time::Instant::now();
+    let mut dispatch = client
+        .dispatch(
+            &creds(),
+            "streaming-server-1",
+            request(LeaseId(1), serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+    assert!(start.elapsed() < Duration::from_millis(150));
+    assert!(matches!(
+        dispatch.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Frame(_)
+    ));
+    assert!(matches!(
+        dispatch.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Terminated(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn active_same_key_same_body_rejects_without_second_handler_call() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let handler = slow_streaming_handler(calls.clone(), gate.clone());
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(10), serde_json::json!({"path": "/tmp/a"}));
+
+    let first = client
+        .dispatch(&creds(), "active-dup", req.clone())
+        .await
+        .unwrap();
+    let err = client
+        .dispatch(&creds(), "active-dup", req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProtocolError::DuplicateIdempotencyKey { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(first);
+    gate.notify_waiters();
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn completed_stream_replays_cached_buffered_response() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(streaming_handler(calls.clone())).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(11), serde_json::json!({"path": "/tmp/a"}));
+
+    let first = collect_body(
+        client
+            .dispatch(&creds(), "completed-replay", req.clone())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = collect_body(
+        client
+            .dispatch(&creds(), "completed-replay", req)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first, second);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn handler_error_clears_active_idempotency_entry() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_handler = calls.clone();
+    let handler: OperationHandler = Arc::new(move |_req| {
+        let calls_for_handler = calls_for_handler.clone();
+        Box::pin(async move {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            Err(ProtocolError::InvalidPayload {
+                detail: "scripted failure".to_owned(),
+            })
+        })
+    });
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(12), serde_json::json!({"path": "/tmp/a"}));
+
+    let first = client
+        .dispatch(&creds(), "handler-error", req.clone())
+        .await
+        .unwrap_err();
+    let second = client
+        .dispatch(&creds(), "handler-error", req)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(first, ProtocolError::InvalidPayload { .. }));
+    assert!(matches!(second, ProtocolError::InvalidPayload { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker_finished = Arc::new(AtomicBool::new(false));
+    let handler =
+        client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(13), serde_json::json!({"path": "/tmp/a"}));
+
+    let mut first = client
+        .dispatch(&creds(), "aborted-stream", req.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Frame(_)
+    ));
+    drop(first);
+
+    assert!(!worker_finished.load(Ordering::SeqCst));
+    let duplicate = client
+        .dispatch(&creds(), "aborted-stream", req)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        ProtocolError::DuplicateIdempotencyKey { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn worker_abort_after_response_clears_active_idempotency_entry() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker_finished = Arc::new(AtomicBool::new(false));
+    let handler = worker_aborts_after_response_handler(calls.clone(), worker_finished.clone());
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(14), serde_json::json!({"path": "/tmp/a"}));
+
+    let mut first = client
+        .dispatch(&creds(), "worker-abort", req.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Frame(_)
+    ));
+    let _ = first.frames.next_frame().await.unwrap_err();
+    wait_until(|| worker_finished.load(Ordering::SeqCst)).await;
+
+    let _ = client.dispatch(&creds(), "worker-abort", req).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
 }
 
 #[tokio::test]
@@ -283,20 +601,12 @@ fn idempotency_cache_evicts_oldest_after_capacity() {
         },
         body: vec![b'1'],
     };
-    assert!(
-        cache
-            .record_miss("a".to_owned(), [1; 32], response.clone())
-            .is_ok()
-    );
-    assert!(
-        cache
-            .record_miss("b".to_owned(), [2; 32], response.clone())
-            .is_ok()
-    );
-    assert!(cache.record_miss("c".to_owned(), [3; 32], response).is_ok());
+    cache.complete("a", [1; 32], response.clone());
+    cache.complete("b", [2; 32], response.clone());
+    cache.complete("c", [3; 32], response);
     assert!(matches!(
         cache.lookup("a", [1; 32]),
-        IdempotencyLookup::Miss
+        IdempotencyBegin::Started
     ));
 }
 
