@@ -101,7 +101,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
         fixture
             .assert_no_success_for_operation(summary.job_id, OperationKind::ProbeFile)
             .await?;
-        fixture.assert_failure_summary(
+        DurableWorkflowFixture::assert_failure_summary(
             &summary,
             OperationKind::ProbeFile,
             FailureClass::WorkerCrash,
@@ -135,7 +135,7 @@ async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
     fixture
         .assert_no_terminal_frame_accepted(summary.job_id, OperationKind::ProbeFile)
         .await?;
-    fixture.assert_failure_summary(
+    DurableWorkflowFixture::assert_failure_summary(
         &summary,
         OperationKind::ProbeFile,
         FailureClass::WorkerTimeout,
@@ -171,7 +171,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
                 FailureClass::WorkerCrash,
             )
             .await?;
-        fixture.assert_failure_summary(
+        DurableWorkflowFixture::assert_failure_summary(
             &summary,
             OperationKind::ProbeFile,
             FailureClass::MalformedWorkerResult,
@@ -207,7 +207,7 @@ async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
         fixture
             .assert_heartbeat_events_exist(summary.job_id, OperationKind::ProbeFile)
             .await?;
-        fixture.assert_failure_summary(
+        DurableWorkflowFixture::assert_failure_summary(
             &summary,
             OperationKind::ProbeFile,
             FailureClass::ProgressTimeout,
@@ -259,7 +259,7 @@ async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
         fixture
             .assert_no_malformed_frame(summary.job_id, OperationKind::ProbeFile)
             .await?;
-        fixture.assert_failure_summary(
+        DurableWorkflowFixture::assert_failure_summary(
             &summary,
             OperationKind::ProbeFile,
             FailureClass::WorkerTimeout,
@@ -1058,6 +1058,38 @@ impl DurableWorkflowFixture {
                 failure_class_name(class)
             ),
             count > 0,
+        )?;
+        let durable_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM tickets t \
+             JOIN leases l ON l.ticket_id = t.id \
+             JOIN events lease_event \
+               ON lease_event.subject_type = 'lease' \
+              AND lease_event.subject_id = l.id \
+              AND lease_event.kind = 'lease.released' \
+             JOIN events ticket_event \
+               ON ticket_event.subject_type = 'ticket' \
+              AND ticket_event.subject_id = t.id \
+              AND ticket_event.kind = 'ticket.failed_terminal' \
+             WHERE t.job_id = ? \
+               AND t.state = 'failed' \
+               AND json_extract(t.payload, '$.operation') = ? \
+               AND l.state = 'released' \
+               AND l.release_reason = 'failed_terminal' \
+               AND json_extract(lease_event.payload, '$.release_reason') = 'failed_terminal' \
+               AND json_extract(ticket_event.payload, '$.class') = ?",
+        )
+        .bind(i64::try_from(job_id.0)?)
+        .bind(operation_name(operation))
+        .bind(failure_class_name(class))
+        .fetch_one(&self.pool)
+        .await?;
+        expect(
+            &format!(
+                "expected durable failed ticket and lease state for {operation:?} class {}",
+                failure_class_name(class)
+            ),
+            durable_count > 0,
         )
     }
 
@@ -1198,7 +1230,6 @@ impl DurableWorkflowFixture {
     }
 
     fn assert_failure_summary(
-        &self,
         summary: &voom_control_plane::workflow::WorkflowRunSummary,
         operation: OperationKind,
         class: FailureClass,

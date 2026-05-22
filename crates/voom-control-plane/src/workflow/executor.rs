@@ -1009,47 +1009,12 @@ async fn consume_dispatch_stream(
     let mut last_heartbeat = Instant::now();
     let mut heartbeat = tokio::time::interval(options.heartbeat_interval);
     loop {
-        let now = Instant::now();
-        if now.duration_since(last_heartbeat) >= options.heartbeat_timeout {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                FailureClass::WorkerTimeout,
-                VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
-            )
-            .await;
-        }
-        if now.duration_since(last_progress) >= options.progress_idle_timeout {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                FailureClass::ProgressTimeout,
-                VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
-            )
-            .await;
-        }
         let progress_deadline = sleep_until(last_progress + options.progress_idle_timeout);
         let heartbeat_deadline = sleep_until(last_heartbeat + options.heartbeat_timeout);
         tokio::pin!(progress_deadline);
         tokio::pin!(heartbeat_deadline);
         tokio::select! {
             biased;
-            () = &mut heartbeat_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::WorkerTimeout,
-                    VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
-                ).await;
-            }
-            () = &mut progress_deadline => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    FailureClass::ProgressTimeout,
-                    VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
-                ).await;
-            }
             frame = dispatch.frames.next_frame() => {
                 match frame {
                     Ok(NdjsonOutcome::Frame(frame)) => {
@@ -1080,6 +1045,22 @@ async fn consume_dispatch_stream(
                         ).await;
                     }
                 }
+            }
+            () = &mut heartbeat_deadline => {
+                return fail_lease_and_return(
+                    control,
+                    lease_id,
+                    FailureClass::WorkerTimeout,
+                    VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
+                ).await;
+            }
+            () = &mut progress_deadline => {
+                return fail_lease_and_return(
+                    control,
+                    lease_id,
+                    FailureClass::ProgressTimeout,
+                    VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+                ).await;
             }
             _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
                 heartbeat_lease(control, lease_id, &mut last_heartbeat, &options).await?;
@@ -1268,6 +1249,10 @@ fn no_response_timeout(options: &WorkflowExecutorOptions) -> Duration {
         .max(Duration::from_millis(1))
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "throughput is an approximate reporting metric, not an exact counter"
+)]
 fn throughput(count: u64, elapsed: Duration) -> f64 {
     let seconds = elapsed.as_secs_f64();
     if seconds > 0.0 {
