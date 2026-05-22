@@ -127,7 +127,7 @@ async fn quality_completion_creates_exactly_selected_transform_based_on_needs_tr
 }
 
 #[tokio::test]
-async fn transform_completion_creates_backup_but_not_verify() {
+async fn transform_completion_creates_downstream_work_but_not_verify() {
     let fixture = WorkflowExpansionFixture::new().await;
     let transform = fixture
         .seed_succeeded_ticket(
@@ -145,16 +145,29 @@ async fn transform_completion_creates_backup_but_not_verify() {
         .await
         .unwrap();
 
-    assert_eq!(node_ids(&first), vec!["backup"]);
-    assert!(second.is_empty());
-    let backup = parse_workflow_payload(&first[0]);
     assert_eq!(
-        backup.rendered_payload["path"],
-        "/staging/file-001.h265.mkv"
+        node_ids(&first),
+        vec!["backup", "external-sync", "issue", "use-lease"]
     );
+    assert!(second.is_empty());
+    for ticket in &first {
+        let payload = parse_workflow_payload(ticket);
+        assert_eq!(
+            payload.rendered_payload["path"],
+            "/staging/file-001.h265.mkv"
+        );
+    }
+    let issue = fixture.ticket("issue", "file-001").await;
+    assert_eq!(issue.rendered_payload["reason"], "quality_regression");
+    let external_sync = fixture.ticket("external-sync", "file-001").await;
+    assert_eq!(external_sync.rendered_payload["system"], "plex");
+    assert_eq!(external_sync.rendered_payload["action"], "refresh");
+    let use_lease = fixture.ticket("use-lease", "file-001").await;
+    assert_eq!(use_lease.rendered_payload["holder"], "manual");
+    assert_eq!(use_lease.rendered_payload["reason"], "playback");
     fixture.assert_no_ticket("verify", "file-001").await;
-    fixture.assert_ticket_count(2).await;
-    fixture.assert_dependency_count(1).await;
+    fixture.assert_ticket_count(5).await;
+    fixture.assert_dependency_count(4).await;
 }
 
 #[tokio::test]
@@ -182,6 +195,84 @@ async fn backup_completion_creates_verify_after_local_backup_id_exists() {
     assert_eq!(verify.rendered_payload["path"], "backup-local-001");
     fixture.assert_ticket_count(2).await;
     fixture.assert_dependency_count(1).await;
+}
+
+#[tokio::test]
+async fn expansion_promotes_existing_pending_ticket_after_restart() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let probe = fixture
+        .seed_succeeded_ticket(
+            "probe",
+            "file-001",
+            OperationKind::ProbeFile,
+            serde_json::json!({"codec": "h264"}),
+        )
+        .await;
+    let quality = fixture
+        .seed_pending_ticket("quality", "file-001", OperationKind::ScoreQuality)
+        .await;
+    fixture.add_dependency(quality.id, probe.id).await;
+
+    let created = expand_probe_completion(&fixture.ctx(), "file-001", &probe)
+        .await
+        .unwrap();
+
+    assert!(created.is_empty());
+    let quality = fixture.find_ticket("quality", "file-001").await.unwrap();
+    assert_eq!(quality.state, voom_store::repo::tickets::TicketState::Ready);
+    fixture.assert_ticket_count(2).await;
+    fixture.assert_dependency_count(1).await;
+}
+
+#[tokio::test]
+async fn scanner_completion_dedupes_duplicate_file_outputs() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let scanner = fixture
+        .seed_succeeded_ticket(
+            "scan",
+            "root",
+            OperationKind::ScanLibrary,
+            serde_json::json!({
+                "files": [
+                    "/library/file-000.mkv",
+                    "/library/file-000.mkv",
+                    {"path": "/library/file-001.mkv"}
+                ]
+            }),
+        )
+        .await;
+
+    let created = expand_scanner_completion(&fixture.ctx(), &scanner)
+        .await
+        .unwrap();
+
+    assert_eq!(created.len(), 6);
+    fixture.assert_ticket_count(7).await;
+    fixture.assert_dependency_count(6).await;
+}
+
+#[tokio::test]
+async fn scanner_completion_rejects_branch_id_path_collisions() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let scanner = fixture
+        .seed_succeeded_ticket(
+            "scan",
+            "root",
+            OperationKind::ScanLibrary,
+            serde_json::json!({
+                "files": [
+                    "/library/file-000.mkv",
+                    "/other/file-000.mp4"
+                ]
+            }),
+        )
+        .await;
+
+    let err = expand_scanner_completion(&fixture.ctx(), &scanner)
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("both derive branch id"));
 }
 
 struct WorkflowExpansionFixture {
@@ -272,6 +363,49 @@ impl WorkflowExpansionFixture {
             .unwrap();
         set_ticket_succeeded(&self.cp, ticket.id, result, self.now).await;
         self.cp.tickets().get(ticket.id).await.unwrap().unwrap()
+    }
+
+    async fn seed_pending_ticket(
+        &self,
+        node_id: &str,
+        branch_id: &str,
+        operation: OperationKind,
+    ) -> Ticket {
+        let branch = branch_for_seed(branch_id, operation);
+        let rendered_payload = render_default_payload(operation, &branch, timing()).unwrap();
+        let payload = WorkflowTicketPayload {
+            workflow_id: self.workflow_id.clone(),
+            plan_id: self.plan_id.clone(),
+            node_id: node_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            operation,
+            rendered_payload,
+        }
+        .to_ticket_payload()
+        .unwrap();
+        self.cp
+            .create_ticket(NewTicket {
+                job_id: Some(self.job_id),
+                kind: ticket_kind(operation),
+                priority: 0,
+                payload,
+                max_attempts: 1,
+                created_at: self.now,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn add_dependency(&self, ticket_id: TicketId, depends_on: TicketId) {
+        self.cp
+            .tickets()
+            .add_dependency(ticket_id, depends_on)
+            .await
+            .unwrap();
+    }
+
+    async fn find_ticket(&self, node_id: &str, branch_id: &str) -> Option<Ticket> {
+        find_ticket(&self.cp, self.job_id, node_id, branch_id).await
     }
 
     async fn ticket(&self, node_id: &str, branch_id: &str) -> WorkflowTicketPayload {

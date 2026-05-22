@@ -17,6 +17,11 @@ fn default_ci_plan_has_seed_two_three_files_and_parallel_dispatches() {
         .unwrap();
     assert_eq!(backup.depends_on(), &[] as &[String]);
     assert_eq!(backup.depends_on_selected(), &["transform".to_owned()]);
+    for id in ["external-sync", "issue", "use-lease"] {
+        let node = plan.nodes.iter().find(|node| node.id() == id).unwrap();
+        assert_eq!(node.depends_on(), &[] as &[String]);
+        assert_eq!(node.depends_on_selected(), &["transform".to_owned()]);
+    }
     plan.validate().unwrap();
 }
 

@@ -34,6 +34,10 @@ fn default_payload_rendering_covers_default_ci_operations() {
                 assert_eq!(payload["system"], "plex");
                 assert_eq!(payload["action"], "refresh");
             }
+            OperationKind::EditTracks => {
+                assert_eq!(payload["holder"], "manual");
+                assert_eq!(payload["reason"], "playback");
+            }
             OperationKind::ScanLibrary => {
                 assert_eq!(payload["fan_out_count"], 3);
             }

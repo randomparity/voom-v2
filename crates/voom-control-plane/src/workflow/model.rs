@@ -75,9 +75,14 @@ impl WorkflowPlan {
                     "transform",
                 ),
                 operation_after_selected("backup", OperationKind::BackUpFile, &["transform"]),
+                operation_after_selected(
+                    "external-sync",
+                    OperationKind::SyncExternalSystem,
+                    &["transform"],
+                ),
+                operation_after_selected("issue", OperationKind::CommitArtifact, &["transform"]),
+                operation_after_selected("use-lease", OperationKind::EditTracks, &["transform"]),
                 operation("verify", OperationKind::VerifyArtifact, &["backup"]),
-                operation("commit", OperationKind::CommitArtifact, &["verify"]),
-                operation("sync", OperationKind::SyncExternalSystem, &["commit"]),
             ],
             fan_out: FanOutPolicy { max_files: 3 },
             concurrency: ConcurrencyPolicy {

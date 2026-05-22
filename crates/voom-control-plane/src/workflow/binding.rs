@@ -35,7 +35,6 @@ pub fn render_default_payload_with_fan_out(
         | OperationKind::IdentifyMedia
         | OperationKind::BackUpFile
         | OperationKind::VerifyArtifact
-        | OperationKind::EditTracks
         | OperationKind::ExtractAudio
         | OperationKind::TranscribeAudio
         | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
@@ -69,6 +68,11 @@ pub fn render_default_payload_with_fan_out(
             "path": branch.path,
             "system": "plex",
             "action": "refresh",
+        }),
+        OperationKind::EditTracks => json!({
+            "path": branch.path,
+            "holder": "manual",
+            "reason": "playback",
         }),
     };
 

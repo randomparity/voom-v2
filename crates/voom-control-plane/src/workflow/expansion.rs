@@ -1,11 +1,13 @@
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::Value;
+use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{JobId, TicketId, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::OperationKind;
 
 use super::binding::{BranchContext, render_default_payload};
@@ -53,8 +55,16 @@ pub async fn expand_scanner_completion(
     let files = scanner_files(scanner_ticket)?;
     let files = files.into_iter().take(ctx.plan.fan_out.max_files);
     let mut specs = Vec::new();
+    let mut paths_by_branch = HashMap::new();
     for path in files {
         let branch_id = branch_id_from_path(&path)?;
+        if let Some(existing_path) = paths_by_branch.insert(branch_id.clone(), path.clone())
+            && existing_path != path
+        {
+            return Err(VoomError::Config(format!(
+                "scanner paths `{existing_path}` and `{path}` both derive branch id `{branch_id}`"
+            )));
+        }
         for node_id in ["probe", "hash", "identity"] {
             specs.push(spec_for_branch(
                 ctx,
@@ -126,18 +136,22 @@ pub async fn expand_transform_completion(
     transform_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
     let output_path = string_result_field(transform_ticket, "output_path")?;
-    let spec = spec_for_branch(
-        ctx,
-        "backup",
-        &BranchContext {
-            branch_id: branch_id.to_owned(),
-            path: output_path,
-            probe_codec: None,
-        },
-        transform_ticket.id,
-        transform_ticket,
-    )?;
-    create_missing_tickets(ctx, vec![spec]).await
+    let branch = BranchContext {
+        branch_id: branch_id.to_owned(),
+        path: output_path,
+        probe_codec: None,
+    };
+    let mut specs = Vec::new();
+    for node_id in ["backup", "external-sync", "issue", "use-lease"] {
+        specs.push(spec_for_branch(
+            ctx,
+            node_id,
+            &branch,
+            transform_ticket.id,
+            transform_ticket,
+        )?);
+    }
+    create_missing_tickets(ctx, specs).await
 }
 
 pub async fn expand_backup_completion(
@@ -207,23 +221,26 @@ async fn create_missing_tickets(
     ctx: &ExpansionContext<'_>,
     specs: Vec<TicketSpec>,
 ) -> Result<Vec<Ticket>, VoomError> {
-    let mut missing = Vec::new();
-    for spec in specs {
-        if find_existing_ticket(ctx, &spec.kind, &spec.branch_id, &spec.node_id)
-            .await?
-            .is_none()
-        {
-            missing.push(spec);
-        }
-    }
-
-    if missing.is_empty() {
-        return Ok(Vec::new());
-    }
+    let specs = dedupe_specs(specs);
 
     let mut tx = begin_tx(&ctx.control.pool).await?;
-    let mut created = Vec::new();
-    for spec in missing {
+    let mut expected_ids = Vec::new();
+    let mut created_ids = Vec::new();
+    for spec in specs {
+        if let Some(ticket_id) = find_existing_ticket_id_in_tx(
+            &mut tx,
+            ctx.job_id,
+            &spec.kind,
+            &spec.branch_id,
+            &spec.node_id,
+        )
+        .await?
+        {
+            ensure_dependency_in_tx(&mut tx, &ctx.control.tickets, ticket_id, spec.depends_on)
+                .await?;
+            expected_ids.push(ticket_id);
+            continue;
+        }
         let input = NewTicket {
             job_id: Some(ctx.job_id),
             kind: spec.kind,
@@ -256,30 +273,51 @@ async fn create_missing_tickets(
             .tickets
             .add_dependency_in_tx(&mut tx, ticket.id, spec.depends_on)
             .await?;
-        created.push(ticket);
+        expected_ids.push(ticket.id);
+        created_ids.push(ticket.id);
     }
     commit_tx(tx).await?;
 
-    let mut refreshed = Vec::new();
-    for ticket in created {
+    for ticket_id in expected_ids {
         ctx.control
-            .mark_ready_if_unblocked(ticket.id, ctx.now)
+            .mark_ready_if_unblocked(ticket_id, ctx.now)
             .await?;
+    }
+
+    let mut refreshed = Vec::new();
+    for ticket_id in created_ids {
         let ticket =
-            ctx.control.tickets.get(ticket.id).await?.ok_or_else(|| {
-                VoomError::Internal(format!("created ticket {} vanished", ticket.id))
+            ctx.control.tickets.get(ticket_id).await?.ok_or_else(|| {
+                VoomError::Internal(format!("created ticket {ticket_id} vanished"))
             })?;
         refreshed.push(ticket);
     }
     Ok(refreshed)
 }
 
-async fn find_existing_ticket(
-    ctx: &ExpansionContext<'_>,
+fn dedupe_specs(specs: Vec<TicketSpec>) -> Vec<TicketSpec> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for spec in specs {
+        let key = (
+            spec.kind.clone(),
+            spec.branch_id.clone(),
+            spec.node_id.clone(),
+        );
+        if seen.insert(key) {
+            out.push(spec);
+        }
+    }
+    out
+}
+
+async fn find_existing_ticket_id_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    job_id: JobId,
     kind: &str,
     branch_id: &str,
     node_id: &str,
-) -> Result<Option<Ticket>, VoomError> {
+) -> Result<Option<TicketId>, VoomError> {
     let row: Option<(i64,)> = sqlx::query_as(
         "SELECT id FROM tickets \
          WHERE job_id = ? \
@@ -289,21 +327,56 @@ async fn find_existing_ticket(
          ORDER BY id ASC \
          LIMIT 1",
     )
-    .bind(sqlite_i64(ctx.job_id.0, "job id")?)
+    .bind(sqlite_i64(job_id.0, "job id")?)
     .bind(kind)
     .bind(branch_id)
     .bind(node_id)
-    .fetch_optional(&ctx.control.pool)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("workflow ticket lookup: {e}")))?;
 
     let Some((id,)) = row else {
         return Ok(None);
     };
-    ctx.control
-        .tickets
-        .get(TicketId(sqlite_u64(id, "ticket id")?))
+    Ok(Some(TicketId(sqlite_u64(id, "ticket id")?)))
+}
+
+async fn ensure_dependency_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    tickets: &impl TicketRepo,
+    ticket_id: TicketId,
+    depends_on: TicketId,
+) -> Result<(), VoomError> {
+    let exists: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM ticket_dependencies \
+         WHERE ticket_id = ? AND depends_on_ticket_id = ? \
+         LIMIT 1",
+    )
+    .bind(sqlite_i64(ticket_id.0, "ticket id")?)
+    .bind(sqlite_i64(depends_on.0, "dependency ticket id")?)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("workflow dependency lookup: {e}")))?;
+    if exists.is_some() {
+        return Ok(());
+    }
+
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+        .bind(sqlite_i64(ticket_id.0, "ticket id")?)
+        .fetch_optional(&mut **tx)
         .await
+        .map_err(|e| VoomError::Database(format!("workflow ticket state lookup: {e}")))?;
+    match state.as_deref() {
+        Some(state) if state == TicketState::Pending.as_str() => {
+            tickets
+                .add_dependency_in_tx(tx, ticket_id, depends_on)
+                .await
+        }
+        Some(state) => Err(VoomError::Conflict(format!(
+            "workflow ticket {ticket_id} is {state}; missing dependency on {depends_on} cannot be repaired"
+        ))),
+        None => Err(VoomError::NotFound(format!("ticket {ticket_id}"))),
+    }
 }
 
 fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<String>, VoomError> {
