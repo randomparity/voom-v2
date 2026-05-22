@@ -122,32 +122,36 @@ fn evidence_confidence_out_of_range_is_rejected() {
 #[test]
 fn empty_provider_and_profile_names_are_rejected() {
     let mut empty_provider = minimal_input_set();
-    empty_provider.identity_evidence.push(IdentityEvidenceInput {
-        ordinal: 0,
-        target: TargetRef::Synthetic {
-            key: "work-1".to_owned(),
-            kind: TargetKind::MediaWork,
-        },
-        assertion_type: "match".to_owned(),
-        provider: "".to_owned(),
-        provider_version: "1".to_owned(),
-        confidence: 0.5,
-        provenance: serde_json::json!({"source": "test"}),
-        observed_at: time::OffsetDateTime::UNIX_EPOCH,
-        existing_evidence_id: None,
-    });
+    empty_provider
+        .identity_evidence
+        .push(IdentityEvidenceInput {
+            ordinal: 0,
+            target: TargetRef::Synthetic {
+                key: "work-1".to_owned(),
+                kind: TargetKind::MediaWork,
+            },
+            assertion_type: "match".to_owned(),
+            provider: "".to_owned(),
+            provider_version: "1".to_owned(),
+            confidence: 0.5,
+            provenance: serde_json::json!({"source": "test"}),
+            observed_at: time::OffsetDateTime::UNIX_EPOCH,
+            existing_evidence_id: None,
+        });
 
     let mut empty_profile = minimal_input_set();
-    empty_profile.quality_profiles.push(QualityProfileSelection {
-        ordinal: 0,
-        target: TargetRef::Synthetic {
-            key: "work-1".to_owned(),
-            kind: TargetKind::MediaWork,
-        },
-        profile_name: " ".to_owned(),
-        profile_version: "1".to_owned(),
-        dimension_weights: serde_json::json!({}),
-    });
+    empty_profile
+        .quality_profiles
+        .push(QualityProfileSelection {
+            ordinal: 0,
+            target: TargetRef::Synthetic {
+                key: "work-1".to_owned(),
+                kind: TargetKind::MediaWork,
+            },
+            profile_name: " ".to_owned(),
+            profile_version: "1".to_owned(),
+            dimension_weights: serde_json::json!({}),
+        });
 
     assert!(validate_input_set(&empty_provider).is_err());
     assert!(validate_input_set(&empty_profile).is_err());
