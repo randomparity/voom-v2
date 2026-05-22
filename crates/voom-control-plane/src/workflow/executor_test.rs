@@ -21,7 +21,9 @@ use voom_worker_protocol::{
     OperationResponse, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
-use super::executor::{WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary};
+use super::executor::{
+    WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary, is_synthetic_root_ticket,
+};
 use super::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
 use super::runtime::WorkerRuntimeRegistry;
 use super::ticket_payload::WorkflowTicketPayload;
@@ -212,6 +214,30 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
 
     assert_eq!(summary.dispatch_count, 1);
     assert_eq!(fixture.other_job_ready_count().await, 1);
+}
+
+#[test]
+fn summary_branch_count_only_excludes_synthetic_root_ticket() {
+    let synthetic_root = WorkflowTicketPayload::new_for_test(
+        "workflow",
+        "plan",
+        "scan",
+        "root",
+        OperationKind::ScanLibrary,
+        json!({"path": "/library"}),
+    );
+    let mut real_root_branch = WorkflowTicketPayload::new_for_test(
+        "workflow",
+        "plan",
+        "probe",
+        "root",
+        OperationKind::ProbeFile,
+        json!({"path": "/library/root.mkv"}),
+    );
+    real_root_branch.source_file = Some(json!({"path": "/library/root.mkv"}));
+
+    assert!(is_synthetic_root_ticket(&synthetic_root));
+    assert!(!is_synthetic_root_ticket(&real_root_branch));
 }
 
 struct ExecutorFixture {

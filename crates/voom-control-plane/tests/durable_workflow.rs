@@ -40,24 +40,37 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[tokio::test]
 async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestResult<()> {
     let mut fixture = DurableWorkflowFixture::start_all_fake_providers().await?;
-    let summary = fixture
-        .executor()
-        .submit_and_run(WorkflowPlan::default_ci())
-        .await
-        .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
+    let result = async {
+        let summary = fixture
+            .executor()
+            .submit_and_run(WorkflowPlan::default_ci())
+            .await
+            .map_err(|err| io_error(format!("workflow failed: {:?}", err.source)))?;
 
-    assert_eq!(summary.branch_count, 3);
-    assert_eq!(summary.dispatch_count, 31);
-    assert_eq!(summary.operation_count(OperationKind::Remux), 2);
-    assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
-    assert!(summary.peak_active_workflow_leases > 1);
-    fixture.assert_job_succeeded(summary.job_id).await?;
-    fixture
-        .assert_all_workflow_tickets_succeeded(summary.job_id)
-        .await?;
+        expect_eq("branch_count", &summary.branch_count, &3)?;
+        expect_eq("dispatch_count", &summary.dispatch_count, &31)?;
+        expect_eq(
+            "remux operation count",
+            &summary.operation_count(OperationKind::Remux),
+            &2,
+        )?;
+        expect_eq(
+            "transcode operation count",
+            &summary.operation_count(OperationKind::TranscodeVideo),
+            &1,
+        )?;
+        expect(
+            "peak_active_workflow_leases should exceed 1",
+            summary.peak_active_workflow_leases > 1,
+        )?;
+        fixture.assert_job_succeeded(summary.job_id).await?;
+        fixture
+            .assert_all_workflow_tickets_succeeded(summary.job_id)
+            .await
+    }
+    .await;
 
-    fixture.shutdown().await?;
-    Ok(())
+    combine_result_and_cleanup(result, fixture.shutdown().await)
 }
 
 #[tokio::test]
@@ -289,7 +302,9 @@ impl DurableWorkflowFixture {
     async fn start_all_fake_providers() -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
         for provider in provider_specs() {
-            fixture.register_process_provider(provider).await?;
+            if let Err(err) = fixture.register_process_provider(provider).await {
+                return combine_result_and_cleanup(Err(err), fixture.shutdown().await);
+            }
         }
         Ok(fixture)
     }
@@ -545,8 +560,7 @@ impl DurableWorkflowFixture {
             .bind(i64::try_from(job_id.0)?)
             .fetch_one(&self.pool)
             .await?;
-        assert_eq!(state, expected);
-        Ok(())
+        expect_eq("job state", &state.as_str(), &expected)
     }
 
     async fn assert_all_workflow_tickets_succeeded(&self, job_id: JobId) -> TestResult<()> {
@@ -559,8 +573,7 @@ impl DurableWorkflowFixture {
         .bind(i64::try_from(job_id.0)?)
         .fetch_one(&self.pool)
         .await?;
-        assert_eq!(unfinished, 0);
-        Ok(())
+        expect_eq("unfinished workflow ticket count", &unfinished, &0)
     }
 
     async fn assert_ticket_state_counts(
@@ -593,10 +606,23 @@ impl DurableWorkflowFixture {
     }
 
     async fn shutdown(&mut self) -> TestResult<()> {
+        let mut cleanup_error: Option<String> = None;
         while let Some(mut launch) = self.launches.pop() {
-            launch.shutdown().await?;
+            if let Err(err) = launch.shutdown().await {
+                match &mut cleanup_error {
+                    Some(existing) => {
+                        existing.push_str("; ");
+                        existing.push_str(&err.to_string());
+                    }
+                    None => cleanup_error = Some(err.to_string()),
+                }
+            }
         }
-        Ok(())
+        if let Some(cleanup_error) = cleanup_error {
+            Err(io_error(cleanup_error))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -679,27 +705,29 @@ impl ProviderLaunch {
             .stderr(Stdio::inherit())
             .spawn()?;
         let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io_error(format!("{} stdout missing", provider.name)))?;
-        let mut lines = BufReader::new(stdout).lines();
-        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
-            .await??
-            .ok_or_else(|| io_error(format!("{} exited before bind line", provider.name)))?;
-        let bound = line
-            .strip_prefix("BOUND addr=")
-            .ok_or_else(|| io_error(format!("malformed {} bind line: {line}", provider.name)))?
-            .parse::<std::net::SocketAddr>()?;
+        let credentials = WorkerCredentials {
+            worker_id,
+            worker_epoch: 0,
+            secret: SecretString::from(secret.to_owned()),
+        };
+        let bound = match read_bound_addr(&mut child, provider.name).await {
+            Ok(bound) => bound,
+            Err(err) => {
+                let mut launch = Self {
+                    child,
+                    stdin,
+                    bound: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                    credentials,
+                    name: provider.name,
+                };
+                return combine_result_and_cleanup(Err(err), launch.terminate().await);
+            }
+        };
         Ok(Self {
             child,
             stdin,
             bound,
-            credentials: WorkerCredentials {
-                worker_id,
-                worker_epoch: 0,
-                secret: SecretString::from(secret.to_owned()),
-            },
+            credentials,
             name: provider.name,
         })
     }
@@ -721,6 +749,7 @@ impl ProviderLaunch {
     }
 
     async fn terminate(&mut self) -> TestResult<()> {
+        drop(self.stdin.take());
         let _ = self.child.start_kill();
         tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await??;
         Ok(())
@@ -731,6 +760,21 @@ impl Drop for ProviderLaunch {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
     }
+}
+
+async fn read_bound_addr(child: &mut Child, name: &str) -> TestResult<std::net::SocketAddr> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io_error(format!("{name} stdout missing")))?;
+    let mut lines = BufReader::new(stdout).lines();
+    let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await??
+        .ok_or_else(|| io_error(format!("{name} exited before bind line")))?;
+    Ok(line
+        .strip_prefix("BOUND addr=")
+        .ok_or_else(|| io_error(format!("malformed {name} bind line: {line}")))?
+        .parse::<std::net::SocketAddr>()?)
 }
 
 fn provider_binary(name: &str) -> TestResult<PathBuf> {
@@ -871,6 +915,37 @@ fn format_time(t: OffsetDateTime) -> TestResult<String> {
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(std::io::Error::other(message.into()))
+}
+
+fn expect(label: &str, condition: bool) -> TestResult<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(io_error(label.to_owned()))
+    }
+}
+
+fn expect_eq<T>(label: &str, actual: &T, expected: &T) -> TestResult<()>
+where
+    T: std::fmt::Debug + PartialEq,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io_error(format!(
+            "{label}: expected {expected:?}, got {actual:?}"
+        )))
+    }
+}
+
+fn combine_result_and_cleanup<T>(result: TestResult<T>, cleanup: TestResult<()>) -> TestResult<T> {
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), Ok(())) | (Ok(_), Err(err)) => Err(err),
+        (Err(err), Err(cleanup_err)) => Err(io_error(format!(
+            "{err}; provider cleanup failed: {cleanup_err}"
+        ))),
+    }
 }
 
 trait TicketStateParseForTest {

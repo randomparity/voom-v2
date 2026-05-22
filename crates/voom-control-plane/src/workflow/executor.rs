@@ -801,7 +801,7 @@ impl WorkflowRunSummary {
                 else {
                     continue;
                 };
-                if workflow_payload.branch_id != "root" {
+                if !is_synthetic_root_ticket(&workflow_payload) {
                     branches.insert(workflow_payload.branch_id);
                 }
                 *ticket_counts.entry(workflow_payload.operation).or_default() += 1;
@@ -815,6 +815,13 @@ impl WorkflowRunSummary {
             }
         }
     }
+}
+
+pub(crate) fn is_synthetic_root_ticket(payload: &WorkflowTicketPayload) -> bool {
+    payload.branch_id == "root"
+        && payload.node_id == "scan"
+        && payload.operation == OperationKind::ScanLibrary
+        && payload.source_file.is_none()
 }
 
 #[derive(Debug)]
