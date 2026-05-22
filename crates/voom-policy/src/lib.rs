@@ -14,6 +14,7 @@ pub mod fixtures;
 pub mod model;
 pub mod parser;
 pub mod span;
+pub mod validate;
 
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use diagnostic::{
@@ -27,3 +28,4 @@ pub use model::{
 };
 pub use parser::{ParseError, parse_policy_source};
 pub use span::{SourceLocation, SourceSpan, line_column};
+pub use validate::{ValidationResult, validate_policy_ast};
