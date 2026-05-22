@@ -124,6 +124,32 @@ async fn worker_crash_fails_terminally() {
     assert_eq!(err.summary.failure_count, 1);
 }
 
+#[tokio::test]
+async fn missing_runtime_fails_before_lease_acquire() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    fixture
+        .register_worker_without_runtime("hash-worker", OperationKind::HashFile, 1)
+        .await;
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(err.summary.dispatch_count, 0);
+    assert_eq!(fixture.lease_count().await, 0);
+}
+
+#[tokio::test]
+async fn dispatch_setup_error_fails_acquired_lease() {
+    let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::DispatchError).await;
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(err.summary.dispatch_count, 1);
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(fixture.held_lease_count().await, 0);
+}
+
 struct ExecutorFixture {
     cp: crate::ControlPlane,
     _tmp: tempfile::NamedTempFile,
@@ -217,6 +243,28 @@ impl ExecutorFixture {
         behavior: FakeBehavior,
     ) -> WorkerId {
         let worker = self
+            .register_worker_without_runtime(name, operation, max_parallel)
+            .await;
+        let client = Arc::new(FakeClient::new(worker, behavior));
+        self.registry.register_in_process_runtime(
+            worker,
+            client,
+            WorkerCredentials {
+                worker_id: worker,
+                worker_epoch: 0,
+                secret: SecretString::from("test-secret"),
+            },
+        );
+        worker
+    }
+
+    async fn register_worker_without_runtime(
+        &mut self,
+        name: &str,
+        operation: OperationKind,
+        max_parallel: u32,
+    ) -> WorkerId {
+        let worker = self
             .cp
             .register_worker(NewWorker {
                 name: name.to_owned(),
@@ -248,16 +296,6 @@ impl ExecutorFixture {
             })
             .await
             .unwrap();
-        let client = Arc::new(FakeClient::new(worker.id, behavior));
-        self.registry.register_in_process_runtime(
-            worker.id,
-            client,
-            WorkerCredentials {
-                worker_id: worker.id,
-                worker_epoch: worker.epoch,
-                secret: SecretString::from("test-secret"),
-            },
-        );
         worker.id
     }
 
@@ -308,6 +346,13 @@ impl ExecutorFixture {
             .await
             .unwrap()
     }
+
+    async fn held_lease_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
 }
 
 #[derive(Debug)]
@@ -340,6 +385,7 @@ enum FakeBehavior {
     MalformedFrame,
     Hang,
     Crash,
+    DispatchError,
 }
 
 #[async_trait]
@@ -355,6 +401,9 @@ impl ClientHandle for FakeClient {
         request: OperationRequest,
     ) -> Result<DispatchStream, ProtocolError> {
         assert_eq!(_creds.worker_id, self.worker_id);
+        if matches!(self.behavior, FakeBehavior::DispatchError) {
+            return Err(ProtocolError::InternalServerError);
+        }
         self.enter_active();
         let (reader, writer) = tokio::io::duplex(16 * 1024);
         let behavior = self.behavior;
@@ -393,7 +442,7 @@ async fn write_behavior(
         FakeBehavior::Hang => {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        FakeBehavior::Crash => {}
+        FakeBehavior::Crash | FakeBehavior::DispatchError => {}
     }
 }
 

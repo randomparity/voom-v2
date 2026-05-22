@@ -420,6 +420,7 @@ where
                 return Ok(SpawnOutcome::PreLeaseRetriable);
             }
         };
+        let runtime = self.runtimes.get(worker_id)?;
         let lease = acquire_lease_with_retry(
             &self.control_plane,
             NewLease {
@@ -435,7 +436,6 @@ where
         summary.record_dispatch(workflow_payload.operation, worker_id, reservations);
 
         let control = self.control_plane.clone();
-        let runtime = self.runtimes.get(worker_id)?;
         let options = self.options.clone();
         active.spawn(async move {
             dispatch_ticket(
@@ -687,7 +687,6 @@ impl WorkflowRunSummary {
     }
 
     fn record_failure(&mut self, operation: OperationKind) {
-        self.failure_count += 1;
         self.per_operation
             .entry(operation)
             .or_default()
@@ -817,7 +816,22 @@ async fn dispatch_ticket_inner(
         .client
         .dispatch(&runtime.credentials, &idempotency_key, request)
         .await
-        .map_err(|err| map_protocol_error(&err))?;
+        .map_err(|err| {
+            let source = map_protocol_error(&err);
+            (err, source)
+        });
+    let dispatch = match dispatch {
+        Ok(dispatch) => dispatch,
+        Err((_err, source)) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                failure_class_for_error(&source),
+                source,
+            )
+            .await;
+        }
+    };
     if dispatch.response.lease_id != lease_id {
         return fail_lease_and_return(
             control,
@@ -1010,6 +1024,32 @@ fn voom_error_for_failure_class(class: FailureClass, message: String) -> VoomErr
         other => VoomError::Internal(format!(
             "unsupported worker failure code {other:?}: {message}"
         )),
+    }
+}
+
+fn failure_class_for_error(source: &VoomError) -> FailureClass {
+    match source.error_code() {
+        ErrorCode::WorkerTimeout => FailureClass::WorkerTimeout,
+        ErrorCode::NoEligibleWorker => FailureClass::NoEligibleWorker,
+        ErrorCode::ArtifactUnavailable => FailureClass::ArtifactUnavailable,
+        ErrorCode::ArtifactChecksumMismatch => FailureClass::ArtifactChecksumMismatch,
+        ErrorCode::ExternalSystemUnavailable => FailureClass::ExternalSystemUnavailable,
+        ErrorCode::ExternalSystemRateLimited => FailureClass::ExternalSystemRateLimited,
+        ErrorCode::VerificationFailure => FailureClass::VerificationFailure,
+        ErrorCode::BackupFailure => FailureClass::BackupFailure,
+        ErrorCode::CommitFailure => FailureClass::CommitFailure,
+        ErrorCode::PolicyParseError => FailureClass::PolicyParseError,
+        ErrorCode::PolicyValidationError => FailureClass::PolicyValidationError,
+        ErrorCode::MissingCapability => FailureClass::MissingCapability,
+        ErrorCode::MalformedWorkerResult => FailureClass::MalformedWorkerResult,
+        ErrorCode::UserCancellation => FailureClass::UserCancellation,
+        ErrorCode::StaleIdentityEvidence => FailureClass::StaleIdentityEvidence,
+        ErrorCode::ClosureResolutionIncomplete => FailureClass::ClosureResolutionIncomplete,
+        ErrorCode::BlockedByUseLease => FailureClass::BlockedByActiveUseLease,
+        ErrorCode::ApprovalRequired => FailureClass::ApprovalRequired,
+        ErrorCode::PriorityPolicyConflict => FailureClass::PriorityPolicyConflict,
+        ErrorCode::AmbiguousWorkerSelection => FailureClass::AmbiguousWorkerSelection,
+        _ => FailureClass::WorkerCrash,
     }
 }
 
