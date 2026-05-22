@@ -238,7 +238,7 @@ where
                     .await;
                 return Err(WorkflowRunError { summary, source });
             }
-            if self.workflow_finished(job.id).await {
+            if active.is_empty() && self.workflow_finished(job.id).await {
                 if let Some(source) = self.first_failed_ticket_error(job.id).await {
                     let _ = self
                         .control_plane
