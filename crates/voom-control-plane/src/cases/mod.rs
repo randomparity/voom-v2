@@ -100,8 +100,14 @@ pub(crate) async fn cp() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     let url = format!("sqlite://{}", tmp.path().display());
     let _ = voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
-    let cp = crate::ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
-        .await
-        .unwrap();
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        std::sync::Arc::new(voom_core::SystemClock),
+        std::sync::Arc::new(std::sync::Mutex::new(
+            voom_core::rng_test_support::FrozenRng::new(u32::MAX),
+        )),
+    )
+    .await
+    .unwrap();
     (cp, tmp)
 }

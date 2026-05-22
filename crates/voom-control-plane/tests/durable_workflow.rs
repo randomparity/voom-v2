@@ -37,11 +37,17 @@ use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{HttpClient, OperationKind, WorkerCredentials};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+static PROCESS_PROVIDER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+async fn process_provider_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    PROCESS_PROVIDER_TEST_LOCK.lock().await
+}
+
 #[tokio::test]
 async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_all_fake_providers().await?;
     let result = async {
         let summary = fixture
@@ -78,6 +84,7 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
 
 #[tokio::test]
 async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
         OperationKind::ProbeFile,
         ChaosWorkerMode::Crash,
@@ -114,6 +121,7 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
 
 #[tokio::test]
 async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture =
         DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::ProbeFile)
             .await?;
@@ -148,6 +156,7 @@ async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
 
 #[tokio::test]
 async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
         OperationKind::ProbeFile,
         ChaosWorkerMode::MalformedResult,
@@ -188,6 +197,7 @@ async fn chaos_malformed_result_maps_to_malformed_worker_result() -> TestResult<
 
 #[tokio::test]
 async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override(
         OperationKind::ProbeFile,
         ChaosWorkerMode::DeadlineExceeded,
@@ -224,6 +234,7 @@ async fn chaos_progress_timeout_maps_to_progress_timeout() -> TestResult<()> {
 
 #[tokio::test]
 async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let chaos = WorkflowChaosOptions::suppress_heartbeats_for_operation(OperationKind::ProbeFile);
     let mut fixture = DurableWorkflowFixture::start_with_chaos_override_and_options(
         OperationKind::ProbeFile,
@@ -276,6 +287,7 @@ async fn chaos_missed_heartbeat_uses_executor_watchdog() -> TestResult<()> {
 
 #[tokio::test]
 async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_all_fake_providers().await?;
     let result = async {
         let summary = fixture
@@ -313,7 +325,10 @@ async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<
 
 #[tokio::test]
 async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() -> TestResult<()> {
+    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture = DurableWorkflowFixture::start_all_fake_providers_with_max_parallel(2).await?;
+    fixture.executor_options.heartbeat_timeout = Duration::from_secs(2);
+    fixture.executor_options.progress_idle_timeout = Duration::from_secs(2);
     let result = async {
         let mut plan = WorkflowPlan::default_ci();
         plan.concurrency.max_in_flight_dispatches = 3;
