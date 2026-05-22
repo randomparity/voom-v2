@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use voom_conformance::manifest::{Manifest, resolve_active, validate_operation_coverage};
@@ -42,6 +44,12 @@ async fn echo_worker_and_negative_fixtures_pass_conformance() {
     if let Err(e) = validate_operation_coverage(&manifest) {
         let mut combined = SuiteResult::default();
         combined.fail("manifest_operation_coverage", e.to_string());
+        assert_all_passed(&combined);
+        return;
+    }
+    if let Err(e) = ensure_fake_worker_bins_built() {
+        let mut combined = SuiteResult::default();
+        combined.fail("fake_worker_bins_build", e);
         assert_all_passed(&combined);
         return;
     }
@@ -135,4 +143,38 @@ fn record_shutdown(
         Ok(status) => result.fail(name, format!("exit status {status}")),
         Err(e) => result.fail(name, e.to_string()),
     }
+}
+
+fn ensure_fake_worker_bins_built() -> Result<(), String> {
+    static BUILD: OnceLock<Result<(), String>> = OnceLock::new();
+    BUILD
+        .get_or_init(|| {
+            let mut command = std::process::Command::new("cargo");
+            command.args(["build", "-p", "voom-fakes", "--bins"]);
+            if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+                command.arg("--target-dir").arg(target_dir);
+            }
+            if let Some(target) =
+                std::env::var_os("CARGO_BUILD_TARGET").filter(|target| !target.is_empty())
+            {
+                command.arg("--target").arg(target);
+            }
+            let status = command
+                .current_dir(workspace_root())
+                .status()
+                .map_err(|e| format!("fake worker build failed to start: {e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(format!("fake worker build exited with {status}"))
+            }
+        })
+        .clone()
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }

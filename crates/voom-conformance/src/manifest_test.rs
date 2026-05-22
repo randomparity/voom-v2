@@ -148,6 +148,13 @@ fn default_target_dir_fallback_points_at_workspace_target_dir() {
 }
 
 #[test]
+fn relative_cargo_target_dir_resolves_from_workspace_root() {
+    let dir = target_dir_from_env("target/ci-repro".into());
+    assert!(dir.ends_with("target/ci-repro"), "{dir:?}");
+    assert!(dir.is_absolute(), "{dir:?}");
+}
+
+#[test]
 fn rejects_active_entry_without_operation_cases() {
     let raw = r#"
 [[binaries]]

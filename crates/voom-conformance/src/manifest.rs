@@ -84,7 +84,7 @@ impl Manifest {
 
 pub fn resolve_active(entry: &ActiveBinary) -> Result<PathBuf, ManifestError> {
     let target_dir =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, PathBuf::from);
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, target_dir_from_env);
     resolve_active_with_sources(
         entry,
         |key| std::env::var_os(key),
@@ -116,9 +116,7 @@ where
     }
     if let Some(target_dir) = target_dir {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
-        return Ok(target_dir
-            .join("debug")
-            .join(format!("{}{}", entry.target, suffix)));
+        return Ok(debug_dir(target_dir).join(format!("{}{}", entry.target, suffix)));
     }
     Err(ManifestError::MissingActiveBinary {
         name: entry.name.clone(),
@@ -126,14 +124,34 @@ where
     })
 }
 
+fn target_dir_from_env(path: std::ffi::OsString) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        workspace_root().join(path)
+    }
+}
+
+fn debug_dir(target_dir: &Path) -> PathBuf {
+    if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET").filter(|target| !target.is_empty())
+    {
+        target_dir.join(target).join("debug")
+    } else {
+        target_dir.join("debug")
+    }
+}
+
+#[must_use]
 pub fn default_target_dir() -> PathBuf {
+    workspace_root().join("target")
+}
+
+fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .map_or_else(
-            || PathBuf::from("target"),
-            |workspace| workspace.join("target"),
-        )
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 pub fn validate_operation_coverage(manifest: &Manifest) -> Result<(), ManifestError> {
