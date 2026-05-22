@@ -228,3 +228,27 @@ fn rejects_unknown_boolean_track_filter_branch() {
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
+
+#[test]
+fn rejects_invalid_exists_condition_target() {
+    assert!(
+        codes("policy \"p\" { phase a { when exists banana { container mkv } } }")
+            .contains(&"invalid_track_target".to_owned())
+    );
+}
+
+#[test]
+fn rejects_condition_comparison_without_value() {
+    assert!(
+        codes("policy \"p\" { phase a { when video.codec == { container mkv } } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_invalid_skip_condition_target() {
+    assert!(
+        codes("policy \"p\" { phase a { skip when exists banana container mkv } }")
+            .contains(&"invalid_track_target".to_owned())
+    );
+}

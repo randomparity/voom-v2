@@ -236,7 +236,7 @@ impl<'a> Validator<'a> {
             let text = statement_text(control);
             match control.keyword().value.as_str() {
                 "depends_on" | "run_if" => {}
-                "skip" => self.validate_field_paths(control, text.as_ref()),
+                "skip" => self.validate_skip_condition(control, text.as_ref()),
                 "on_error" => self.validate_on_error(control, text.as_ref()),
                 _ => self.error(
                     DiagnosticCode::UnknownPhaseStatementOrOperation,
@@ -513,7 +513,8 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_condition(&mut self, statement: &StatementAst, text: &str) {
-        self.validate_field_paths(statement, text);
+        let condition = text.trim_start_matches("when").trim();
+        self.validate_condition_expression(statement, condition);
         if let StatementAst::Block { statements, .. } = statement {
             for nested in statements {
                 self.validate_nested_operation(nested);
@@ -521,11 +522,77 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_skip_condition(&mut self, statement: &StatementAst, text: &str) {
+        let condition = text
+            .trim_start_matches("skip")
+            .trim()
+            .trim_start_matches("when")
+            .trim();
+        self.validate_condition_expression(statement, condition);
+    }
+
+    fn validate_condition_expression(&mut self, statement: &StatementAst, text: &str) {
+        self.validate_field_paths(statement, text);
+        if !self.is_valid_condition_expression(statement, text) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "invalid condition expression",
+            );
+        }
+    }
+
+    fn is_valid_condition_expression(&mut self, statement: &StatementAst, text: &str) -> bool {
+        if text.trim().is_empty() {
+            return false;
+        }
+        if let Some(parts) = split_bool_condition(text, " or ") {
+            return parts
+                .into_iter()
+                .all(|part| self.is_valid_condition_expression(statement, part));
+        }
+        if let Some(parts) = split_bool_condition(text, " and ") {
+            return parts
+                .into_iter()
+                .all(|part| self.is_valid_condition_expression(statement, part));
+        }
+        if let Some(inner) = text.trim().strip_prefix("not ") {
+            return self.is_valid_condition_expression(statement, inner.trim());
+        }
+
+        let tokens = words(text);
+        match tokens.as_slice() {
+            ["exists", target, ..] => {
+                self.validate_track_target(statement.span(), target);
+                if !is_track_target_name(target) {
+                    return true;
+                }
+                if let Some((_, filter)) = text.split_once(" where ") {
+                    is_valid_track_filter(filter.trim())
+                } else {
+                    tokens.len() == 2
+                }
+            }
+            ["count", target, op, value] => {
+                self.validate_track_target(statement.span(), target);
+                is_track_target_name(target) && is_comparison_op(op) && value.parse::<u64>().is_ok()
+            }
+            _ => {
+                if let Some(index) = tokens.iter().position(|token| is_comparison_op(token)) {
+                    return index > 0
+                        && tokens.get(index + 1).is_some_and(|value| !value.is_empty())
+                        && tokens.first().is_some_and(|path| path.contains('.'));
+                }
+                tokens.len() == 1
+                    && tokens
+                        .first()
+                        .is_some_and(|token| token.contains('.') || is_reference_token(token))
+            }
+        }
+    }
+
     fn validate_track_target(&mut self, span: SourceSpan, target: &str) {
-        if !matches!(
-            target,
-            "video" | "audio" | "subtitle" | "subtitles" | "attachment" | "attachments"
-        ) {
+        if !is_track_target_name(target) {
             self.error(
                 DiagnosticCode::InvalidTrackTarget,
                 span,
@@ -732,6 +799,22 @@ fn is_reference_token(token: &str) -> bool {
 }
 
 #[must_use]
+fn is_track_target_name(target: &str) -> bool {
+    matches!(
+        target,
+        "video" | "audio" | "subtitle" | "subtitles" | "attachment" | "attachments"
+    )
+}
+
+#[must_use]
+fn is_comparison_op(token: &str) -> bool {
+    matches!(
+        token,
+        "==" | "=" | "!=" | "<" | "<=" | ">" | ">=" | "contains" | "matches"
+    )
+}
+
+#[must_use]
 fn is_valid_track_filter(text: &str) -> bool {
     if let Some(parts) = split_bool_filter(text, " or ") {
         return parts.into_iter().all(is_valid_track_filter);
@@ -754,6 +837,19 @@ fn is_valid_track_filter(text: &str) -> bool {
 
 #[must_use]
 fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    split_bool_expression(text, delimiter)
+}
+
+#[must_use]
+fn split_bool_condition<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    if text.contains(" where ") {
+        return None;
+    }
+    split_bool_expression(text, delimiter)
+}
+
+#[must_use]
+fn split_bool_expression<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
     let parts = text
         .split(delimiter)
         .map(str::trim)
