@@ -145,15 +145,24 @@ pub enum PolicyInputSetValidationError {
     EmptyFixtureLabels,
     DuplicateFixtureLabel(String),
     MissingSnapshotOrBundleTarget,
-    UndeclaredSyntheticTarget { key: String, kind: TargetKind },
+    UndeclaredSyntheticTarget {
+        key: String,
+        kind: TargetKind,
+    },
     SyntheticKeyKindMismatch {
         key: String,
         expected: TargetKind,
         actual: TargetKind,
     },
-    InvalidEvidenceConfidence { ordinal: u32 },
-    EmptyProviderName { ordinal: u32 },
-    EmptyQualityProfileName { ordinal: u32 },
+    InvalidEvidenceConfidence {
+        ordinal: u32,
+    },
+    EmptyProviderName {
+        ordinal: u32,
+    },
+    EmptyQualityProfileName {
+        ordinal: u32,
+    },
 }
 
 pub fn validate_input_set(
@@ -223,7 +232,12 @@ fn validate_child_targets(
         .media_snapshots
         .iter()
         .map(|snapshot| &snapshot.target)
-        .chain(input.identity_evidence.iter().map(|evidence| &evidence.target))
+        .chain(
+            input
+                .identity_evidence
+                .iter()
+                .map(|evidence| &evidence.target),
+        )
         .chain(input.bundle_targets.iter().map(|bundle| &bundle.target))
         .chain(input.quality_profiles.iter().map(|profile| &profile.target))
         .chain(input.issues.iter().map(|issue| &issue.target))

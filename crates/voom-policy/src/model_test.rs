@@ -121,8 +121,8 @@ fn evidence_confidence_out_of_range_is_rejected() {
 
 #[test]
 fn empty_provider_and_profile_names_are_rejected() {
-    let mut input = minimal_input_set();
-    input.identity_evidence.push(IdentityEvidenceInput {
+    let mut empty_provider = minimal_input_set();
+    empty_provider.identity_evidence.push(IdentityEvidenceInput {
         ordinal: 0,
         target: TargetRef::Synthetic {
             key: "work-1".to_owned(),
@@ -136,7 +136,9 @@ fn empty_provider_and_profile_names_are_rejected() {
         observed_at: time::OffsetDateTime::UNIX_EPOCH,
         existing_evidence_id: None,
     });
-    input.quality_profiles.push(QualityProfileSelection {
+
+    let mut empty_profile = minimal_input_set();
+    empty_profile.quality_profiles.push(QualityProfileSelection {
         ordinal: 0,
         target: TargetRef::Synthetic {
             key: "work-1".to_owned(),
@@ -147,7 +149,8 @@ fn empty_provider_and_profile_names_are_rejected() {
         dimension_weights: serde_json::json!({}),
     });
 
-    assert!(validate_input_set(&input).is_err());
+    assert!(validate_input_set(&empty_provider).is_err());
+    assert!(validate_input_set(&empty_profile).is_err());
 }
 
 #[test]
