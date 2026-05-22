@@ -391,6 +391,40 @@ async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() 
 }
 
 #[tokio::test]
+async fn dropped_client_stream_replays_after_worker_terminal() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let worker_finished = Arc::new(AtomicBool::new(false));
+    let handler = client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
+    let (addr, running) = running_server(handler).await;
+    let client = HttpClient::new(addr);
+    let req = request(LeaseId(15), serde_json::json!({"path": "/tmp/a"}));
+
+    let mut first = client
+        .dispatch(&creds(), "dropped-then-terminal", req.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        first.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Frame(_)
+    ));
+    drop(first);
+    wait_until(|| worker_finished.load(Ordering::SeqCst)).await;
+
+    let replay = collect_body(
+        client
+            .dispatch(&creds(), "dropped-then-terminal", req)
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(replay.len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
 async fn worker_abort_after_response_clears_active_idempotency_entry() {
     let calls = Arc::new(AtomicUsize::new(0));
     let worker_finished = Arc::new(AtomicBool::new(false));

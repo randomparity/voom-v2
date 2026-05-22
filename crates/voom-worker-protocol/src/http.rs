@@ -127,14 +127,6 @@ impl StreamingFrameWriter {
             detail: format!("json encode: {e}"),
         })?;
         bytes.push(b'\n');
-        self.sender
-            .send(StreamingMessage::Frame {
-                bytes: Bytes::from(bytes.clone()),
-                terminal,
-            })
-            .map_err(|_| ProtocolError::MalformedFrame {
-                detail: "stream receiver closed".to_owned(),
-            })?;
         {
             let mut cached = self
                 .shared
@@ -147,6 +139,12 @@ impl StreamingFrameWriter {
             self.shared.terminal_sent.store(true, Ordering::SeqCst);
             self.shared.complete_if_ready()?;
         }
+        self.sender
+            .send(StreamingMessage::Frame {
+                bytes: Bytes::from(bytes),
+                terminal,
+            })
+            .ok();
         Ok(())
     }
 
