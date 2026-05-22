@@ -24,6 +24,7 @@ CREATE TABLE policy_versions (
     created_at         TEXT NOT NULL,
     CHECK (version_number > 0),
     CHECK (length(source_hash) = 64),
+    CHECK (source_hash NOT GLOB '*[^0-9a-f]*'),
     CHECK (schema_version > 0),
     UNIQUE (policy_document_id, version_number),
     UNIQUE (policy_document_id, source_hash),

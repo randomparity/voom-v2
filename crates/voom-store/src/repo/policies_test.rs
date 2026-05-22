@@ -158,6 +158,36 @@ async fn raw_sql_rejects_unstable_policy_document_slug() {
 }
 
 #[tokio::test]
+async fn raw_sql_rejects_non_hex_policy_version_hash() {
+    let (pool, _tmp) = pool().await;
+    let document_id = sqlx::query(
+        "INSERT INTO policy_documents (slug, display_name, created_at) VALUES (?, ?, ?)",
+    )
+    .bind("bad-hash")
+    .bind("bad hash")
+    .bind("1970-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    let err = sqlx::query(
+        "INSERT INTO policy_versions \
+         (policy_document_id, version_number, source_text, source_hash, schema_version, \
+          compiled_json, created_at) VALUES (?, 1, ?, ?, 2, '{}', ?)",
+    )
+    .bind(document_id)
+    .bind("policy \"bad-hash\" { phase a {} }")
+    .bind("g".repeat(64))
+    .bind("1970-01-01T00:00:00Z")
+    .execute(&pool)
+    .await
+    .unwrap_err();
+
+    assert!(err.to_string().contains("CHECK"));
+}
+
+#[tokio::test]
 async fn concurrent_add_version_has_one_winner() {
     let (pool, _tmp) = pool().await;
     let repo_a = SqlitePolicyRepo::new(pool.clone());
