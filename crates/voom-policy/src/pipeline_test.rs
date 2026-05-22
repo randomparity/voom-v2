@@ -1,4 +1,4 @@
-use crate::{CompiledOperation, TrackFilter};
+use crate::{CompiledCondition, CompiledOperation, TrackFilter};
 
 use super::*;
 
@@ -46,4 +46,23 @@ fn compile_policy_preserves_boolean_track_filters() {
     assert_eq!(filters.len(), 2);
     assert!(matches!(filters[0], TrackFilter::LanguageIn { .. }));
     assert!(matches!(filters[1], TrackFilter::Commentary));
+}
+
+#[test]
+fn compile_policy_preserves_boolean_conditions() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { when exists audio or exists subtitle { container mkv } } }",
+    )
+    .unwrap();
+    let CompiledOperation::Conditional {
+        condition: CompiledCondition::Or { conditions },
+        ..
+    } = &out.policy.phases[0].operations[0]
+    else {
+        unreachable!("expected boolean condition");
+    };
+
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(conditions[0], CompiledCondition::Exists { .. }));
+    assert!(matches!(conditions[1], CompiledCondition::Exists { .. }));
 }

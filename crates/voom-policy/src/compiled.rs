@@ -499,7 +499,22 @@ fn phase_on_error(controls: &[StatementAst]) -> Option<ErrorStrategy> {
 }
 
 fn condition_from_text(text: &str) -> CompiledCondition {
+    if let Some(parts) = split_bool_condition(text, " or ") {
+        return CompiledCondition::Or {
+            conditions: parts.into_iter().map(condition_from_text).collect(),
+        };
+    }
+    if let Some(parts) = split_bool_condition(text, " and ") {
+        return CompiledCondition::And {
+            conditions: parts.into_iter().map(condition_from_text).collect(),
+        };
+    }
     let tokens = words(text);
+    if tokens.first() == Some(&"not") {
+        return CompiledCondition::Not {
+            inner: Box::new(condition_from_text(text.trim_start_matches("not").trim())),
+        };
+    }
     if tokens.first() == Some(&"exists") {
         return CompiledCondition::Exists {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
@@ -514,11 +529,6 @@ fn condition_from_text(text: &str) -> CompiledCondition {
                 .get(3)
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or_default(),
-        };
-    }
-    if tokens.first() == Some(&"not") {
-        return CompiledCondition::Not {
-            inner: Box::new(condition_from_text(text.trim_start_matches("not").trim())),
         };
     }
     if let Some(index) = tokens
@@ -540,6 +550,13 @@ fn condition_from_text(text: &str) -> CompiledCondition {
     CompiledCondition::Predicate {
         name: text.to_owned(),
     }
+}
+
+fn split_bool_condition<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    if text.contains(" where ") {
+        return None;
+    }
+    split_bool_expression(text, delimiter)
 }
 
 fn track_filter(text: &str) -> Option<TrackFilter> {
@@ -591,6 +608,10 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
 }
 
 fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    split_bool_expression(text, delimiter)
+}
+
+fn split_bool_expression<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
     let parts = text
         .split(delimiter)
         .map(str::trim)
