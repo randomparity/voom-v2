@@ -74,6 +74,19 @@ plane may compose it in the same transaction. Sprint 3 should not expand
 the event vocabulary solely to narrate fixture insertion; the durable
 input-set rows and fixture tests are the source of truth.
 
+### 3.1 Policy identity compatibility
+
+`PolicyInputSet` is not a policy document, policy version, or accepted
+policy. Its ids must not be written into
+`identity_evidence.accepted_policy_id`.
+
+Sprint 1 left `identity_evidence.accepted_policy_id` nullable for the
+future policy registry. Sprint 3 deliberately does not fill that hook:
+the policy id space belongs to Sprint 4, when parser and compiler work
+introduces durable policy/version identity. Sprint 3 input sets may
+later link to those policy versions, but input-set ids and policy ids
+remain separate namespaces.
+
 ## 4. Domain Model
 
 ### 4.1 PolicyInputSet
@@ -180,20 +193,37 @@ policy evaluation. That behavior belongs to Sprint 6.
 
 ### 4.7 Target Scope
 
-Every scoped child input names exactly one target. The allowed target
-kinds are:
+Every scoped child input names exactly one target. The allowed concrete
+target kinds are:
 
 - media work id;
 - media variant id;
 - bundle id;
 - file asset id;
 - file version id;
-- file location id;
-- synthetic key.
+- file location id.
 
-The synthetic key form is required for deterministic fixtures that
-should not depend on a pre-seeded SQLite identity graph. Real durable ids
-are used when available.
+The allowed synthetic target form is a synthetic key declared by the
+same input set. Synthetic targets are required for deterministic
+fixtures that should not depend on a pre-seeded SQLite identity graph.
+Real durable ids are used when available.
+
+### 4.8 PolicySyntheticTarget
+
+`PolicySyntheticTarget` declares a fixture-owned logical object before
+child inputs can reference it. It contains:
+
+- owning input-set id;
+- unique `synthetic_key` within that input set;
+- declared target kind: `media_work`, `media_variant`, `asset_bundle`,
+  `file_asset`, `file_version`, or `file_location`;
+- optional display name.
+
+The same synthetic key within one input set denotes the same logical
+object across all child tables. A child row that references a synthetic
+key must also declare the same target kind as the corresponding
+`PolicySyntheticTarget`. Reusing the same key for different target kinds
+inside one input set is invalid.
 
 ## 5. Persistence
 
@@ -201,6 +231,7 @@ Migration `0006_policy_inputs.sql` should add:
 
 - `policy_input_sets`;
 - `policy_input_set_fixture_labels`;
+- `policy_input_synthetic_targets`;
 - `policy_media_snapshot_inputs`;
 - `policy_identity_evidence_inputs`;
 - `policy_bundle_target_inputs`;
@@ -224,6 +255,14 @@ per input set. Child rows should preserve deterministic ordering with an
 integer `ordinal` column or insertion-order query rule, so JSON and DB
 round trips produce stable fixture output.
 
+Synthetic targets must use a `(policy_input_set_id, synthetic_key)`
+unique constraint. Child tables that support synthetic targets must
+store enough shape to enforce same-input-set lookup of the declared
+target kind. The implementation may enforce that cross-table reference
+through a foreign-key-friendly synthetic-target id or through repository
+validation plus SQL uniqueness, but it must be impossible for persisted
+fixture data to use an undeclared synthetic key.
+
 ## 6. Validation
 
 `voom-policy` validation should enforce:
@@ -232,6 +271,10 @@ round trips produce stable fixture output.
   input;
 - slug and fixture labels are non-empty stable tokens;
 - each scoped child input names exactly one target;
+- every synthetic-key target references a declared
+  `PolicySyntheticTarget` in the same input set;
+- a synthetic key is never reused for multiple target kinds within one
+  input set;
 - evidence confidence is within `0.0..=1.0`;
 - profile names and provider names are non-empty;
 - JSON-like fields serialize deterministically in fixtures;
@@ -275,23 +318,28 @@ Sprint 3 verification includes:
 - Transaction rollback test proving an invalid child row leaves no
   partial input set.
 - `voom-control-plane` use-case tests for create/get/list.
-- Documentation placeholder scan.
+- Documentation scan for incomplete-work markers.
 - `just ci`.
 
 Tests must use the existing sibling unit-test layout and existing store
 test-support patterns.
 
-## 9. Acceptance Matrix
+## 9. Acceptance And Traceability Matrix
 
-| Requirement | Sprint 3 artifact | Notes |
-|---|---|---|
-| Media snapshots can feed future policy evaluation. | `MediaSnapshotInput`, `policy_media_snapshot_inputs`, compliant/noncompliant fixtures. | Raw probe parsing is later worker/provider work. |
-| Identity evidence can influence future policy decisions. | `IdentityEvidenceInput`, `policy_identity_evidence_inputs`. | Existing `identity_evidence` ids may be linked, but inline fixture evidence is allowed. |
-| Bundle targets can express primary media and sidecar expectations. | `BundleTargetInput`, `policy_bundle_target_inputs`. | No bundle commit or rename behavior in Sprint 3. |
-| Quality profile selection is explicit. | `QualityProfileSelection`, `policy_quality_profile_selections`. | Scoring math and compliance reports are later work. |
-| Existing or expected issues can be represented. | `IssueInput`, `policy_issue_inputs`. | Durable issue creation from noncompliance is Sprint 6. |
-| Fixtures can express compliant and noncompliant synthetic media. | Two required fixture labels and files. | No parser, planner, or execution needed. |
-| Policy input records are durable. | Migration 0006, repository tests, control-plane use cases. | Includes SQLite because Sprint 3 must feed later durable planner work. |
+| Policy input area | Sprint 3 coverage | Fixture coverage | Deferral |
+|---|---|---|---|
+| Media policy inputs: container, codec, audio language, subtitles, and health facts. | `MediaSnapshotInput`, `BundleTargetInput`, `policy_media_snapshot_inputs`, `policy_bundle_target_inputs`. | Both required fixtures include snapshot and bundle-target rows. | Policy text grammar, compliance reports, and plan generation are Sprint 4 through Sprint 6. |
+| Identity evidence inputs. | `IdentityEvidenceInput`, optional links to existing `identity_evidence`, inline fixture evidence. | Both required fixtures include identity evidence using declared synthetic targets. | Accepting evidence under a policy id is Sprint 4+ policy registry work. |
+| Bundle and sidecar target inputs. | `BundleTargetInput` plus bundle-role vocabulary. | The compliant fixture includes satisfied bundle roles; the noncompliant fixture includes at least one missing or forbidden target fact. | Bundle commit, rename, rollback, and artifact production are later commit/planner work. |
+| Quality/scoring policy inputs. | `QualityProfileSelection` with profile name, version, and optional dimension weights. | Both required fixtures name the active scoring profile. | Scoring math and quality compliance reports are Sprint 6+ work. |
+| Issue policy inputs. | `IssueInput` can represent relevant open, accepted, suppressed, or planned issue facts. | The noncompliant fixture includes at least one issue input that explains the future action. | Creating or updating durable issues from policy evaluation is Sprint 6. |
+| Retention policy inputs. | Covered only as quality profile selections and identity evidence facts. | Noncompliant fixture may express duplicate or lower-quality facts as evidence/issue inputs. | Archive, delete, keep-best, and approval behavior are later retention/planner work. |
+| Safety policy inputs. | Covered only where evidence and issue facts are needed as later safety-gate inputs. | Fixtures may include evidence needed by future safety checks, but no gate executes. | Approval gates, backup requirements, rollback, and commit safety decisions are later planner/execution work. |
+| External-system policy inputs. | Covered only as identity evidence, issue facts, and provenance payloads. | Fixtures may name external providers in evidence provenance. | External sync jobs, path mapping behavior, writes, and refresh operations are later external-system work. |
+| Runtime use policy inputs. | No new Sprint 3 input model; use leases are already durable control-plane state. | No required fixture coverage. | Using active leases in policy/planner decisions is deferred to planner/scheduler work. |
+| Scheduling policy inputs. | No Sprint 3 model. | No required fixture coverage. | Scheduling priorities, windows, throttles, locality, and worker eligibility are scheduler/planner sprints. |
+| Durable policy input records. | Migration 0006, `PolicyInputRepo`, control-plane create/get/list use cases. | Required fixtures round-trip through SQLite. | Durable policy document/version identity is Sprint 4. |
+| Synthetic fixture targets. | `PolicySyntheticTarget`, `policy_input_synthetic_targets`, same-input-set synthetic-key validation. | Both required fixtures declare every synthetic target before child rows reference it. | Real identity seeding remains optional for Sprint 3 fixtures. |
 
 ## 10. Implementation Order
 
@@ -301,11 +349,11 @@ test-support patterns.
 4. Add `voom-store::repo::policy_inputs`.
 5. Add repository tests, including rollback behavior.
 6. Add `ControlPlane` policy-input use cases and tests.
-7. Add acceptance-matrix closeout notes if implementation discovers a
+7. Add traceability-matrix closeout notes if implementation discovers a
    legitimate deferral.
 
 ## 11. Open Decisions
 
-No unresolved product decisions remain for Sprint 3. Exact Rust module
-names, helper names, and fixture file paths are implementation details as
-long as they preserve the crate boundaries and acceptance matrix above.
+No open product decisions remain for Sprint 3. Exact Rust module names,
+helper names, and fixture file paths are implementation details as long
+as they preserve the crate boundaries and acceptance matrix above.
