@@ -1,0 +1,149 @@
+{
+  "policy_name": "production-normalize-reduced",
+  "slug": "production-normalize-reduced",
+  "source_hash": "1c96f738e64d92047f6422d16b440029da9ce575ffb7d2292736e3d641fd3a4f",
+  "schema_version": 2,
+  "metadata": {
+    "profile": "production",
+    "version": "1"
+  },
+  "config": {
+    "languages": "languages audio: [eng, und]",
+    "on_error": "on_error: continue"
+  },
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        },
+        {
+          "type": "keep_tracks",
+          "target": "audio",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng",
+              "und"
+            ]
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "attachment",
+          "filter": {
+            "type": "not",
+            "inner": {
+              "type": "font"
+            }
+          }
+        },
+        {
+          "type": "reorder_tracks",
+          "targets": [
+            "video",
+            "audio",
+            "subtitle"
+          ]
+        },
+        {
+          "type": "set_defaults",
+          "target": "audio",
+          "strategy": "first"
+        },
+        {
+          "type": "clear_track_actions",
+          "target": "audio"
+        },
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "exists",
+            "target": "audio",
+            "filter": null
+          },
+          "operations": [
+            {
+              "type": "set_tag",
+              "key": "audio_profile",
+              "value": {
+                "type": "field_path",
+                "path": [
+                  "identity",
+                  "title"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "rules",
+          "mode": "first",
+          "rules": [
+            {
+              "name": "remove-commentary",
+              "condition": {
+                "type": "exists",
+                "target": "audio",
+                "filter": {
+                  "type": "commentary"
+                }
+              },
+              "operations": [
+                {
+                  "type": "remove_tracks",
+                  "target": "audio",
+                  "filter": {
+                    "type": "commentary"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "annotate",
+      "depends_on": [
+        "normalize"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_tag",
+          "key": "title",
+          "value": {
+            "type": "field_path",
+            "path": [
+              "identity",
+              "title"
+            ]
+          }
+        },
+        {
+          "type": "delete_tag",
+          "key": "encoder"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize",
+    "annotate"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

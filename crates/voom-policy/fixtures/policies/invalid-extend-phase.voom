@@ -1,0 +1,5 @@
+policy "invalid-extend-phase" {
+  phase normalize {
+    extend base {}
+  }
+}

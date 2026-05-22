@@ -1,0 +1,18 @@
+[
+  {
+    "code": "deferred_composition",
+    "severity": "error",
+    "stage": "validate",
+    "span": {
+      "start": 37,
+      "end": 43
+    },
+    "location": {
+      "line": 2,
+      "column": 11
+    },
+    "message": "policy composition through extends is deferred",
+    "suggestion": null,
+    "related": []
+  }
+]

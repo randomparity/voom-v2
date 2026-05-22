@@ -1,0 +1,7 @@
+policy "invalid-unknown-core-field" {
+  phase normalize {
+    when vidio.codec == hevc {
+      container mkv
+    }
+  }
+}

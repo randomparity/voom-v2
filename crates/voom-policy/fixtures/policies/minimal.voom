@@ -1,0 +1,5 @@
+policy "minimal" {
+  phase inspect {
+    container mkv
+  }
+}

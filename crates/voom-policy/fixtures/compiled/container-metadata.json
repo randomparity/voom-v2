@@ -1,0 +1,56 @@
+{
+  "policy_name": "container-metadata",
+  "slug": "container-metadata",
+  "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+  "schema_version": 2,
+  "metadata": {
+    "description": "container and metadata normalization",
+    "version": "1"
+  },
+  "config": {
+    "languages": "languages audio: [eng, und]",
+    "on_error": "on_error: abort"
+  },
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        },
+        {
+          "type": "clear_tags"
+        },
+        {
+          "type": "set_tag",
+          "key": "title",
+          "value": {
+            "type": "field_path",
+            "path": [
+              "identity",
+              "title"
+            ]
+          }
+        },
+        {
+          "type": "delete_tag",
+          "key": "encoder"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

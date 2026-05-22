@@ -1,0 +1,7 @@
+policy "invalid-extends" {
+  extends "base"
+
+  phase normalize {
+    container mkv
+  }
+}

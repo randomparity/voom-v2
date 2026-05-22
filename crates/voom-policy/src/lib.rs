@@ -15,6 +15,7 @@ pub mod fixtures;
 pub mod model;
 pub mod parser;
 pub mod pipeline;
+pub mod policy_fixtures;
 pub mod span;
 pub mod validate;
 
@@ -36,6 +37,10 @@ pub use model::{
 pub use parser::{ParseError, parse_policy_source};
 pub use pipeline::{
     CompileOutput, PolicyCompileError, compile_policy, parse_policy, validate_policy,
+};
+pub use policy_fixtures::{
+    PolicyFixture, invalid_policy_fixtures, load_json_fixture, load_policy_fixture,
+    valid_policy_fixtures,
 };
 pub use span::{SourceLocation, SourceSpan, line_column};
 pub use validate::{ValidationResult, validate_policy_ast};

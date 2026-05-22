@@ -1,0 +1,36 @@
+policy "production-normalize-reduced" {
+  metadata {
+    version: "1"
+    profile: "production"
+  }
+
+  config {
+    languages audio: [eng, und]
+    on_error: continue
+  }
+
+  phase normalize {
+    container mkv
+    keep audio where lang in [eng, und]
+    remove attachments where not font
+    order tracks [video, audio, subtitle]
+    defaults audio: first
+    actions audio clear
+    when exists audio {
+      set_tag "audio_profile" identity.title
+    }
+    rules first {
+      rule "remove-commentary" {
+        when exists audio where commentary {
+          remove audio where commentary
+        }
+      }
+    }
+  }
+
+  phase annotate {
+    depends_on: [normalize]
+    set_tag "title" identity.title
+    delete_tag "encoder"
+  }
+}
