@@ -109,6 +109,12 @@ impl ControlPlane {
                 ticket.state
             )));
         }
+        if ticket.next_eligible_at > now {
+            return Err(VoomError::Conflict(format!(
+                "pre-lease failure rejected: ticket {ticket_id} is not eligible until {}",
+                ticket.next_eligible_at
+            )));
+        }
 
         let next_attempt = ticket.attempt.checked_add(1).ok_or_else(|| {
             VoomError::Internal(format!(
@@ -137,7 +143,7 @@ impl ControlPlane {
         let ticket_id_i = sqlite_i64(ticket.id.0, "ticket id")?;
         let now_str = iso8601(now)?;
         let updated = if terminal {
-            terminal_fail_ready_ticket(tx, ticket_id_i, ticket.attempt, next_attempt, &now_str)
+            terminal_fail_ready_ticket(tx, ticket_id_i, ticket.attempt, next_attempt, &now_str, now)
                 .await?
         } else {
             let mut shot = self.snapshot_rng();
@@ -243,16 +249,18 @@ async fn terminal_fail_ready_ticket(
     previous_attempt: u32,
     next_attempt: u32,
     now_str: &str,
+    now: OffsetDateTime,
 ) -> Result<sqlx::sqlite::SqliteQueryResult, VoomError> {
     sqlx::query(
         "UPDATE tickets SET state = 'failed', state_changed_at = ?, \
          attempt = ?, epoch = epoch + 1 WHERE id = ? AND state = 'ready' \
-         AND attempt = ?",
+         AND attempt = ? AND next_eligible_at <= ?",
     )
     .bind(now_str)
     .bind(i64::from(next_attempt))
     .bind(ticket_id_i)
     .bind(i64::from(previous_attempt))
+    .bind(iso8601(now)?)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("pre-lease terminal fail: {e}")))
@@ -269,13 +277,14 @@ async fn requeue_ready_ticket(
     sqlx::query(
         "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
          attempt = ?, next_eligible_at = ?, epoch = epoch + 1 \
-         WHERE id = ? AND state = 'ready' AND attempt = ?",
+         WHERE id = ? AND state = 'ready' AND attempt = ? AND next_eligible_at <= ?",
     )
     .bind(now_str)
     .bind(i64::from(next_attempt))
     .bind(iso8601(next_eligible_at)?)
     .bind(ticket_id_i)
     .bind(i64::from(previous_attempt))
+    .bind(now_str)
     .execute(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("pre-lease requeue: {e}")))

@@ -156,6 +156,36 @@ async fn pre_lease_no_eligible_worker_requeues_without_creating_lease() {
 }
 
 #[tokio::test]
+async fn pre_lease_no_eligible_worker_rejects_retry_before_next_eligible_at() {
+    let (cp, _tmp) = cp().await;
+    let t = cp
+        .create_ticket(ticket_with_max_attempts("test.noop", 3))
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+
+    let now = T0 + TDuration::seconds(5);
+    let first = cp
+        .record_pre_lease_ticket_failure(t.id, FailureClass::NoEligibleWorker, now)
+        .await
+        .unwrap()
+        .ticket;
+
+    let err = cp
+        .record_pre_lease_ticket_failure(t.id, FailureClass::NoEligibleWorker, now)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)));
+    let unchanged = cp.tickets().get(t.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.attempt, first.attempt);
+    assert_eq!(unchanged.state, TicketState::Ready);
+    assert_eq!(unchanged.next_eligible_at, first.next_eligible_at);
+    assert_eq!(event_count(&cp, EventKind::TicketFailedRetriable).await, 1);
+    assert_eq!(event_count(&cp, EventKind::TicketFailedTerminal).await, 0);
+}
+
+#[tokio::test]
 async fn pre_lease_ambiguous_worker_selection_terminal_fails_immediately() {
     let (cp, _tmp) = cp().await;
     let t = cp
