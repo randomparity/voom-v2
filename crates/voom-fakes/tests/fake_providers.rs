@@ -204,7 +204,11 @@ async fn timed_fake_provider_streams_progress_before_terminal() {
         progress_count >= 2,
         "expected at least two progress frames before terminal, got {progress_count}"
     );
-    assert!(terminal_at > first_progress_at.unwrap());
+    let streamed_elapsed = terminal_at.duration_since(first_progress_at.unwrap());
+    assert!(
+        streamed_elapsed >= Duration::from_millis(90),
+        "expected progress to stream across wall-clock time, got {streamed_elapsed:?}"
+    );
 
     launch.shutdown().await;
 }
