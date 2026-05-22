@@ -22,6 +22,10 @@ const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_use_leas
 const MIGRATION_0005_SQL: &str =
     include_str!("../../../migrations/0005_commit_intents_persistent_permit.sql");
 
+/// SQL for migration 0006 (Sprint 3 policy input persistence), embedded at
+/// compile time.
+const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_policy_inputs.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -70,6 +74,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("commit_intents_persistent_permit"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0005_SQL),
+            false,
+        ),
+        Migration::new(
+            6,
+            Cow::Borrowed("policy_inputs"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0006_SQL),
             false,
         ),
     ]),

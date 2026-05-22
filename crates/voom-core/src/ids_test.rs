@@ -68,6 +68,34 @@ fn media_snapshot_id_displays_inner_u64() {
 }
 
 #[test]
+fn policy_input_set_id_displays_inner_u64() {
+    assert_eq!(PolicyInputSetId(10).to_string(), "10");
+}
+
+#[test]
+fn policy_input_set_id_round_trips_through_json() {
+    let id = PolicyInputSetId(10);
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "10");
+    let back: PolicyInputSetId = serde_json::from_str(&json).unwrap();
+    assert_eq!(id, back);
+}
+
+#[test]
+fn policy_synthetic_target_id_displays_inner_u64() {
+    assert_eq!(PolicySyntheticTargetId(11).to_string(), "11");
+}
+
+#[test]
+fn policy_synthetic_target_id_round_trips_through_json() {
+    let id = PolicySyntheticTargetId(11);
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "11");
+    let back: PolicySyntheticTargetId = serde_json::from_str(&json).unwrap();
+    assert_eq!(id, back);
+}
+
+#[test]
 fn use_lease_id_displays_inner_u64() {
     assert_eq!(UseLeaseId(42).to_string(), "42");
 }
