@@ -212,3 +212,19 @@ fn rejects_order_without_tracks_keyword() {
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
+
+#[test]
+fn rejects_unknown_track_filter_predicate() {
+    assert!(
+        codes("policy \"p\" { phase a { keep audio where banana } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unknown_boolean_track_filter_branch() {
+    assert!(
+        codes("policy \"p\" { phase a { keep audio where lang in [eng] or banana } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}

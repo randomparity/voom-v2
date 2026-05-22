@@ -371,6 +371,15 @@ impl<'a> Validator<'a> {
         self.validate_track_target(statement.span(), tokens.get(1).copied().unwrap_or_default());
         self.validate_language_tokens(statement, text);
         self.validate_field_paths(statement, text);
+        if let Some((_, filter)) = text.split_once(" where ")
+            && !is_valid_track_filter(filter.trim())
+        {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "unknown track filter predicate",
+            );
+        }
     }
 
     fn validate_order(&mut self, statement: &StatementAst, text: &str) {
@@ -720,6 +729,37 @@ fn is_reference_token(token: &str) -> bool {
         .bytes()
         .next()
         .is_some_and(|byte| byte.is_ascii_alphabetic())
+}
+
+#[must_use]
+fn is_valid_track_filter(text: &str) -> bool {
+    if let Some(parts) = split_bool_filter(text, " or ") {
+        return parts.into_iter().all(is_valid_track_filter);
+    }
+    if let Some(parts) = split_bool_filter(text, " and ") {
+        return parts.into_iter().all(is_valid_track_filter);
+    }
+    if let Some(inner) = text.trim().strip_prefix("not ") {
+        return is_valid_track_filter(inner.trim());
+    }
+
+    let tokens = words(text);
+    match tokens.as_slice() {
+        ["lang" | "language" | "codec", "in", ..] => !list_values(text).is_empty(),
+        ["commentary" | "forced" | "default" | "font"] => true,
+        ["title", "contains" | "matches", value, ..] => !value.is_empty(),
+        _ => false,
+    }
+}
+
+#[must_use]
+fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
+    let parts = text
+        .split(delimiter)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() > 1 { Some(parts) } else { None }
 }
 
 #[cfg(test)]
