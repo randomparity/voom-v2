@@ -1,5 +1,14 @@
-//! Reserved for Sprint 3+ — see workspace spec for scope.
+//! Policy-domain inputs for Sprint 3.
 
-pub mod placeholder {
-    //! Intentionally empty until the owning sprint lands.
-}
+pub mod model;
+
+pub use model::{
+    BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
+    MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSetValidationError,
+    PolicyInputSourceKind, PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef,
+    validate_input_set,
+};
+
+#[cfg(test)]
+#[path = "model_test.rs"]
+mod tests;

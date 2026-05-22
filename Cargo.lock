@@ -2612,6 +2612,12 @@ version = "0.1.0-dev"
 [[package]]
 name = "voom-policy"
 version = "0.1.0-dev"
+dependencies = [
+ "serde",
+ "serde_json",
+ "time",
+ "voom-core",
+]
 
 [[package]]
 name = "voom-scheduler"
