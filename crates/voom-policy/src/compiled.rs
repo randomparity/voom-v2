@@ -632,6 +632,11 @@ fn filter_predicate(token: Option<&str>) -> Option<TrackFilter> {
 
 fn compiled_value(text: &str) -> CompiledValue {
     let text = text.trim();
+    if text.starts_with('"') && text.ends_with('"') {
+        return CompiledValue::String {
+            value: strip_quotes(text),
+        };
+    }
     if text == "true" {
         return CompiledValue::Boolean { value: true };
     }

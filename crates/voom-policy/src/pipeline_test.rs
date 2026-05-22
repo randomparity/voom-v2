@@ -66,3 +66,19 @@ fn compile_policy_preserves_boolean_conditions() {
     assert!(matches!(conditions[0], CompiledCondition::Exists { .. }));
     assert!(matches!(conditions[1], CompiledCondition::Exists { .. }));
 }
+
+#[test]
+fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
+    let out =
+        compile_policy("policy \"p\" { phase a { set_tag \"title\" \"Movie.Name\" } }").unwrap();
+    let CompiledOperation::SetTag { value, .. } = &out.policy.phases[0].operations[0] else {
+        unreachable!("expected set_tag operation");
+    };
+
+    assert_eq!(
+        *value,
+        crate::CompiledValue::String {
+            value: "Movie.Name".to_owned()
+        }
+    );
+}

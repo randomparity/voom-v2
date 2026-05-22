@@ -764,13 +764,43 @@ fn text_after_quoted_value(text: &str) -> Option<&str> {
 }
 
 #[must_use]
-fn field_path_tokens(text: &str) -> Vec<&str> {
+fn field_path_tokens(text: &str) -> Vec<String> {
+    let text = without_quoted_text(text);
     text.split(|ch: char| {
         ch.is_ascii_whitespace() || matches!(ch, '"' | '\'' | '[' | ']' | '(' | ')' | '{' | '}')
     })
     .map(|token| token.trim_matches(|ch: char| matches!(ch, ',' | ':')))
     .filter(|token| token.contains('.'))
+    .map(str::to_owned)
     .collect()
+}
+
+#[must_use]
+fn without_quoted_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in text.chars() {
+        if escaped {
+            out.push(' ');
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            out.push(' ');
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            out.push(' ');
+            continue;
+        }
+        out.push(if in_string { ' ' } else { ch });
+    }
+
+    out
 }
 
 #[must_use]
