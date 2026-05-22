@@ -1,6 +1,6 @@
 ---
 name: voom-sprint-2-design
-description: Sprint 2 (Synthetic Provider Suite MVP) overview design for VOOM — versioned HTTP/JSON worker protocol, local worker supervisor, eleven fake providers, chaos worker, benchmark worker, and provider conformance tests. Decomposes the sprint into six phases on `feat/sprint-2`, fixes cross-phase architectural decisions, and defers per-phase detail to the phase-level design docs.
+description: Sprint 2 (Synthetic Provider Suite MVP) overview design for VOOM — versioned HTTP/JSON worker protocol, workflow-executor scheduler closeout, eleven fake providers, chaos worker, benchmark worker, and provider conformance tests. Decomposes the sprint into six phases on `feat/sprint-2`, fixes cross-phase architectural decisions, and defers per-phase detail to the phase-level design docs.
 status: proposed
 date: 2026-05-19
 sprint: 2
@@ -34,9 +34,18 @@ The architectural-spec exit criteria for Sprint 2 are:
 - Benchmark worker reports scheduler throughput.
 
 "The real scheduler" in this sprint is the Sprint 1 lease-acquire /
-heartbeat / release / expire lifecycle, plus the new **local worker
-supervisor** added in Phase 2 that drives the dequeue → dispatch → result
-loop. Full multi-worker scoring (capability + locality + cost) is Sprint 4.
+heartbeat / release / expire lifecycle plus the Sprint 2
+`WorkerSelector` capacity boundary. Phase 2 originally named the owning
+loop `LocalWorkerSupervisor`; the implemented closeout path exposes that
+dequeue → lease → dispatch → result behavior as the Phase 7
+`WorkflowExecutor`, not as a standalone supervisor API. The Phase 7
+executor is therefore the Sprint 2 exit-gate scheduler surface: it uses
+durable tickets and leases, `SingleWorkerPerKindSelector`, process-backed
+workers over `voom-worker-protocol`, heartbeat/progress watchdogs, and
+durable terminal transitions. The broader supervisor outbox/incarnation
+reconciliation surface described below remains design context for later
+sprints. Full multi-worker scoring (capability + locality + cost) is
+Sprint 4.
 
 Out of scope for Sprint 2 (deferred to named later sprints):
 
@@ -101,22 +110,32 @@ pass. `voom-conformance` runs the `echo-worker` through both the
 typed and raw-wire contract suites green and exits non-zero on every
 golden-byte mutation in the suite.
 
-### Phase 2 — Local worker supervisor
+### Phase 2 — Local worker supervisor design surface
 
-Crates: `voom-control-plane` (supervisor + use-cases), `voom-scheduler`
-(minimal `WorkerSelector` trait), and `voom-store` (migration 0005 +
-`WorkerIncarnationRepo`). The supervisor lives in
+Implementation note: the following section is the original Phase 2
+supervisor design target. The branch did not ship a public
+`LocalWorkerSupervisor` type or `worker_incarnations`/dispatch-intent
+outbox in Sprint 2. Instead, Sprint 2 closeout promoted the durable
+scheduler behavior into the Phase 7 `WorkflowExecutor`; that executor is
+the tested dequeue → lease → dispatch → result path for the sprint exit
+criteria.
+
+Crates: `voom-control-plane` (scheduler/supervisor use-cases) and
+`voom-scheduler` (minimal `WorkerSelector` trait). The deferred
+supervisor design also calls for `voom-store` worker-incarnation and
+dispatch-intent repositories. The supervisor lives in
 `voom-control-plane` because Sprint 1 already establishes
 `voom-control-plane` as the sole layer that composes durable state
 mutations with event writes inside one transaction (see Sprint 1 §5.2);
-making the supervisor a control-plane use-case keeps that invariant
-without duplication. `voom-scheduler` ships a minimal `WorkerSelector`
-trait + `SingleWorkerPerKindSelector` default impl so the
-operation-to-worker routing has a typed boundary today; Sprint 4 will
-swap in multi-worker scoring behind the same trait without changing
-supervisor or test code.
+the implemented `WorkflowExecutor` keeps that invariant by routing
+durable job, ticket, lease, and dependency mutations through
+control-plane use cases. `voom-scheduler` ships a minimal
+`WorkerSelector` trait + `SingleWorkerPerKindSelector` default impl so
+the operation-to-worker routing has a typed boundary today; Sprint 4
+will swap in multi-worker scoring behind the same trait without changing
+workflow-executor test code.
 
-The supervisor (a) registers and supervises local worker processes
+The deferred standalone supervisor design (a) registers and supervises local worker processes
 via Sprint 1's `WorkerRepo` plus the new `WorkerIncarnationRepo`
 (§4.8), (b) dequeues ready tickets via Sprint 1's
 `LeaseRepo::acquire_in_tx`, (c) selects exactly one worker through
@@ -132,12 +151,15 @@ use-case method that composes the repo `_in_tx` call with the
 matching `EventRepo::append_in_tx` in a single transaction — the
 supervisor never writes to a repo without going through this layer.
 
-The Phase 1 conformance harness gates this phase: Phase 2 may not
-declare exit until the supervisor passes a conformance run against
-`echo-worker` (both typed and raw-wire layers).
+The implemented Sprint 2 exit gate uses the Phase 7 `WorkflowExecutor`
+instead of this standalone supervisor API. Phase 1/6 conformance gates
+the worker protocol and fake binaries directly; a later sprint that
+reintroduces the standalone supervisor must add the corresponding
+supervisor-side conformance run.
 
-**Exit:** end-to-end tests in `crates/voom-control-plane/tests/`
-cover:
+**Deferred standalone supervisor exit:** when this design surface is
+implemented in a later sprint, end-to-end tests in
+`crates/voom-control-plane/tests/` should cover:
 
 - supervisor register → dequeue → dispatch → progress → result →
   release happy path against `echo-worker`;
@@ -185,8 +207,9 @@ decided in the Phase 3 design) so tests are reproducible.
 
 **Exit:** an end-to-end test runs a multi-step synthetic flow
 (scan → probe → identity → quality → issue → use-lease) through the
-real supervisor, every fake passes the conformance harness, and the
-durable event log matches the scripted scenario.
+implemented `WorkflowExecutor` scheduler path, every fake passes the
+conformance harness, and the durable event log matches the scripted
+scenario.
 
 ### Phase 4 — Chaos worker
 
@@ -216,10 +239,11 @@ issues, lease release reasons, retry classification per Sprint 1's
 Crate: `voom-fakes` (additional binary `benchmark-worker`, independent
 of `voom-fake-support` for the same independence reason as chaos
 above). A worker that accepts a parametrized "no-op" operation and
-reports per-operation latency + throughput from the supervisor's
-perspective, emitted as structured progress frames the test harness
-collects. The harness asserts a throughput floor so regressions in
-dispatch / heartbeat / event-emit overhead are caught in CI.
+reports per-operation latency + throughput in structured progress frames
+the test harness collects. The full supervisor-throughput gate from the
+original plan was superseded in Sprint 2 closeout by Phase 7's durable
+workflow throughput summary, which measures dispatch throughput through
+the implemented `WorkflowExecutor` scheduler path.
 
 `benchmark-worker` must pass the conformance harness before being
 admitted to the throughput suite.
@@ -235,11 +259,12 @@ Crate: `voom-conformance` (extended). Phase 1 shipped the bootstrap
 conformance harness gating every subsequent worker; Phase 6 extends
 it to the full architectural-spec contract surface: every operation
 kind from the fixed vocabulary, every error category from the failure
-taxonomy, cancellation, registration replay, capability mismatch,
-worker re-registration after crash, and supervisor-side recovery from
-each chaos scenario. The phase also runs the now-complete suite
-across every Phase 3 / 4 / 5 binary together as a final integration
-gate.
+taxonomy, cancellation, registration replay, capability mismatch, and
+worker re-registration after crash. Workflow-level chaos recovery is
+covered by the Phase 7 `WorkflowExecutor` integration tests; standalone
+supervisor recovery remains deferred with §4.8. The phase also runs the
+now-complete suite across every Phase 3 / 4 / 5 binary together as a
+final integration gate.
 
 **Exit:** `cargo test -p voom-conformance` runs the full extended
 contract suite against all eleven fakes plus chaos and benchmark, and
@@ -251,59 +276,65 @@ without passing it.
 | Crate | Sprint 2 contents added |
 |---|---|
 | `voom-worker-protocol` | Phase 1. Wire types (`OperationRequest`, `OperationResponse`, `ProgressFrame`, `ProtocolError`, `WorkerCredentials`), version-negotiation handshake, NDJSON frame codec with framing invariants (§4.2), bearer-token + worker-identity validation, transport traits (`ClientHandle`, `ServerHandle`), one concrete HTTP/1.1 loopback transport. Public typed-encode API plus a `low_level` module exposing raw HTTP / NDJSON primitives so `voom-conformance` and `chaos-worker` can construct malformed wire bytes outside the typed encoder (§4.7). |
-| `voom-conformance` | New crate, Phase 1 (bootstrap) + Phase 6 (full). Black-box protocol conformance harness that launches a worker binary over the public protocol only. No dependency on `voom-fake-support`. Ships one minimal `echo-worker` binary in Phase 1 to validate the harness against itself. The Phase 1 harness includes a **raw-wire mutation suite**: golden-byte HTTP/NDJSON fixtures plus mutations that bypass `ClientHandle`/`ServerHandle` and assert the worker / supervisor reject malformed bytes (§4.7). |
-| `voom-control-plane` | Phase 2. `LocalWorkerSupervisor` plus the new `ControlPlane` use-case methods it composes (e.g., `register_worker_process`, `dequeue_and_dispatch`, `record_progress`, `record_result`, `reconcile_orphaned_workers_on_startup`, `fail_lease_on_progress_timeout`, `expire_stale_leases`). All durable mutations go through these use-cases per Sprint 1 §5.2. The supervisor's watchdog state machine (§4.9) and restart reconciliation (§4.8) live here. New `crates/voom-control-plane/tests/` integration suite covering supervisor lifecycle, restart-after-crash, watchdog race scenarios, chaos scenarios, and the benchmark harness. |
-| `voom-scheduler` | Phase 2 ships a minimal `WorkerSelector` trait plus a `SingleWorkerPerKindSelector` default impl: select exactly one active worker advertising the requested `OperationKind`; return `FailureClass::NoEligibleWorker` for zero matches; return `FailureClass::AmbiguousWorkerSelection` (new variant — added to `voom-core::failure` in the same phase) for multiple matches unless an explicit override is set. Sprint 4 swaps in multi-worker scoring behind the same trait without changing the supervisor. |
-| `voom-store` | Phase 2 ships migration `0005_worker_incarnations.sql`: adds the `worker_incarnations` table that persists per-spawn runtime state (pid, endpoint, epoch, secret hash, started_at, retired_at) used by §4.8 restart reconciliation. New `WorkerIncarnationRepo` exposes the `_in_tx` lifecycle methods the supervisor composes through `voom-control-plane`. |
+| `voom-conformance` | New crate, Phase 1 (bootstrap) + Phase 6 (full). Black-box protocol conformance harness that launches a worker binary over the public protocol only. No dependency on `voom-fake-support`. Ships one minimal `echo-worker` binary in Phase 1 to validate the harness against itself. The Phase 1 harness includes a **raw-wire mutation suite**: golden-byte HTTP/NDJSON fixtures plus mutations that bypass `ClientHandle`/`ServerHandle` and assert the worker rejects malformed bytes (§4.7). |
+| `voom-control-plane` | Phase 2/7. The original Phase 2 design named a standalone `LocalWorkerSupervisor`; the implemented Sprint 2 scheduler surface is Phase 7's `WorkflowExecutor`. It composes `ControlPlane` use cases for job/ticket creation, worker selection, lease acquire/release/fail, dependency promotion, heartbeat/progress watchdogs, chaos mapping, and durable workflow summaries. The separate worker-incarnation outbox and public supervisor API remain later-sprint work. |
+| `voom-scheduler` | Phase 2 ships a minimal `WorkerSelector` trait plus a `SingleWorkerPerKindSelector` default impl: select exactly one active worker advertising the requested `OperationKind`; return `FailureClass::NoEligibleWorker` for zero matches; return `FailureClass::AmbiguousWorkerSelection` (new variant — added to `voom-core::failure` in the same phase) for multiple matches unless an explicit override is set. Sprint 4 swaps in multi-worker scoring behind the same trait without changing scheduler callers. |
+| `voom-store` | Sprint 2 reuses the existing durable jobs, tickets, leases, workers, capabilities, and grants tables for the implemented `WorkflowExecutor` path. The originally proposed `0005_worker_incarnations.sql`, `lease_dispatch_intents`, and `WorkerIncarnationRepo` are deferred with the standalone supervisor/outbox work in §4.8. |
 | `voom-fake-support` | New crate, Phase 3. Shared helpers for fake binaries (lease loop, scenario runner, progress emitter, result-envelope helpers). Consumed only by the eleven `fake-*` binaries — never by `chaos-worker`, `benchmark-worker`, `voom-conformance`, or `voom-control-plane`. |
 | `voom-fakes` | New crate, Phases 3 / 4 / 5. Eleven `fake-*` binaries plus `chaos-worker` and `benchmark-worker`. The fake binaries depend on `voom-fake-support`; chaos and benchmark depend only on `voom-worker-protocol::low_level` so their malformed-frame behavior cannot ride on the shared typed encoder. |
 | `voom-core` | Phase 1 adds a `protocol_version` constant plus error-code variants for `WORKER_RETIRED`, `WORKER_INCARNATION_STALE`, `AMBIGUOUS_WORKER_SELECTION`. Phase 2 adds `FailureClass::ProgressTimeout` (distinct from `WorkerTimeout` for callbacks-but-no-progress) and `FailureClass::AmbiguousWorkerSelection`. |
-| `voom-cli` | Phase 2 / Phase 3 may add read-only inspection verbs over progress events, supervisor state, and `worker_incarnations` if Sprint 1's existing verbs are insufficient. Read-only only. |
+| `voom-cli` | No implemented Sprint 2 closeout dependency. A later standalone supervisor sprint may add read-only inspection verbs over progress events, supervisor state, and `worker_incarnations` if Sprint 1's existing verbs are insufficient. Read-only only. |
 | `voom-api`, `voom-events`, `voom-policy`, `voom-plan`, `voom-artifact` | Untouched. No Sprint 2 deliverables land here. |
 
-`voom-events` is deliberately not touched even though the supervisor
-emits events — Sprint 1 already defined the relevant `EventKind`
-variants (`worker.registered`, `lease.acquired`, `lease.heartbeat`,
-`lease.released`, `ticket.progress`, `ticket.failed`, etc.). Phase 2's
-job is to wire the supervisor into those existing variants, not invent
-new ones. If a Sprint 2 phase truly needs a new event kind, the
-delta is added to `voom-events` in that phase's plan with an explicit
-note in the per-phase design.
+`voom-events` is deliberately not touched. Sprint 1 already defined the
+relevant `EventKind` variants (`worker.registered`, `lease.acquired`,
+`lease.heartbeat`, `lease.released`, `ticket.progress`,
+`ticket.failed`, etc.), and Sprint 2's implemented `WorkflowExecutor`
+closeout path records durable job, ticket, lease, progress, and failure
+state through the existing control-plane/store APIs without inventing
+new event kinds. A later standalone supervisor may wire its process and
+callback lifecycle into those same variants; if that work truly needs a
+new event kind, the delta belongs in that later phase's plan with an
+explicit note in its per-phase design.
 
 ## 4. Cross-phase architectural decisions
 
 These decisions are fixed here so each per-phase design starts from a
 shared baseline.
 
-### 4.1 Transport: in-process spawn + HTTP/1.1 loopback with bearer-token identity
+### 4.1 Transport: process-backed HTTP/1.1 loopback with bearer-token identity
 
-Workers are real OS processes spawned by the supervisor on the same
-host. The supervisor talks to them over HTTP/1.1 on `127.0.0.1` with a
-per-worker ephemeral port. On spawn the supervisor generates a 32-byte
-cryptographically random `worker_secret` and passes it to the child
-through an env var (`VOOM_WORKER_SECRET`); the supervisor also assigns
-a `worker_id` (Sprint 1 `WorkerId`) and a `worker_epoch: u64` (bumped
-on every (re-)spawn of the same logical worker). The worker prints
-its bound port to stdout on startup; the supervisor reads it before
-issuing the first request.
+For the implemented Sprint 2 closeout path, fake providers, chaos, and
+benchmark workers are real OS processes spawned by the Phase 7 test
+fixture and registered with the `WorkflowExecutor` runtime registry. The
+executor dispatches to them over HTTP/1.1 on `127.0.0.1` with
+per-worker ephemeral endpoints and bearer-token credentials carried by
+the worker protocol. This keeps Sprint 2 on the real wire contract while
+avoiding an unshipped public supervisor daemon API.
 
-Every request from the supervisor to the worker carries
-`Authorization: Bearer <worker_secret>`, `X-Voom-Worker-Id`, and
-`X-Voom-Worker-Epoch` headers. Every callback from the worker to the
-supervisor (heartbeat, progress, result) carries the same three
+The deferred standalone supervisor design uses the same protocol shape
+but owns the process lifecycle itself: on spawn it generates a 32-byte
+cryptographically random `worker_secret`, passes it to the child through
+an env var (`VOOM_WORKER_SECRET`), assigns a `worker_id` (Sprint 1
+`WorkerId`) and a `worker_epoch: u64`, reads the child's bound port from
+stdout, and then issues requests.
+
+Every scheduler-to-worker request carries `Authorization: Bearer
+<worker_secret>`, `X-Voom-Worker-Id`, and `X-Voom-Worker-Epoch` headers.
+Deferred worker-to-supervisor callbacks would carry the same three
 fields. Either side rejects requests whose `worker_secret` does not
-match the spawn pair, whose `worker_id` is not the supervisor's
-current row, or whose `worker_epoch` is not the supervisor's current
-epoch for that worker. A worker that has been retired (epoch bumped
-past its value) is rejected with `WORKER_RETIRED` and the supervisor
-records the call as a stale-worker event.
+match the active credential, whose `worker_id` is not the expected
+worker row, or whose `worker_epoch` is stale for that worker. A worker
+that has been retired is rejected with `WORKER_RETIRED`; the deferred
+supervisor records that call as a stale-worker event.
 
 Negative tests cover wrong secret, wrong worker_id, stale epoch, and
-calls after explicit retire. The model is the same one Sprint 4's
-authenticated remote transport will use: TLS replaces loopback,
-client-cert binding replaces the spawn-time secret, and the worker_id
-+ epoch validation stays identical. No supervisor logic or test
-changes when Sprint 4 swaps the transport.
+calls after explicit retire at the protocol/conformance boundary. The
+model is the same one Sprint 4's authenticated remote transport will
+use: TLS replaces loopback, client-cert binding replaces the spawn-time
+secret, and the worker_id + epoch validation stays identical. Scheduler
+call sites and protocol tests should not change when Sprint 4 swaps the
+transport.
 
 The protocol crate's public API is structured so callers never
 construct a raw `hyper::Client` — they go through `ClientHandle` and
@@ -322,21 +353,21 @@ a negative test:
 - **Frame identity.** Every frame includes `lease_id` (Sprint 1
   `LeaseId`) and a monotonic `seq: u64` starting at 0 and incrementing
   by 1 per frame on the same lease. Frames with `seq` lower than or
-  equal to the supervisor's last-received `seq` for that lease are
+  equal to the scheduler's last-received `seq` for that lease are
   dropped as duplicates and not double-counted. Frames whose
-  `lease_id` does not match the lease the supervisor opened the
+  `lease_id` does not match the lease the scheduler opened the
   stream for are rejected and the stream is aborted.
 - **Terminal frame.** Each lease's progress stream ends with exactly
   one terminal frame: `ProgressFrame::Result { ... }` or
   `ProgressFrame::Error { class, code, payload }`. After a terminal
   frame, any further frame on the same stream is a contract violation
-  and the supervisor records `malformed_worker_result`.
+  and the scheduler records `malformed_worker_result`.
 - **Max frame size.** A single NDJSON line is rejected if it exceeds
-  64 KiB. The supervisor closes the stream and records the worker as
+  64 KiB. The scheduler closes the stream and records the worker as
   failed with `malformed_worker_result`. The 64 KiB ceiling is tuned
   so realistic result envelopes (synthetic ticket payloads in
   Sprint 2; real worker payloads in Sprint 5) fit comfortably while
-  unbounded growth cannot wedge the supervisor's reader.
+  unbounded growth cannot wedge the scheduler's reader.
 - **Stall timeout.** Heartbeat liveness and progress liveness are
   evaluated independently by the watchdog (§4.9). A worker that
   keeps heartbeating but emits no progress for `progress_idle_deadline`
@@ -361,41 +392,47 @@ SSE remains an option for a future sprint if a UI consumer needs
 native event-id replay; NDJSON with these invariants is sufficient
 for Sprint 2.
 
-### 4.3 Dispatch direction: supervisor pulls, worker accepts
+### 4.3 Dispatch direction: scheduler pulls, worker accepts
 
-The supervisor initiates every operation request (`POST /v1/operations`
-to the worker's HTTP endpoint). Workers do not poll the control plane.
-This gives the supervisor full control over backpressure, cancellation,
-and per-worker concurrency, and matches the eventual Sprint 4 model
+The implemented Sprint 2 scheduler path initiates every operation
+request through `WorkflowExecutor`: it dequeues a ready ticket, acquires
+a durable lease, selects one registered worker with
+`SingleWorkerPerKindSelector`, and dispatches `POST /v1/operations` to
+that worker's HTTP endpoint. Workers do not poll the control plane. This
+gives the scheduler full control over backpressure, cancellation, and
+per-worker concurrency, and matches the eventual Sprint 4 model
 (scheduler dispatches; worker accepts).
 
-Heartbeats are also worker → supervisor `POST /v1/leases/{id}/heartbeat`
-calls. The supervisor's HTTP server (running as part of the control
-plane process in Sprint 2) accepts them and refreshes
-`leases.last_heartbeat_at` via Sprint 1's `LeaseRepo::heartbeat_in_tx`.
-The watchdog (§4.9) — not `expire_due` — owns the timeout decision and
-its failure-class mapping; `expire_due` becomes the safety-net for
-leases held by incarnations the supervisor has lost track of after
-crash and is reclassified to use the new `ProgressTimeout` /
-`WorkerTimeout` / `WorkerCrash` selection rule (§4.9).
+For Phase 7, heartbeat/progress liveness is observed from the worker
+response stream and executor-owned watchdogs. The executor refreshes
+lease heartbeat/progress state through the Sprint 1 control-plane/store
+APIs and owns the timeout decision and failure-class mapping. The
+deferred standalone supervisor callback form may add worker →
+supervisor `POST /v1/leases/{id}/heartbeat` calls and an HTTP callback
+server; that is not required for the Sprint 2 closeout gate.
 
-### 4.4 Worker lifecycle: spawned-and-supervised, one process per fake binary
+### 4.4 Worker lifecycle: process-backed fake workers, one process per fake binary
 
-The supervisor spawns each fake worker as its own OS process, holds the
-`tokio::process::Child` handle, and joins it cleanly on shutdown. A
-worker that exits unexpectedly is detected by both the
-`tokio::process::Child` exit watcher (immediate, process-level signal)
-and the heartbeat timeout (eventual, durable-state signal). The
-supervisor records the crash via the existing Sprint 1 lease-failure
-path. There is no in-process worker fast path; the architectural spec
-forbids it (ADR-0002).
+The implemented closeout tests spawn each fake worker as its own OS
+process in the Phase 7 test fixture, register the process-backed runtime
+with `WorkflowExecutor`, and cleanly shut the provider down at the end
+of each run. A worker that exits unexpectedly is surfaced through the
+worker protocol stream and mapped by the executor's watchdog path to the
+existing Sprint 1 lease-failure path. There is no in-process worker fast
+path; the architectural spec forbids it (ADR-0002).
+
+The deferred standalone supervisor owns the `tokio::process::Child`
+handles itself, detects process exit with a child watcher plus heartbeat
+timeout, and records crashes through the same lease-failure semantics.
 
 ### 4.5 Capability advertisement: at registration time, durable in `worker_capabilities`
 
 Workers advertise capabilities (operation kinds, codecs, hardware) in
-the registration payload. The supervisor stores them via Sprint 1's
-`WorkerRepo::register_in_tx`, which already writes to the existing
-`worker_capabilities` table. No new schema in Sprint 2.
+the registration payload. The implemented closeout path stores runtime
+worker registrations through the existing Sprint 1 worker/capability
+repositories and uses those durable rows for scheduler selection. No new
+schema in Sprint 2. The deferred standalone supervisor uses the same
+repository path when that API lands.
 
 ### 4.6 Determinism for synthetic providers
 
@@ -439,17 +476,24 @@ the typed encoder, because the typed encoder is what the conformance
 suite is trying to falsify.
 
 The harness is a test crate, not a runtime gate. CI runs it as part
-of `just ci`. The supervisor does not invoke it at runtime — the
-runtime trusts the wire contract. A future sprint may add a runtime
+of `just ci`. The scheduler/executor does not invoke it at runtime —
+the runtime trusts the wire contract. A future sprint may add a runtime
 self-check to `voom-cli worker verify`; that verb is out of scope for
 Sprint 2.
 
-### 4.8 Worker incarnation persistence, dispatch outbox, and restart reconciliation
+### 4.8 Deferred worker incarnation persistence, dispatch outbox, and restart reconciliation
+
+This section is later-sprint design context for the standalone
+`LocalWorkerSupervisor`/outbox surface. It did not ship in Sprint 2 and
+is not part of the Phase 7 `WorkflowExecutor` closeout gate. Sprint 2's
+implemented scheduler path uses durable ticket/lease rows plus
+process-backed runtime registrations held by the Phase 7 test fixture;
+it does not persist worker incarnations or lease dispatch intents.
 
 Bearer-token identity (§4.1) is per-spawn. The HTTP dispatch is a
 side effect outside any DB transaction, so the durable state needs a
 **two-step outbox pattern** that survives every supervisor-crash
-point. Phase 2 ships migration `0005_worker_incarnations.sql`:
+point. The deferred supervisor design introduces a migration like:
 
 ```sql
 CREATE TABLE worker_incarnations (
@@ -555,9 +599,9 @@ safe even if the original HTTP dispatch did reach the worker — the
 worker recognizes the duplicate key and either no-ops or returns the
 cached prior result.
 
-The parent-death belt-and-suspenders is upgraded from "later
-optimization" to **required for Sprint 2 correctness on long-running
-operations**: every spawned worker inherits a parent-death watchdog
+The parent-death belt-and-suspenders is part of the deferred supervisor
+design for long-running operations: every spawned worker inherits a
+parent-death watchdog
 implemented via a stdin pipe held open by the supervisor. The worker
 reads stdin in a background task; when the supervisor exits, the
 pipe closes, the read returns EOF, and the worker performs its own
@@ -569,7 +613,8 @@ voluntarily because its supervisor parent did. The stdin-pipe
 mechanism is portable across macOS and Linux without platform
 `#[cfg]`.
 
-Phase 2 ships disk-backed restart tests:
+The deferred supervisor implementation should ship disk-backed restart
+tests:
 
 - supervisor crashes between step 1 and step 2 (no `live` row);
 - supervisor crashes between step 3 and step 4 (live row, no
@@ -587,7 +632,15 @@ Phase 2 ships disk-backed restart tests:
   pid before reconciliation runs; identity check refuses to signal,
   row retired as `kill_skipped_identity_mismatch`.
 
-### 4.9 Supervisor watchdog state machine and timeout precedence
+### 4.9 Implemented workflow watchdog state machine and deferred supervisor arbiter
+
+Sprint 2 Phase 7 implements the watchdog semantics in
+`WorkflowExecutor` dispatch tasks: terminal frames, malformed frames,
+stream end/crash, heartbeat timeout, progress timeout, and dispatch
+timeout are mapped into durable lease/ticket state with the precedence
+covered by `durable_workflow` and workflow executor tests. The
+single-arbiter/process-exit channel design below remains the deferred
+standalone supervisor form for a later sprint.
 
 The supervisor's per-lease watchdog tracks three independent
 deadlines and an exit observer:
@@ -626,7 +679,7 @@ terminal state ever wins per lease:
    `ProgressTimeout` and fail the lease.
 6. Otherwise, keep waiting.
 
-Every classification calls a single `ControlPlane` use-case
+In the deferred supervisor form, every classification calls a single `ControlPlane` use-case
 (`fail_lease_with_class`) which composes
 `LeaseRepo::fail_lease_in_tx` plus the matching event in one
 transaction. The use-case is idempotent on lease state: if the lease
@@ -635,17 +688,19 @@ heartbeat-deadline miss), the second call returns
 `AlreadyTerminal { existing_class }` and the watchdog records the
 race as a non-fatal audit event without overwriting.
 
-`LeaseRepo::expire_due` is now the safety-net for cases where the
-supervisor itself has lost track of a lease (crash before
+For the deferred supervisor, `LeaseRepo::expire_due` is the safety-net
+for cases where the supervisor itself has lost track of a lease (crash before
 incarnation row was written, or watchdog deadlocked). It picks up
 expiry-time-passed leases the watchdog did not handle and assigns
 `WorkerCrash` since the original failure class is unknowable from
-durable state alone. Phase 2 widens the `expire_due` test matrix to
-prove this safety-net does not double-fail leases the watchdog
-already terminated.
+durable state alone. Deferred supervisor work should widen the
+`expire_due` test matrix for supervisor-owned leases and prove this
+safety-net does not double-fail leases the watchdog already terminated.
 
-The precedence table is pinned by paired tests in
-`crates/voom-control-plane/tests/watchdog/`:
+The implemented Phase 7 precedence table is pinned by
+`crates/voom-control-plane/src/workflow/executor_test.rs` and
+`crates/voom-control-plane/tests/durable_workflow.rs`. A later standalone
+supervisor should add paired tests in `crates/voom-control-plane/tests/watchdog/`:
 
 - heartbeat-only, no progress, no exit → `WorkerTimeout`
 - progress-only, no heartbeat, no exit → `ProgressTimeout`
@@ -669,8 +724,10 @@ Sprint 2 keeps the Sprint 1 test layout — sibling `*_test.rs` files for
 unit tests under `src/`, integration tests under `crates/*/tests/`.
 Every new wire type gets a round-trip serde test. Every framing
 invariant from §4.2 gets a paired positive / negative test in the
-Phase 1 conformance harness. Every supervisor state transition gets a
-unit test that drives it directly without spawning a real process.
+Phase 1 conformance harness. Every implemented workflow/scheduler state
+transition gets a unit test that drives it directly without spawning a
+real process; deferred standalone supervisor transitions should follow
+the same rule when that surface lands.
 
 Three crates spawn child processes in their integration tests:
 
@@ -678,9 +735,10 @@ Three crates spawn child processes in their integration tests:
   via the public protocol; the only consumer that talks to the wire
   contract without going through `voom-fake-support` or the
   supervisor.
-- `voom-control-plane` — the supervisor's E2E tests; spawns
-  `echo-worker` (Phase 2), the eleven fakes (Phase 3), `chaos-worker`
-  (Phase 4), and `benchmark-worker` (Phase 5).
+- `voom-control-plane` — workflow/scheduler E2E tests; spawns the
+  process-backed fake providers, `chaos-worker`, and benchmark-related
+  workers used by the implemented closeout path. Deferred standalone
+  supervisor E2E tests should use the same process-cleanup discipline.
 - `voom-fakes` / `voom-fake-support` — scenario unit tests on the
   shared helpers; do not spawn anything themselves.
 
@@ -689,9 +747,9 @@ same migration set.
 
 Bearer-token + worker-identity negative tests are owned by
 `voom-conformance` (the harness deliberately mutilates headers and
-asserts the worker / supervisor rejects). The supervisor side gets
-its own focused unit tests for stale-epoch and retired-worker
-rejection — independent of any worker binary.
+asserts the worker rejects). Deferred supervisor-side identity tests
+should cover stale-epoch and retired-worker rejection independent of any
+worker binary when that API lands.
 
 `just check-test-layout` already enforces the sibling-tests convention
 and is wired into `just ci`. No changes needed there.

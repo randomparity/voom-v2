@@ -29,6 +29,13 @@ protocol calls. It also closes the Sprint 2 exit criteria around chaos
 coverage and scheduler-throughput reporting from the durable workflow
 path.
 
+For Sprint 2 closeout, "real scheduler surface" means the implemented
+`WorkflowExecutor` loop: durable ticket dequeue, `SingleWorkerPerKindSelector`
+selection, durable lease acquire/release/fail, process-backed protocol
+dispatch, and watchdog-owned terminal state. The earlier parent spec's
+standalone `LocalWorkerSupervisor`/worker-incarnation outbox remains
+later-sprint design context and is not required for Phase 7 exit.
+
 Phase 7 does not introduce a policy language, external workflow DSL,
 production daemon loop, real media tools, or multi-worker scoring. The
 workflow model is reusable and shaped for later high-level nodes, but
