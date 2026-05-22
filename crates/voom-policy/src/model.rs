@@ -192,9 +192,26 @@ pub struct IssueInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyInputSetValidationError {
     EmptySlug,
+    InvalidSlug {
+        slug: String,
+    },
+    InvalidSchemaVersion,
     EmptyFixtureLabels,
+    InvalidFixtureLabel {
+        label: String,
+    },
     DuplicateFixtureLabel(String),
     MissingSnapshotOrBundleTarget,
+    InvalidSyntheticKey {
+        key: String,
+    },
+    DuplicateSyntheticTarget {
+        key: String,
+    },
+    DuplicateChildOrdinal {
+        collection: &'static str,
+        ordinal: u32,
+    },
     UndeclaredSyntheticTarget {
         key: String,
         kind: TargetKind,
@@ -221,6 +238,15 @@ pub fn validate_input_set(
     if input.slug.trim().is_empty() {
         return Err(PolicyInputSetValidationError::EmptySlug);
     }
+    if !is_stable_token(&input.slug) {
+        return Err(PolicyInputSetValidationError::InvalidSlug {
+            slug: input.slug.clone(),
+        });
+    }
+
+    if input.schema_version == 0 {
+        return Err(PolicyInputSetValidationError::InvalidSchemaVersion);
+    }
 
     validate_fixture_labels(&input.fixture_labels)?;
 
@@ -229,6 +255,7 @@ pub fn validate_input_set(
     }
 
     let synthetic_targets = validate_synthetic_declarations(&input.synthetic_targets)?;
+    validate_child_ordinals(input)?;
     validate_child_targets(input, &synthetic_targets)?;
     validate_evidence(&input.identity_evidence)?;
     validate_quality_profiles(&input.quality_profiles)?;
@@ -243,6 +270,11 @@ fn validate_fixture_labels(labels: &[String]) -> Result<(), PolicyInputSetValida
 
     let mut seen = HashSet::new();
     for label in labels {
+        if !is_stable_token(label) {
+            return Err(PolicyInputSetValidationError::InvalidFixtureLabel {
+                label: label.clone(),
+            });
+        }
         if !seen.insert(label) {
             return Err(PolicyInputSetValidationError::DuplicateFixtureLabel(
                 label.clone(),
@@ -259,10 +291,20 @@ fn validate_synthetic_declarations(
     let mut targets = HashMap::new();
 
     for declaration in declarations {
+        if !is_stable_token(&declaration.synthetic_key) {
+            return Err(PolicyInputSetValidationError::InvalidSyntheticKey {
+                key: declaration.synthetic_key.clone(),
+            });
+        }
         if let Some(existing) =
             targets.insert(declaration.synthetic_key.as_str(), declaration.target_kind)
-            && existing != declaration.target_kind
         {
+            if existing == declaration.target_kind {
+                return Err(PolicyInputSetValidationError::DuplicateSyntheticTarget {
+                    key: declaration.synthetic_key.clone(),
+                });
+            }
+
             return Err(PolicyInputSetValidationError::SyntheticKeyKindMismatch {
                 key: declaration.synthetic_key.clone(),
                 expected: existing,
@@ -272,6 +314,61 @@ fn validate_synthetic_declarations(
     }
 
     Ok(targets)
+}
+
+fn is_stable_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+fn validate_child_ordinals(
+    input: &PolicyInputSetDraft,
+) -> Result<(), PolicyInputSetValidationError> {
+    validate_ordinals(
+        "media_snapshots",
+        input
+            .media_snapshots
+            .iter()
+            .map(|snapshot| snapshot.ordinal),
+    )?;
+    validate_ordinals(
+        "identity_evidence",
+        input
+            .identity_evidence
+            .iter()
+            .map(|evidence| evidence.ordinal),
+    )?;
+    validate_ordinals(
+        "bundle_targets",
+        input.bundle_targets.iter().map(|bundle| bundle.ordinal),
+    )?;
+    validate_ordinals(
+        "quality_profiles",
+        input.quality_profiles.iter().map(|profile| profile.ordinal),
+    )?;
+    validate_ordinals("issues", input.issues.iter().map(|issue| issue.ordinal))
+}
+
+fn validate_ordinals<I>(
+    collection: &'static str,
+    ordinals: I,
+) -> Result<(), PolicyInputSetValidationError>
+where
+    I: IntoIterator<Item = u32>,
+{
+    let mut seen = HashSet::new();
+    for ordinal in ordinals {
+        if !seen.insert(ordinal) {
+            return Err(PolicyInputSetValidationError::DuplicateChildOrdinal {
+                collection,
+                ordinal,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_child_targets(

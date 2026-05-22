@@ -91,6 +91,44 @@ async fn fixture_labels_are_globally_unique() {
 }
 
 #[tokio::test]
+async fn invalid_schema_version_is_policy_validation_error() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqlitePolicyInputRepo::new(pool);
+    let mut draft = compliant_fixture();
+    draft.schema_version = 0;
+
+    let err = repo.create_input_set(draft).await.unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+}
+
+#[tokio::test]
+async fn invalid_duplicate_synthetic_target_is_policy_validation_error() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqlitePolicyInputRepo::new(pool);
+    let mut draft = compliant_fixture();
+    let duplicate = draft.synthetic_targets[0].clone();
+    draft.synthetic_targets.push(duplicate);
+
+    let err = repo.create_input_set(draft).await.unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+}
+
+#[tokio::test]
+async fn invalid_duplicate_child_ordinal_is_policy_validation_error() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqlitePolicyInputRepo::new(pool);
+    let mut draft = compliant_fixture();
+    let duplicate = draft.media_snapshots[0].clone();
+    draft.media_snapshots.push(duplicate);
+
+    let err = repo.create_input_set(draft).await.unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+}
+
+#[tokio::test]
 async fn create_rolls_back_when_child_insert_fails() {
     let (pool, _tmp) = pool().await;
     let repo = SqlitePolicyInputRepo::new(pool);

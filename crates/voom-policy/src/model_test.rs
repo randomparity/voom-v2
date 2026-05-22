@@ -85,11 +85,45 @@ fn empty_slug_is_rejected() {
 }
 
 #[test]
+fn zero_schema_version_is_rejected() {
+    let mut input = minimal_input_set();
+    input.schema_version = 0;
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::InvalidSchemaVersion)
+    ));
+}
+
+#[test]
+fn slug_must_be_a_stable_token() {
+    let mut input = minimal_input_set();
+    input.slug = "bad slug".to_owned();
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::InvalidSlug { slug }) if slug == "bad slug"
+    ));
+}
+
+#[test]
 fn duplicate_fixture_label_is_rejected() {
     let mut input = minimal_input_set();
     input.fixture_labels = vec!["dup".to_owned(), "dup".to_owned()];
 
     assert!(validate_input_set(&input).is_err());
+}
+
+#[test]
+fn fixture_labels_must_be_stable_tokens() {
+    let mut input = minimal_input_set();
+    input.fixture_labels = vec!["not stable".to_owned()];
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::InvalidFixtureLabel { label })
+            if label == "not stable"
+    ));
 }
 
 #[test]
@@ -121,6 +155,54 @@ fn synthetic_key_reused_with_different_kind_is_rejected() {
     });
 
     assert!(validate_input_set(&input).is_err());
+}
+
+#[test]
+fn synthetic_key_must_be_a_stable_token() {
+    let mut input = minimal_input_set();
+    input.synthetic_targets[0].synthetic_key = "work 1".to_owned();
+    input.media_snapshots[0].target = TargetRef::Synthetic {
+        key: "work 1".to_owned(),
+        kind: TargetKind::MediaWork,
+    };
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::InvalidSyntheticKey { key })
+            if key == "work 1"
+    ));
+}
+
+#[test]
+fn duplicate_synthetic_key_with_same_kind_is_rejected() {
+    let mut input = minimal_input_set();
+    input.synthetic_targets.push(PolicySyntheticTarget {
+        synthetic_key: "work-1".to_owned(),
+        target_kind: TargetKind::MediaWork,
+        display_name: None,
+    });
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::DuplicateSyntheticTarget { key })
+            if key == "work-1"
+    ));
+}
+
+#[test]
+fn duplicate_child_ordinal_within_same_input_area_is_rejected() {
+    let mut input = minimal_input_set();
+    let mut duplicate = input.media_snapshots[0].clone();
+    duplicate.container = Some("mp4".to_owned());
+    input.media_snapshots.push(duplicate);
+
+    assert!(matches!(
+        validate_input_set(&input),
+        Err(super::PolicyInputSetValidationError::DuplicateChildOrdinal {
+            collection,
+            ordinal: 0,
+        }) if collection == "media_snapshots"
+    ));
 }
 
 #[test]
