@@ -148,3 +148,13 @@ fn rejects_on_error_without_value() {
             .contains(&"invalid_on_error_value".to_owned())
     );
 }
+
+#[test]
+fn rejects_deferred_execution_inside_rule_block() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { rules first { rule \"r\" { transcode video to hevc {} } } } }"
+        )
+        .contains(&"deferred_execution_operation".to_owned())
+    );
+}

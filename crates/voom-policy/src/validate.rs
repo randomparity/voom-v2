@@ -438,6 +438,18 @@ impl<'a> Validator<'a> {
                         rule.span(),
                         "rules block may only contain rule blocks",
                     );
+                    continue;
+                }
+                let StatementAst::Block { statements, .. } = rule else {
+                    self.error(
+                        DiagnosticCode::UnknownPhaseStatementOrOperation,
+                        rule.span(),
+                        "rule must be a block",
+                    );
+                    continue;
+                };
+                for nested in statements {
+                    self.validate_nested_operation(nested);
                 }
             }
         }
