@@ -45,6 +45,10 @@ define_id!(MediaSnapshotId);
 define_id!(PolicyInputSetId);
 define_id!(PolicySyntheticTargetId);
 
+// Policy registry layer (Sprint 4).
+define_id!(PolicyDocumentId);
+define_id!(PolicyVersionId);
+
 // Issue layer (M3 issues table; the `IssueId` newtype lands in M1 so
 // `TicketFailedTerminal` event payloads can already carry the optional
 // auto-opened issue id — it serializes as `null` in M1 because no

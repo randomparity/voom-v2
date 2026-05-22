@@ -96,6 +96,19 @@ fn policy_synthetic_target_id_round_trips_through_json() {
 }
 
 #[test]
+fn policy_document_id_displays_inner_u64() {
+    assert_eq!(PolicyDocumentId(42).to_string(), "42");
+}
+
+#[test]
+fn policy_version_id_round_trips_through_json() {
+    let id = PolicyVersionId(7);
+    let json = serde_json::to_string(&id).unwrap();
+    assert_eq!(json, "7");
+    assert_eq!(serde_json::from_str::<PolicyVersionId>(&json).unwrap(), id);
+}
+
+#[test]
 fn use_lease_id_displays_inner_u64() {
     assert_eq!(UseLeaseId(42).to_string(), "42");
 }
