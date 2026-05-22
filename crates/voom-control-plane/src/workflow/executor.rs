@@ -10,7 +10,7 @@ use voom_core::{ErrorCode, FailureClass, JobId, LeaseId, TicketId, VoomError, Wo
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
@@ -540,18 +540,36 @@ where
     }
 
     async fn next_ready_workflow_ticket(&self, job_id: JobId, workflow_id: &str) -> Option<Ticket> {
-        let ready = self
-            .control_plane
-            .tickets
-            .list_by_state(TicketState::Ready, self.options.ready_batch_size)
-            .await
-            .ok()?;
-        ready.into_iter().find(|ticket| {
-            ticket.job_id == Some(job_id)
-                && ticket.next_eligible_at <= self.control_plane.clock().now()
-                && WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone())
-                    .is_ok_and(|payload| payload.workflow_id == workflow_id)
-        })
+        let now = format_time(self.control_plane.clock().now()).ok()?;
+        let rows = sqlx::query(
+            "SELECT id FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'ready' \
+               AND next_eligible_at <= ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+             ORDER BY priority DESC, next_eligible_at ASC, id ASC \
+             LIMIT ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(now)
+        .bind(workflow_id)
+        .bind(i64::from(self.options.ready_batch_size))
+        .fetch_all(&self.control_plane.pool)
+        .await
+        .ok()?;
+        for row in rows {
+            let id: i64 = row.try_get("id").ok()?;
+            let ticket = self
+                .control_plane
+                .tickets
+                .get(TicketId(sqlite_u64(id)))
+                .await
+                .ok()??;
+            if WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone()).is_ok() {
+                return Some(ticket);
+            }
+        }
+        None
     }
 
     async fn workflow_finished(&self, job_id: JobId) -> bool {
@@ -962,7 +980,7 @@ async fn fail_lease_and_return<T>(
     class: FailureClass,
     source: VoomError,
 ) -> Result<T, VoomError> {
-    let _ = fail_lease_with_retry(control, lease_id, source.to_string(), class).await;
+    fail_lease_with_retry(control, lease_id, source.to_string(), class).await?;
     Err(source)
 }
 
@@ -1200,6 +1218,11 @@ fn time_duration(duration: Duration) -> Result<time::Duration, VoomError> {
 
 fn duration_millis_u32(duration: Duration) -> u32 {
     u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
+}
+
+fn format_time(t: OffsetDateTime) -> Result<String, VoomError> {
+    t.format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .map_err(|e| VoomError::Internal(format!("format iso8601: {e}")))
 }
 
 fn sleep_until(deadline: Instant) -> Pin<Box<tokio::time::Sleep>> {

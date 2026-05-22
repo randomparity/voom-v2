@@ -9,8 +9,10 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
-use voom_core::{ErrorCode, SystemClock, WorkerId};
+use voom_core::{ErrorCode, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
+use voom_store::repo::jobs::NewJob;
+use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
@@ -20,6 +22,8 @@ use voom_worker_protocol::{
 use super::executor::{WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary};
 use super::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
 use super::runtime::WorkerRuntimeRegistry;
+use super::ticket_payload::WorkflowTicketPayload;
+use super::timing::EffectiveTiming;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -150,12 +154,26 @@ async fn dispatch_setup_error_fails_acquired_lease() {
     assert_eq!(fixture.held_lease_count().await, 0);
 }
 
+#[tokio::test]
+async fn ready_lookup_is_scoped_to_active_workflow_job() {
+    let mut fixture = ExecutorFixture::with_ready_tickets(1).await;
+    fixture.seed_other_job_ready_ticket(100).await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.ready_batch_size = 1;
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.dispatch_count, 1);
+    assert_eq!(fixture.other_job_ready_count().await, 1);
+}
+
 struct ExecutorFixture {
     cp: crate::ControlPlane,
     _tmp: tempfile::NamedTempFile,
     plan: WorkflowPlan,
     registry: WorkerRuntimeRegistry,
     first_worker_id: Option<WorkerId>,
+    other_job_id: Option<JobId>,
 }
 
 impl ExecutorFixture {
@@ -232,6 +250,7 @@ impl ExecutorFixture {
             plan: independent_hash_plan(ticket_count),
             registry: WorkerRuntimeRegistry::new(),
             first_worker_id: None,
+            other_job_id: None,
         }
     }
 
@@ -349,6 +368,63 @@ impl ExecutorFixture {
 
     async fn held_lease_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn seed_other_job_ready_ticket(&mut self, priority: i64) {
+        let job = self
+            .cp
+            .open_job(NewJob {
+                kind: "other.workflow".to_owned(),
+                priority,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        let operation = OperationKind::HashFile;
+        let rendered_payload = json!({
+            "operation": operation_name(operation),
+            "branch_id": "other",
+            "path": "/library/other.mkv",
+            "duration_ms": 10_u64,
+            "progress_interval_ms": 1_u64,
+        });
+        let payload = WorkflowTicketPayload {
+            workflow_id: "other-workflow".to_owned(),
+            plan_id: "other-plan".to_owned(),
+            node_id: "hash-other".to_owned(),
+            branch_id: "other".to_owned(),
+            operation,
+            rendered_payload,
+            timing: EffectiveTiming::for_test(10, 1),
+            source_file: None,
+        }
+        .to_ticket_payload()
+        .unwrap();
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: Some(job.id),
+                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                priority,
+                payload,
+                max_attempts: 1,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        self.other_job_id = Some(job.id);
+    }
+
+    async fn other_job_ready_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tickets WHERE job_id = ? AND state = 'ready'")
+            .bind(i64::try_from(self.other_job_id.unwrap().0).unwrap())
             .fetch_one(&self.cp.pool)
             .await
             .unwrap()
