@@ -72,6 +72,29 @@ fn warns_for_unknown_plugin_namespace() {
 }
 
 #[test]
+fn warns_for_metadata_requires_tools() {
+    let ast = parse_policy_source(
+        "policy \"p\" { metadata { requires_tools: [ffmpeg] } phase a { container mkv } }",
+    )
+    .unwrap();
+
+    let result = validate_policy_ast("", &ast);
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "metadata_requires_tools_deferred")
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|d| d.severity == crate::DiagnosticSeverity::Warning)
+    );
+}
+
+#[test]
 fn rejects_unknown_core_field_root() {
     assert!(
         codes("policy \"p\" { phase a { when vidio.codec == hevc { container mkv } } }")

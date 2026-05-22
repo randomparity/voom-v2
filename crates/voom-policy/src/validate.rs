@@ -84,6 +84,7 @@ impl<'a> Validator<'a> {
         }
 
         self.validate_config();
+        self.validate_metadata();
         self.validate_phase_names();
         self.validate_phase_dependencies();
         for phase in &self.ast.phases {
@@ -102,6 +103,18 @@ impl<'a> Validator<'a> {
                     statement.span(),
                     "unknown config statement",
                 ),
+            }
+        }
+    }
+
+    fn validate_metadata(&mut self) {
+        for setting in &self.ast.metadata {
+            if setting.key.value == "requires_tools" {
+                self.warning(
+                    DiagnosticCode::MetadataRequiresToolsDeferred,
+                    setting.key.span,
+                    "metadata requires_tools is not represented as worker capabilities in Sprint 4",
+                );
             }
         }
     }
