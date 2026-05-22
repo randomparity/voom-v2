@@ -1,6 +1,8 @@
 use super::*;
 
-use voom_policy::{BundleTargetState, FixtureName, IssueInputState, TargetKind, TargetRef, load_fixture};
+use voom_policy::{
+    BundleTargetState, FixtureName, IssueInputState, TargetKind, TargetRef, load_fixture,
+};
 
 use crate::test_support::fresh_initialized_pool_at;
 
@@ -158,24 +160,39 @@ async fn sqlite_round_trip_matches_fixture_projection() {
 
     assert_eq!(created.synthetic_targets.len(), 6);
     assert_eq!(created.synthetic_targets[0].synthetic_key, "asset-1");
-    assert_eq!(created.synthetic_targets[0].target_kind, TargetKind::FileAsset);
+    assert_eq!(
+        created.synthetic_targets[0].target_kind,
+        TargetKind::FileAsset
+    );
     assert_eq!(
         created.synthetic_targets[0].display_name.as_deref(),
         Some("Synthetic Asset")
     );
     assert_eq!(created.synthetic_targets[1].synthetic_key, "bundle-1");
-    assert_eq!(created.synthetic_targets[1].target_kind, TargetKind::AssetBundle);
+    assert_eq!(
+        created.synthetic_targets[1].target_kind,
+        TargetKind::AssetBundle
+    );
     assert_eq!(created.synthetic_targets[2].synthetic_key, "location-1");
     assert_eq!(
         created.synthetic_targets[2].target_kind,
         TargetKind::FileLocation
     );
     assert_eq!(created.synthetic_targets[3].synthetic_key, "variant-1");
-    assert_eq!(created.synthetic_targets[3].target_kind, TargetKind::MediaVariant);
+    assert_eq!(
+        created.synthetic_targets[3].target_kind,
+        TargetKind::MediaVariant
+    );
     assert_eq!(created.synthetic_targets[4].synthetic_key, "version-1");
-    assert_eq!(created.synthetic_targets[4].target_kind, TargetKind::FileVersion);
+    assert_eq!(
+        created.synthetic_targets[4].target_kind,
+        TargetKind::FileVersion
+    );
     assert_eq!(created.synthetic_targets[5].synthetic_key, "work-1");
-    assert_eq!(created.synthetic_targets[5].target_kind, TargetKind::MediaWork);
+    assert_eq!(
+        created.synthetic_targets[5].target_kind,
+        TargetKind::MediaWork
+    );
 
     assert_eq!(created.media_snapshots.len(), 1);
     let snapshot = &created.media_snapshots[0];
@@ -194,7 +211,10 @@ async fn sqlite_round_trip_matches_fixture_projection() {
     assert_eq!(snapshot.audio_languages, ["en"]);
     assert!(snapshot.subtitle_languages.is_empty());
     assert_eq!(snapshot.health_flags, ["missing_english_subtitle"]);
-    assert_eq!(snapshot.stream_summary, draft.media_snapshots[0].stream_summary);
+    assert_eq!(
+        snapshot.stream_summary,
+        draft.media_snapshots[0].stream_summary
+    );
     assert_eq!(snapshot.existing_media_snapshot_id, None);
 
     assert_eq!(created.identity_evidence.len(), 1);

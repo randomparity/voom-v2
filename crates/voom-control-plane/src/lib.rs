@@ -23,7 +23,8 @@ use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
     artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
     identity::SqliteIdentityRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo,
-    tickets::SqliteTicketRepo, use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
+    policy_inputs::SqlitePolicyInputRepo, tickets::SqliteTicketRepo,
+    use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -51,6 +52,7 @@ pub struct ControlPlane {
     pub(crate) identity: SqliteIdentityRepo,
     pub(crate) bundles: SqliteBundleRepo,
     pub(crate) use_leases: SqliteUseLeaseRepo,
+    pub(crate) policy_inputs: SqlitePolicyInputRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -72,6 +74,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("identity", &self.identity)
             .field("bundles", &self.bundles)
             .field("use_leases", &self.use_leases)
+            .field("policy_inputs", &self.policy_inputs)
             .finish()
     }
 }
@@ -142,6 +145,7 @@ impl ControlPlane {
             identity: SqliteIdentityRepo::new(pool.clone()),
             bundles: SqliteBundleRepo::new(pool.clone()),
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),
+            policy_inputs: SqlitePolicyInputRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -300,6 +304,21 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn use_leases(&self) -> &SqliteUseLeaseRepo {
         &self.use_leases
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
+        &self.policy_inputs
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(
+        dead_code,
+        reason = "callers reach `self.policy_inputs` directly today"
+    )]
+    #[must_use]
+    pub(crate) fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
+        &self.policy_inputs
     }
 }
 

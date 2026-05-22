@@ -27,6 +27,7 @@ time = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
+voom-policy = { workspace = true }
 voom-scheduler = { version = "0.1.0-dev", path = "../voom-scheduler" }
 voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
