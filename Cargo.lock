@@ -2547,6 +2547,7 @@ dependencies = [
  "tokio",
  "voom-core",
  "voom-events",
+ "voom-fake-support",
  "voom-scheduler",
  "voom-store",
  "voom-worker-protocol",

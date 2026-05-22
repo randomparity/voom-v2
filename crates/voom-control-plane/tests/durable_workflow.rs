@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{ConnectOptions, Row, SqlitePool};
 use time::OffsetDateTime;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin};
@@ -34,7 +35,11 @@ use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
-use voom_worker_protocol::{HttpClient, OperationKind, WorkerCredentials};
+use voom_worker_protocol::http::OperationBody;
+use voom_worker_protocol::{
+    ClientHandle, DispatchStream, HandshakeResponse, HttpClient, NdjsonReader, OperationKind,
+    OperationRequest, ProtocolError, WorkerCredentials,
+};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 static PROCESS_PROVIDER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -325,8 +330,7 @@ async fn benchmark_durable_workflow_reports_non_zero_throughput() -> TestResult<
 
 #[tokio::test]
 async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() -> TestResult<()> {
-    let _process_provider_guard = process_provider_test_guard().await;
-    let mut fixture = DurableWorkflowFixture::start_all_fake_providers_with_max_parallel(1).await?;
+    let mut fixture = DurableWorkflowFixture::start_all_in_process_fake_providers(1).await?;
     let result = async {
         let mut plan = WorkflowPlan::default_ci();
         plan.concurrency.max_in_flight_dispatches = 3;
@@ -606,6 +610,18 @@ impl DurableWorkflowFixture {
         Ok(fixture)
     }
 
+    async fn start_all_in_process_fake_providers(max_parallel: u32) -> TestResult<Self> {
+        let mut fixture = Self::without_fake_providers().await?;
+        fixture.executor_options.heartbeat_timeout = Duration::from_secs(2);
+        fixture.executor_options.progress_idle_timeout = Duration::from_secs(2);
+        for provider in provider_specs() {
+            fixture
+                .register_in_process_provider(provider, max_parallel)
+                .await?;
+        }
+        Ok(fixture)
+    }
+
     async fn start_with_chaos_override(
         operation: OperationKind,
         mode: ChaosWorkerMode,
@@ -754,6 +770,33 @@ impl DurableWorkflowFixture {
     ) -> TestResult<()> {
         self.register_process_provider_operations(provider.name, provider.operations, max_parallel)
             .await
+    }
+
+    async fn register_in_process_provider(
+        &mut self,
+        provider: ProviderSpec,
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        let secret = format!("durable-workflow-{}-secret", provider.name);
+        let worker = self
+            .register_worker_without_runtime(
+                provider.name,
+                provider.operations,
+                max_parallel,
+                &secret,
+            )
+            .await?;
+        self.registered_workers.push((worker, max_parallel));
+        self.registry.register_in_process_runtime(
+            worker,
+            Arc::new(InProcessFakeProvider::new(provider.name)?),
+            WorkerCredentials {
+                worker_id: worker,
+                worker_epoch: 0,
+                secret: SecretString::from(secret),
+            },
+        );
+        Ok(())
     }
 
     async fn register_process_providers_except(
@@ -1496,6 +1539,60 @@ struct NoResponseRuntime {
     bound: std::net::SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     joined: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct InProcessFakeProvider {
+    definition: voom_fake_support::ProviderDefinition,
+}
+
+impl InProcessFakeProvider {
+    fn new(name: &'static str) -> TestResult<Self> {
+        let definition = voom_fake_support::provider_definition(name)
+            .ok_or_else(|| io_error(format!("unknown fake provider {name}")))?;
+        Ok(Self { definition })
+    }
+}
+
+#[async_trait::async_trait]
+impl ClientHandle for InProcessFakeProvider {
+    async fn handshake(&self, _offered: u32) -> Result<HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn dispatch(
+        &self,
+        _creds: &WorkerCredentials,
+        _idempotency_key: &str,
+        request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        let duration_ms = request
+            .payload
+            .get("duration_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let mut immediate_request = request;
+        if let Some(payload) = immediate_request.payload.as_object_mut() {
+            payload.insert("duration_ms".to_owned(), json!(0));
+            payload.insert("progress_interval_ms".to_owned(), json!(0));
+        }
+        let dispatch = voom_fake_support::dispatch_provider(&self.definition, &immediate_request)?;
+        let OperationBody::Buffered(body) = dispatch.body else {
+            return Err(ProtocolError::InternalServerError);
+        };
+        let expected_lease_id = dispatch.response.lease_id;
+        let (mut writer, reader) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            if duration_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+            }
+            let _ = writer.write_all(&body).await;
+        });
+        Ok(DispatchStream {
+            response: dispatch.response,
+            frames: NdjsonReader::new(Box::pin(reader), expected_lease_id),
+        })
+    }
 }
 
 impl NoResponseRuntime {
