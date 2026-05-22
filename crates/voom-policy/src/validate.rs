@@ -377,6 +377,21 @@ impl<'a> Validator<'a> {
         self.validate_track_target(statement.span(), tokens.get(1).copied().unwrap_or_default());
         self.validate_language_tokens(statement, text);
         self.validate_field_paths(statement, text);
+        if text.contains(" where ") {
+            if tokens.get(2).copied() != Some("where") {
+                self.error(
+                    DiagnosticCode::UnknownPhaseStatementOrOperation,
+                    statement.span(),
+                    "track filter must follow the track target",
+                );
+            }
+        } else if tokens.len() > 2 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "track operation does not accept extra arguments without `where`",
+            );
+        }
         if let Some((_, filter)) = text.split_once(" where ")
             && !is_valid_track_filter(filter.trim())
         {
@@ -407,6 +422,13 @@ impl<'a> Validator<'a> {
         }
         for target in targets {
             self.validate_track_target(statement.span(), target);
+        }
+        if text_after_list(text).is_some_and(|value| !value.is_empty()) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "order tracks does not accept extra arguments after the target list",
+            );
         }
     }
 
@@ -780,6 +802,13 @@ fn list_values(text: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+#[must_use]
+fn text_after_list(text: &str) -> Option<&str> {
+    let start = text.find('[')?;
+    let end = text[start + 1..].find(']')?;
+    Some(text[start + 1 + end + 1..].trim())
 }
 
 #[must_use]

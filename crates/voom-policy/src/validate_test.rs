@@ -158,6 +158,14 @@ fn rejects_keep_without_track_target() {
 }
 
 #[test]
+fn rejects_keep_with_extra_tokens_without_where() {
+    assert!(
+        codes("policy \"p\" { phase a { keep audio garbage } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_defaults_without_strategy() {
     assert!(
         codes("policy \"p\" { phase a { defaults audio } }")
@@ -273,6 +281,14 @@ fn rejects_actions_with_extra_tokens() {
 fn rejects_order_without_tracks_keyword() {
     assert!(
         codes("policy \"p\" { phase a { order [video, audio] } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_order_with_extra_tokens_after_list() {
+    assert!(
+        codes("policy \"p\" { phase a { order tracks [video, audio] later } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
