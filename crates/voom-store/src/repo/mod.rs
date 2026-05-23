@@ -6,6 +6,7 @@ pub mod commit_safety_gate;
 pub(crate) mod common;
 pub mod events;
 pub mod identity;
+pub mod issues;
 pub mod jobs;
 pub mod leases;
 pub mod policies;
@@ -28,6 +29,10 @@ pub use commit_safety_gate::{
     prepare_destructive_commit, validate_bypass,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
+pub use issues::{
+    IssueRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueRow,
+    PolicyIssueStatus, SqliteIssueRepo,
+};
 pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
     ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, LeaseState, NewLease, ReleaseReason,

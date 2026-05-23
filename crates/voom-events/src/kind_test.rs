@@ -28,6 +28,9 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::IssueOpened,
+        EventKind::IssueUpdated,
+        EventKind::IssueResolved,
         EventKind::UseLeaseAcquired,
         EventKind::UseLeaseReleased,
         EventKind::UseLeaseExpired,
@@ -67,6 +70,13 @@ fn ticket_failed_retriable_wire_string() {
 }
 
 #[test]
+fn issue_lifecycle_event_kinds_use_dotted_wire_format() {
+    assert_eq!(EventKind::IssueOpened.as_str(), "issue.opened");
+    assert_eq!(EventKind::IssueUpdated.as_str(), "issue.updated");
+    assert_eq!(EventKind::IssueResolved.as_str(), "issue.resolved");
+}
+
+#[test]
 fn every_kind_round_trips_through_as_str_and_from_str() {
     // Programmatically enumerate every variant — if a new variant is added
     // without an as_str/from_str pair, this test fails.
@@ -96,6 +106,9 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::IssueOpened,
+        EventKind::IssueUpdated,
+        EventKind::IssueResolved,
         EventKind::UseLeaseAcquired,
         EventKind::UseLeaseReleased,
         EventKind::UseLeaseExpired,

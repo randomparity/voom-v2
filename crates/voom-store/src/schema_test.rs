@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 7);
+    assert_eq!(expected_migrations(), 8);
 }
 
 #[tokio::test]
