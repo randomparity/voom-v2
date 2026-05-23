@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
-use voom_policy::{CompiledOperation, CompiledPolicy, MediaSnapshotInput, PolicyInputSetDraft};
+use voom_policy::{
+    ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
+    CompiledValue, MediaSnapshotInput, PolicyInputSetDraft, RuleMatchMode,
+};
 
 use crate::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
@@ -118,6 +121,15 @@ impl<'a> PlanBuilder<'a> {
             CompiledOperation::SetContainer { container } => {
                 self.expand_set_container(phase_name, container);
             }
+            CompiledOperation::Conditional {
+                condition,
+                operations,
+            } => {
+                self.expand_conditional(phase_name, condition, operations);
+            }
+            CompiledOperation::Rules { mode, rules } => {
+                self.expand_rules(phase_name, *mode, rules);
+            }
             unsupported => {
                 self.expand_unsupported_operation(phase_name, unsupported);
             }
@@ -126,76 +138,258 @@ impl<'a> PlanBuilder<'a> {
 
     fn expand_set_container(&mut self, phase_name: &str, container: &str) {
         for snapshot in &self.input.media_snapshots {
-            let ordinal = checked_ordinal(self.nodes.len());
-            let (status, status_reason, capability) = match snapshot.container.as_deref() {
-                Some(current) if current == container => (
-                    NodeStatus::NoOp,
-                    format!("container is already {container}"),
-                    None,
-                ),
-                Some(current) => (
-                    NodeStatus::Planned,
-                    format!("container {current} will be changed to {container}"),
-                    Some("remux_container".to_owned()),
-                ),
-                None => {
-                    let message = "snapshot container is unknown";
-                    self.diagnostics.push(
-                        PlanningDiagnostic::error(
-                            PlanningDiagnosticCode::InsufficientSnapshotFacts,
-                            message,
-                        )
-                        .with_phase(phase_name)
-                        .with_operation_kind("set_container")
-                        .with_target(snapshot.target.clone()),
-                    );
-                    (NodeStatus::Blocked, message.to_owned(), None)
-                }
-            };
-
-            self.nodes.push(make_node(
-                phase_name,
-                ordinal,
-                snapshot,
-                "set_container",
-                json!({ "container": container }),
-                status,
-                status_reason,
-                capability,
-            ));
+            self.expand_set_container_for_snapshot(phase_name, snapshot, container);
         }
     }
 
     fn expand_unsupported_operation(&mut self, phase_name: &str, operation: &CompiledOperation) {
         let operation_kind = operation_kind(operation);
-        let message = format!("operation {operation_kind} is not supported in Sprint 5 planner");
-        let payload = serde_json::to_value(operation).unwrap_or_else(|_| {
-            json!({
-                "type": operation_kind,
-            })
-        });
+        let message = "operation is not supported by Sprint 5 planner";
+        let payload = operation_payload(operation);
 
         for snapshot in &self.input.media_snapshots {
-            self.diagnostics.push(
-                PlanningDiagnostic::error(
-                    PlanningDiagnosticCode::UnsupportedOperationForSprint5,
-                    message.clone(),
-                )
-                .with_phase(phase_name)
-                .with_operation_kind(operation_kind)
-                .with_target(snapshot.target.clone()),
-            );
-            self.nodes.push(make_node(
+            self.expand_blocked_unsupported_for_snapshot(
                 phase_name,
-                checked_ordinal(self.nodes.len()),
                 snapshot,
                 operation_kind,
                 payload.clone(),
-                NodeStatus::Blocked,
-                message.clone(),
-                None,
-            ));
+                message,
+            );
         }
+    }
+
+    fn expand_conditional(
+        &mut self,
+        phase_name: &str,
+        condition: &CompiledCondition,
+        operations: &[CompiledOperation],
+    ) {
+        for snapshot in &self.input.media_snapshots {
+            match evaluate_condition(condition, snapshot) {
+                Some(true) => self.expand_operations_for_snapshot(phase_name, snapshot, operations),
+                Some(false) => {}
+                None => {
+                    for operation in operations {
+                        self.expand_blocked_insufficient_facts_for_snapshot(
+                            phase_name, snapshot, operation,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn expand_rules(&mut self, phase_name: &str, mode: RuleMatchMode, rules: &[CompiledRule]) {
+        for snapshot in &self.input.media_snapshots {
+            self.expand_rules_for_snapshot(phase_name, snapshot, mode, rules);
+        }
+    }
+
+    fn expand_operations_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operations: &[CompiledOperation],
+    ) {
+        for operation in operations {
+            self.expand_operation_for_snapshot(phase_name, snapshot, operation);
+        }
+    }
+
+    fn expand_operation_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operation: &CompiledOperation,
+    ) {
+        match operation {
+            CompiledOperation::SetContainer { container } => {
+                self.expand_set_container_for_snapshot(phase_name, snapshot, container);
+            }
+            CompiledOperation::Conditional {
+                condition,
+                operations,
+            } => match evaluate_condition(condition, snapshot) {
+                Some(true) => self.expand_operations_for_snapshot(phase_name, snapshot, operations),
+                Some(false) => {}
+                None => {
+                    for nested_operation in operations {
+                        self.expand_blocked_insufficient_facts_for_snapshot(
+                            phase_name,
+                            snapshot,
+                            nested_operation,
+                        );
+                    }
+                }
+            },
+            CompiledOperation::Rules { mode, rules } => {
+                self.expand_rules_for_snapshot(phase_name, snapshot, *mode, rules);
+            }
+            unsupported => {
+                self.expand_blocked_unsupported_for_snapshot(
+                    phase_name,
+                    snapshot,
+                    operation_kind(unsupported),
+                    operation_payload(unsupported),
+                    "operation is not supported by Sprint 5 planner",
+                );
+            }
+        }
+    }
+
+    fn expand_rules_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        mode: RuleMatchMode,
+        rules: &[CompiledRule],
+    ) {
+        match mode {
+            RuleMatchMode::First => {
+                for rule in rules {
+                    match rule_condition_matches(rule, snapshot) {
+                        Some(true) => {
+                            self.expand_operations_for_snapshot(
+                                phase_name,
+                                snapshot,
+                                &rule.operations,
+                            );
+                            break;
+                        }
+                        Some(false) => {}
+                        None => {
+                            for operation in &rule.operations {
+                                self.expand_blocked_insufficient_facts_for_snapshot(
+                                    phase_name, snapshot, operation,
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            RuleMatchMode::All => {
+                for rule in rules {
+                    match rule_condition_matches(rule, snapshot) {
+                        Some(true) => {
+                            self.expand_operations_for_snapshot(
+                                phase_name,
+                                snapshot,
+                                &rule.operations,
+                            );
+                        }
+                        Some(false) => {}
+                        None => {
+                            for operation in &rule.operations {
+                                self.expand_blocked_insufficient_facts_for_snapshot(
+                                    phase_name, snapshot, operation,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn expand_set_container_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        container: &str,
+    ) {
+        let ordinal = checked_ordinal(self.nodes.len());
+        let (status, status_reason, capability) = match snapshot.container.as_deref() {
+            Some(current) if current == container => (
+                NodeStatus::NoOp,
+                format!("container is already {container}"),
+                None,
+            ),
+            Some(current) => (
+                NodeStatus::Planned,
+                format!("container {current} will be changed to {container}"),
+                Some("remux_container".to_owned()),
+            ),
+            None => {
+                let message = "snapshot container is unknown";
+                self.diagnostics.push(
+                    PlanningDiagnostic::error(
+                        PlanningDiagnosticCode::InsufficientSnapshotFacts,
+                        message,
+                    )
+                    .with_phase(phase_name)
+                    .with_operation_kind("set_container")
+                    .with_target(snapshot.target.clone()),
+                );
+                (NodeStatus::Blocked, message.to_owned(), None)
+            }
+        };
+
+        self.nodes.push(make_node(
+            phase_name,
+            ordinal,
+            snapshot,
+            "set_container",
+            json!({ "container": container }),
+            status,
+            status_reason,
+            capability,
+        ));
+    }
+
+    fn expand_blocked_insufficient_facts_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operation: &CompiledOperation,
+    ) {
+        let operation_kind = operation_kind(operation);
+        let message = "snapshot facts are insufficient to evaluate condition";
+        self.diagnostics.push(
+            PlanningDiagnostic::error(PlanningDiagnosticCode::InsufficientSnapshotFacts, message)
+                .with_phase(phase_name)
+                .with_operation_kind(operation_kind)
+                .with_target(snapshot.target.clone()),
+        );
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            operation_kind,
+            operation_payload(operation),
+            NodeStatus::Blocked,
+            message.to_owned(),
+            None,
+        ));
+    }
+
+    fn expand_blocked_unsupported_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operation_kind: &str,
+        payload: serde_json::Value,
+        message: &str,
+    ) {
+        self.diagnostics.push(
+            PlanningDiagnostic::error(
+                PlanningDiagnosticCode::UnsupportedOperationForSprint5,
+                message,
+            )
+            .with_phase(phase_name)
+            .with_operation_kind(operation_kind)
+            .with_target(snapshot.target.clone()),
+        );
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            operation_kind,
+            payload,
+            NodeStatus::Blocked,
+            message.to_owned(),
+            None,
+        ));
     }
 
     fn finish(self) -> Result<ExecutionPlan, PlanGenerationError> {
@@ -254,6 +448,219 @@ impl<'a> PlanBuilder<'a> {
             "provenance": provenance,
         });
         plan_id(&preimage).map_err(|error| serialization_error(&error))
+    }
+}
+
+fn rule_condition_matches(rule: &CompiledRule, snapshot: &MediaSnapshotInput) -> Option<bool> {
+    rule.condition.as_ref().map_or(Some(true), |condition| {
+        evaluate_condition(condition, snapshot)
+    })
+}
+
+fn operation_payload(operation: &CompiledOperation) -> serde_json::Value {
+    let operation_kind = operation_kind(operation);
+    serde_json::to_value(operation).unwrap_or_else(|_| {
+        json!({
+            "type": operation_kind,
+        })
+    })
+}
+
+fn evaluate_condition(
+    condition: &CompiledCondition,
+    snapshot: &MediaSnapshotInput,
+) -> Option<bool> {
+    match condition {
+        CompiledCondition::FieldComparison { path, op, value } => {
+            evaluate_field_comparison(path, *op, value, snapshot)
+        }
+        CompiledCondition::FieldExists { path } => snapshot_field(path, snapshot).map(|_| true),
+        CompiledCondition::Not { inner } => evaluate_condition(inner, snapshot).map(|value| !value),
+        CompiledCondition::And { conditions } => {
+            let mut saw_unknown = false;
+            for condition in conditions {
+                match evaluate_condition(condition, snapshot) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(true)
+        }
+        CompiledCondition::Or { conditions } => {
+            let mut saw_unknown = false;
+            for condition in conditions {
+                match evaluate_condition(condition, snapshot) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(false)
+        }
+        CompiledCondition::Exists { .. }
+        | CompiledCondition::Count { .. }
+        | CompiledCondition::Predicate { .. } => None,
+    }
+}
+
+fn evaluate_field_comparison(
+    path: &[String],
+    op: ComparisonOp,
+    value: &CompiledValue,
+    snapshot: &MediaSnapshotInput,
+) -> Option<bool> {
+    let left = snapshot_field(path, snapshot)?;
+    let right = condition_value(value, snapshot)?;
+    compare_snapshot_values(&left, op, &right)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotFieldValue {
+    String(String),
+    Number(u64),
+    Boolean(bool),
+}
+
+fn snapshot_field(path: &[String], snapshot: &MediaSnapshotInput) -> Option<SnapshotFieldValue> {
+    let canonical = canonical_field_path(path)?;
+    match canonical {
+        "container" => snapshot
+            .container
+            .as_ref()
+            .map(|value| SnapshotFieldValue::String(value.clone())),
+        "video_codec" => snapshot
+            .video_codec
+            .as_ref()
+            .map(|value| SnapshotFieldValue::String(value.clone())),
+        "width" => snapshot
+            .width
+            .map(|value| SnapshotFieldValue::Number(u64::from(value))),
+        "height" => snapshot
+            .height
+            .map(|value| SnapshotFieldValue::Number(u64::from(value))),
+        "hdr" => snapshot
+            .hdr
+            .as_ref()
+            .map(|value| SnapshotFieldValue::String(value.clone())),
+        "bitrate" => snapshot.bitrate.map(SnapshotFieldValue::Number),
+        "duration_millis" => snapshot.duration_millis.map(SnapshotFieldValue::Number),
+        _ => None,
+    }
+}
+
+fn canonical_field_path(path: &[String]) -> Option<&'static str> {
+    match path {
+        [field] => match field.as_str() {
+            "container" => Some("container"),
+            "video_codec" => Some("video_codec"),
+            "width" => Some("width"),
+            "height" => Some("height"),
+            "hdr" => Some("hdr"),
+            "bitrate" => Some("bitrate"),
+            "duration_millis" => Some("duration_millis"),
+            _ => None,
+        },
+        [scope, field] if scope == "video" => match field.as_str() {
+            "codec" => Some("video_codec"),
+            "width" => Some("width"),
+            "height" => Some("height"),
+            "hdr" => Some("hdr"),
+            "bitrate" => Some("bitrate"),
+            "duration_millis" => Some("duration_millis"),
+            _ => None,
+        },
+        [scope, field] if scope == "media" => match field.as_str() {
+            "container" => Some("container"),
+            "duration_millis" => Some("duration_millis"),
+            _ => None,
+        },
+        [scope, field] if scope == "container" => match field.as_str() {
+            "name" | "value" => Some("container"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn condition_value(
+    value: &CompiledValue,
+    snapshot: &MediaSnapshotInput,
+) -> Option<SnapshotFieldValue> {
+    match value {
+        CompiledValue::String { value } => Some(SnapshotFieldValue::String(value.clone())),
+        CompiledValue::Number { value } => {
+            value.parse::<u64>().ok().map(SnapshotFieldValue::Number)
+        }
+        CompiledValue::Boolean { value } => Some(SnapshotFieldValue::Boolean(*value)),
+        CompiledValue::FieldPath { path } => snapshot_field(path, snapshot),
+        CompiledValue::List { .. } => None,
+    }
+}
+
+fn compare_snapshot_values(
+    left: &SnapshotFieldValue,
+    op: ComparisonOp,
+    right: &SnapshotFieldValue,
+) -> Option<bool> {
+    match (left, right) {
+        (SnapshotFieldValue::String(left), SnapshotFieldValue::String(right)) => {
+            compare_strings(left, op, right)
+        }
+        (SnapshotFieldValue::Number(left), SnapshotFieldValue::Number(right)) => {
+            compare_numbers(*left, op, *right)
+        }
+        (SnapshotFieldValue::Boolean(left), SnapshotFieldValue::Boolean(right)) => {
+            compare_booleans(*left, op, *right)
+        }
+        _ => match op {
+            ComparisonOp::Eq => Some(false),
+            ComparisonOp::Ne => Some(true),
+            ComparisonOp::Lt
+            | ComparisonOp::Lte
+            | ComparisonOp::Gt
+            | ComparisonOp::Gte
+            | ComparisonOp::Contains
+            | ComparisonOp::Matches => None,
+        },
+    }
+}
+
+fn compare_strings(left: &str, op: ComparisonOp, right: &str) -> Option<bool> {
+    match op {
+        ComparisonOp::Eq => Some(left == right),
+        ComparisonOp::Ne => Some(left != right),
+        ComparisonOp::Contains => Some(left.contains(right)),
+        ComparisonOp::Lt
+        | ComparisonOp::Lte
+        | ComparisonOp::Gt
+        | ComparisonOp::Gte
+        | ComparisonOp::Matches => None,
+    }
+}
+
+fn compare_numbers(left: u64, op: ComparisonOp, right: u64) -> Option<bool> {
+    match op {
+        ComparisonOp::Eq => Some(left == right),
+        ComparisonOp::Ne => Some(left != right),
+        ComparisonOp::Lt => Some(left < right),
+        ComparisonOp::Lte => Some(left <= right),
+        ComparisonOp::Gt => Some(left > right),
+        ComparisonOp::Gte => Some(left >= right),
+        ComparisonOp::Contains | ComparisonOp::Matches => None,
+    }
+}
+
+fn compare_booleans(left: bool, op: ComparisonOp, right: bool) -> Option<bool> {
+    match op {
+        ComparisonOp::Eq => Some(left == right),
+        ComparisonOp::Ne => Some(left != right),
+        ComparisonOp::Lt
+        | ComparisonOp::Lte
+        | ComparisonOp::Gt
+        | ComparisonOp::Gte
+        | ComparisonOp::Contains
+        | ComparisonOp::Matches => None,
     }
 }
 

@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use voom_policy::{
-    CompiledOperation, CompiledPhase, CompiledPolicy, MediaSnapshotInput, PolicyInputSetDraft,
-    PolicyInputSourceKind, TargetKind, TargetRef,
+    ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
+    CompiledValue, MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetKind,
+    TargetRef, TrackTarget,
 };
 
-use crate::{NodeStatus, PlanningContext, PlanningRequest, generate_plan};
+use crate::{DependencyKind, NodeStatus, PlanningContext, PlanningRequest, generate_plan};
 
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
     CompiledPolicy {
@@ -156,4 +157,127 @@ fn plan_id_includes_schema_version_identity() {
 
     assert_ne!(schema_one.plan_id, schema_two.plan_id);
     assert_ne!(schema_one.plan_hash, schema_two.plan_hash);
+}
+
+#[test]
+fn unresolved_condition_emits_blocked_node_for_nested_operation() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Conditional {
+            condition: CompiledCondition::Predicate {
+                name: "external_host_state".to_owned(),
+            },
+            operations: vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        }),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn track_operations_emit_blocked_nodes_instead_of_disappearing() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::KeepTracks {
+            target: TrackTarget::Audio,
+            filter: None,
+        }),
+        input: input(Some("mkv")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "keep_tracks");
+    assert_eq!(plan.summary.blocked_node_count, 1);
+    assert_eq!(plan.diagnostics.len(), 1);
+}
+
+#[test]
+fn tag_operations_emit_blocked_nodes_instead_of_disappearing() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::ClearTags),
+        input: input(Some("mkv")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "clear_tags");
+    assert_eq!(plan.summary.blocked_node_count, 1);
+    assert_eq!(plan.diagnostics.len(), 1);
+}
+
+#[test]
+fn phase_depends_on_creates_stable_edges() {
+    let mut compiled = policy(CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    });
+    compiled.phases.push(CompiledPhase {
+        name: "verify".to_owned(),
+        depends_on: vec!["normalize".to_owned()],
+        run_if: None,
+        skip_if: None,
+        on_error: None,
+        operations: vec![CompiledOperation::ClearTags],
+    });
+    compiled.phase_order = vec!["normalize".to_owned(), "verify".to_owned()];
+
+    let plan = generate_plan(PlanningRequest {
+        policy: compiled,
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(plan.edges.len(), 1);
+    assert_eq!(
+        plan.edges[0].dependency_kind,
+        DependencyKind::PhaseDependsOn
+    );
+    assert_eq!(plan.edges[0].from_node_id, plan.nodes[0].node_id);
+    assert_eq!(plan.edges[0].to_node_id, plan.nodes[1].node_id);
+}
+
+#[test]
+fn container_name_condition_selects_resolved_branch() {
+    let plan_for = |container| {
+        generate_plan(PlanningRequest {
+            policy: policy(CompiledOperation::Conditional {
+                condition: CompiledCondition::FieldComparison {
+                    path: vec!["container".to_owned(), "name".to_owned()],
+                    op: ComparisonOp::Eq,
+                    value: CompiledValue::String {
+                        value: "mp4".to_owned(),
+                    },
+                },
+                operations: vec![CompiledOperation::SetContainer {
+                    container: "mkv".to_owned(),
+                }],
+            }),
+            input: input(Some(container)),
+            context: PlanningContext::default(),
+        })
+        .unwrap()
+    };
+
+    let matching = plan_for("mp4");
+    assert_eq!(matching.nodes.len(), 1);
+    assert_eq!(matching.nodes[0].status, NodeStatus::Planned);
+
+    let non_matching = plan_for("mkv");
+    assert!(non_matching.nodes.is_empty());
+    assert!(non_matching.diagnostics.is_empty());
 }
