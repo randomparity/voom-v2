@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use voom_worker_protocol::OperationKind;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WorkflowPlan {
     pub id: String,
     pub seed: u64,
@@ -12,12 +12,12 @@ pub struct WorkflowPlan {
     pub timing: TimingPolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum WorkflowNode {
     Operation(OperationNode),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct OperationNode {
     pub id: String,
     pub operation: OperationKind,
@@ -26,17 +26,17 @@ pub struct OperationNode {
     pub provides_selected: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct FanOutPolicy {
     pub max_files: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ConcurrencyPolicy {
     pub max_in_flight_dispatches: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct TimingPolicy {
     pub base_duration_ms: u64,
     pub jitter_ms: u64,
