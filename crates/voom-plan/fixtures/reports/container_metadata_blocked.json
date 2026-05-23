@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "report_id": "report_bd185a61ba4546b2",
+  "report_hash": "blake3:78ef2f490bde0d7f9c9ff37680b5fc413d9d10eef4ebb78c97f7a3da1b86bf2f",
+  "plan_id": "plan_blocked",
+  "plan_hash": "blake3:blocked",
+  "policy": {
+    "slug": "container-metadata",
+    "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
+  },
+  "input": {
+    "slug": "synthetic-compliant-baseline",
+    "source_label": "synthetic_compliant_baseline",
+    "fixture_labels": [
+      "synthetic_compliant_baseline"
+    ]
+  },
+  "summary": {
+    "status": "blocked",
+    "total_check_count": 1,
+    "compliant_check_count": 0,
+    "noncompliant_check_count": 0,
+    "blocked_check_count": 1,
+    "executable_check_count": 0,
+    "operation_counts_by_kind": {
+      "set_container": 1
+    }
+  },
+  "checks": [
+    {
+      "check_id": "check_4a5f751f3efa72c6",
+      "node_id": "node_blocked",
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "compliance_kind": "container",
+      "operation_kind": "set_container",
+      "desired_state": {
+        "container": "mkv"
+      },
+      "check_status": "blocked",
+      "reason": "snapshot container is unknown",
+      "issue_action_hint": "create_or_update_open",
+      "execution_eligibility": "blocked"
+    }
+  ],
+  "diagnostics": [],
+  "provenance": {
+    "reporter": "voom-plan",
+    "format": "sprint6-v1"
+  }
+}

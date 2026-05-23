@@ -24,7 +24,7 @@ pub use compliance_model::{
 };
 pub use compliance_report::{ComplianceReportError, generate_compliance_report};
 pub use diagnostic::{PlanningDiagnostic, PlanningDiagnosticCode, PlanningDiagnosticSeverity};
-pub use fixtures::{GoldenPlanFixtureError, load_golden_plan};
+pub use fixtures::{GoldenPlanFixtureError, load_golden_compliance_report, load_golden_plan};
 pub use hash::{edge_id, node_id, plan_hash, plan_id};
 pub use model::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, Estimate, ExecutionPlan,

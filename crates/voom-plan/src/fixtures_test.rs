@@ -60,6 +60,19 @@ fn golden_plans_deserialize_through_public_type() {
 }
 
 #[test]
+fn golden_compliance_reports_deserialize_through_public_type() {
+    for name in [
+        "container_metadata_compliant",
+        "container_metadata_noncompliant",
+        "container_metadata_blocked",
+        "container_metadata_mixed",
+    ] {
+        let value = load_golden_compliance_report(name).unwrap();
+        serde_json::from_value::<crate::ComplianceReport>(value).unwrap();
+    }
+}
+
+#[test]
 fn unknown_golden_plan_name_fails_loudly() {
     let err = load_golden_plan("typo").unwrap_err();
 
