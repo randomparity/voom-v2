@@ -1,5 +1,6 @@
 use super::*;
 use crate::pool::connect;
+use crate::test_support::fresh_initialized_pool_at;
 
 /// SQL that creates an empty `_sqlx_migrations` table matching sqlx's
 /// schema. Tests use this to simulate post-init states without depending
@@ -27,7 +28,116 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 8);
+    assert_eq!(expected_migrations(), 9);
+}
+
+async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
+    (pool, tmp)
+}
+
+#[tokio::test]
+async fn nodes_schema_preserves_registry_constraints_and_worker_link() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let nodes_sql: String =
+        sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'nodes'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(nodes_sql.contains("CHECK (kind IN ('local','remote','synthetic'))"));
+    assert!(nodes_sql.contains("CHECK (status IN ('registered','active','stale','retired'))"));
+    assert!(nodes_sql.contains("CHECK (json_valid(metadata))"));
+    assert!(nodes_sql.contains("CHECK (heartbeat_ttl_seconds > 0)"));
+
+    let worker_node_col: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name = 'node_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(worker_node_col, 1);
+
+    let fk_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('workers') WHERE \"table\" = 'nodes'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fk_count, 1);
+}
+
+#[tokio::test]
+async fn nodes_reject_invalid_registry_values_at_the_database_boundary() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    sqlx::query(
+        "INSERT INTO nodes (
+             name, kind, status, registered_at, last_seen_at,
+             heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata
+         ) VALUES (
+             'valid-node', 'local', 'registered', '2026-05-23T00:00:00Z',
+             '2026-05-23T00:00:00Z', 60, 'hash', 'hint', '{}'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_node_insert_rejected(
+        &pool,
+        "INSERT INTO nodes (
+             name, kind, status, registered_at, last_seen_at,
+             heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata
+         ) VALUES (
+             'bad-metadata', 'local', 'registered', '2026-05-23T00:00:00Z',
+             '2026-05-23T00:00:00Z', 60, 'hash', 'hint', '{not-json'
+         )",
+    )
+    .await;
+    assert_node_insert_rejected(
+        &pool,
+        "INSERT INTO nodes (
+             name, kind, status, registered_at, last_seen_at,
+             heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata
+         ) VALUES (
+             'bad-ttl', 'local', 'registered', '2026-05-23T00:00:00Z',
+             '2026-05-23T00:00:00Z', 0, 'hash', 'hint', '{}'
+         )",
+    )
+    .await;
+    assert_node_insert_rejected(
+        &pool,
+        "INSERT INTO nodes (
+             name, kind, status, registered_at, last_seen_at,
+             heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata
+         ) VALUES (
+             'bad-kind', 'edge', 'registered', '2026-05-23T00:00:00Z',
+             '2026-05-23T00:00:00Z', 60, 'hash', 'hint', '{}'
+         )",
+    )
+    .await;
+    assert_node_insert_rejected(
+        &pool,
+        "INSERT INTO nodes (
+             name, kind, status, registered_at, last_seen_at,
+             heartbeat_ttl_seconds, auth_token_hash, auth_token_hint, metadata
+         ) VALUES (
+             'bad-status', 'local', 'unknown', '2026-05-23T00:00:00Z',
+             '2026-05-23T00:00:00Z', 60, 'hash', 'hint', '{}'
+         )",
+    )
+    .await;
+}
+
+async fn assert_node_insert_rejected(pool: &sqlx::SqlitePool, sql: &str) {
+    let err = sqlx::query(sql).execute(pool).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CHECK constraint failed"),
+        "expected SQLite CHECK constraint to reject invalid node row, got {err:?}"
+    );
 }
 
 #[tokio::test]
