@@ -1,0 +1,16 @@
+---
+source: crates/voom-cli/tests/plan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "cli",
+  "status": "error",
+  "data": null,
+  "warnings": [],
+  "error": {
+    "code": "BAD_ARGS",
+    "message": "error: the following required arguments were not provided:\n  --policy-file <POLICY_FILE>\n\nUsage: voom plan dry-run --policy-file <POLICY_FILE> --input-fixture <INPUT_FIXTURE>\n\nFor more information, try '--help'.\n",
+    "hint": "Run `voom --help` for usage"
+  }
+}

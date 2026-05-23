@@ -130,6 +130,26 @@ fn parse_error_emits_plan_error_envelope() {
     insta::assert_json_snapshot!("parse_error", json);
 }
 
+#[test]
+fn plan_dry_run_missing_required_arg_emits_bad_args_envelope() {
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "plan",
+            "dry-run",
+            "--input-fixture",
+            "synthetic_noncompliant_transcode_needed",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "cli");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+    insta::assert_json_snapshot!("dry_run_missing_required_arg", json);
+}
+
 #[tokio::test]
 async fn missing_input_set_emits_plan_error_envelope() {
     let tmp = NamedTempFile::new().unwrap();

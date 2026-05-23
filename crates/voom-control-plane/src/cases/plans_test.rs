@@ -42,9 +42,7 @@ async fn durable_planning_reads_compiled_policy_without_creating_execution_state
         .await
         .unwrap();
 
-    let before_jobs = count_rows(&cp, "jobs").await;
-    let before_events = count_rows(&cp, "events").await;
-    let before_tickets = count_rows(&cp, "tickets").await;
+    let before = read_only_table_counts(&cp).await;
 
     let plan = cp
         .plan_accepted_policy_version_with_input_set(created_policy.version.id, input.id)
@@ -53,9 +51,37 @@ async fn durable_planning_reads_compiled_policy_without_creating_execution_state
 
     assert_eq!(plan.policy.version_id, Some(created_policy.version.id));
     assert_eq!(plan.input.input_set_id, Some(input.id));
-    assert_eq!(before_jobs, count_rows(&cp, "jobs").await);
-    assert_eq!(before_events, count_rows(&cp, "events").await);
-    assert_eq!(before_tickets, count_rows(&cp, "tickets").await);
+    assert_eq!(before, read_only_table_counts(&cp).await);
+}
+
+const PLAN_READ_ONLY_TABLES: &[&str] = &[
+    "jobs",
+    "tickets",
+    "ticket_dependencies",
+    "leases",
+    "events",
+    "issues",
+    "issue_links",
+    "artifact_handles",
+    "artifact_locations",
+    "artifact_lineage",
+    "policy_versions",
+    "policy_input_sets",
+    "policy_input_set_fixture_labels",
+    "policy_input_synthetic_targets",
+    "policy_media_snapshot_inputs",
+    "policy_identity_evidence_inputs",
+    "policy_bundle_target_inputs",
+    "policy_quality_profile_selections",
+    "policy_issue_inputs",
+];
+
+async fn read_only_table_counts(cp: &crate::ControlPlane) -> Vec<(&'static str, i64)> {
+    let mut counts = Vec::with_capacity(PLAN_READ_ONLY_TABLES.len());
+    for table in PLAN_READ_ONLY_TABLES {
+        counts.push((*table, count_rows(cp, table).await));
+    }
+    counts
 }
 
 async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
