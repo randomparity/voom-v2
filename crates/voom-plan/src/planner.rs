@@ -111,37 +111,56 @@ impl<'a> PlanBuilder<'a> {
                 continue;
             };
 
-            self.expand_phase(&phase.name, phase.skip_if.as_ref(), &phase.operations);
+            self.expand_phase(
+                &phase.name,
+                phase.run_if.as_ref(),
+                phase.skip_if.as_ref(),
+                &phase.operations,
+            );
         }
     }
 
     fn expand_phase(
         &mut self,
         phase_name: &str,
+        run_if: Option<&CompiledCondition>,
         skip_if: Option<&CompiledCondition>,
         operations: &[CompiledOperation],
     ) {
-        let Some(skip_if) = skip_if else {
+        if run_if.is_none() && skip_if.is_none() {
             for operation in operations {
                 self.expand_operation(phase_name, operation);
             }
             return;
-        };
+        }
 
         for snapshot in &self.input.media_snapshots {
-            match evaluate_condition(skip_if, snapshot) {
-                Some(true) => {}
-                Some(false) => {
+            let should_run = run_if.map_or(Some(true), |condition| {
+                evaluate_condition(condition, snapshot)
+            });
+            let should_skip = skip_if.map_or(Some(false), |condition| {
+                evaluate_condition(condition, snapshot)
+            });
+            match (should_run, should_skip) {
+                (Some(true), Some(false)) => {
                     self.expand_operations_for_snapshot(phase_name, snapshot, operations);
                 }
-                None => {
-                    for operation in operations {
-                        self.expand_blocked_insufficient_facts_for_snapshot(
-                            phase_name, snapshot, operation,
-                        );
-                    }
-                }
+                (Some(false), _) | (_, Some(true)) => {}
+                (None, _) | (_, None) => self.expand_blocked_insufficient_facts_for_operations(
+                    phase_name, snapshot, operations,
+                ),
             }
+        }
+    }
+
+    fn expand_blocked_insufficient_facts_for_operations(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operations: &[CompiledOperation],
+    ) {
+        for operation in operations {
+            self.expand_blocked_insufficient_facts_for_snapshot(phase_name, snapshot, operation);
         }
     }
 

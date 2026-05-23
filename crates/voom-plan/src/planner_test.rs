@@ -202,6 +202,31 @@ fn phase_skip_if_true_suppresses_phase_operations() {
 }
 
 #[test]
+fn unresolved_phase_run_if_blocks_phase_operations() {
+    let mut compiled = policy(CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    });
+    compiled.phases[0].run_if = Some(CompiledCondition::Predicate {
+        name: "modified".to_owned(),
+    });
+
+    let plan = generate_plan(PlanningRequest {
+        policy: compiled,
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
 fn plan_id_includes_schema_version_identity() {
     let request = |schema_version| PlanningRequest {
         policy: policy(CompiledOperation::SetContainer {
