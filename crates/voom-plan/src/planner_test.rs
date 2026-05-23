@@ -170,6 +170,38 @@ fn policy_warnings_are_visible_in_plan_output() {
 }
 
 #[test]
+fn phase_skip_if_true_suppresses_phase_operations() {
+    let mut compiled = policy(CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    });
+    compiled.phases[0].skip_if = Some(CompiledCondition::FieldComparison {
+        path: vec!["container".to_owned(), "name".to_owned()],
+        op: ComparisonOp::Eq,
+        value: CompiledValue::String {
+            value: "mp4".to_owned(),
+        },
+    });
+
+    let skipped = generate_plan(PlanningRequest {
+        policy: compiled.clone(),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+    assert!(skipped.nodes.is_empty());
+    assert!(skipped.diagnostics.is_empty());
+
+    let not_skipped = generate_plan(PlanningRequest {
+        policy: compiled,
+        input: input(Some("avi")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+    assert_eq!(not_skipped.nodes.len(), 1);
+    assert_eq!(not_skipped.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
 fn plan_id_includes_schema_version_identity() {
     let request = |schema_version| PlanningRequest {
         policy: policy(CompiledOperation::SetContainer {

@@ -111,8 +111,36 @@ impl<'a> PlanBuilder<'a> {
                 continue;
             };
 
-            for operation in &phase.operations {
-                self.expand_operation(&phase.name, operation);
+            self.expand_phase(&phase.name, phase.skip_if.as_ref(), &phase.operations);
+        }
+    }
+
+    fn expand_phase(
+        &mut self,
+        phase_name: &str,
+        skip_if: Option<&CompiledCondition>,
+        operations: &[CompiledOperation],
+    ) {
+        let Some(skip_if) = skip_if else {
+            for operation in operations {
+                self.expand_operation(phase_name, operation);
+            }
+            return;
+        };
+
+        for snapshot in &self.input.media_snapshots {
+            match evaluate_condition(skip_if, snapshot) {
+                Some(true) => {}
+                Some(false) => {
+                    self.expand_operations_for_snapshot(phase_name, snapshot, operations);
+                }
+                None => {
+                    for operation in operations {
+                        self.expand_blocked_insufficient_facts_for_snapshot(
+                            phase_name, snapshot, operation,
+                        );
+                    }
+                }
             }
         }
     }
