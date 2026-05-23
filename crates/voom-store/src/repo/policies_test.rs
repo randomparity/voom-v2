@@ -49,6 +49,22 @@ async fn create_document_with_first_version_round_trips() {
 }
 
 #[tokio::test]
+async fn create_document_rejects_source_for_different_policy_slug() {
+    let (repo, _tmp) = repo().await;
+
+    let err = repo
+        .create_document_with_version(draft(
+            "stable-policy",
+            "policy \"different-policy\" { phase a {} }",
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+    assert!(repo.list_documents().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn list_documents_orders_by_slug() {
     let (repo, _tmp) = repo().await;
     let b = repo
@@ -116,6 +132,33 @@ async fn add_version_advances_current_version_and_epoch() {
     assert_eq!(added.version_number, 2);
     assert_eq!(document.current_accepted_version_id, Some(added.id));
     assert_eq!(document.epoch, created.document.epoch + 1);
+}
+
+#[tokio::test]
+async fn add_version_rejects_source_for_different_policy_slug() {
+    let (repo, _tmp) = repo().await;
+    let created = repo
+        .create_document_with_version(draft(
+            "same-policy",
+            "policy \"same-policy\" { phase a {} }",
+        ))
+        .await
+        .unwrap();
+
+    let err = repo
+        .add_version(
+            created.document.id,
+            "policy \"other-policy\" { phase a {} }".to_owned(),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+    assert_eq!(
+        repo.list_versions(created.document.id).await.unwrap(),
+        [created.version]
+    );
 }
 
 #[tokio::test]

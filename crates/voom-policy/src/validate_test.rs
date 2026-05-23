@@ -143,6 +143,24 @@ fn rejects_tag_ordering_conflict() {
 }
 
 #[test]
+fn rejects_nested_clear_tags_after_set_tag_in_same_phase() {
+    assert!(
+        codes("policy \"p\" { phase a { set_tag \"title\" identity.title when exists audio { clear_tags } } }")
+            .contains(&"tag_ordering_error".to_owned())
+    );
+}
+
+#[test]
+fn rejects_nested_tag_operation_conflict_in_same_phase() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { when exists audio { set_tag \"title\" identity.title } delete_tag \"title\" } }"
+        )
+        .contains(&"ambiguous_tag_operation_conflict".to_owned())
+    );
+}
+
+#[test]
 fn accepts_rules_first_mode() {
     let diagnostics = codes("policy \"p\" { phase a { rules first { rule \"r\" {} } } }");
 

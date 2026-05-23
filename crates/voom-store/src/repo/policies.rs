@@ -101,6 +101,7 @@ impl PolicyRepo for SqlitePolicyRepo {
     ) -> Result<CreatedPolicyVersion, VoomError> {
         validate_slug(&draft.slug)?;
         let compiled = voom_policy::compile_policy(&draft.source_text).map_err(|err| err.error)?;
+        validate_compiled_slug(&compiled.policy.slug, &draft.slug)?;
         let compiled_json = voom_policy::deterministic_json(&compiled.policy)?;
         let compiled_json_text = serialize_json(&compiled_json, "policy_versions.compiled_json")?;
         let created_at = iso8601(draft.created_at)?;
@@ -163,6 +164,10 @@ impl PolicyRepo for SqlitePolicyRepo {
         }
 
         let compiled = voom_policy::compile_policy(&source_text).map_err(|err| err.error)?;
+        let document = self.get_document(document_id).await?.ok_or_else(|| {
+            VoomError::NotFound(format!("policy document {document_id} not found"))
+        })?;
+        validate_compiled_slug(&compiled.policy.slug, &document.slug)?;
         let compiled_json = voom_policy::deterministic_json(&compiled.policy)?;
         let compiled_json_text = serialize_json(&compiled_json, "policy_versions.compiled_json")?;
         let created_at = iso8601(created_at)?;
@@ -401,6 +406,16 @@ fn validate_slug(slug: &str) -> Result<(), VoomError> {
     } else {
         Err(VoomError::Config(format!(
             "policy document slug must be a stable token: {slug:?}"
+        )))
+    }
+}
+
+fn validate_compiled_slug(compiled_slug: &str, document_slug: &str) -> Result<(), VoomError> {
+    if compiled_slug == document_slug {
+        Ok(())
+    } else {
+        Err(VoomError::Config(format!(
+            "compiled policy slug {compiled_slug:?} does not match policy document slug {document_slug:?}"
         )))
     }
 }

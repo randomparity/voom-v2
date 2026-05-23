@@ -37,6 +37,13 @@ struct Validator<'a> {
     diagnostics: Vec<PolicyDiagnostic>,
 }
 
+#[derive(Default)]
+struct TagEffects {
+    saw_set_tag: bool,
+    set_tags: BTreeSet<String>,
+    delete_tags: BTreeSet<String>,
+}
+
 impl<'a> Validator<'a> {
     const fn new(source: &'a str, ast: &'a PolicyAst) -> Self {
         Self {
@@ -250,9 +257,7 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_phase(&mut self, phase: &PhaseAst) {
-        let mut saw_set_tag = false;
-        let mut set_tags = BTreeSet::new();
-        let mut delete_tags = BTreeSet::new();
+        let mut tag_effects = TagEffects::default();
 
         for control in &phase.controls {
             let text = statement_text(control);
@@ -278,29 +283,23 @@ impl<'a> Validator<'a> {
                 "actions" => self.validate_actions(operation, text.as_ref()),
                 "clear_tags" => {
                     self.validate_clear_tags(operation, text.as_ref());
-                    if saw_set_tag {
-                        self.error(
-                            DiagnosticCode::TagOrderingError,
-                            operation.span(),
-                            "clear_tags must precede set_tag in a phase",
-                        );
-                    }
+                    self.record_clear_tags(&mut tag_effects, operation.span());
                 }
                 "set_tag" => {
-                    saw_set_tag = true;
                     if let Some(key) = self.validate_set_tag(operation, text.as_ref()) {
-                        set_tags.insert(key);
+                        tag_effects.saw_set_tag = true;
+                        tag_effects.set_tags.insert(key);
                     }
                 }
                 "delete_tag" => {
                     if let Some(key) = self.validate_delete_tag(operation, text.as_ref()) {
-                        delete_tags.insert(key);
+                        tag_effects.delete_tags.insert(key);
                     }
                 }
                 "when" => {
-                    self.validate_condition(operation, text.as_ref());
+                    self.validate_condition(operation, text.as_ref(), &mut tag_effects);
                 }
-                "rules" => self.validate_rules(operation, text.as_ref()),
+                "rules" => self.validate_rules(operation, text.as_ref(), &mut tag_effects),
                 "extend" => self.error(
                     DiagnosticCode::DeferredPhaseInheritance,
                     operation.span(),
@@ -319,7 +318,12 @@ impl<'a> Validator<'a> {
             }
         }
 
-        for key in set_tags.intersection(&delete_tags) {
+        let conflicts = tag_effects
+            .set_tags
+            .intersection(&tag_effects.delete_tags)
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in conflicts {
             self.error(
                 DiagnosticCode::AmbiguousTagOperationConflict,
                 phase.name.span,
@@ -328,7 +332,11 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_nested_operation(&mut self, statement: &StatementAst) {
+    fn validate_nested_operation(
+        &mut self,
+        statement: &StatementAst,
+        tag_effects: &mut TagEffects,
+    ) {
         match statement.keyword().value.as_str() {
             "container" => {
                 let text = statement_text(statement);
@@ -351,17 +359,25 @@ impl<'a> Validator<'a> {
                 match statement.keyword().value.as_str() {
                     "actions" => self.validate_actions(statement, text.as_ref()),
                     "set_tag" => {
-                        let _ = self.validate_set_tag(statement, text.as_ref());
+                        if let Some(key) = self.validate_set_tag(statement, text.as_ref()) {
+                            tag_effects.saw_set_tag = true;
+                            tag_effects.set_tags.insert(key);
+                        }
                     }
                     "delete_tag" => {
-                        let _ = self.validate_delete_tag(statement, text.as_ref());
+                        if let Some(key) = self.validate_delete_tag(statement, text.as_ref()) {
+                            tag_effects.delete_tags.insert(key);
+                        }
                     }
-                    _ => self.validate_clear_tags(statement, text.as_ref()),
+                    _ => {
+                        self.validate_clear_tags(statement, text.as_ref());
+                        self.record_clear_tags(tag_effects, statement.span());
+                    }
                 }
             }
             "when" => {
                 let text = statement_text(statement);
-                self.validate_condition(statement, text.as_ref());
+                self.validate_condition(statement, text.as_ref(), tag_effects);
             }
             "transcode" | "synthesize" | "verify" => self.error(
                 DiagnosticCode::DeferredExecutionOperation,
@@ -373,6 +389,16 @@ impl<'a> Validator<'a> {
                 statement.span(),
                 "unknown nested operation",
             ),
+        }
+    }
+
+    fn record_clear_tags(&mut self, tag_effects: &mut TagEffects, span: SourceSpan) {
+        if tag_effects.saw_set_tag {
+            self.error(
+                DiagnosticCode::TagOrderingError,
+                span,
+                "clear_tags must precede set_tag in a phase",
+            );
         }
     }
 
@@ -571,7 +597,12 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_rules(&mut self, statement: &StatementAst, text: &str) {
+    fn validate_rules(
+        &mut self,
+        statement: &StatementAst,
+        text: &str,
+        tag_effects: &mut TagEffects,
+    ) {
         let tokens = words(text);
         let mode = tokens.get(1).copied().unwrap_or_default();
         if !matches!(mode, "first" | "all") {
@@ -607,18 +638,23 @@ impl<'a> Validator<'a> {
                     continue;
                 };
                 for nested in statements {
-                    self.validate_nested_operation(nested);
+                    self.validate_nested_operation(nested, tag_effects);
                 }
             }
         }
     }
 
-    fn validate_condition(&mut self, statement: &StatementAst, text: &str) {
+    fn validate_condition(
+        &mut self,
+        statement: &StatementAst,
+        text: &str,
+        tag_effects: &mut TagEffects,
+    ) {
         let condition = text.trim_start_matches("when").trim();
         self.validate_condition_expression(statement, condition);
         if let StatementAst::Block { statements, .. } = statement {
             for nested in statements {
-                self.validate_nested_operation(nested);
+                self.validate_nested_operation(nested, tag_effects);
             }
         }
     }
