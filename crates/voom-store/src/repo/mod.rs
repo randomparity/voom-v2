@@ -8,6 +8,7 @@ pub mod events;
 pub mod identity;
 pub mod jobs;
 pub mod leases;
+pub mod policies;
 pub mod policy_inputs;
 pub mod schema_meta;
 pub mod tickets;
@@ -31,6 +32,10 @@ pub use jobs::{Job, JobRepo, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
     ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, LeaseState, NewLease, ReleaseReason,
     SqliteLeaseRepo,
+};
+pub use policies::{
+    CreatedPolicyVersion, NewPolicyDocumentVersion, PolicyDocument, PolicyDocumentSummary,
+    PolicyRepo, PolicyVersion, SqlitePolicyRepo,
 };
 pub use policy_inputs::{
     PolicyBundleTargetInput, PolicyIdentityEvidenceInput, PolicyInputRepo, PolicyInputSet,

@@ -1,0 +1,18 @@
+[
+  {
+    "code": "deferred_phase_inheritance",
+    "severity": "error",
+    "stage": "validate",
+    "span": {
+      "start": 56,
+      "end": 70
+    },
+    "location": {
+      "line": 3,
+      "column": 5
+    },
+    "message": "phase inheritance through extend is deferred",
+    "suggestion": null,
+    "related": []
+  }
+]

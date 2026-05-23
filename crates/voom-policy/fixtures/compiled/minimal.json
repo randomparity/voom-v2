@@ -1,0 +1,32 @@
+{
+  "policy_name": "minimal",
+  "slug": "minimal",
+  "source_hash": "2587b07bfd86d17bb7b17a540aa65729c9c48042b54205d3f93d0688b532b662",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "inspect",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "inspect"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

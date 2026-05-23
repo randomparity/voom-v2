@@ -1,0 +1,18 @@
+policy "container-metadata" {
+  metadata {
+    version: "1"
+    description: "container and metadata normalization"
+  }
+
+  config {
+    languages audio: [eng, und]
+    on_error: abort
+  }
+
+  phase normalize {
+    container mkv
+    clear_tags
+    set_tag "title" identity.title
+    delete_tag "encoder"
+  }
+}

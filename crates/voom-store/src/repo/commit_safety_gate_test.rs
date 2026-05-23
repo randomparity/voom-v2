@@ -925,6 +925,7 @@ async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event(
                 file_version_ids: None,
                 hashes: Some(serde_json::json!([[seeded.version_id.0, "hash-/srv/x"]])),
                 locations: None,
+                ..AcceptedPin::default()
             },
         )
         .await
@@ -1370,6 +1371,7 @@ async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_even
                 file_version_ids: None,
                 hashes: Some(serde_json::json!([[seeded.version_id.0, "hash-/srv/x"]])),
                 locations: None,
+                ..AcceptedPin::default()
             },
         )
         .await

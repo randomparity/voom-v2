@@ -1,0 +1,18 @@
+[
+  {
+    "code": "deferred_execution_operation",
+    "severity": "error",
+    "stage": "validate",
+    "span": {
+      "start": 62,
+      "end": 88
+    },
+    "location": {
+      "line": 3,
+      "column": 5
+    },
+    "message": "execution operation is deferred to a later sprint",
+    "suggestion": null,
+    "related": []
+  }
+]

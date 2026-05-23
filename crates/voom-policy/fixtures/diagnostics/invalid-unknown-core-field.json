@@ -1,0 +1,18 @@
+[
+  {
+    "code": "invalid_core_field_path",
+    "severity": "error",
+    "stage": "validate",
+    "span": {
+      "start": 62,
+      "end": 114
+    },
+    "location": {
+      "line": 3,
+      "column": 5
+    },
+    "message": "unknown core field path root",
+    "suggestion": null,
+    "related": []
+  }
+]
