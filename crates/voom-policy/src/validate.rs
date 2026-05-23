@@ -1018,13 +1018,14 @@ fn is_core_field_root(root: &str) -> bool {
 
 #[must_use]
 fn is_valid_core_field_path(root: &str, rest: &str) -> bool {
-    let Some(field) = rest.split('.').next().filter(|field| !field.is_empty()) else {
+    let parts = rest.split('.').collect::<Vec<_>>();
+    if parts.iter().any(|part| part.is_empty()) {
         return false;
-    };
+    }
     match root {
         "video" => matches!(
-            field,
-            "codec"
+            parts.as_slice(),
+            ["codec"
                 | "title"
                 | "width"
                 | "height"
@@ -1032,11 +1033,11 @@ fn is_valid_core_field_path(root: &str, rest: &str) -> bool {
                 | "bitrate"
                 | "duration"
                 | "duration_millis"
-                | "health_flags"
+                | "health_flags"]
         ),
         "audio" => matches!(
-            field,
-            "codec"
+            parts.as_slice(),
+            ["codec"
                 | "lang"
                 | "language"
                 | "languages"
@@ -1044,39 +1045,50 @@ fn is_valid_core_field_path(root: &str, rest: &str) -> bool {
                 | "commentary"
                 | "forced"
                 | "default"
-                | "title"
+                | "title"]
         ),
         "subtitle" | "subtitles" => {
             matches!(
-                field,
-                "lang" | "language" | "languages" | "forced" | "default" | "title" | "disposition"
+                parts.as_slice(),
+                ["lang"
+                    | "language"
+                    | "languages"
+                    | "forced"
+                    | "default"
+                    | "title"
+                    | "disposition"]
             )
         }
-        "attachment" | "attachments" => matches!(field, "font" | "title" | "disposition"),
-        "container" => matches!(field, "name" | "value"),
+        "attachment" | "attachments" => {
+            matches!(parts.as_slice(), ["font" | "title" | "disposition"])
+        }
+        "container" => matches!(parts.as_slice(), ["name" | "value"]),
         "identity" => matches!(
-            field,
-            "title"
+            parts.as_slice(),
+            ["title"
                 | "assertion_type"
                 | "provider"
                 | "provider_version"
                 | "confidence"
                 | "provenance"
-                | "observed_at"
+                | "observed_at"]
         ),
         "quality" => matches!(
-            field,
-            "profile_name" | "profile_version" | "dimension_weights"
+            parts.as_slice(),
+            ["profile_name" | "profile_version" | "dimension_weights"]
         ),
-        "issue" => matches!(field, "kind" | "severity" | "priority" | "state" | "reason"),
+        "issue" => matches!(
+            parts.as_slice(),
+            ["kind" | "severity" | "priority" | "state" | "reason"]
+        ),
         "bundle" => matches!(
-            field,
-            "role"
+            parts.as_slice(),
+            ["role"
                 | "desired_state"
                 | "language"
                 | "label"
                 | "disposition"
-                | "artifact_expectation"
+                | "artifact_expectation"]
         ),
         _ => false,
     }

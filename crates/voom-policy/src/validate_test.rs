@@ -113,6 +113,16 @@ fn rejects_unknown_core_field_path_below_valid_root() {
 }
 
 #[test]
+fn rejects_unknown_core_field_path_extra_segments() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { when video.codec.no_such_fact == true { container mkv } } }"
+        )
+        .contains(&"invalid_core_field_path".to_owned())
+    );
+}
+
+#[test]
 fn rejects_invalid_config_language() {
     assert!(
         codes("policy \"p\" { config { languages audio: [english] } phase a {} }")
