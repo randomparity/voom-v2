@@ -28,6 +28,13 @@ fn artifact_location_id_displays_inner_u64() {
 }
 
 #[test]
+fn node_id_display_and_json_match_public_id_contract() {
+    let id = NodeId(42);
+    assert_eq!(id.to_string(), "42");
+    assert_eq!(serde_json::to_string(&id).unwrap(), "42");
+}
+
+#[test]
 fn media_work_id_displays_inner_u64() {
     assert_eq!(MediaWorkId(1).to_string(), "1");
 }
