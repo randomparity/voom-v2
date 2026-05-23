@@ -9,8 +9,8 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_29d536e0788a05a4",
-      "plan_hash": "blake3:29d536e0788a05a4592edf6496eacf98ba09790830271d32dbc853fe9ef9b7ee",
+      "plan_id": "plan_216ecc541a9dee68",
+      "plan_hash": "blake3:216ecc541a9dee685ca83fa27c60701a5e705f6f4a36d7cfb6cf059c47314bbf",
       "policy": {
         "slug": "container-metadata",
         "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
@@ -48,6 +48,9 @@ expression: json
           "operation_kind": "set_container",
           "operation_payload": {
             "container": "mkv"
+          },
+          "observed_state": {
+            "container": "mp4"
           },
           "status": "planned",
           "status_reason": "container mp4 will be changed to mkv",

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use voom_core::{CommitId, EvidenceId, FailureClass, IssueId, UseLeaseId};
+use voom_core::{CommitId, EvidenceId, FailureClass, IssueId, PolicyVersionId, UseLeaseId};
 
 use crate::kind::EventKind;
 
@@ -211,6 +211,18 @@ pub struct ArtifactLineageRecordedPayload {
     pub parent_artifact_id: u64,
     pub child_artifact_id: u64,
     pub operation: String,
+}
+
+// --- issues ----------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueLifecyclePayload {
+    pub issue_id: IssueId,
+    pub kind: String,
+    pub status: String,
+    pub dedupe_key: Option<String>,
+    pub policy_version_id: Option<PolicyVersionId>,
+    pub report_id: Option<String>,
 }
 
 // --- media identity --------------------------------------------------------
@@ -786,6 +798,12 @@ pub enum Event {
     ArtifactLocationRetired(ArtifactLocationRetiredPayload),
     #[serde(rename = "artifact_lineage.recorded")]
     ArtifactLineageRecorded(ArtifactLineageRecordedPayload),
+    #[serde(rename = "issue.opened")]
+    IssueOpened(IssueLifecyclePayload),
+    #[serde(rename = "issue.updated")]
+    IssueUpdated(IssueLifecyclePayload),
+    #[serde(rename = "issue.resolved")]
+    IssueResolved(IssueLifecyclePayload),
     #[serde(rename = "media_work.created")]
     MediaWorkCreated(MediaWorkCreatedPayload),
     #[serde(rename = "media_variant.created")]
@@ -886,6 +904,9 @@ impl Event {
             Self::ArtifactLocationRecorded(_) => EventKind::ArtifactLocationRecorded,
             Self::ArtifactLocationRetired(_) => EventKind::ArtifactLocationRetired,
             Self::ArtifactLineageRecorded(_) => EventKind::ArtifactLineageRecorded,
+            Self::IssueOpened(_) => EventKind::IssueOpened,
+            Self::IssueUpdated(_) => EventKind::IssueUpdated,
+            Self::IssueResolved(_) => EventKind::IssueResolved,
             Self::MediaWorkCreated(_) => EventKind::MediaWorkCreated,
             Self::MediaVariantCreated(_) => EventKind::MediaVariantCreated,
             Self::AssetBundleCreated(_) => EventKind::AssetBundleCreated,

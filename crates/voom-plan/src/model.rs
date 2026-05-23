@@ -90,6 +90,8 @@ pub struct PlanNode {
     pub target: TargetRef,
     pub operation_kind: String,
     pub operation_payload: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<serde_json::Value>,
     pub status: NodeStatus,
     pub status_reason: String,
     pub capability_hints: CapabilityHints,

@@ -3,8 +3,8 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use voom_cli::cli::{Cli, Command, PlanCommand};
-use voom_cli::commands::{health, init, plan, version};
+use voom_cli::cli::{Cli, Command, ComplianceCommand, PlanCommand};
+use voom_cli::commands::{compliance, health, init, plan, version};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
 use voom_control_plane::HealthPlane;
@@ -194,5 +194,35 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
                 plan::show(&cfg.database_url, local, policy_version_id, input_set_id).await?,
             ))
         }
+        Command::Compliance(command) => dispatch_compliance(&cli, command).await,
     }
+}
+
+async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("compliance", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    let code = match command {
+        ComplianceCommand::Report {
+            policy_version_id,
+            input_set_id,
+        } => compliance::report(&cfg.database_url, local, policy_version_id, input_set_id).await?,
+        ComplianceCommand::Apply {
+            policy_version_id,
+            input_set_id,
+        } => compliance::apply(&cfg.database_url, local, policy_version_id, input_set_id).await?,
+        ComplianceCommand::Execute {
+            policy_version_id,
+            input_set_id,
+        } => compliance::execute(&cfg.database_url, local, policy_version_id, input_set_id).await?,
+    };
+    Ok(Exit::from_run_code(code))
 }

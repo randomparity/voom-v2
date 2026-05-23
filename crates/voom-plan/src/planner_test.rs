@@ -104,6 +104,48 @@ fn set_container_plans_non_mkv_snapshot() {
 }
 
 #[test]
+fn set_container_plan_nodes_carry_structured_observed_container_when_known() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+    let node = plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == "set_container")
+        .unwrap();
+
+    assert_eq!(
+        node.observed_state,
+        Some(serde_json::json!({"container": "mp4"}))
+    );
+}
+
+#[test]
+fn set_container_plan_nodes_leave_observed_state_absent_when_unknown() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }),
+        input: input(None),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+    let node = plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == "set_container")
+        .unwrap();
+
+    assert_eq!(node.status, NodeStatus::Blocked);
+    assert_eq!(node.observed_state, None);
+}
+
+#[test]
 fn set_container_no_ops_already_mkv_snapshot() {
     let plan = generate_plan(PlanningRequest {
         policy: policy(CompiledOperation::SetContainer {

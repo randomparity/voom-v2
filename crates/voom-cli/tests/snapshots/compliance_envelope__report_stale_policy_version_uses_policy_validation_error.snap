@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/compliance_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "compliance",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "POLICY_VALIDATION_ERROR",
+    "message": "policy validation error: policy version 1 is not the current accepted version"
+  }
+}

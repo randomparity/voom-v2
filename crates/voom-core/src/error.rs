@@ -79,6 +79,10 @@ pub enum ErrorCode {
     /// A compiled policy and policy input set could not be converted into an
     /// execution-plan projection.
     PlanGenerationError,
+    /// A compliance report could not be generated or serialized deterministically.
+    ComplianceReportError,
+    /// Policy-derived planned work could not be bridged into executable workflow work.
+    PolicyExecutionError,
     /// The selected worker lacks a required capability.
     MissingCapability,
     /// A worker result deserialized but didn't satisfy the contract.
@@ -136,6 +140,8 @@ impl ErrorCode {
             Self::PolicyParseError => "POLICY_PARSE_ERROR",
             Self::PolicyValidationError => "POLICY_VALIDATION_ERROR",
             Self::PlanGenerationError => "PLAN_GENERATION_ERROR",
+            Self::ComplianceReportError => "COMPLIANCE_REPORT_ERROR",
+            Self::PolicyExecutionError => "POLICY_EXECUTION_ERROR",
             Self::MissingCapability => "MISSING_CAPABILITY",
             Self::MalformedWorkerResult => "MALFORMED_WORKER_RESULT",
             Self::UserCancellation => "USER_CANCELLATION",
@@ -206,6 +212,10 @@ pub enum VoomError {
     PolicyValidationError(String),
     #[error("plan generation error: {0}")]
     PlanGeneration(String),
+    #[error("compliance report error: {0}")]
+    ComplianceReport(String),
+    #[error("policy execution error: {0}")]
+    PolicyExecution(String),
     #[error("missing capability: {0}")]
     MissingCapability(String),
     #[error("malformed worker result: {0}")]
@@ -257,6 +267,8 @@ impl VoomError {
             Self::PolicyParseError(_) => ErrorCode::PolicyParseError,
             Self::PolicyValidationError(_) => ErrorCode::PolicyValidationError,
             Self::PlanGeneration(_) => ErrorCode::PlanGenerationError,
+            Self::ComplianceReport(_) => ErrorCode::ComplianceReportError,
+            Self::PolicyExecution(_) => ErrorCode::PolicyExecutionError,
             Self::MissingCapability(_) => ErrorCode::MissingCapability,
             Self::MalformedWorkerResult(_) => ErrorCode::MalformedWorkerResult,
             Self::UserCancellation(_) => ErrorCode::UserCancellation,

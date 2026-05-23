@@ -29,6 +29,9 @@ const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_policy_i
 /// SQL for migration 0007 (Sprint 4 policy registry), embedded at compile time.
 const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_policy_registry.sql");
 
+/// SQL for migration 0008 (Sprint 6 issue dedupe key), embedded at compile time.
+const MIGRATION_0008_SQL: &str = include_str!("../../../migrations/0008_issue_dedupe_key.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -91,6 +94,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("policy_registry"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0007_SQL),
+            false,
+        ),
+        Migration::new(
+            8,
+            Cow::Borrowed("issue_dedupe_key"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0008_SQL),
             false,
         ),
     ]),

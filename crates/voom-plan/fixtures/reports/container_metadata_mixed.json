@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "report_id": "report_9de085246036e05f",
+  "report_hash": "blake3:c3e63e8f31e344285f3d21adc2b09f3a322c5cb55fd64395c1b2f06a6a9b39e7",
+  "plan_id": "plan_mixed",
+  "plan_hash": "blake3:mixed",
+  "policy": {
+    "slug": "container-metadata",
+    "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
+  },
+  "input": {
+    "slug": "synthetic-noncompliant-transcode-needed",
+    "source_label": "synthetic_noncompliant_transcode_needed",
+    "fixture_labels": [
+      "synthetic_noncompliant_transcode_needed"
+    ]
+  },
+  "summary": {
+    "status": "mixed",
+    "total_check_count": 2,
+    "compliant_check_count": 0,
+    "noncompliant_check_count": 1,
+    "blocked_check_count": 1,
+    "executable_check_count": 1,
+    "operation_counts_by_kind": {
+      "set_container": 2
+    }
+  },
+  "checks": [
+    {
+      "check_id": "check_2ca28ad215c61479",
+      "node_id": "node_9dff79b44d89c9f9",
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "compliance_kind": "container",
+      "operation_kind": "set_container",
+      "desired_state": {
+        "container": "mkv"
+      },
+      "observed_state": {
+        "container": "mp4"
+      },
+      "check_status": "noncompliant",
+      "reason": "container mp4 will be changed to mkv",
+      "issue_action_hint": "create_or_update_planned",
+      "execution_eligibility": "supported"
+    },
+    {
+      "check_id": "check_3433697be1879338",
+      "node_id": "node_mixed_blocked",
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "compliance_kind": "container",
+      "operation_kind": "set_container",
+      "desired_state": {
+        "container": "mkv"
+      },
+      "check_status": "blocked",
+      "reason": "snapshot container is unknown",
+      "issue_action_hint": "create_or_update_open",
+      "execution_eligibility": "blocked"
+    }
+  ],
+  "diagnostics": [],
+  "provenance": {
+    "reporter": "voom-plan",
+    "format": "sprint6-v1"
+  }
+}

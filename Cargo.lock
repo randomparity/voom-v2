@@ -2538,6 +2538,7 @@ name = "voom-control-plane"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "rand 0.9.4",
  "secrecy",

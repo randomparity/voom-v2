@@ -39,6 +39,9 @@ pub enum Command {
     /// Generate or inspect execution plans.
     #[command(subcommand)]
     Plan(PlanCommand),
+    /// Generate, apply, or execute compliance reports.
+    #[command(subcommand)]
+    Compliance(ComplianceCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -52,6 +55,31 @@ pub enum PlanCommand {
     },
     /// Generate a plan from durable accepted policy and input rows.
     Show {
+        #[arg(long)]
+        policy_version_id: u64,
+        #[arg(long)]
+        input_set_id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum ComplianceCommand {
+    /// Generate a compliance report from durable policy and input rows.
+    Report {
+        #[arg(long)]
+        policy_version_id: u64,
+        #[arg(long)]
+        input_set_id: u64,
+    },
+    /// Apply compliance report findings to durable issues.
+    Apply {
+        #[arg(long)]
+        policy_version_id: u64,
+        #[arg(long)]
+        input_set_id: u64,
+    },
+    /// Apply issues, then execute supported compliance work.
+    Execute {
         #[arg(long)]
         policy_version_id: u64,
         #[arg(long)]

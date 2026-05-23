@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "report_id": "report_e9a1074c378f0605",
+  "report_hash": "blake3:e52b4b42c524347ec094bad24b68044cf6179fe94002fea02f857615245661a2",
+  "plan_id": "plan_216ecc541a9dee68",
+  "plan_hash": "blake3:216ecc541a9dee685ca83fa27c60701a5e705f6f4a36d7cfb6cf059c47314bbf",
+  "policy": {
+    "slug": "container-metadata",
+    "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
+  },
+  "input": {
+    "slug": "synthetic-noncompliant-transcode-needed",
+    "source_label": "synthetic_noncompliant_transcode_needed",
+    "fixture_labels": [
+      "synthetic_noncompliant_transcode_needed"
+    ]
+  },
+  "summary": {
+    "status": "noncompliant",
+    "total_check_count": 1,
+    "compliant_check_count": 0,
+    "noncompliant_check_count": 1,
+    "blocked_check_count": 0,
+    "executable_check_count": 1,
+    "operation_counts_by_kind": {
+      "set_container": 1
+    }
+  },
+  "checks": [
+    {
+      "check_id": "check_8c6fb91175c0c79e",
+      "node_id": "node_9dff79b44d89c9f9",
+      "target": {
+        "type": "synthetic",
+        "key": "variant-1",
+        "kind": "media_variant"
+      },
+      "compliance_kind": "container",
+      "operation_kind": "set_container",
+      "desired_state": {
+        "container": "mkv"
+      },
+      "observed_state": {
+        "container": "mp4"
+      },
+      "check_status": "noncompliant",
+      "reason": "container mp4 will be changed to mkv",
+      "issue_action_hint": "create_or_update_planned",
+      "execution_eligibility": "supported"
+    }
+  ],
+  "diagnostics": [],
+  "provenance": {
+    "reporter": "voom-plan",
+    "format": "sprint6-v1"
+  }
+}

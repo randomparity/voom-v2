@@ -321,6 +321,10 @@ impl<'a> PlanBuilder<'a> {
             snapshot,
             "set_container",
             json!({ "container": container }),
+            snapshot
+                .container
+                .as_ref()
+                .map(|container| json!({ "container": container })),
             status,
             status_reason,
             capability,
@@ -347,6 +351,7 @@ impl<'a> PlanBuilder<'a> {
             snapshot,
             operation_kind,
             operation_payload(operation),
+            None,
             NodeStatus::Blocked,
             message.to_owned(),
             None,
@@ -376,6 +381,7 @@ impl<'a> PlanBuilder<'a> {
             snapshot,
             operation_kind,
             payload,
+            None,
             NodeStatus::Blocked,
             message.to_owned(),
             None,
@@ -718,6 +724,7 @@ fn make_node(
     snapshot: &MediaSnapshotInput,
     operation_kind: &str,
     operation_payload: serde_json::Value,
+    observed_state: Option<serde_json::Value>,
     status: NodeStatus,
     status_reason: String,
     capability: Option<String>,
@@ -734,6 +741,7 @@ fn make_node(
         target: snapshot.target.clone(),
         operation_kind: operation_kind.to_owned(),
         operation_payload,
+        observed_state,
         status,
         status_reason,
         capability_hints: CapabilityHints {

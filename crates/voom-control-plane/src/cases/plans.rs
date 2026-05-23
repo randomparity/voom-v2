@@ -92,7 +92,7 @@ impl ControlPlane {
     }
 }
 
-fn input_set_to_draft(input: PolicyInputSet) -> PolicyInputSetDraft {
+pub(crate) fn input_set_to_draft(input: PolicyInputSet) -> PolicyInputSetDraft {
     PolicyInputSetDraft {
         slug: input.slug,
         display_name: input.display_name,

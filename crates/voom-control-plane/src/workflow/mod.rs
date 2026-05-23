@@ -2,6 +2,7 @@ pub mod binding;
 pub mod executor;
 pub mod expansion;
 pub mod model;
+pub mod policy_bridge;
 pub mod runtime;
 pub mod ticket_payload;
 pub mod timing;
