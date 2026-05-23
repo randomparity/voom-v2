@@ -87,6 +87,7 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::CommitFailure
         | ErrorCode::PolicyParseError
         | ErrorCode::PolicyValidationError
+        | ErrorCode::PlanGenerationError
         | ErrorCode::MissingCapability
         | ErrorCode::MalformedWorkerResult
         | ErrorCode::UserCancellation

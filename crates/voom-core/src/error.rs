@@ -76,6 +76,9 @@ pub enum ErrorCode {
     PolicyParseError,
     /// A policy document parsed but failed validation.
     PolicyValidationError,
+    /// A compiled policy and policy input set could not be converted into an
+    /// execution-plan projection.
+    PlanGenerationError,
     /// The selected worker lacks a required capability.
     MissingCapability,
     /// A worker result deserialized but didn't satisfy the contract.
@@ -132,6 +135,7 @@ impl ErrorCode {
             Self::CommitFailure => "COMMIT_FAILURE",
             Self::PolicyParseError => "POLICY_PARSE_ERROR",
             Self::PolicyValidationError => "POLICY_VALIDATION_ERROR",
+            Self::PlanGenerationError => "PLAN_GENERATION_ERROR",
             Self::MissingCapability => "MISSING_CAPABILITY",
             Self::MalformedWorkerResult => "MALFORMED_WORKER_RESULT",
             Self::UserCancellation => "USER_CANCELLATION",
@@ -200,6 +204,8 @@ pub enum VoomError {
     PolicyParseError(String),
     #[error("policy validation error: {0}")]
     PolicyValidationError(String),
+    #[error("plan generation error: {0}")]
+    PlanGeneration(String),
     #[error("missing capability: {0}")]
     MissingCapability(String),
     #[error("malformed worker result: {0}")]
@@ -250,6 +256,7 @@ impl VoomError {
             Self::CommitFailure(_) => ErrorCode::CommitFailure,
             Self::PolicyParseError(_) => ErrorCode::PolicyParseError,
             Self::PolicyValidationError(_) => ErrorCode::PolicyValidationError,
+            Self::PlanGeneration(_) => ErrorCode::PlanGenerationError,
             Self::MissingCapability(_) => ErrorCode::MissingCapability,
             Self::MalformedWorkerResult(_) => ErrorCode::MalformedWorkerResult,
             Self::UserCancellation(_) => ErrorCode::UserCancellation,
