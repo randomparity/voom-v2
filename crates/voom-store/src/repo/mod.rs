@@ -9,6 +9,7 @@ pub mod identity;
 pub mod issues;
 pub mod jobs;
 pub mod leases;
+pub mod nodes;
 pub mod policies;
 pub mod policy_inputs;
 pub mod schema_meta;
@@ -38,6 +39,7 @@ pub use leases::{
     ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, LeaseState, NewLease, ReleaseReason,
     SqliteLeaseRepo,
 };
+pub use nodes::{NewNode, Node, NodeAuthRecord, NodeKind, NodeRepo, NodeStatus, SqliteNodeRepo};
 pub use policies::{
     CreatedPolicyVersion, NewPolicyDocumentVersion, PolicyDocument, PolicyDocumentSummary,
     PolicyRepo, PolicyVersion, SqlitePolicyRepo,
