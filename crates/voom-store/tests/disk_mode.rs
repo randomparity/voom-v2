@@ -49,6 +49,7 @@ async fn m1_fixture_flow_persists_across_reconnect() {
                 name: "w-disk".to_owned(),
                 kind: WorkerKind::Synthetic,
                 registered_at: T0,
+                node_id: None,
             })
             .await
             .unwrap();

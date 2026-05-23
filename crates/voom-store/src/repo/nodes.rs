@@ -28,7 +28,7 @@ impl NodeKind {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "local" => Ok(Self::Local),
             "remote" => Ok(Self::Remote),
@@ -59,7 +59,7 @@ impl NodeStatus {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "registered" => Ok(Self::Registered),
             "active" => Ok(Self::Active),

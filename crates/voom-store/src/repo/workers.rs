@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{VoomError, WorkerId};
+use voom_core::{NodeId, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
+use super::nodes::{NodeKind, NodeStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerKind {
@@ -77,11 +78,13 @@ pub struct NewWorker {
     pub name: String,
     pub kind: WorkerKind,
     pub registered_at: OffsetDateTime,
+    pub node_id: Option<NodeId>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Worker {
     pub id: WorkerId,
+    pub node_id: Option<NodeId>,
     pub name: String,
     pub kind: WorkerKind,
     pub status: WorkerStatus,
@@ -89,6 +92,21 @@ pub struct Worker {
     pub last_seen_at: OffsetDateTime,
     pub retired_at: Option<OffsetDateTime>,
     pub epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerNodeContext {
+    pub id: NodeId,
+    pub name: String,
+    pub kind: NodeKind,
+    pub status: NodeStatus,
+    pub last_seen_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerInspection {
+    pub worker: Worker,
+    pub node: Option<WorkerNodeContext>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,11 +180,17 @@ pub trait WorkerRepo: Repository {
     ) -> Result<Worker, VoomError>;
 
     async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError>;
+    async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError>;
     async fn list_by_status(
         &self,
         status: WorkerStatus,
         limit: u32,
     ) -> Result<Vec<Worker>, VoomError>;
+    async fn list_inspections(
+        &self,
+        status: Option<WorkerStatus>,
+        limit: u32,
+    ) -> Result<Vec<WorkerInspection>, VoomError>;
 }
 
 #[derive(Debug, Clone)]
@@ -192,18 +216,20 @@ impl WorkerRepo for SqliteWorkerRepo {
     ) -> Result<Worker, VoomError> {
         let ts = iso8601(input.registered_at)?;
         let res = sqlx::query(
-            "INSERT INTO workers (name, kind, status, registered_at, last_seen_at) \
-             VALUES (?, ?, 'registered', ?, ?)",
+            "INSERT INTO workers (name, kind, status, registered_at, last_seen_at, node_id) \
+             VALUES (?, ?, 'registered', ?, ?, ?)",
         )
         .bind(&input.name)
         .bind(input.kind.as_str())
         .bind(&ts)
         .bind(&ts)
+        .bind(input.node_id.map(|id| i64_from_u64(id.0)))
         .execute(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("workers insert: {e}")))?;
         Ok(Worker {
             id: WorkerId(u64_from_i64(res.last_insert_rowid())),
+            node_id: input.node_id,
             name: input.name,
             kind: input.kind,
             status: WorkerStatus::Registered,
@@ -367,7 +393,7 @@ impl WorkerRepo for SqliteWorkerRepo {
 
     async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
         let row = sqlx::query(
-            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
              FROM workers WHERE id = ?",
         )
         .bind(i64_from_u64(id.0))
@@ -377,13 +403,30 @@ impl WorkerRepo for SqliteWorkerRepo {
         row.as_ref().map(row_to_worker).transpose()
     }
 
+    async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError> {
+        let row = sqlx::query(
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, \
+             n.id AS node_context_id, n.name AS node_context_name, \
+             n.kind AS node_context_kind, n.status AS node_context_status, \
+             n.last_seen_at AS node_context_last_seen_at \
+             FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+             WHERE w.id = ?",
+        )
+        .bind(i64_from_u64(id.0))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("workers inspection get: {e}")))?;
+        row.as_ref().map(row_to_inspection).transpose()
+    }
+
     async fn list_by_status(
         &self,
         status: WorkerStatus,
         limit: u32,
     ) -> Result<Vec<Worker>, VoomError> {
         let rows = sqlx::query(
-            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
              FROM workers WHERE status = ? \
              ORDER BY registered_at ASC, id ASC LIMIT ?",
         )
@@ -394,6 +437,44 @@ impl WorkerRepo for SqliteWorkerRepo {
         .map_err(|e| VoomError::Database(format!("workers list: {e}")))?;
         rows.iter().map(row_to_worker).collect()
     }
+
+    async fn list_inspections(
+        &self,
+        status: Option<WorkerStatus>,
+        limit: u32,
+    ) -> Result<Vec<WorkerInspection>, VoomError> {
+        let rows = if let Some(status) = status {
+            sqlx::query(
+                "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+                 w.last_seen_at, w.retired_at, w.epoch, \
+                 n.id AS node_context_id, n.name AS node_context_name, \
+                 n.kind AS node_context_kind, n.status AS node_context_status, \
+                 n.last_seen_at AS node_context_last_seen_at \
+                 FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+                 WHERE w.status = ? \
+                 ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
+            )
+            .bind(status.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query(
+                "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+                 w.last_seen_at, w.retired_at, w.epoch, \
+                 n.id AS node_context_id, n.name AS node_context_name, \
+                 n.kind AS node_context_kind, n.status AS node_context_status, \
+                 n.last_seen_at AS node_context_last_seen_at \
+                 FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+                 ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
+            )
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| VoomError::Database(format!("workers inspection list: {e}")))?;
+        rows.iter().map(row_to_inspection).collect()
+    }
 }
 
 async fn get_in_tx(
@@ -401,7 +482,7 @@ async fn get_in_tx(
     id: WorkerId,
 ) -> Result<Option<Worker>, VoomError> {
     let row = sqlx::query(
-        "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+        "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
          FROM workers WHERE id = ?",
     )
     .bind(i64_from_u64(id.0))
@@ -413,6 +494,9 @@ async fn get_in_tx(
 
 fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
     let id: i64 = row.try_get("id").map_err(|e| map_row_err("workers", &e))?;
+    let node_id: Option<i64> = row
+        .try_get("node_id")
+        .map_err(|e| map_row_err("workers", &e))?;
     let name: String = row
         .try_get("name")
         .map_err(|e| map_row_err("workers", &e))?;
@@ -436,6 +520,7 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         .map_err(|e| map_row_err("workers", &e))?;
     Ok(Worker {
         id: WorkerId(u64_from_i64(id)),
+        node_id: node_id.map(|id| NodeId(u64_from_i64(id))),
         name,
         kind: WorkerKind::parse(&kind)?,
         status: WorkerStatus::parse(&status)?,
@@ -444,6 +529,43 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
         epoch: u64_from_i64(epoch),
     })
+}
+
+fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, VoomError> {
+    let worker = row_to_worker(row)?;
+    let node_id: Option<i64> = row
+        .try_get("node_context_id")
+        .map_err(|e| map_row_err("workers inspection", &e))?;
+    if let (Some(worker_node_id), None) = (worker.node_id, node_id) {
+        return Err(VoomError::Database(format!(
+            "workers inspection missing node context: worker_id={} node_id={}",
+            worker.id, worker_node_id
+        )));
+    }
+    let node = node_id
+        .map(|id| {
+            let name: String = row
+                .try_get("node_context_name")
+                .map_err(|e| map_row_err("workers inspection", &e))?;
+            let kind: String = row
+                .try_get("node_context_kind")
+                .map_err(|e| map_row_err("workers inspection", &e))?;
+            let status: String = row
+                .try_get("node_context_status")
+                .map_err(|e| map_row_err("workers inspection", &e))?;
+            let last_seen: String = row
+                .try_get("node_context_last_seen_at")
+                .map_err(|e| map_row_err("workers inspection", &e))?;
+            Ok(WorkerNodeContext {
+                id: NodeId(u64_from_i64(id)),
+                name,
+                kind: NodeKind::parse(&kind)?,
+                status: NodeStatus::parse(&status)?,
+                last_seen_at: parse_iso8601(&last_seen)?,
+            })
+        })
+        .transpose()?;
+    Ok(WorkerInspection { worker, node })
 }
 
 fn serialize_string_vec(v: &[String], field: &str) -> Result<String, VoomError> {

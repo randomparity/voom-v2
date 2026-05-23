@@ -57,8 +57,8 @@ pub use use_leases::{
     UseLeaseRepo,
 };
 pub use workers::{
-    Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker, WorkerKind,
-    WorkerRepo, WorkerStatus,
+    Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
+    WorkerInspection, WorkerKind, WorkerNodeContext, WorkerRepo, WorkerStatus,
 };
 
 /// Marker trait so future repository traits compose uniformly.

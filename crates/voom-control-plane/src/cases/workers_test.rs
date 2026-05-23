@@ -22,6 +22,7 @@ async fn register_worker_emits_worker_registered() {
             name: "alpha".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -48,6 +49,7 @@ async fn record_capability_emits_worker_capability_recorded() {
             name: "alpha".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -90,6 +92,7 @@ async fn record_grant_emits_worker_grant_recorded() {
             name: "alpha".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -130,6 +133,7 @@ async fn retire_worker_emits_worker_retired() {
             name: "alpha".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
         })
         .await
         .unwrap();

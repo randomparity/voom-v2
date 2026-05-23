@@ -476,6 +476,7 @@ async fn register_policy_remux_worker_with_extra(
             name: "policy-test-remux".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: cp.clock().now(),
+            node_id: None,
         })
         .await
         .unwrap();

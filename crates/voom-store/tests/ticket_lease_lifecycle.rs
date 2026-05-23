@@ -79,6 +79,7 @@ async fn happy_path_ready_leased_succeeded_with_events() {
             name: "w-happy".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -138,6 +139,7 @@ async fn max_attempts_2_via_fail_retriable_yields_two_dispatched_attempts() {
             name: "w-a".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -217,6 +219,7 @@ async fn max_attempts_2_via_expire_due_yields_two_dispatched_attempts() {
             name: "w-b".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -280,6 +283,7 @@ async fn max_attempts_3_mixed_fail_and_expire_due() {
             name: "w-c".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -379,6 +383,7 @@ async fn force_release_requeue_rejects_when_exhausted() {
             name: "w-strand".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();

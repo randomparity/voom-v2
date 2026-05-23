@@ -45,6 +45,7 @@ async fn expire_due_handles_bulk_overdue_leases() {
             name: "w-bulk".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -137,6 +138,7 @@ async fn expire_due_handles_backlog_above_chunk_size() {
             name: "w-backlog".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -189,6 +191,7 @@ async fn expire_due_drains_backlog_above_batch_limit() {
             name: "w-drain".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
