@@ -175,6 +175,8 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::PolicyParseError
         | ErrorCode::PolicyValidationError
         | ErrorCode::PlanGenerationError
+        | ErrorCode::ComplianceReportError
+        | ErrorCode::PolicyExecutionError
         | ErrorCode::MissingCapability
         | ErrorCode::MalformedWorkerResult
         | ErrorCode::UserCancellation

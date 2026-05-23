@@ -114,6 +114,20 @@ fn plan_generation_error_has_stable_public_code() {
     assert_eq!(err.error_code(), ErrorCode::PlanGenerationError);
 }
 
+#[test]
+fn compliance_report_error_has_stable_public_code() {
+    let err = VoomError::ComplianceReport("deterministic serialization failed".to_owned());
+    assert_eq!(err.code(), "COMPLIANCE_REPORT_ERROR");
+    assert_eq!(err.error_code(), ErrorCode::ComplianceReportError);
+}
+
+#[test]
+fn policy_execution_error_has_stable_public_code() {
+    let err = VoomError::PolicyExecution("unsupported operation".to_owned());
+    assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
+    assert_eq!(err.error_code(), ErrorCode::PolicyExecutionError);
+}
+
 /// Adding a variant to `ErrorCode` must force a wire-string decision in
 /// `as_str()`. This test is intentionally an exhaustive match so a new
 /// variant fails compilation here too — both halves of the round trip
@@ -150,6 +164,8 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::PolicyParseError,
         ErrorCode::PolicyValidationError,
         ErrorCode::PlanGenerationError,
+        ErrorCode::ComplianceReportError,
+        ErrorCode::PolicyExecutionError,
         ErrorCode::MissingCapability,
         ErrorCode::MalformedWorkerResult,
         ErrorCode::UserCancellation,
