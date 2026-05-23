@@ -258,9 +258,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         input: NewCapability,
     ) -> Result<Capability, VoomError> {
-        let codecs = serialize_string_vec(&input.codecs, "codecs")?;
-        let hw = serialize_string_vec(&input.hardware, "hardware")?;
-        let access = serialize_string_vec(&input.artifact_access, "artifact_access")?;
+        let codecs = serialize_json(&input.codecs, "codecs")?;
+        let hw = serialize_json(&input.hardware, "hardware")?;
+        let access = serialize_json(&input.artifact_access, "artifact_access")?;
         let extra = serialize_json(&input.extra, "extra")?;
         let res = sqlx::query(
             "INSERT INTO worker_capabilities \
@@ -301,10 +301,10 @@ impl WorkerRepo for SqliteWorkerRepo {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         input: NewGrant,
     ) -> Result<Grant, VoomError> {
-        let ce = serialize_string_vec(&input.can_execute, "can_execute")?;
-        let cr = serialize_string_vec(&input.can_access_read, "can_access_read")?;
-        let cw = serialize_string_vec(&input.can_access_write, "can_access_write")?;
-        let d = serialize_string_vec(&input.denies, "denies")?;
+        let ce = serialize_json(&input.can_execute, "can_execute")?;
+        let cr = serialize_json(&input.can_access_read, "can_access_read")?;
+        let cw = serialize_json(&input.can_access_write, "can_access_write")?;
+        let d = serialize_json(&input.denies, "denies")?;
         let mp = serialize_json(&input.max_parallel, "max_parallel")?;
         let res = sqlx::query(
             "INSERT INTO worker_grants \
@@ -443,35 +443,22 @@ impl WorkerRepo for SqliteWorkerRepo {
         status: Option<WorkerStatus>,
         limit: u32,
     ) -> Result<Vec<WorkerInspection>, VoomError> {
-        let rows = if let Some(status) = status {
-            sqlx::query(
-                "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
-                 w.last_seen_at, w.retired_at, w.epoch, \
-                 n.id AS node_context_id, n.name AS node_context_name, \
-                 n.kind AS node_context_kind, n.status AS node_context_status, \
-                 n.last_seen_at AS node_context_last_seen_at \
-                 FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
-                 WHERE w.status = ? \
-                 ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
-            )
-            .bind(status.as_str())
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
-                 w.last_seen_at, w.retired_at, w.epoch, \
-                 n.id AS node_context_id, n.name AS node_context_name, \
-                 n.kind AS node_context_kind, n.status AS node_context_status, \
-                 n.last_seen_at AS node_context_last_seen_at \
-                 FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
-                 ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
-            )
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-        }
+        let status = status.map(WorkerStatus::as_str);
+        let rows = sqlx::query(
+            "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
+             w.last_seen_at, w.retired_at, w.epoch, \
+             n.id AS node_context_id, n.name AS node_context_name, \
+             n.kind AS node_context_kind, n.status AS node_context_status, \
+             n.last_seen_at AS node_context_last_seen_at \
+             FROM workers w LEFT JOIN nodes n ON n.id = w.node_id \
+             WHERE (? IS NULL OR w.status = ?) \
+             ORDER BY w.registered_at ASC, w.id ASC LIMIT ?",
+        )
+        .bind(status)
+        .bind(status)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| VoomError::Database(format!("workers inspection list: {e}")))?;
         rows.iter().map(row_to_inspection).collect()
     }
@@ -566,10 +553,6 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
         })
         .transpose()?;
     Ok(WorkerInspection { worker, node })
-}
-
-fn serialize_string_vec(v: &[String], field: &str) -> Result<String, VoomError> {
-    serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
 }
 
 #[cfg(test)]

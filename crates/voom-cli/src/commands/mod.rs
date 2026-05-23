@@ -1,3 +1,4 @@
+pub(crate) mod common;
 pub mod compliance;
 pub mod health;
 pub mod init;

@@ -6,9 +6,10 @@ use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_core::{ErrorCode, NodeId, WorkerId};
-use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext, WorkerStatus};
+use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
 
 use crate::cli::WorkerCommand;
+use crate::commands::common::{emit_voom_error, open_control_plane};
 use crate::commands::token_source::{TokenSourceArgs, read_token};
 use crate::envelope::{Local, emit_err, emit_ok};
 
@@ -110,7 +111,7 @@ async fn register(
             return Ok(1);
         }
     };
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -124,7 +125,7 @@ async fn register(
     };
     match cp.register_worker_for_node(input).await {
         Ok(worker) => emit_inspection(&cp, local, worker.id).await,
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("worker", &err, local),
     }
 }
 
@@ -133,7 +134,7 @@ async fn list(
     local: Local,
     status: Option<crate::cli::WorkerStatusArg>,
 ) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -153,12 +154,12 @@ async fn list(
             Vec::new(),
         )
         .map(|()| 0),
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("worker", &err, local),
     }
 }
 
 async fn show(database_url: &str, local: Local, worker_id: u64) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("worker", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -174,23 +175,7 @@ async fn show(database_url: &str, local: Local, worker_id: u64) -> io::Result<i3
             )?;
             Ok(2)
         }
-        Err(err) => emit_voom_error(&err, local),
-    }
-}
-
-async fn open(database_url: &str, local: &Local) -> io::Result<Result<ControlPlane, i32>> {
-    match ControlPlane::open(database_url).await {
-        Ok(cp) => Ok(Ok(cp)),
-        Err(err) => {
-            emit_err(
-                "worker",
-                err.code(),
-                err.to_string(),
-                None,
-                Some(local.clone()),
-            )?;
-            Ok(Err(2))
-        }
+        Err(err) => emit_voom_error("worker", &err, local),
     }
 }
 
@@ -207,7 +192,7 @@ async fn emit_inspection(cp: &ControlPlane, local: Local, worker_id: WorkerId) -
             )?;
             Ok(2)
         }
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("worker", &err, local),
     }
 }
 
@@ -221,11 +206,6 @@ fn emit_worker(worker: WorkerInspection, local: Local) -> io::Result<i32> {
         Vec::new(),
     )
     .map(|()| 0)
-}
-
-fn emit_voom_error(err: &voom_core::VoomError, local: Local) -> io::Result<i32> {
-    emit_err("worker", err.code(), err.to_string(), None, Some(local))?;
-    Ok(2)
 }
 
 fn capability_draft(operation: String) -> NewWorkerCapabilityDraft {
@@ -245,7 +225,7 @@ impl From<WorkerInspection> for WorkerData {
             node_id: inspection.worker.node_id.map(|id| id.0),
             name: inspection.worker.name,
             kind: inspection.worker.kind.as_str(),
-            status: worker_status_str(inspection.worker.status),
+            status: inspection.worker.status.as_str(),
             registered_at: inspection.worker.registered_at.to_string(),
             last_seen_at: inspection.worker.last_seen_at.to_string(),
             retired_at: inspection.worker.retired_at.map(|at| at.to_string()),
@@ -264,15 +244,6 @@ impl From<WorkerNodeContext> for NodeContextData {
             status: node.status.as_str(),
             last_seen_at: node.last_seen_at.to_string(),
         }
-    }
-}
-
-const fn worker_status_str(status: WorkerStatus) -> &'static str {
-    match status {
-        WorkerStatus::Registered => "registered",
-        WorkerStatus::Active => "active",
-        WorkerStatus::Stale => "stale",
-        WorkerStatus::Retired => "retired",
     }
 }
 

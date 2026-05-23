@@ -1,7 +1,7 @@
 //! Shared helpers used by every repository module in this crate.
 //! Internal to `voom-store::repo` — not part of the public API.
 
-use serde_json::Value as JsonValue;
+use serde::Serialize;
 use time::OffsetDateTime;
 use voom_core::VoomError;
 
@@ -29,7 +29,10 @@ pub(crate) fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
         .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
 }
 
-pub(crate) fn serialize_json(v: &JsonValue, field: &str) -> Result<String, VoomError> {
+pub(crate) fn serialize_json<T: Serialize + ?Sized>(
+    v: &T,
+    field: &str,
+) -> Result<String, VoomError> {
     serde_json::to_string(v).map_err(|e| VoomError::Internal(format!("serialize {field}: {e}")))
 }
 

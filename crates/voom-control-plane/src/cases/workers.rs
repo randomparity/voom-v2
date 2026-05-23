@@ -103,7 +103,7 @@ impl ControlPlane {
                 "node token verification failed".to_owned(),
             ));
         }
-        if auth.status == NodeStatus::Stale || auth.status == NodeStatus::Retired {
+        if matches!(auth.status, NodeStatus::Stale | NodeStatus::Retired) {
             return Err(VoomError::Conflict(format!(
                 "workers register for node rejected: id={} status={}",
                 input.node_id,

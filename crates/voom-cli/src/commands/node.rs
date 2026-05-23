@@ -3,12 +3,12 @@ use std::io;
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use serde_json::json;
-use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::nodes::RegisterNodeInput;
 use voom_core::{ErrorCode, NodeId};
-use voom_store::repo::nodes::{Node, NodeStatus};
+use voom_store::repo::nodes::Node;
 
 use crate::cli::NodeCommand;
+use crate::commands::common::{emit_voom_error, open_control_plane};
 use crate::commands::token_source::{TokenSourceArgs, read_token};
 use crate::envelope::{Local, emit_err, emit_ok};
 
@@ -83,7 +83,7 @@ async fn register(
     kind: crate::cli::NodeKindArg,
     heartbeat_ttl_seconds: Option<u32>,
 ) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("node", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -109,7 +109,7 @@ async fn register(
             )
             .map(|()| 0)
         }
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("node", &err, local),
     }
 }
 
@@ -132,13 +132,13 @@ async fn heartbeat(
             return Ok(1);
         }
     };
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("node", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
     match cp.heartbeat_node(NodeId(node_id), &token).await {
         Ok(node) => emit_node(node, local),
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("node", &err, local),
     }
 }
 
@@ -147,7 +147,7 @@ async fn list(
     local: Local,
     status: Option<crate::cli::NodeStatusArg>,
 ) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("node", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -164,12 +164,12 @@ async fn list(
             Vec::new(),
         )
         .map(|()| 0),
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("node", &err, local),
     }
 }
 
 async fn show(database_url: &str, local: Local, node_id: u64) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("node", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -185,7 +185,7 @@ async fn show(database_url: &str, local: Local, node_id: u64) -> io::Result<i32>
             )?;
             Ok(2)
         }
-        Err(err) => emit_voom_error(&err, local),
+        Err(err) => emit_voom_error("node", &err, local),
     }
 }
 
@@ -195,7 +195,7 @@ async fn retire(
     node_id: u64,
     expected_epoch: u64,
 ) -> io::Result<i32> {
-    let cp = match open(database_url, &local).await? {
+    let cp = match open_control_plane("node", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
@@ -204,23 +204,7 @@ async fn retire(
         .await
     {
         Ok(node) => emit_node(node, local),
-        Err(err) => emit_voom_error(&err, local),
-    }
-}
-
-async fn open(database_url: &str, local: &Local) -> io::Result<Result<ControlPlane, i32>> {
-    match ControlPlane::open(database_url).await {
-        Ok(cp) => Ok(Ok(cp)),
-        Err(err) => {
-            emit_err(
-                "node",
-                err.code(),
-                err.to_string(),
-                None,
-                Some(local.clone()),
-            )?;
-            Ok(Err(2))
-        }
+        Err(err) => emit_voom_error("node", &err, local),
     }
 }
 
@@ -236,30 +220,16 @@ fn emit_node(node: Node, local: Local) -> io::Result<i32> {
     .map(|()| 0)
 }
 
-fn emit_voom_error(err: &voom_core::VoomError, local: Local) -> io::Result<i32> {
-    emit_err("node", err.code(), err.to_string(), None, Some(local))?;
-    Ok(2)
-}
-
 impl From<Node> for NodeData {
     fn from(node: Node) -> Self {
         Self {
             id: node.id.0,
             name: node.name,
             kind: node.kind.as_str(),
-            status: node_status_str(node.status),
+            status: node.status.as_str(),
             heartbeat_ttl_seconds: node.heartbeat_ttl_seconds,
             epoch: node.epoch,
         }
-    }
-}
-
-const fn node_status_str(status: NodeStatus) -> &'static str {
-    match status {
-        NodeStatus::Registered => "registered",
-        NodeStatus::Active => "active",
-        NodeStatus::Stale => "stale",
-        NodeStatus::Retired => "retired",
     }
 }
 

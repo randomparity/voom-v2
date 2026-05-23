@@ -238,27 +238,18 @@ impl NodeRepo for SqliteNodeRepo {
     }
 
     async fn list(&self, status: Option<NodeStatus>, limit: u32) -> Result<Vec<Node>, VoomError> {
-        let rows = if let Some(status) = status {
-            sqlx::query(
-                "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-                 heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-                 FROM nodes WHERE status = ? \
-                 ORDER BY registered_at ASC, id ASC LIMIT ?",
-            )
-            .bind(status.as_str())
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-        } else {
-            sqlx::query(
-                "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
-                 heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-                 FROM nodes ORDER BY registered_at ASC, id ASC LIMIT ?",
-            )
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await
-        }
+        let status = status.map(NodeStatus::as_str);
+        let rows = sqlx::query(
+            "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
+             heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
+             FROM nodes WHERE (? IS NULL OR status = ?) \
+             ORDER BY registered_at ASC, id ASC LIMIT ?",
+        )
+        .bind(status)
+        .bind(status)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
         .map_err(|e| VoomError::Database(format!("nodes list: {e}")))?;
         rows.iter().map(row_to_node).collect()
     }
