@@ -121,6 +121,7 @@ pub enum TrackTarget {
 pub enum TrackFilter {
     LanguageIn { values: Vec<String> },
     CodecIn { values: Vec<String> },
+    Channels { op: ComparisonOp, value: u64 },
     Commentary,
     Forced,
     Default,
@@ -600,6 +601,10 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
         }),
         ["codec", "in", ..] => Some(TrackFilter::CodecIn {
             values: list_values(text).into_iter().map(str::to_owned).collect(),
+        }),
+        ["channels", op, value] => Some(TrackFilter::Channels {
+            op: comparison_op(Some(op))?,
+            value: value.parse::<u64>().ok()?,
         }),
         ["title", "contains", ..] => {
             title_filter_value(text, "contains").map(|value| TrackFilter::TitleContains {

@@ -103,6 +103,16 @@ fn rejects_unknown_core_field_root() {
 }
 
 #[test]
+fn rejects_unknown_core_field_path_below_valid_root() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { when video.not_a_policy_input_fact == true { container mkv } } }"
+        )
+        .contains(&"invalid_core_field_path".to_owned())
+    );
+}
+
+#[test]
 fn rejects_invalid_config_language() {
     assert!(
         codes("policy \"p\" { config { languages audio: [english] } phase a {} }")
@@ -356,6 +366,11 @@ fn rejects_unknown_track_filter_predicate() {
         codes("policy \"p\" { phase a { keep audio where banana } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
+}
+
+#[test]
+fn accepts_channel_count_track_filter() {
+    assert!(codes("policy \"p\" { phase a { keep audio where channels >= 6 } }").is_empty());
 }
 
 #[test]

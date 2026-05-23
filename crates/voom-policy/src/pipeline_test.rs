@@ -146,6 +146,23 @@ fn compile_policy_preserves_quoted_condition_comparison_value() {
 }
 
 #[test]
+fn compile_policy_preserves_channel_count_track_filter() {
+    let out =
+        compile_policy("policy \"p\" { phase a { keep audio where channels >= 6 } }").unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].operations[0],
+        CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Audio,
+            filter: Some(TrackFilter::Channels {
+                op: crate::ComparisonOp::Gte,
+                value: 6,
+            }),
+        }
+    );
+}
+
+#[test]
 fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
     let out =
         compile_policy("policy \"p\" { phase a { set_tag \"title\" \"Movie.Name\" } }").unwrap();

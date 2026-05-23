@@ -778,6 +778,12 @@ impl<'a> Validator<'a> {
                     statement.span(),
                     "unknown core field path root",
                 );
+            } else if !is_valid_core_field_path(root, rest) {
+                self.error(
+                    DiagnosticCode::InvalidCoreFieldPath,
+                    statement.span(),
+                    "unknown core field path",
+                );
             }
         }
     }
@@ -1011,6 +1017,72 @@ fn is_core_field_root(root: &str) -> bool {
 }
 
 #[must_use]
+fn is_valid_core_field_path(root: &str, rest: &str) -> bool {
+    let Some(field) = rest.split('.').next().filter(|field| !field.is_empty()) else {
+        return false;
+    };
+    match root {
+        "video" => matches!(
+            field,
+            "codec"
+                | "title"
+                | "width"
+                | "height"
+                | "hdr"
+                | "bitrate"
+                | "duration"
+                | "duration_millis"
+                | "health_flags"
+        ),
+        "audio" => matches!(
+            field,
+            "codec"
+                | "lang"
+                | "language"
+                | "languages"
+                | "channels"
+                | "commentary"
+                | "forced"
+                | "default"
+                | "title"
+        ),
+        "subtitle" | "subtitles" => {
+            matches!(
+                field,
+                "lang" | "language" | "languages" | "forced" | "default" | "title" | "disposition"
+            )
+        }
+        "attachment" | "attachments" => matches!(field, "font" | "title" | "disposition"),
+        "container" => matches!(field, "name" | "value"),
+        "identity" => matches!(
+            field,
+            "title"
+                | "assertion_type"
+                | "provider"
+                | "provider_version"
+                | "confidence"
+                | "provenance"
+                | "observed_at"
+        ),
+        "quality" => matches!(
+            field,
+            "profile_name" | "profile_version" | "dimension_weights"
+        ),
+        "issue" => matches!(field, "kind" | "severity" | "priority" | "state" | "reason"),
+        "bundle" => matches!(
+            field,
+            "role"
+                | "desired_state"
+                | "language"
+                | "label"
+                | "disposition"
+                | "artifact_expectation"
+        ),
+        _ => false,
+    }
+}
+
+#[must_use]
 fn is_reference_token(token: &str) -> bool {
     token
         .bytes()
@@ -1050,6 +1122,7 @@ fn is_valid_track_filter(text: &str) -> bool {
     let tokens = words(text);
     match tokens.as_slice() {
         ["lang" | "language" | "codec", "in", ..] => !list_values(text).is_empty(),
+        ["channels", op, value] => is_comparison_op(op) && value.parse::<u64>().is_ok(),
         ["commentary" | "forced" | "default" | "font"] => true,
         ["title", "contains", ..] => title_filter_value(text, "contains").is_some(),
         ["title", "matches", ..] => title_filter_value(text, "matches").is_some(),
