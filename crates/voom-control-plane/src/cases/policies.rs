@@ -6,6 +6,42 @@ use voom_store::repo::policies::{
 
 use crate::ControlPlane;
 
+#[derive(Debug)]
+pub enum PolicyMutationError {
+    Compile(voom_policy::PolicyCompileError),
+    Store(VoomError),
+}
+
+impl PolicyMutationError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Compile(err) => err.code(),
+            Self::Store(err) => err.code(),
+        }
+    }
+
+    #[must_use]
+    pub fn diagnostics(&self) -> &[voom_policy::PolicyDiagnostic] {
+        match self {
+            Self::Compile(err) => &err.diagnostics,
+            Self::Store(_) => &[],
+        }
+    }
+}
+
+impl From<voom_policy::PolicyCompileError> for PolicyMutationError {
+    fn from(err: voom_policy::PolicyCompileError) -> Self {
+        Self::Compile(err)
+    }
+}
+
+impl From<VoomError> for PolicyMutationError {
+    fn from(err: VoomError) -> Self {
+        Self::Store(err)
+    }
+}
+
 impl ControlPlane {
     /// Compile a policy source without persisting it.
     ///
@@ -30,7 +66,8 @@ impl ControlPlane {
         &self,
         slug: &str,
         source: &str,
-    ) -> Result<CreatedPolicyVersion, VoomError> {
+    ) -> Result<CreatedPolicyVersion, PolicyMutationError> {
+        voom_policy::compile_policy(source)?;
         self.policies
             .create_document_with_version(NewPolicyDocumentVersion {
                 slug: slug.to_owned(),
@@ -39,6 +76,7 @@ impl ControlPlane {
                 created_at: self.clock().now(),
             })
             .await
+            .map_err(PolicyMutationError::from)
     }
 
     /// Add a new accepted version to an existing policy document.
@@ -49,10 +87,12 @@ impl ControlPlane {
         &self,
         document_id: PolicyDocumentId,
         source: &str,
-    ) -> Result<PolicyVersion, VoomError> {
+    ) -> Result<PolicyVersion, PolicyMutationError> {
+        voom_policy::compile_policy(source)?;
         self.policies
-            .add_version(document_id, source.to_owned())
+            .add_version(document_id, source.to_owned(), self.clock().now())
             .await
+            .map_err(PolicyMutationError::from)
     }
 
     /// Get a policy document by id.

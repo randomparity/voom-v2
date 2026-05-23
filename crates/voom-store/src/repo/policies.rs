@@ -66,6 +66,7 @@ pub trait PolicyRepo: Repository {
         &self,
         document_id: PolicyDocumentId,
         source_text: String,
+        created_at: OffsetDateTime,
     ) -> Result<PolicyVersion, VoomError>;
 
     async fn get_document(&self, id: PolicyDocumentId)
@@ -151,6 +152,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         &self,
         document_id: PolicyDocumentId,
         source_text: String,
+        created_at: OffsetDateTime,
     ) -> Result<PolicyVersion, VoomError> {
         let source_hash = voom_policy::source_hash(&source_text);
         if let Some(existing) = self
@@ -163,7 +165,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         let compiled = voom_policy::compile_policy(&source_text).map_err(|err| err.error)?;
         let compiled_json = voom_policy::deterministic_json(&compiled.policy)?;
         let compiled_json_text = serialize_json(&compiled_json, "policy_versions.compiled_json")?;
-        let created_at = iso8601(OffsetDateTime::now_utc())?;
+        let created_at = iso8601(created_at)?;
 
         let mut tx = begin_immediate(&self.pool).await?;
         if let Some(existing) =

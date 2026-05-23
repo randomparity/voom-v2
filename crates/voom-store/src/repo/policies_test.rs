@@ -79,7 +79,11 @@ async fn duplicate_source_returns_existing_version() {
         .unwrap();
 
     let second = repo
-        .add_version(first.document.id, draft.source_text)
+        .add_version(
+            first.document.id,
+            draft.source_text,
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
         .await
         .unwrap();
 
@@ -99,6 +103,7 @@ async fn add_version_advances_current_version_and_epoch() {
         .add_version(
             created.document.id,
             "policy \"advance\" { phase a {} phase b { depends_on: [a] } }".to_owned(),
+            time::OffsetDateTime::UNIX_EPOCH,
         )
         .await
         .unwrap();
@@ -199,8 +204,16 @@ async fn concurrent_add_version_has_one_winner() {
 
     let source = "policy \"race\" { phase a {} phase b { depends_on: [a] } }";
     let (left, right) = tokio::join!(
-        repo_a.add_version(created.document.id, source.to_owned()),
-        repo_b.add_version(created.document.id, source.to_owned())
+        repo_a.add_version(
+            created.document.id,
+            source.to_owned(),
+            time::OffsetDateTime::UNIX_EPOCH
+        ),
+        repo_b.add_version(
+            created.document.id,
+            source.to_owned(),
+            time::OffsetDateTime::UNIX_EPOCH
+        )
     );
 
     assert!(
