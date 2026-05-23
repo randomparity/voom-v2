@@ -86,6 +86,44 @@ fn compile_policy_preserves_boolean_conditions() {
 }
 
 #[test]
+fn compile_policy_preserves_parenthesized_boolean_conditions() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { when (exists audio or exists subtitle) and exists video { container mkv } } }",
+    )
+    .unwrap();
+    let CompiledOperation::Conditional {
+        condition: CompiledCondition::And { conditions },
+        ..
+    } = &out.policy.phases[0].operations[0]
+    else {
+        unreachable!("expected parenthesized boolean condition");
+    };
+
+    assert_eq!(conditions.len(), 2);
+    assert!(matches!(conditions[0], CompiledCondition::Or { .. }));
+    assert!(matches!(conditions[1], CompiledCondition::Exists { .. }));
+}
+
+#[test]
+fn compile_policy_preserves_parenthesized_boolean_track_filters() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { keep audio where (lang in [eng] or commentary) and not forced } }",
+    )
+    .unwrap();
+    let CompiledOperation::KeepTracks {
+        filter: Some(TrackFilter::And { filters }),
+        ..
+    } = &out.policy.phases[0].operations[0]
+    else {
+        unreachable!("expected parenthesized boolean track filter");
+    };
+
+    assert_eq!(filters.len(), 2);
+    assert!(matches!(filters[0], TrackFilter::Or { .. }));
+    assert!(matches!(filters[1], TrackFilter::Not { .. }));
+}
+
+#[test]
 fn compile_policy_preserves_quoted_condition_comparison_value() {
     let out = compile_policy(
         "policy \"p\" { phase a { when video.title contains \"Director or Commentary\" { clear_tags } } }",

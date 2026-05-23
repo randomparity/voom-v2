@@ -644,6 +644,7 @@ impl<'a> Validator<'a> {
     }
 
     fn is_valid_condition_expression(&mut self, statement: &StatementAst, text: &str) -> bool {
+        let text = strip_outer_group(text.trim());
         if text.trim().is_empty() {
             return false;
         }
@@ -999,6 +1000,7 @@ fn is_comparison_op(token: &str) -> bool {
 
 #[must_use]
 fn is_valid_track_filter(text: &str) -> bool {
+    let text = strip_outer_group(text.trim());
     if let Some(parts) = split_bool_filter(text, " or ") {
         return parts.into_iter().all(is_valid_track_filter);
     }
@@ -1045,6 +1047,7 @@ fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
     let mut cursor = 0usize;
     let mut in_string = false;
     let mut escaped = false;
+    let mut paren_depth = 0usize;
 
     while cursor < text.len() {
         let Some(ch) = text[cursor..].chars().next() else {
@@ -1065,7 +1068,19 @@ fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
             cursor += ch.len_utf8();
             continue;
         }
-        if !in_string && text[cursor..].starts_with(delimiter) {
+        if !in_string {
+            if ch == '(' {
+                paren_depth = paren_depth.saturating_add(1);
+                cursor += ch.len_utf8();
+                continue;
+            }
+            if ch == ')' {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += ch.len_utf8();
+                continue;
+            }
+        }
+        if !in_string && paren_depth == 0 && text[cursor..].starts_with(delimiter) {
             let part = text[start..cursor].trim();
             if !part.is_empty() {
                 parts.push(part);
@@ -1082,6 +1097,58 @@ fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
         parts.push(part);
     }
     parts
+}
+
+#[must_use]
+fn strip_outer_group(text: &str) -> &str {
+    let mut text = text.trim();
+    loop {
+        let Some(inner) = text
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+        else {
+            return text;
+        };
+        if !is_balanced_parenthesized(text) {
+            return text;
+        }
+        text = inner.trim();
+    }
+}
+
+#[must_use]
+fn is_balanced_parenthesized(text: &str) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 && index + ch.len_utf8() != text.len() {
+                return false;
+            }
+        }
+    }
+
+    depth == 0
 }
 
 #[must_use]
