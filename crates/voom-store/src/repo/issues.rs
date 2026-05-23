@@ -129,7 +129,7 @@ impl IssueRepo for SqliteIssueRepo {
         .execute(&mut **tx)
         .await;
 
-        match inserted {
+        let existing = match inserted {
             Ok(result) => {
                 return Ok(PolicyIssueMutation {
                     kind: PolicyIssueMutationKind::Created,
@@ -142,16 +142,13 @@ impl IssueRepo for SqliteIssueRepo {
                 });
             }
             Err(err) => {
-                let existing = select_issue_for_update(tx, &draft.dedupe_key).await?;
-                if existing.is_none() {
+                let existing = select_issue_detail(tx, &draft.dedupe_key).await?;
+                let Some(existing) = existing else {
                     return Err(VoomError::Database(format!("issues insert: {err}")));
-                }
+                };
+                existing
             }
-        }
-
-        let existing = select_issue_detail(tx, &draft.dedupe_key)
-            .await?
-            .ok_or_else(|| VoomError::Database("issues conflict row disappeared".to_owned()))?;
+        };
         if existing.row.status == draft.status
             && existing.title == draft.title
             && existing.body == draft.body
@@ -255,21 +252,6 @@ struct PolicyIssueDetail {
     title: String,
     body: String,
     priority_reason: Option<String>,
-}
-
-async fn select_issue_for_update(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    dedupe_key: &str,
-) -> Result<Option<PolicyIssueRow>, VoomError> {
-    let row = sqlx::query(
-        "SELECT id, dedupe_key, status, epoch \
-         FROM issues WHERE kind = 'policy_noncompliant' AND dedupe_key = ?",
-    )
-    .bind(dedupe_key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| VoomError::Database(format!("issues select: {e}")))?;
-    row.as_ref().map(row_to_policy_issue).transpose()
 }
 
 async fn select_issue_detail(

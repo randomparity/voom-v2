@@ -1,22 +1,18 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::pin::Pin;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use secrecy::SecretString;
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
+use sqlx::Row;
 use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::{
     IssueRepo, PolicyInputRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind,
     PolicyIssueStatus, PolicyRepo,
-    workers::{NewCapability, NewGrant, NewWorker, WorkerKind},
 };
-use voom_worker_protocol::{
-    ClientHandle, DispatchStream, OperationKind, OperationRequest, OperationResponse,
-    ProgressFrame, ProtocolError, WorkerCredentials,
-};
+use voom_worker_protocol::{HttpClient, OperationKind, WorkerCredentials};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
@@ -24,6 +20,7 @@ use crate::workflow::{
     WorkerRuntimeRegistry, WorkflowExecutor,
     executor::WorkflowExecutorOptions,
     policy_bridge::{PolicyExecutionSummary, workflow_plan_from_compliance},
+    ticket_payload::operation_name,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -111,10 +108,6 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Propagates durable input, report, issue, and event append failures.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Sprint 6 apply flow keeps issue upsert, exact resolve, stale resolve, and event emission visibly ordered"
-    )]
     pub async fn apply_compliance_report(
         &self,
         policy_version_id: PolicyVersionId,
@@ -123,6 +116,19 @@ impl ControlPlane {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await?;
+        self.apply_generated_compliance_report(&report_data, policy_version_id)
+            .await
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Sprint 6 apply flow keeps issue upsert, exact resolve, stale resolve, and event emission visibly ordered"
+    )]
+    async fn apply_generated_compliance_report(
+        &self,
+        report_data: &ComplianceReportData,
+        policy_version_id: PolicyVersionId,
+    ) -> Result<ComplianceApplyData, VoomError> {
         let policy_document_id =
             report_data.report.policy.document_id.ok_or_else(|| {
                 VoomError::ComplianceReport("missing policy document id".to_owned())
@@ -231,7 +237,7 @@ impl ControlPlane {
 
         commit_tx(tx).await?;
         Ok(ComplianceApplyData {
-            report: report_data.report,
+            report: report_data.report.clone(),
             issues: summary,
         })
     }
@@ -254,7 +260,7 @@ impl ControlPlane {
                 partial: None,
             })?;
         let apply_data = self
-            .apply_compliance_report(policy_version_id, input_set_id)
+            .apply_generated_compliance_report(&report_data, policy_version_id)
             .await
             .map_err(|source| ComplianceExecuteError {
                 source,
@@ -290,13 +296,21 @@ impl ControlPlane {
             });
         };
 
-        let runtimes = self
-            .synthetic_policy_runtime_registry()
-            .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
+        let runtimes = match self.policy_runtime_registry().await {
+            Ok(runtimes) => runtimes,
+            Err(source) => {
+                let partial = ComplianceExecuteData {
+                    report: apply_data.report,
+                    issues: apply_data.issues,
+                    execution: bridge.summary,
+                    execution_diagnostic: None,
+                };
+                return Err(ComplianceExecuteError {
+                    source,
+                    partial: Some(partial),
+                });
+            }
+        };
         self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes)
             .await
     }
@@ -307,6 +321,21 @@ impl ControlPlane {
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        self.execute_compliance_policy_with_runtime_registry_for_test(
+            policy_version_id,
+            input_set_id,
+            WorkerRuntimeRegistry::new(),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_compliance_policy_with_runtime_registry_for_test(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
@@ -315,7 +344,7 @@ impl ControlPlane {
                 partial: None,
             })?;
         let apply_data = self
-            .apply_compliance_report(policy_version_id, input_set_id)
+            .apply_generated_compliance_report(&report_data, policy_version_id)
             .await
             .map_err(|source| ComplianceExecuteError {
                 source,
@@ -327,19 +356,16 @@ impl ControlPlane {
                 partial: None,
             },
         )?;
-        self.register_synthetic_policy_worker()
+        let Some(workflow) = bridge.workflow else {
+            return Ok(ComplianceExecuteData {
+                report: apply_data.report,
+                issues: apply_data.issues,
+                execution: bridge.summary,
+                execution_diagnostic: None,
+            });
+        };
+        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes)
             .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
-        self.execute_compliance_workflow(
-            apply_data,
-            bridge.summary,
-            bridge.workflow.unwrap(),
-            WorkerRuntimeRegistry::new(),
-        )
-        .await
     }
 
     async fn execute_compliance_workflow(
@@ -381,46 +407,47 @@ impl ControlPlane {
         })
     }
 
-    async fn synthetic_policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
-        let worker_id = self.register_synthetic_policy_worker().await?;
-        Ok(WorkerRuntimeRegistry::new().with_in_process_runtime(
-            worker_id,
-            Arc::new(SyntheticPolicyClient),
-            WorkerCredentials {
-                worker_id,
-                worker_epoch: 0,
-                secret: SecretString::from("policy-synthetic-secret"),
-            },
-        ))
-    }
+    async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
+        let mut registry = WorkerRuntimeRegistry::new();
+        let rows = sqlx::query(
+            "SELECT w.id, w.epoch, wc.extra \
+             FROM workers w \
+             JOIN worker_capabilities wc ON wc.worker_id = w.id \
+             WHERE w.status IN ('registered', 'active') \
+               AND wc.operation = ? \
+             ORDER BY w.id ASC",
+        )
+        .bind(operation_name(OperationKind::Remux))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;
 
-    async fn register_synthetic_policy_worker(&self) -> Result<WorkerId, VoomError> {
-        let worker = self
-            .register_worker(NewWorker {
-                name: "policy-synthetic-remux".to_owned(),
-                kind: WorkerKind::Synthetic,
-                registered_at: self.clock().now(),
-            })
-            .await?;
-        self.record_capability(NewCapability {
-            worker_id: worker.id,
-            operation: operation_name(OperationKind::Remux).to_owned(),
-            codecs: Vec::new(),
-            hardware: Vec::new(),
-            artifact_access: Vec::new(),
-            extra: json!({}),
-        })
-        .await?;
-        self.record_grant(NewGrant {
-            worker_id: worker.id,
-            can_execute: vec![operation_name(OperationKind::Remux).to_owned()],
-            can_access_read: Vec::new(),
-            can_access_write: Vec::new(),
-            denies: Vec::new(),
-            max_parallel: json!({ operation_name(OperationKind::Remux): 1 }),
-        })
-        .await?;
-        Ok(worker.id)
+        for row in rows {
+            let worker_id_raw = row
+                .try_get::<i64, _>("id")
+                .map_err(|e| VoomError::Database(format!("policy runtime worker id: {e}")))?;
+            let worker_epoch_raw = row
+                .try_get::<i64, _>("epoch")
+                .map_err(|e| VoomError::Database(format!("policy runtime worker epoch: {e}")))?;
+            let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
+            let worker_epoch = sqlite_u64(worker_epoch_raw, "worker epoch")?;
+            let extra: String = row
+                .try_get("extra")
+                .map_err(|e| VoomError::Database(format!("policy runtime registry extra: {e}")))?;
+            let Some((endpoint, secret)) = runtime_metadata(&extra)? else {
+                continue;
+            };
+            registry.register_in_process_runtime(
+                worker_id,
+                Arc::new(HttpClient::new(endpoint)),
+                WorkerCredentials {
+                    worker_id,
+                    worker_epoch,
+                    secret,
+                },
+            );
+        }
+        Ok(registry)
     }
 
     async fn load_current_accepted_policy_and_input(
@@ -458,50 +485,6 @@ impl ControlPlane {
                 VoomError::NotFound(format!("policy input set {input_set_id} not found"))
             })?;
         Ok(DurableComplianceInputs { version, input })
-    }
-}
-
-#[derive(Debug)]
-struct SyntheticPolicyClient;
-
-#[async_trait::async_trait]
-impl ClientHandle for SyntheticPolicyClient {
-    async fn handshake(
-        &self,
-        _offered: u32,
-    ) -> Result<voom_worker_protocol::HandshakeResponse, ProtocolError> {
-        Err(ProtocolError::InternalServerError)
-    }
-
-    async fn dispatch(
-        &self,
-        _creds: &WorkerCredentials,
-        _idempotency_key: &str,
-        request: OperationRequest,
-    ) -> Result<DispatchStream, ProtocolError> {
-        let response = OperationResponse {
-            lease_id: request.lease_id,
-            accepted_at: chrono::Utc::now(),
-        };
-        let frame = ProgressFrame::Result {
-            lease_id: request.lease_id,
-            seq: 0,
-            emitted_at: chrono::Utc::now(),
-            payload: json!({"status": "ok"}),
-        };
-        let body = serde_json::to_vec(&frame).map_err(|_| ProtocolError::InternalServerError)?;
-        let (mut writer, reader) = tokio::io::duplex(1024);
-        tokio::spawn(async move {
-            let _ = writer.write_all(&body).await;
-            let _ = writer.write_all(b"\n").await;
-        });
-        Ok(DispatchStream {
-            response,
-            frames: voom_worker_protocol::NdjsonReader::new(
-                Pin::from(Box::new(reader) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-                request.lease_id,
-            ),
-        })
     }
 }
 
@@ -554,24 +537,25 @@ fn merge_run_summary(
         .collect();
 }
 
-fn operation_name(operation: OperationKind) -> &'static str {
-    match operation {
-        OperationKind::ScanLibrary => "scan_library",
-        OperationKind::ProbeFile => "probe_file",
-        OperationKind::HashFile => "hash_file",
-        OperationKind::IdentifyMedia => "identify_media",
-        OperationKind::ScoreQuality => "score_quality",
-        OperationKind::SyncExternalSystem => "sync_external_system",
-        OperationKind::BackUpFile => "back_up_file",
-        OperationKind::Remux => "remux",
-        OperationKind::TranscodeVideo => "transcode_video",
-        OperationKind::EditTracks => "edit_tracks",
-        OperationKind::ExtractAudio => "extract_audio",
-        OperationKind::TranscribeAudio => "transcribe_audio",
-        OperationKind::VerifyArtifact => "verify_artifact",
-        OperationKind::CommitArtifact => "commit_artifact",
-        OperationKind::DeleteArtifact => "delete_artifact",
-    }
+fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
+    let value: serde_json::Value = serde_json::from_str(extra)
+        .map_err(|e| VoomError::Database(format!("worker capability extra JSON: {e}")))?;
+    let endpoint = value
+        .get("endpoint")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| VoomError::Config("worker runtime endpoint is missing".to_owned()))?;
+    let secret = value
+        .get("secret")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| VoomError::Config("worker runtime secret is missing".to_owned()))?;
+    let endpoint = endpoint
+        .parse::<SocketAddr>()
+        .map_err(|e| VoomError::Config(format!("worker endpoint {endpoint:?}: {e}")))?;
+    Ok(Some((endpoint, SecretString::from(secret.to_owned()))))
+}
+
+fn sqlite_u64(value: i64, label: &str) -> Result<u64, VoomError> {
+    u64::try_from(value).map_err(|_| VoomError::Database(format!("{label} was negative: {value}")))
 }
 
 fn issue_draft(dedupe_key: &str, check: &voom_plan::ComplianceCheck) -> PolicyIssueDraft {

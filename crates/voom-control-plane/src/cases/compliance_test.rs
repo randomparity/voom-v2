@@ -1,7 +1,18 @@
+use std::pin::Pin;
+use std::sync::Arc;
+
+use secrecy::SecretString;
+use tokio::io::AsyncWriteExt;
 use voom_events::EventKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
+use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_worker_protocol::{
+    ClientHandle, DispatchStream, OperationKind, OperationRequest, OperationResponse,
+    ProgressFrame, ProtocolError, WorkerCredentials,
+};
 
 use crate::cases::{count, cp};
+use crate::workflow::WorkerRuntimeRegistry;
 
 async fn seed_noncompliant(
     cp: &crate::ControlPlane,
@@ -288,6 +299,7 @@ async fn compliance_execute_no_executable_work_creates_no_job() {
 async fn compliance_execute_reports_issues_applied_when_workflow_submission_fails() {
     let (cp, _tmp) = cp().await;
     let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    register_policy_remux_worker(&cp).await;
 
     let err = cp
         .execute_compliance_policy_without_runtime_for_test(policy_version_id, input_set_id)
@@ -299,6 +311,32 @@ async fn compliance_execute_reports_issues_applied_when_workflow_submission_fail
     assert_eq!(partial.issues.created_count, 1);
     assert_eq!(partial.execution.submitted_node_count, 1);
     assert_eq!(partial.execution.failure_count, 0);
+    assert_eq!(count_rows(&cp, "issues").await, 1);
+}
+
+#[tokio::test]
+async fn compliance_execute_reports_issues_applied_when_runtime_registry_fails() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    register_policy_remux_worker_with_extra(
+        &cp,
+        serde_json::json!({
+            "endpoint": "not-a-socket",
+            "secret": "policy-test-secret",
+        }),
+    )
+    .await;
+
+    let err = cp
+        .execute_compliance_policy(policy_version_id, input_set_id)
+        .await
+        .unwrap_err();
+
+    let partial = err.partial.unwrap();
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    assert_eq!(partial.issues.created_count, 1);
+    assert_eq!(partial.execution.submitted_node_count, 1);
+    assert_eq!(partial.execution.job_id, None);
     assert_eq!(count_rows(&cp, "issues").await, 1);
 }
 
@@ -341,11 +379,17 @@ async fn apply_mutates_only_issues_and_issue_events() {
 async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
     let (cp, _tmp) = cp().await;
     let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let worker_id = register_policy_remux_worker(&cp).await;
+    let runtimes = success_runtime_registry(worker_id);
     let before = boundary_counts(&cp).await;
 
-    cp.execute_compliance_policy(policy_version_id, input_set_id)
-        .await
-        .unwrap();
+    cp.execute_compliance_policy_with_runtime_registry_for_test(
+        policy_version_id,
+        input_set_id,
+        runtimes,
+    )
+    .await
+    .unwrap();
 
     let after = boundary_counts(&cp).await;
     assert!(after.count("issues") > before.count("issues"));
@@ -353,6 +397,12 @@ async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
     assert!(after.count("jobs") > before.count("jobs"));
     assert!(after.count("tickets") > before.count("tickets"));
     assert!(after.count("leases") > before.count("leases"));
+    assert_eq!(after.count("workers"), before.count("workers"));
+    assert_eq!(
+        after.count("worker_capabilities"),
+        before.count("worker_capabilities")
+    );
+    assert_eq!(after.count("worker_grants"), before.count("worker_grants"));
     assert_eq!(
         after.count("artifact_handles"),
         before.count("artifact_handles")
@@ -373,6 +423,9 @@ const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "jobs",
     "tickets",
     "leases",
+    "workers",
+    "worker_capabilities",
+    "worker_grants",
     "artifact_handles",
     "artifact_locations",
     "artifact_lineage",
@@ -408,4 +461,106 @@ async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {
+    register_policy_remux_worker_with_extra(cp, serde_json::json!({})).await
+}
+
+async fn register_policy_remux_worker_with_extra(
+    cp: &crate::ControlPlane,
+    extra: serde_json::Value,
+) -> voom_core::WorkerId {
+    let worker = cp
+        .register_worker(NewWorker {
+            name: "policy-test-remux".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: cp.clock().now(),
+        })
+        .await
+        .unwrap();
+    cp.record_capability(NewCapability {
+        worker_id: worker.id,
+        operation: operation_name(OperationKind::Remux).to_owned(),
+        codecs: Vec::new(),
+        hardware: Vec::new(),
+        artifact_access: Vec::new(),
+        extra,
+    })
+    .await
+    .unwrap();
+    cp.record_grant(NewGrant {
+        worker_id: worker.id,
+        can_execute: vec![operation_name(OperationKind::Remux).to_owned()],
+        can_access_read: Vec::new(),
+        can_access_write: Vec::new(),
+        denies: Vec::new(),
+        max_parallel: serde_json::json!({ operation_name(OperationKind::Remux): 1 }),
+    })
+    .await
+    .unwrap();
+    worker.id
+}
+
+fn success_runtime_registry(worker_id: voom_core::WorkerId) -> WorkerRuntimeRegistry {
+    WorkerRuntimeRegistry::new().with_in_process_runtime(
+        worker_id,
+        Arc::new(SuccessClient),
+        WorkerCredentials {
+            worker_id,
+            worker_epoch: 0,
+            secret: SecretString::from("policy-test-secret"),
+        },
+    )
+}
+
+fn operation_name(operation: OperationKind) -> &'static str {
+    match operation {
+        OperationKind::Remux => "remux",
+        _ => unreachable!("compliance tests only seed remux"),
+    }
+}
+
+#[derive(Debug)]
+struct SuccessClient;
+
+#[async_trait::async_trait]
+impl ClientHandle for SuccessClient {
+    async fn handshake(
+        &self,
+        _offered: u32,
+    ) -> Result<voom_worker_protocol::HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn dispatch(
+        &self,
+        _creds: &WorkerCredentials,
+        _idempotency_key: &str,
+        request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        let response = OperationResponse {
+            lease_id: request.lease_id,
+            accepted_at: chrono::Utc::now(),
+        };
+        let frame = ProgressFrame::Result {
+            lease_id: request.lease_id,
+            seq: 0,
+            emitted_at: chrono::Utc::now(),
+            payload: serde_json::json!({"status": "ok"}),
+        };
+        let body = serde_json::to_vec(&frame).map_err(|_| ProtocolError::InternalServerError)?;
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let _ = writer.write_all(&body).await;
+            let _ = writer.write_all(b"\n").await;
+        });
+        Ok(DispatchStream {
+            response,
+            frames: voom_worker_protocol::NdjsonReader::new(
+                Pin::from(Box::new(reader) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+                request.lease_id,
+            ),
+        })
+    }
 }
