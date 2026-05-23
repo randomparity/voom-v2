@@ -1,0 +1,15 @@
+---
+source: crates/voom-cli/tests/plan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "plan",
+  "status": "error",
+  "data": null,
+  "warnings": [],
+  "error": {
+    "code": "POLICY_PARSE_ERROR",
+    "message": "policy parse error: policy parse failed"
+  }
+}

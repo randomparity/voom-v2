@@ -1,0 +1,249 @@
+---
+source: crates/voom-cli/tests/plan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "plan",
+  "status": "ok",
+  "data": {
+    "plan": {
+      "schema_version": 1,
+      "plan_id": "plan_29d536e0788a05a4",
+      "plan_hash": "blake3:29d536e0788a05a4592edf6496eacf98ba09790830271d32dbc853fe9ef9b7ee",
+      "policy": {
+        "slug": "container-metadata",
+        "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
+      },
+      "input": {
+        "slug": "synthetic-noncompliant-transcode-needed",
+        "source_label": "synthetic_noncompliant_transcode_needed",
+        "fixture_labels": [
+          "synthetic_noncompliant_transcode_needed"
+        ]
+      },
+      "summary": {
+        "total_node_count": 4,
+        "executable_node_count": 1,
+        "no_op_node_count": 0,
+        "blocked_node_count": 3,
+        "target_count": 1,
+        "operation_counts_by_kind": {
+          "clear_tags": 1,
+          "delete_tag": 1,
+          "set_container": 1,
+          "set_tag": 1
+        }
+      },
+      "nodes": [
+        {
+          "node_id": "node_9dff79b44d89c9f9",
+          "phase_name": "normalize",
+          "ordinal": 0,
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "operation_kind": "set_container",
+          "operation_payload": {
+            "container": "mkv"
+          },
+          "status": "planned",
+          "status_reason": "container mp4 will be changed to mkv",
+          "capability_hints": {
+            "operation_capability": "remux_container"
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "synthetic:media_variant:variant-1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        },
+        {
+          "node_id": "node_810a976b823236df",
+          "phase_name": "normalize",
+          "ordinal": 1,
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "operation_kind": "clear_tags",
+          "operation_payload": {
+            "type": "clear_tags"
+          },
+          "status": "blocked",
+          "status_reason": "operation is not supported by Sprint 5 planner",
+          "capability_hints": {
+            "operation_capability": null
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "synthetic:media_variant:variant-1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        },
+        {
+          "node_id": "node_49b773aa85d91815",
+          "phase_name": "normalize",
+          "ordinal": 2,
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "operation_kind": "set_tag",
+          "operation_payload": {
+            "type": "set_tag",
+            "key": "title",
+            "value": {
+              "type": "field_path",
+              "path": [
+                "identity",
+                "title"
+              ]
+            }
+          },
+          "status": "blocked",
+          "status_reason": "operation is not supported by Sprint 5 planner",
+          "capability_hints": {
+            "operation_capability": null
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "synthetic:media_variant:variant-1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        },
+        {
+          "node_id": "node_41195a59cc88f9d4",
+          "phase_name": "normalize",
+          "ordinal": 3,
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "operation_kind": "delete_tag",
+          "operation_payload": {
+            "type": "delete_tag",
+            "key": "encoder"
+          },
+          "status": "blocked",
+          "status_reason": "operation is not supported by Sprint 5 planner",
+          "capability_hints": {
+            "operation_capability": null
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "synthetic:media_variant:variant-1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        }
+      ],
+      "edges": [],
+      "warnings": [],
+      "diagnostics": [
+        {
+          "severity": "error",
+          "code": "unsupported_operation_for_sprint5",
+          "message": "operation is not supported by Sprint 5 planner",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "phase_name": "normalize",
+          "operation_kind": "clear_tags"
+        },
+        {
+          "severity": "error",
+          "code": "unsupported_operation_for_sprint5",
+          "message": "operation is not supported by Sprint 5 planner",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "phase_name": "normalize",
+          "operation_kind": "set_tag"
+        },
+        {
+          "severity": "error",
+          "code": "unsupported_operation_for_sprint5",
+          "message": "operation is not supported by Sprint 5 planner",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "phase_name": "normalize",
+          "operation_kind": "delete_tag"
+        }
+      ],
+      "provenance": {
+        "planner": "voom-plan",
+        "format": "sprint5-v1"
+      }
+    }
+  },
+  "warnings": [],
+  "error": null
+}
