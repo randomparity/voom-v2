@@ -1,5 +1,7 @@
 //! `NodeRepo` — owns durable node identity rows.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
@@ -72,7 +74,7 @@ impl NodeStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewNode {
     pub name: String,
     pub kind: NodeKind,
@@ -81,6 +83,20 @@ pub struct NewNode {
     pub auth_token_hash: String,
     pub auth_token_hint: String,
     pub metadata: JsonValue,
+}
+
+impl fmt::Debug for NewNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewNode")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("registered_at", &self.registered_at)
+            .field("heartbeat_ttl_seconds", &self.heartbeat_ttl_seconds)
+            .field("auth_token_hash", &"<secret>")
+            .field("auth_token_hint", &self.auth_token_hint)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,13 +114,25 @@ pub struct Node {
     pub epoch: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeAuthRecord {
     pub id: NodeId,
     pub status: NodeStatus,
     pub last_seen_at: OffsetDateTime,
     pub heartbeat_ttl_seconds: u32,
     pub auth_token_hash: String,
+}
+
+impl fmt::Debug for NodeAuthRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeAuthRecord")
+            .field("id", &self.id)
+            .field("status", &self.status)
+            .field("last_seen_at", &self.last_seen_at)
+            .field("heartbeat_ttl_seconds", &self.heartbeat_ttl_seconds)
+            .field("auth_token_hash", &"<secret>")
+            .finish()
+    }
 }
 
 #[async_trait]
@@ -305,20 +333,8 @@ impl NodeRepo for SqliteNodeRepo {
             .collect::<Result<Vec<_>, _>>()?;
         let mut changed = Vec::new();
         for node in candidates {
-            let expires_at =
-                node.last_seen_at + Duration::seconds(i64::from(node.heartbeat_ttl_seconds));
-            if node.status != NodeStatus::Stale && expires_at <= now {
-                sqlx::query("UPDATE nodes SET status = 'stale', epoch = epoch + 1 WHERE id = ?")
-                    .bind(i64_from_u64(node.id.0))
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(|e| VoomError::Database(format!("nodes mark stale: {e}")))?;
-                changed.push(get_in_tx(tx, node.id).await?.ok_or_else(|| {
-                    VoomError::Internal(format!(
-                        "nodes mark stale: row vanished post-update id={}",
-                        node.id
-                    ))
-                })?);
+            if let Some(node) = mark_stale_candidate_in_tx(tx, &node, now).await? {
+                changed.push(node);
             }
         }
         Ok(changed)
@@ -368,6 +384,45 @@ impl NodeRepo for SqliteNodeRepo {
             VoomError::Internal(format!("nodes retire: row vanished post-update id={id}"))
         })
     }
+}
+
+async fn mark_stale_candidate_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    node: &Node,
+    now: OffsetDateTime,
+) -> Result<Option<Node>, VoomError> {
+    let expires_at = node.last_seen_at + Duration::seconds(i64::from(node.heartbeat_ttl_seconds));
+    if node.status == NodeStatus::Stale || expires_at > now {
+        return Ok(None);
+    }
+
+    let last_seen_at = iso8601(node.last_seen_at)?;
+    let res = sqlx::query(
+        "UPDATE nodes \
+         SET status = 'stale', epoch = epoch + 1 \
+         WHERE id = ? \
+           AND status IN ('registered','active') \
+           AND last_seen_at = ? \
+           AND heartbeat_ttl_seconds = ? \
+           AND epoch = ?",
+    )
+    .bind(i64_from_u64(node.id.0))
+    .bind(last_seen_at)
+    .bind(i64::from(node.heartbeat_ttl_seconds))
+    .bind(i64_from_u64(node.epoch))
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("nodes mark stale: {e}")))?;
+    if res.rows_affected() == 0 {
+        return Ok(None);
+    }
+
+    get_in_tx(tx, node.id).await?.map(Some).ok_or_else(|| {
+        VoomError::Internal(format!(
+            "nodes mark stale: row vanished post-update id={}",
+            node.id
+        ))
+    })
 }
 
 async fn get_in_tx(

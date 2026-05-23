@@ -25,7 +25,7 @@ impl fmt::Debug for GeneratedNodeToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GeneratedNodeToken")
             .field("plaintext", &"<secret>")
-            .field("hash", &self.hash)
+            .field("hash", &"<secret>")
             .field("hint", &self.hint)
             .finish()
     }
@@ -101,13 +101,6 @@ impl NodeTokenGenerator for SharedRngNodeTokenGenerator {
 }
 
 impl ControlPlane {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 6 adds the token helper before node registration calls it"
-        )
-    )]
     pub(crate) fn generate_node_token(&self) -> Result<GeneratedNodeToken, VoomError> {
         let service = NodeTokenService::new(SharedRngNodeTokenGenerator::new(self.rng.clone()));
         service.generate()

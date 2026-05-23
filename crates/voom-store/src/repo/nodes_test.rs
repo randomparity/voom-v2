@@ -38,6 +38,40 @@ async fn nodes_register_get_and_list_round_trip_without_exposing_plaintext_token
 }
 
 #[tokio::test]
+async fn nodes_debug_redacts_auth_token_hash_but_keeps_hint() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let hash = "voom-node-token-sha256-v1:debug-secret";
+    let input = NewNode {
+        name: "synthetic-a".to_owned(),
+        kind: NodeKind::Synthetic,
+        registered_at: T0,
+        heartbeat_ttl_seconds: 60,
+        auth_token_hash: hash.to_owned(),
+        auth_token_hint: "hint1234".to_owned(),
+        metadata: serde_json::json!({"zone":"test"}),
+    };
+
+    let input_debug = format!("{input:?}");
+    assert!(!input_debug.contains(hash));
+    assert!(!input_debug.contains("voom-node-token-sha256-v1:"));
+    assert!(input_debug.contains("hint1234"));
+
+    let mut tx = pool.begin().await.unwrap();
+    let node = repo.register_in_tx(&mut tx, input).await.unwrap();
+    let auth = repo
+        .auth_record_in_tx(&mut tx, node.id)
+        .await
+        .unwrap()
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let auth_debug = format!("{auth:?}");
+    assert!(!auth_debug.contains(hash));
+    assert!(!auth_debug.contains("voom-node-token-sha256-v1:"));
+}
+
+#[tokio::test]
 async fn nodes_heartbeat_moves_registered_or_stale_node_to_active_and_increments_epoch() {
     for status in [NodeStatus::Registered, NodeStatus::Stale] {
         let (_tmp, pool, repo, node) = seeded_node(status, T0).await;
@@ -102,6 +136,31 @@ async fn nodes_mark_stale_changes_only_freshly_expired_non_retired_rows() {
         repo.get(stale.id).await.unwrap().unwrap().epoch,
         stale.epoch
     );
+}
+
+#[tokio::test]
+async fn nodes_mark_stale_skips_obsolete_candidate_snapshot() {
+    let (pool, _tmp) = fresh_pool().await;
+    let repo = SqliteNodeRepo::new(pool.clone());
+    let node = seed_node(&pool, &repo, "expired", NodeStatus::Active, T0, 5).await;
+    let stale_snapshot = repo.get(node.id).await.unwrap().unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    let heartbeat = repo
+        .heartbeat_in_tx(&mut tx, node.id, T0 + Duration::seconds(20))
+        .await
+        .unwrap();
+    let changed =
+        super::mark_stale_candidate_in_tx(&mut tx, &stale_snapshot, T0 + Duration::seconds(10))
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(changed.is_none());
+    let stored = repo.get(node.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, NodeStatus::Active);
+    assert_eq!(stored.last_seen_at, heartbeat.last_seen_at);
+    assert_eq!(stored.epoch, heartbeat.epoch);
 }
 
 #[tokio::test]

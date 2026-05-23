@@ -23,6 +23,24 @@ fn token_hash_uses_versioned_domain_separated_sha256_hex() {
 }
 
 #[test]
+fn generated_token_debug_redacts_plaintext_and_hash() {
+    let plaintext = generate_token_from_bytes([7_u8; 32]).unwrap();
+    let hash = hash_node_token(plaintext.expose_secret());
+    let generated = GeneratedNodeToken {
+        plaintext,
+        hash: hash.clone(),
+        hint: "hint".to_owned(),
+    };
+
+    let debug = format!("{generated:?}");
+
+    assert!(!debug.contains(generated.plaintext.expose_secret()));
+    assert!(!debug.contains(&hash));
+    assert!(!debug.contains("voom-node-token-sha256-v1:"));
+    assert!(debug.contains("hint"));
+}
+
+#[test]
 fn verification_uses_hash_equality_without_exposing_secret() {
     let hash = hash_node_token("voom-node-v1.valid");
     assert!(verify_node_token("voom-node-v1.valid", &hash));
