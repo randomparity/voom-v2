@@ -61,3 +61,33 @@ fn error_envelope_omits_data() {
     assert!(json["data"].is_null());
     assert_eq!(json["error"]["code"], "DB_UNREACHABLE");
 }
+
+#[test]
+fn error_envelope_can_include_partial_data() {
+    let env = Envelope {
+        schema_version: SCHEMA_VERSION,
+        command: "compliance",
+        status: Status::Error,
+        data: Some(serde_json::json!({
+            "report": {"report_id": "report_test"},
+            "issues": {"created_count": 1},
+            "execution_diagnostic": {"code": "unsupported_execution_operation"}
+        })),
+        local: None,
+        warnings: Vec::new(),
+        error: Some(ErrorBody {
+            code: "POLICY_EXECUTION_ERROR",
+            message: "unsupported".into(),
+            hint: None,
+        }),
+    };
+    let json = serde_json::to_value(&env).unwrap();
+
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["data"]["report"]["report_id"], "report_test");
+    assert_eq!(json["data"]["issues"]["created_count"], 1);
+    assert_eq!(
+        json["data"]["execution_diagnostic"]["code"],
+        "unsupported_execution_operation"
+    );
+}

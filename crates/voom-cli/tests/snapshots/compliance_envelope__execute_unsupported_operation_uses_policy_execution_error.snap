@@ -1,0 +1,31 @@
+---
+source: crates/voom-cli/tests/compliance_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "compliance",
+  "status": "error",
+  "data": {
+    "report": {
+      "report_id": "report_test"
+    },
+    "issues": {
+      "created_count": 1,
+      "updated_count": 0,
+      "resolved_count": 0,
+      "skipped_count": 0
+    },
+    "execution": {
+      "submitted_node_count": 0
+    },
+    "execution_diagnostic": {
+      "code": "unsupported_execution_operation"
+    }
+  },
+  "warnings": [],
+  "error": {
+    "code": "POLICY_EXECUTION_ERROR",
+    "message": "policy execution error: unsupported execution operation unsupported_operation"
+  }
+}

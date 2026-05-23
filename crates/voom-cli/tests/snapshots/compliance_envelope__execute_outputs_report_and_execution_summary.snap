@@ -1,0 +1,201 @@
+---
+source: crates/voom-cli/tests/compliance_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "compliance",
+  "status": "ok",
+  "data": {
+    "report": {
+      "schema_version": 1,
+      "report_id": "report_c2108b3366a94955",
+      "report_hash": "blake3:6803accf00d21ba563846055bef9779373ee9bda4e577dca4500972dbbe0d104",
+      "plan_id": "plan_1b86dfd9b176c61c",
+      "plan_hash": "blake3:1b86dfd9b176c61ce54e2eb8e4fffccd0b7940449446fd0894a6ece39b1d0cff",
+      "policy": {
+        "slug": "container-metadata",
+        "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+        "document_id": 1,
+        "version_id": 1
+      },
+      "input": {
+        "slug": "synthetic-noncompliant-transcode-needed",
+        "input_set_id": 1,
+        "fixture_labels": [
+          "synthetic_noncompliant_transcode_needed"
+        ]
+      },
+      "summary": {
+        "status": "mixed",
+        "total_check_count": 4,
+        "compliant_check_count": 0,
+        "noncompliant_check_count": 1,
+        "blocked_check_count": 3,
+        "executable_check_count": 1,
+        "operation_counts_by_kind": {
+          "clear_tags": 1,
+          "delete_tag": 1,
+          "set_container": 1,
+          "set_tag": 1
+        }
+      },
+      "checks": [
+        {
+          "check_id": "check_388208f788287044",
+          "node_id": "node_9dff79b44d89c9f9",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "compliance_kind": "container",
+          "operation_kind": "set_container",
+          "desired_state": {
+            "container": "mkv"
+          },
+          "observed_state": {
+            "container": "mp4"
+          },
+          "check_status": "noncompliant",
+          "reason": "container mp4 will be changed to mkv",
+          "issue_action_hint": "create_or_update_planned",
+          "execution_eligibility": "supported"
+        },
+        {
+          "check_id": "check_6229b6aef08428c4",
+          "node_id": "node_810a976b823236df",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "compliance_kind": "unsupported",
+          "operation_kind": "clear_tags",
+          "desired_state": {
+            "type": "clear_tags"
+          },
+          "check_status": "blocked",
+          "reason": "operation is not supported by Sprint 5 planner",
+          "issue_action_hint": "none",
+          "execution_eligibility": "unsupported"
+        },
+        {
+          "check_id": "check_9b2cdb025299f1cf",
+          "node_id": "node_49b773aa85d91815",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "compliance_kind": "unsupported",
+          "operation_kind": "set_tag",
+          "desired_state": {
+            "type": "set_tag",
+            "key": "title",
+            "value": {
+              "type": "field_path",
+              "path": [
+                "identity",
+                "title"
+              ]
+            }
+          },
+          "check_status": "blocked",
+          "reason": "operation is not supported by Sprint 5 planner",
+          "issue_action_hint": "none",
+          "execution_eligibility": "unsupported"
+        },
+        {
+          "check_id": "check_443b78461c464e40",
+          "node_id": "node_41195a59cc88f9d4",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          },
+          "compliance_kind": "unsupported",
+          "operation_kind": "delete_tag",
+          "desired_state": {
+            "type": "delete_tag",
+            "key": "encoder"
+          },
+          "check_status": "blocked",
+          "reason": "operation is not supported by Sprint 5 planner",
+          "issue_action_hint": "none",
+          "execution_eligibility": "unsupported"
+        }
+      ],
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "code": "unsupported_compliance_operation",
+          "message": "operation clear_tags is not supported by compliance reports",
+          "plan_id": "plan_1b86dfd9b176c61c",
+          "node_id": "node_810a976b823236df",
+          "check_id": "check_6229b6aef08428c4",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "unsupported_compliance_operation",
+          "message": "operation set_tag is not supported by compliance reports",
+          "plan_id": "plan_1b86dfd9b176c61c",
+          "node_id": "node_49b773aa85d91815",
+          "check_id": "check_9b2cdb025299f1cf",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          }
+        },
+        {
+          "severity": "warning",
+          "code": "unsupported_compliance_operation",
+          "message": "operation delete_tag is not supported by compliance reports",
+          "plan_id": "plan_1b86dfd9b176c61c",
+          "node_id": "node_41195a59cc88f9d4",
+          "check_id": "check_443b78461c464e40",
+          "target": {
+            "type": "synthetic",
+            "key": "variant-1",
+            "kind": "media_variant"
+          }
+        }
+      ],
+      "provenance": {
+        "reporter": "voom-plan",
+        "format": "sprint6-v1"
+      }
+    },
+    "issues": {
+      "created_count": 1,
+      "updated_count": 0,
+      "resolved_count": 0,
+      "skipped_count": 3
+    },
+    "execution": {
+      "plan_id": "plan_1b86dfd9b176c61c",
+      "report_id": "report_c2108b3366a94955",
+      "job_id": "[job-id]",
+      "submitted_node_count": 1,
+      "skipped_no_op_count": 0,
+      "blocked_count": 3,
+      "dispatch_count": 1,
+      "failure_count": 0,
+      "per_operation": {
+        "remux": 1
+      }
+    }
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

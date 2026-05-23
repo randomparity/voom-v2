@@ -81,6 +81,30 @@ pub fn emit_err(
     write_json(&env)
 }
 
+pub fn emit_err_with_data<T: Serialize>(
+    command: &'static str,
+    data: T,
+    code: &'static str,
+    message: String,
+    hint: Option<String>,
+    local: Option<Local>,
+) -> io::Result<()> {
+    let env = Envelope {
+        schema_version: SCHEMA_VERSION,
+        command,
+        status: Status::Error,
+        data: Some(data),
+        local,
+        warnings: Vec::new(),
+        error: Some(ErrorBody {
+            code,
+            message,
+            hint,
+        }),
+    };
+    write_json(&env)
+}
+
 fn write_json<T: Serialize>(value: &T) -> io::Result<()> {
     let s = serde_json::to_string(value).map_err(io::Error::other)?;
     let mut out = io::stdout().lock();
