@@ -45,6 +45,9 @@ pub enum Command {
     /// Register and manage execution nodes.
     #[command(subcommand)]
     Node(NodeCommand),
+    /// Register and inspect workers.
+    #[command(subcommand)]
+    Worker(WorkerCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -131,6 +134,37 @@ pub enum NodeCommand {
     },
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum WorkerCommand {
+    /// Register a worker for a node using exactly one node token source.
+    Register {
+        #[arg(long)]
+        node_id: u64,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        kind: WorkerKindArg,
+        #[arg(long)]
+        capability: Vec<String>,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        #[arg(long)]
+        token_env: Option<String>,
+        #[arg(long)]
+        token_stdin: bool,
+    },
+    /// List workers, optionally filtered by status.
+    List {
+        #[arg(long)]
+        status: Option<WorkerStatusArg>,
+    },
+    /// Show one worker.
+    Show {
+        #[arg(long)]
+        worker_id: u64,
+    },
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 #[value(rename_all = "lowercase")]
 pub enum NodeKindArg {
@@ -167,6 +201,46 @@ impl NodeStatusArg {
             Self::Active => voom_store::repo::nodes::NodeStatus::Active,
             Self::Stale => voom_store::repo::nodes::NodeStatus::Stale,
             Self::Retired => voom_store::repo::nodes::NodeStatus::Retired,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum WorkerKindArg {
+    Local,
+    Remote,
+    Synthetic,
+}
+
+impl WorkerKindArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::workers::WorkerKind {
+        match self {
+            Self::Local => voom_store::repo::workers::WorkerKind::Local,
+            Self::Remote => voom_store::repo::workers::WorkerKind::Remote,
+            Self::Synthetic => voom_store::repo::workers::WorkerKind::Synthetic,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum WorkerStatusArg {
+    Registered,
+    Active,
+    Stale,
+    Retired,
+}
+
+impl WorkerStatusArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::workers::WorkerStatus {
+        match self {
+            Self::Registered => voom_store::repo::workers::WorkerStatus::Registered,
+            Self::Active => voom_store::repo::workers::WorkerStatus::Active,
+            Self::Stale => voom_store::repo::workers::WorkerStatus::Stale,
+            Self::Retired => voom_store::repo::workers::WorkerStatus::Retired,
         }
     }
 }

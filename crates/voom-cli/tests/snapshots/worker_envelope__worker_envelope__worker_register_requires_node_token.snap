@@ -1,0 +1,20 @@
+---
+source: crates/voom-cli/tests/worker_envelope.rs
+expression: no_token_json
+---
+{
+  "schema_version": "0",
+  "command": "worker",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "BAD_ARGS",
+    "message": "pass exactly one token source",
+    "hint": "Pass exactly one token source"
+  }
+}

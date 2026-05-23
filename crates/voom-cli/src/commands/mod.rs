@@ -5,3 +5,4 @@ pub mod node;
 pub mod plan;
 pub mod token_source;
 pub mod version;
+pub mod worker;
