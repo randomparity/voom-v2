@@ -154,6 +154,42 @@ pub struct LeaseForceReleasedPayload {
     pub also_requeue: bool,
 }
 
+// --- nodes ------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRegisteredPayload {
+    pub node_id: u64,
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+    pub heartbeat_ttl_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeHeartbeatRecordedPayload {
+    pub node_id: u64,
+    pub status: String,
+    #[serde(with = "time::serde::iso8601")]
+    pub last_seen_at: OffsetDateTime,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeMarkedStalePayload {
+    pub node_id: u64,
+    #[serde(with = "time::serde::iso8601")]
+    pub marked_stale_at: OffsetDateTime,
+    pub epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRetiredPayload {
+    pub node_id: u64,
+    #[serde(with = "time::serde::iso8601")]
+    pub retired_at: OffsetDateTime,
+    pub epoch: u64,
+}
+
 // --- workers ---------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +197,12 @@ pub struct WorkerRegisteredPayload {
     pub worker_id: u64,
     pub name: String,
     pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerLinkedToNodePayload {
+    pub worker_id: u64,
+    pub node_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,8 +824,18 @@ pub enum Event {
     LeaseExpired(LeaseExpiredPayload),
     #[serde(rename = "lease.force_released")]
     LeaseForceReleased(LeaseForceReleasedPayload),
+    #[serde(rename = "node.registered")]
+    NodeRegistered(NodeRegisteredPayload),
+    #[serde(rename = "node.heartbeat_recorded")]
+    NodeHeartbeatRecorded(NodeHeartbeatRecordedPayload),
+    #[serde(rename = "node.marked_stale")]
+    NodeMarkedStale(NodeMarkedStalePayload),
+    #[serde(rename = "node.retired")]
+    NodeRetired(NodeRetiredPayload),
     #[serde(rename = "worker.registered")]
     WorkerRegistered(WorkerRegisteredPayload),
+    #[serde(rename = "worker.linked_to_node")]
+    WorkerLinkedToNode(WorkerLinkedToNodePayload),
     #[serde(rename = "worker.capability_recorded")]
     WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload),
     #[serde(rename = "worker.grant_recorded")]
@@ -896,7 +948,12 @@ impl Event {
             Self::LeaseReleased(_) => EventKind::LeaseReleased,
             Self::LeaseExpired(_) => EventKind::LeaseExpired,
             Self::LeaseForceReleased(_) => EventKind::LeaseForceReleased,
+            Self::NodeRegistered(_) => EventKind::NodeRegistered,
+            Self::NodeHeartbeatRecorded(_) => EventKind::NodeHeartbeatRecorded,
+            Self::NodeMarkedStale(_) => EventKind::NodeMarkedStale,
+            Self::NodeRetired(_) => EventKind::NodeRetired,
             Self::WorkerRegistered(_) => EventKind::WorkerRegistered,
+            Self::WorkerLinkedToNode(_) => EventKind::WorkerLinkedToNode,
             Self::WorkerCapabilityRecorded(_) => EventKind::WorkerCapabilityRecorded,
             Self::WorkerGrantRecorded(_) => EventKind::WorkerGrantRecorded,
             Self::WorkerRetired(_) => EventKind::WorkerRetired,

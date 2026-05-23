@@ -6,6 +6,7 @@ fn subject_type_wire_strings() {
     assert_eq!(SubjectType::Job.as_str(), "job");
     assert_eq!(SubjectType::Ticket.as_str(), "ticket");
     assert_eq!(SubjectType::Lease.as_str(), "lease");
+    assert_eq!(SubjectType::Node.as_str(), "node");
     assert_eq!(SubjectType::Worker.as_str(), "worker");
     assert_eq!(SubjectType::ArtifactHandle.as_str(), "artifact_handle");
     assert_eq!(SubjectType::ArtifactLocation.as_str(), "artifact_location");
@@ -18,6 +19,7 @@ fn every_subject_round_trips_through_as_str_and_from_str() {
         SubjectType::Job,
         SubjectType::Ticket,
         SubjectType::Lease,
+        SubjectType::Node,
         SubjectType::Worker,
         SubjectType::ArtifactHandle,
         SubjectType::ArtifactLocation,
