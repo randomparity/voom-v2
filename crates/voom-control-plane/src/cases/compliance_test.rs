@@ -269,6 +269,39 @@ async fn compliance_apply_does_not_create_issue_for_unsupported_operation() {
     assert_eq!(issue_count, 1);
 }
 
+#[tokio::test]
+async fn compliance_execute_no_executable_work_creates_no_job() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_compliant(&cp).await;
+
+    let data = cp
+        .execute_compliance_policy(policy_version_id, input_set_id)
+        .await
+        .unwrap();
+
+    assert_eq!(data.execution.submitted_node_count, 0);
+    assert_eq!(data.execution.job_id, None);
+    assert_eq!(count_rows(&cp, "jobs").await, 0);
+}
+
+#[tokio::test]
+async fn compliance_execute_reports_issues_applied_when_workflow_submission_fails() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+
+    let err = cp
+        .execute_compliance_policy_without_runtime_for_test(policy_version_id, input_set_id)
+        .await
+        .unwrap_err();
+
+    let partial = err.partial.unwrap();
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    assert_eq!(partial.issues.created_count, 1);
+    assert_eq!(partial.execution.submitted_node_count, 1);
+    assert_eq!(partial.execution.failure_count, 0);
+    assert_eq!(count_rows(&cp, "issues").await, 1);
+}
+
 const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "issues",
     "events",

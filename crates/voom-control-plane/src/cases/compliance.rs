@@ -1,15 +1,30 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::pin::Pin;
+use std::sync::Arc;
 
+use secrecy::SecretString;
 use serde_json::json;
-use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError};
+use tokio::io::AsyncWriteExt;
+use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
+use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::{
     IssueRepo, PolicyInputRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind,
     PolicyIssueStatus, PolicyRepo,
+    workers::{NewCapability, NewGrant, NewWorker, WorkerKind},
+};
+use voom_worker_protocol::{
+    ClientHandle, DispatchStream, OperationKind, OperationRequest, OperationResponse,
+    ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::workflow::{
+    WorkerRuntimeRegistry, WorkflowExecutor,
+    executor::WorkflowExecutorOptions,
+    policy_bridge::{PolicyExecutionSummary, workflow_plan_from_compliance},
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -29,6 +44,21 @@ pub struct IssueApplicationSummary {
 pub struct ComplianceApplyData {
     pub report: voom_plan::ComplianceReport,
     pub issues: IssueApplicationSummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComplianceExecuteData {
+    pub report: voom_plan::ComplianceReport,
+    pub issues: IssueApplicationSummary,
+    pub execution: PolicyExecutionSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_diagnostic: Option<voom_plan::ComplianceDiagnostic>,
+}
+
+#[derive(Debug)]
+pub struct ComplianceExecuteError {
+    pub source: VoomError,
+    pub partial: Option<ComplianceExecuteData>,
 }
 
 struct DurableComplianceInputs {
@@ -206,6 +236,193 @@ impl ControlPlane {
         })
     }
 
+    /// Apply compliance issues, then execute supported planned compliance work.
+    ///
+    /// # Errors
+    /// Returns partial data when issue application completed but bridge or
+    /// workflow execution failed.
+    pub async fn execute_compliance_policy(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        let report_data = self
+            .generate_compliance_report(policy_version_id, input_set_id)
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+        let apply_data = self
+            .apply_compliance_report(policy_version_id, input_set_id)
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+
+        let bridge = match workflow_plan_from_compliance(&report_data.plan, &apply_data.report) {
+            Ok(bridge) => bridge,
+            Err(source) => {
+                let partial = ComplianceExecuteData {
+                    report: apply_data.report,
+                    issues: apply_data.issues,
+                    execution: empty_execution_summary(&report_data.plan, &report_data.report),
+                    execution_diagnostic: Some(execution_diagnostic(
+                        &source,
+                        &report_data.plan.plan_id,
+                        &report_data.report.report_id,
+                    )),
+                };
+                return Err(ComplianceExecuteError {
+                    source,
+                    partial: Some(partial),
+                });
+            }
+        };
+
+        let Some(workflow) = bridge.workflow else {
+            return Ok(ComplianceExecuteData {
+                report: apply_data.report,
+                issues: apply_data.issues,
+                execution: bridge.summary,
+                execution_diagnostic: None,
+            });
+        };
+
+        let runtimes = self
+            .synthetic_policy_runtime_registry()
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_compliance_policy_without_runtime_for_test(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        let report_data = self
+            .generate_compliance_report(policy_version_id, input_set_id)
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+        let apply_data = self
+            .apply_compliance_report(policy_version_id, input_set_id)
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+        let bridge = workflow_plan_from_compliance(&report_data.plan, &apply_data.report).map_err(
+            |source| ComplianceExecuteError {
+                source,
+                partial: None,
+            },
+        )?;
+        self.register_synthetic_policy_worker()
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: None,
+            })?;
+        self.execute_compliance_workflow(
+            apply_data,
+            bridge.summary,
+            bridge.workflow.unwrap(),
+            WorkerRuntimeRegistry::new(),
+        )
+        .await
+    }
+
+    async fn execute_compliance_workflow(
+        &self,
+        apply_data: ComplianceApplyData,
+        mut bridge_summary: PolicyExecutionSummary,
+        workflow: crate::workflow::WorkflowPlan,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        let executor = WorkflowExecutor::with_options(
+            self.clone(),
+            SingleWorkerPerKindSelector,
+            runtimes,
+            WorkflowExecutorOptions::for_tests(),
+        );
+        let result = executor.submit_and_run(workflow).await;
+        let run = match result {
+            Ok(summary) => summary,
+            Err(err) => {
+                merge_run_summary(&mut bridge_summary, &err.summary);
+                let partial = ComplianceExecuteData {
+                    report: apply_data.report,
+                    issues: apply_data.issues,
+                    execution: bridge_summary,
+                    execution_diagnostic: None,
+                };
+                return Err(ComplianceExecuteError {
+                    source: err.source,
+                    partial: Some(partial),
+                });
+            }
+        };
+        merge_run_summary(&mut bridge_summary, &run);
+        Ok(ComplianceExecuteData {
+            report: apply_data.report,
+            issues: apply_data.issues,
+            execution: bridge_summary,
+            execution_diagnostic: None,
+        })
+    }
+
+    async fn synthetic_policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
+        let worker_id = self.register_synthetic_policy_worker().await?;
+        Ok(WorkerRuntimeRegistry::new().with_in_process_runtime(
+            worker_id,
+            Arc::new(SyntheticPolicyClient),
+            WorkerCredentials {
+                worker_id,
+                worker_epoch: 0,
+                secret: SecretString::from("policy-synthetic-secret"),
+            },
+        ))
+    }
+
+    async fn register_synthetic_policy_worker(&self) -> Result<WorkerId, VoomError> {
+        let worker = self
+            .register_worker(NewWorker {
+                name: "policy-synthetic-remux".to_owned(),
+                kind: WorkerKind::Synthetic,
+                registered_at: self.clock().now(),
+            })
+            .await?;
+        self.record_capability(NewCapability {
+            worker_id: worker.id,
+            operation: operation_name(OperationKind::Remux).to_owned(),
+            codecs: Vec::new(),
+            hardware: Vec::new(),
+            artifact_access: Vec::new(),
+            extra: json!({}),
+        })
+        .await?;
+        self.record_grant(NewGrant {
+            worker_id: worker.id,
+            can_execute: vec![operation_name(OperationKind::Remux).to_owned()],
+            can_access_read: Vec::new(),
+            can_access_write: Vec::new(),
+            denies: Vec::new(),
+            max_parallel: json!({ operation_name(OperationKind::Remux): 1 }),
+        })
+        .await?;
+        Ok(worker.id)
+    }
+
     async fn load_current_accepted_policy_and_input(
         &self,
         policy_version_id: PolicyVersionId,
@@ -241,6 +458,119 @@ impl ControlPlane {
                 VoomError::NotFound(format!("policy input set {input_set_id} not found"))
             })?;
         Ok(DurableComplianceInputs { version, input })
+    }
+}
+
+#[derive(Debug)]
+struct SyntheticPolicyClient;
+
+#[async_trait::async_trait]
+impl ClientHandle for SyntheticPolicyClient {
+    async fn handshake(
+        &self,
+        _offered: u32,
+    ) -> Result<voom_worker_protocol::HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn dispatch(
+        &self,
+        _creds: &WorkerCredentials,
+        _idempotency_key: &str,
+        request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        let response = OperationResponse {
+            lease_id: request.lease_id,
+            accepted_at: chrono::Utc::now(),
+        };
+        let frame = ProgressFrame::Result {
+            lease_id: request.lease_id,
+            seq: 0,
+            emitted_at: chrono::Utc::now(),
+            payload: json!({"status": "ok"}),
+        };
+        let body = serde_json::to_vec(&frame).map_err(|_| ProtocolError::InternalServerError)?;
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        tokio::spawn(async move {
+            let _ = writer.write_all(&body).await;
+            let _ = writer.write_all(b"\n").await;
+        });
+        Ok(DispatchStream {
+            response,
+            frames: voom_worker_protocol::NdjsonReader::new(
+                Pin::from(Box::new(reader) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+                request.lease_id,
+            ),
+        })
+    }
+}
+
+fn empty_execution_summary(
+    plan: &voom_plan::ExecutionPlan,
+    report: &voom_plan::ComplianceReport,
+) -> PolicyExecutionSummary {
+    PolicyExecutionSummary {
+        plan_id: plan.plan_id.clone(),
+        report_id: report.report_id.clone(),
+        job_id: None,
+        submitted_node_count: 0,
+        skipped_no_op_count: 0,
+        blocked_count: 0,
+        dispatch_count: 0,
+        failure_count: 0,
+        per_operation: BTreeMap::new(),
+    }
+}
+
+fn execution_diagnostic(
+    source: &VoomError,
+    plan_id: &str,
+    report_id: &str,
+) -> voom_plan::ComplianceDiagnostic {
+    voom_plan::ComplianceDiagnostic {
+        severity: voom_plan::ComplianceDiagnosticSeverity::Error,
+        code: voom_plan::ComplianceDiagnosticCode::UnsupportedExecutionOperation,
+        message: source.to_string(),
+        plan_id: Some(plan_id.to_owned()),
+        report_id: Some(report_id.to_owned()),
+        node_id: None,
+        check_id: None,
+        target: None,
+        suggestion: None,
+    }
+}
+
+fn merge_run_summary(
+    execution: &mut PolicyExecutionSummary,
+    run: &crate::workflow::WorkflowRunSummary,
+) {
+    execution.job_id = Some(run.job_id);
+    execution.dispatch_count = run.dispatch_count;
+    execution.failure_count = run.failure_count;
+    execution.per_operation = run
+        .per_operation
+        .iter()
+        .map(|(operation, summary)| (operation_name(*operation).to_owned(), summary.success_count))
+        .collect();
+}
+
+fn operation_name(operation: OperationKind) -> &'static str {
+    match operation {
+        OperationKind::ScanLibrary => "scan_library",
+        OperationKind::ProbeFile => "probe_file",
+        OperationKind::HashFile => "hash_file",
+        OperationKind::IdentifyMedia => "identify_media",
+        OperationKind::ScoreQuality => "score_quality",
+        OperationKind::SyncExternalSystem => "sync_external_system",
+        OperationKind::BackUpFile => "back_up_file",
+        OperationKind::Remux => "remux",
+        OperationKind::TranscodeVideo => "transcode_video",
+        OperationKind::EditTracks => "edit_tracks",
+        OperationKind::ExtractAudio => "extract_audio",
+        OperationKind::TranscribeAudio => "transcribe_audio",
+        OperationKind::VerifyArtifact => "verify_artifact",
+        OperationKind::CommitArtifact => "commit_artifact",
+        OperationKind::DeleteArtifact => "delete_artifact",
     }
 }
 

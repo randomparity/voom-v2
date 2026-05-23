@@ -20,12 +20,15 @@ test-support = ["voom-store/test-support"]
 
 [dependencies]
 blake3 = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 rand = { workspace = true }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "time"] }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 voom-plan = { workspace = true }
@@ -35,9 +38,6 @@ voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
-chrono = { workspace = true }
-secrecy = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 # FrozenRng/SeededRng from voom-core::rng_test_support, used by lease
