@@ -7,7 +7,9 @@
 )]
 //! Pure Sprint 5 execution-plan projection.
 
+pub mod compliance_hash;
 pub mod compliance_model;
+pub mod compliance_report;
 pub mod diagnostic;
 pub mod fixtures;
 pub mod hash;
@@ -20,6 +22,7 @@ pub use compliance_model::{
     ComplianceProvenance, ComplianceReport, ComplianceSummary, ExecutionEligibility,
     IssueActionHint, ReportStatus,
 };
+pub use compliance_report::{ComplianceReportError, generate_compliance_report};
 pub use diagnostic::{PlanningDiagnostic, PlanningDiagnosticCode, PlanningDiagnosticSeverity};
 pub use fixtures::{GoldenPlanFixtureError, load_golden_plan};
 pub use hash::{edge_id, node_id, plan_hash, plan_id};
