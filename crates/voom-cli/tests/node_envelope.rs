@@ -52,6 +52,32 @@ mod node_envelope {
     }
 
     #[tokio::test]
+    async fn node_register_zero_ttl_returns_config_invalid() {
+        let seeded = seed().await;
+
+        let output = node_command(&seeded.url)
+            .args([
+                "register",
+                "--name",
+                "bad-ttl",
+                "--kind",
+                "local",
+                "--heartbeat-ttl-seconds",
+                "0",
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        let mut json = envelope(output.stdout);
+        assert_eq!(json["command"], "node");
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+        redact_local(&mut json);
+        insta::assert_json_snapshot!("node_register_zero_ttl_returns_config_invalid", json);
+    }
+
+    #[tokio::test]
     async fn node_show_and_list_do_not_expose_token_hash_or_plaintext() {
         let seeded = seed().await;
         let registered = register_node(&seeded.url, "local-a");
