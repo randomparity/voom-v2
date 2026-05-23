@@ -302,6 +302,71 @@ async fn compliance_execute_reports_issues_applied_when_workflow_submission_fail
     assert_eq!(count_rows(&cp, "issues").await, 1);
 }
 
+#[tokio::test]
+async fn report_mutates_no_durable_work_or_issue_tables() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let before = boundary_counts(&cp).await;
+
+    cp.generate_compliance_report(policy_version_id, input_set_id)
+        .await
+        .unwrap();
+
+    assert_eq!(before, boundary_counts(&cp).await);
+}
+
+#[tokio::test]
+async fn apply_mutates_only_issues_and_issue_events() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let before = boundary_counts(&cp).await;
+
+    cp.apply_compliance_report(policy_version_id, input_set_id)
+        .await
+        .unwrap();
+
+    let after = boundary_counts(&cp).await;
+    assert!(after.count("issues") > before.count("issues"));
+    assert!(after.count("events") > before.count("events"));
+    assert_eq!(after.count("jobs"), before.count("jobs"));
+    assert_eq!(after.count("tickets"), before.count("tickets"));
+    assert_eq!(after.count("leases"), before.count("leases"));
+    assert_eq!(
+        after.count("artifact_handles"),
+        before.count("artifact_handles")
+    );
+}
+
+#[tokio::test]
+async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let before = boundary_counts(&cp).await;
+
+    cp.execute_compliance_policy(policy_version_id, input_set_id)
+        .await
+        .unwrap();
+
+    let after = boundary_counts(&cp).await;
+    assert!(after.count("issues") > before.count("issues"));
+    assert!(after.count("events") > before.count("events"));
+    assert!(after.count("jobs") > before.count("jobs"));
+    assert!(after.count("tickets") > before.count("tickets"));
+    assert!(after.count("leases") > before.count("leases"));
+    assert_eq!(
+        after.count("artifact_handles"),
+        before.count("artifact_handles")
+    );
+    assert_eq!(
+        after.count("artifact_locations"),
+        before.count("artifact_locations")
+    );
+    assert_eq!(
+        after.count("artifact_lineage"),
+        before.count("artifact_lineage")
+    );
+}
+
 const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "issues",
     "events",
@@ -312,6 +377,22 @@ const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "artifact_locations",
     "artifact_lineage",
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundaryCounts(Vec<(&'static str, i64)>);
+
+impl BoundaryCounts {
+    fn count(&self, table: &str) -> i64 {
+        self.0
+            .iter()
+            .find_map(|(name, count)| (*name == table).then_some(*count))
+            .unwrap()
+    }
+}
+
+async fn boundary_counts(cp: &crate::ControlPlane) -> BoundaryCounts {
+    BoundaryCounts(table_counts(cp).await)
+}
 
 async fn table_counts(cp: &crate::ControlPlane) -> Vec<(&'static str, i64)> {
     let mut counts = Vec::with_capacity(REPORT_READ_ONLY_TABLES.len());
