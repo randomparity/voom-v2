@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::json;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
-    CompiledValue, MediaSnapshotInput, PolicyInputSetDraft, RuleMatchMode,
+    CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
+    RuleMatchMode,
 };
 
 use crate::{
@@ -75,7 +76,7 @@ impl<'a> PlanBuilder<'a> {
             input,
             context,
             nodes: Vec::new(),
-            warnings: Vec::new(),
+            warnings: policy_warnings(policy),
             diagnostics: Vec::new(),
         }
     }
@@ -449,6 +450,19 @@ impl<'a> PlanBuilder<'a> {
         });
         plan_id(&preimage).map_err(|error| serialization_error(&error))
     }
+}
+
+fn policy_warnings(policy: &CompiledPolicy) -> Vec<String> {
+    policy
+        .warnings
+        .iter()
+        .filter(|warning| warning.severity == DiagnosticSeverity::Warning)
+        .map(policy_warning)
+        .collect()
+}
+
+fn policy_warning(warning: &PolicyDiagnostic) -> String {
+    format!("policy:{}:{}", warning.code, warning.message)
 }
 
 fn rule_condition_matches(rule: &CompiledRule, snapshot: &MediaSnapshotInput) -> Option<bool> {

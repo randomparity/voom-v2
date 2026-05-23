@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
-    CompiledValue, MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetKind,
-    TargetRef, TrackTarget,
+    CompiledValue, DiagnosticCode, DiagnosticStage, MediaSnapshotInput, PolicyDiagnostic,
+    PolicyInputSetDraft, PolicyInputSourceKind, SourceLocation, SourceSpan, TargetKind, TargetRef,
+    TrackTarget,
 };
 
 use crate::{DependencyKind, NodeStatus, PlanningContext, PlanningRequest, generate_plan};
@@ -137,6 +138,35 @@ fn set_container_blocks_unknown_container_snapshot() {
         "insufficient_snapshot_facts"
     );
     assert_eq!(plan.diagnostics[0].message, "snapshot container is unknown");
+}
+
+#[test]
+fn policy_warnings_are_visible_in_plan_output() {
+    let mut compiled = policy(CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    });
+    compiled.warnings.push(PolicyDiagnostic::warning(
+        DiagnosticCode::MetadataRequiresToolsDeferred,
+        DiagnosticStage::Validate,
+        SourceSpan::new(7, 21),
+        SourceLocation { line: 1, column: 8 },
+        "metadata requires_tools is deferred",
+    ));
+
+    let plan = generate_plan(PlanningRequest {
+        policy: compiled,
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(
+        plan.warnings,
+        vec![
+            "policy:metadata_requires_tools_deferred:metadata requires_tools is deferred"
+                .to_owned()
+        ]
+    );
 }
 
 #[test]
