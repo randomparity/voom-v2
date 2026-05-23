@@ -22,9 +22,9 @@ use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
     artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
-    identity::SqliteIdentityRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo,
-    policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo, tickets::SqliteTicketRepo,
-    use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
+    identity::SqliteIdentityRepo, issues::SqliteIssueRepo, jobs::SqliteJobRepo,
+    leases::SqliteLeaseRepo, policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo,
+    tickets::SqliteTicketRepo, use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -51,6 +51,7 @@ pub struct ControlPlane {
     pub(crate) workers: SqliteWorkerRepo,
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
+    pub(crate) issues: SqliteIssueRepo,
     pub(crate) identity: SqliteIdentityRepo,
     pub(crate) bundles: SqliteBundleRepo,
     pub(crate) use_leases: SqliteUseLeaseRepo,
@@ -74,6 +75,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("workers", &self.workers)
             .field("leases", &self.leases)
             .field("artifacts", &self.artifacts)
+            .field("issues", &self.issues)
             .field("identity", &self.identity)
             .field("bundles", &self.bundles)
             .field("use_leases", &self.use_leases)
@@ -146,6 +148,7 @@ impl ControlPlane {
             workers: SqliteWorkerRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
+            issues: SqliteIssueRepo::new(pool.clone()),
             identity: SqliteIdentityRepo::new(pool.clone()),
             bundles: SqliteBundleRepo::new(pool.clone()),
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),

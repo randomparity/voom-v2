@@ -20,6 +20,7 @@ use voom_store::repo::events::{EventFilter, Page};
 
 pub mod artifacts;
 pub mod bundles;
+pub mod compliance;
 pub mod identity;
 pub mod jobs;
 pub mod leases;
