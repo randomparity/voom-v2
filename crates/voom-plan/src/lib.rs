@@ -14,6 +14,7 @@ pub mod model;
 pub mod planner;
 
 pub use diagnostic::{PlanningDiagnostic, PlanningDiagnosticCode, PlanningDiagnosticSeverity};
+pub use fixtures::{GoldenPlanFixtureError, load_golden_plan};
 pub use hash::{edge_id, node_id, plan_hash, plan_id};
 pub use model::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, Estimate, ExecutionPlan,
