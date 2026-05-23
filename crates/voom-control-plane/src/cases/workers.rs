@@ -15,7 +15,8 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_store::repo::nodes::{NodeRepo, NodeStatus};
 use voom_store::repo::workers::{
-    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerKind, WorkerRepo,
+    Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerKind,
+    WorkerRepo, WorkerStatus,
 };
 
 use crate::ControlPlane;
@@ -161,6 +162,29 @@ impl ControlPlane {
             .await?;
         commit_tx(tx).await?;
         Ok(worker)
+    }
+
+    /// Fetch a worker with nullable node context for inspection surfaces.
+    ///
+    /// # Errors
+    /// Propagates repository errors.
+    pub async fn get_worker_inspection(
+        &self,
+        worker_id: WorkerId,
+    ) -> Result<Option<WorkerInspection>, VoomError> {
+        self.workers.get_inspection(worker_id).await
+    }
+
+    /// List workers with nullable node context for inspection surfaces.
+    ///
+    /// # Errors
+    /// Propagates repository errors.
+    pub async fn list_worker_inspections(
+        &self,
+        status: Option<WorkerStatus>,
+        limit: u32,
+    ) -> Result<Vec<WorkerInspection>, VoomError> {
+        self.workers.list_inspections(status, limit).await
     }
 
     async fn record_capability_drafts(

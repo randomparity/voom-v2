@@ -6,9 +6,7 @@ use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_core::{ErrorCode, NodeId, WorkerId};
-use voom_store::repo::workers::{
-    SqliteWorkerRepo, WorkerInspection, WorkerNodeContext, WorkerRepo, WorkerStatus,
-};
+use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext, WorkerStatus};
 
 use crate::cli::WorkerCommand;
 use crate::commands::token_source::{TokenSourceArgs, read_token};
@@ -125,7 +123,7 @@ async fn register(
         grants: Vec::new(),
     };
     match cp.register_worker_for_node(input).await {
-        Ok(worker) => emit_inspection(database_url, local, worker.id).await,
+        Ok(worker) => emit_inspection(&cp, local, worker.id).await,
         Err(err) => emit_voom_error(&err, local),
     }
 }
@@ -135,12 +133,12 @@ async fn list(
     local: Local,
     status: Option<crate::cli::WorkerStatusArg>,
 ) -> io::Result<i32> {
-    let repo = match worker_repo(database_url, &local).await? {
-        Ok(repo) => repo,
+    let cp = match open(database_url, &local).await? {
+        Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    match repo
-        .list_inspections(
+    match cp
+        .list_worker_inspections(
             status.map(crate::cli::WorkerStatusArg::to_store),
             LIST_LIMIT,
         )
@@ -160,11 +158,11 @@ async fn list(
 }
 
 async fn show(database_url: &str, local: Local, worker_id: u64) -> io::Result<i32> {
-    let repo = match worker_repo(database_url, &local).await? {
-        Ok(repo) => repo,
+    let cp = match open(database_url, &local).await? {
+        Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    match repo.get_inspection(WorkerId(worker_id)).await {
+    match cp.get_worker_inspection(WorkerId(worker_id)).await {
         Ok(Some(worker)) => emit_worker(worker, local),
         Ok(None) => {
             emit_err(
@@ -196,31 +194,8 @@ async fn open(database_url: &str, local: &Local) -> io::Result<Result<ControlPla
     }
 }
 
-async fn worker_repo(
-    database_url: &str,
-    local: &Local,
-) -> io::Result<Result<SqliteWorkerRepo, i32>> {
-    match voom_store::connect(database_url).await {
-        Ok(pool) => Ok(Ok(SqliteWorkerRepo::new(pool))),
-        Err(err) => {
-            emit_err(
-                "worker",
-                err.code(),
-                err.to_string(),
-                None,
-                Some(local.clone()),
-            )?;
-            Ok(Err(2))
-        }
-    }
-}
-
-async fn emit_inspection(database_url: &str, local: Local, worker_id: WorkerId) -> io::Result<i32> {
-    let repo = match worker_repo(database_url, &local).await? {
-        Ok(repo) => repo,
-        Err(code) => return Ok(code),
-    };
-    match repo.get_inspection(worker_id).await {
+async fn emit_inspection(cp: &ControlPlane, local: Local, worker_id: WorkerId) -> io::Result<i32> {
+    match cp.get_worker_inspection(worker_id).await {
         Ok(Some(worker)) => emit_worker(worker, local),
         Ok(None) => {
             emit_err(
