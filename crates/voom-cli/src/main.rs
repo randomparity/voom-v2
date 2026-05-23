@@ -3,8 +3,8 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
-use voom_cli::cli::{Cli, Command};
-use voom_cli::commands::{health, init, version};
+use voom_cli::cli::{Cli, Command, PlanCommand};
+use voom_cli::commands::{health, init, plan, version};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
 use voom_control_plane::HealthPlane;
@@ -167,6 +167,31 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
             };
             Ok(Exit::from_run_code(
                 init::run(&cfg.database_url, local).await?,
+            ))
+        }
+        Command::Plan(PlanCommand::DryRun {
+            policy_file,
+            input_fixture,
+        }) => Ok(Exit::from_run_code(
+            plan::dry_run(&policy_file, &input_fixture).await?,
+        )),
+        Command::Plan(PlanCommand::Show {
+            policy_version_id,
+            input_set_id,
+        }) => {
+            let cfg = match resolve_cfg(&cli) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    voom_cli::envelope::emit_err("plan", err.code(), err.to_string(), None, None)?;
+                    return Ok(Exit::Failure);
+                }
+            };
+            let local = Local {
+                db_url: cfg.database_url.clone(),
+                config_path: cfg.config_path.display().to_string(),
+            };
+            Ok(Exit::from_run_code(
+                plan::show(&cfg.database_url, local, policy_version_id, input_set_id).await?,
             ))
         }
     }

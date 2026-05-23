@@ -2506,6 +2506,8 @@ dependencies = [
  "tracing-subscriber",
  "voom-control-plane",
  "voom-core",
+ "voom-plan",
+ "voom-policy",
  "voom-store",
 ]
 
@@ -2548,6 +2550,7 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-fake-support",
+ "voom-plan",
  "voom-policy",
  "voom-scheduler",
  "voom-store",
@@ -2609,6 +2612,14 @@ dependencies = [
 [[package]]
 name = "voom-plan"
 version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "time",
+ "voom-core",
+ "voom-policy",
+]
 
 [[package]]
 name = "voom-policy"

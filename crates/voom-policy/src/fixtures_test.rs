@@ -94,3 +94,22 @@ fn fixture_labels_are_canonical() {
         ["synthetic_noncompliant_transcode_needed"]
     );
 }
+
+#[test]
+fn fixture_names_parse_public_labels() {
+    assert_eq!(
+        "synthetic_compliant_baseline"
+            .parse::<FixtureName>()
+            .unwrap(),
+        FixtureName::SyntheticCompliantBaseline
+    );
+    assert_eq!(
+        FixtureName::SyntheticNoncompliantTranscodeNeeded.as_str(),
+        "synthetic_noncompliant_transcode_needed"
+    );
+}
+
+#[test]
+fn fixture_names_reject_unknown_labels() {
+    assert!("unknown_fixture".parse::<FixtureName>().is_err());
+}

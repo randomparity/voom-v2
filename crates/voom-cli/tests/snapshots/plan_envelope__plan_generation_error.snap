@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/plan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "plan",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "PLAN_GENERATION_ERROR",
+    "message": "plan generation error: planner input set has no media snapshots"
+  }
+}

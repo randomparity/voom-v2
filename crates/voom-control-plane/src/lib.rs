@@ -31,6 +31,8 @@ use voom_store::{SchemaState, connect, probe_schema};
 pub mod cases;
 pub mod workflow;
 
+pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
 /// `LeaseRepo::fail` (and any future caller that needs full-jitter
 /// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
@@ -166,6 +168,12 @@ impl ControlPlane {
     #[must_use]
     pub fn clock(&self) -> &dyn Clock {
         &*self.clock
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn pool_for_test(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Pull a single `u32` from the shared RNG and wrap it in a
