@@ -100,7 +100,10 @@ keeps policy interpretation in one place. `voom-plan` must not depend on
 `voom-control-plane` owns composition. It loads accepted policy versions and
 policy input sets, calls the Sprint 5 planner, generates a report, optionally
 applies issue changes, and optionally executes supported planned nodes through
-`WorkflowExecutor`.
+`WorkflowExecutor`. "Accepted policy version" means the requested
+`policy_version_id` must be the current accepted version on its owning
+`policy_documents` row at command time, not merely a historical immutable
+version row.
 
 `voom-store` owns narrow persistence support for issue lifecycle changes. The
 existing `issues` and `issue_links` tables are the durable store for
@@ -195,19 +198,43 @@ Issue application rules:
 - Unsupported operation checks remain report diagnostics and do not create
   durable issues by default.
 - A matching previously open or planned issue is marked `resolved` when a later
-  durable report contains the matching check as `compliant`.
+  durable report contains the matching check as `compliant`, or when a newer
+  accepted version of the same policy document no longer emits that compliance
+  check.
 - Re-applying the same report is idempotent.
 
 The issue dedupe key is derived from:
 
 ```text
-policy_version_id + input_set_id + target_ref + compliance_kind + operation_kind
+policy_document_id + input_set_id + target_ref + compliance_kind + operation_kind
 ```
 
-Sprint 6 adds a nullable unique `dedupe_key` column to `issues`. It is nullable
-so existing issue rows remain valid and because not every issue kind needs the
-same deduplication strategy. `policy_noncompliant` issues created by Sprint 6
-must have a non-empty dedupe key.
+The dedupe key deliberately uses `policy_document_id`, not `policy_version_id`.
+Policy version rows are immutable and older accepted versions remain queryable,
+but there should be one live issue for "this policy document currently requires
+this target compliance property." A new accepted version of the same policy
+document updates or resolves that issue instead of leaving stale issues from the
+previous accepted version behind. The issue body, lifecycle events, and report
+provenance still record the concrete `policy_version_id` that produced each
+change.
+
+Sprint 6 adds a nullable `dedupe_key` column to `issues` plus a unique partial
+index over non-null `dedupe_key` values. The migration must use SQLite-supported
+steps (`ALTER TABLE ... ADD COLUMN`, then `CREATE UNIQUE INDEX ... WHERE
+dedupe_key IS NOT NULL`) rather than a table-level rewrite hidden behind the
+word "column." The column is nullable so existing issue rows remain valid and
+because not every issue kind needs the same deduplication strategy.
+`policy_noncompliant` issues created by Sprint 6 must have a non-empty dedupe
+key.
+
+Issue application must run in a transaction. It upserts each actionable check by
+`dedupe_key`, treats unique-index conflicts as a retryable read/update path, and
+resolves matching `policy_noncompliant` issues in the same policy document,
+input set, target, compliance kind, and operation kind when the current report
+marks that check compliant or no longer emits that compliance check for the
+current accepted policy version. It must not resolve unrelated policy issues for
+the same target, same input set, or same policy document through broader target
+scans.
 
 Issue titles and bodies should be deterministic and concise. They explain the
 target, policy version, desired state, observed state when known, and why the
@@ -221,7 +248,11 @@ create, update, and resolve behavior.
 ## 6. Synthetic Execution
 
 Sprint 6 execution starts from a generated plan and report. It submits only
-supported planned nodes.
+supported planned nodes. Issue application and workflow submission are separate
+durable phases inside `execute`: issues are applied first and are not rolled
+back if workflow submission or synthetic execution later fails. The command
+response must make that partial state explicit by returning the report, issue
+application summary, and execution summary or execution diagnostic.
 
 Execution rules:
 
@@ -230,10 +261,12 @@ Execution rules:
 - Initially, `set_container` maps to synthetic `OperationKind::Remux`.
 - `no_op` nodes are not submitted.
 - `blocked` nodes are not submitted.
-- If there are no executable planned nodes, the command succeeds with a report
-  and an execution summary showing zero submitted work.
+- If there are no executable planned nodes, the command succeeds with a report,
+  issue application summary, and an execution summary showing zero submitted
+  work without creating a job.
 - If a planned node has no Sprint 6 mapping, execution fails with a stable
-  policy execution diagnostic.
+  policy execution diagnostic before creating a job. Issue application has
+  already occurred and is reported as completed.
 - The mapper preserves the source plan node id in workflow node ids or payload
   metadata so tickets, events, and execution summaries can be traced back to
   compliance checks.
@@ -291,6 +324,12 @@ voom compliance execute --policy-version-id 1 --input-set-id 1
 This command generates the plan and report, applies issue lifecycle changes,
 executes supported planned nodes through `WorkflowExecutor`, and emits the
 report plus execution summary.
+
+All repository-backed compliance commands reject a `policy_version_id` that is
+not the current accepted version for its policy document with
+`POLICY_VALIDATION_ERROR` rather than silently planning against superseded policy
+intent. `NOT_FOUND` remains reserved for policy version ids or input set ids
+that do not exist.
 
 All commands emit the existing single JSON envelope. Successful `execute`
 output has this shape:
@@ -353,6 +392,12 @@ The durable policy-loading path continues Sprint 5 behavior: accepted compiled
 policy JSON is deserialized from the policy version row and is not recompiled
 as the normal path.
 
+Before any of these use cases generate a plan, the control plane must verify
+that the requested policy version exists and is still the policy document's
+`current_accepted_version_id`. This prevents report, issue, or execution state
+from being produced against stale policy versions that remain queryable because
+policy version rows are immutable.
+
 ## 9. Diagnostics
 
 Compliance diagnostics are separate from policy diagnostics and planning
@@ -387,11 +432,18 @@ Sprint 6 verification includes:
 - Issue application tests proving `compliance apply` creates planned and open
   issues, deduplicates repeated runs, resolves matching issues after
   compliance, and does not create issues for unsupported operation scope gaps.
-- Migration/repository tests for `issues.dedupe_key`.
+- Migration/repository tests for `issues.dedupe_key`, including the nullable
+  column, unique partial index, repeated apply, and conflict retry/update path.
 - Execution bridge tests proving only planned supported nodes become workflow
   nodes.
 - Integration tests proving `compliance execute` creates a job and tickets and
   runs `set_container -> Remux` through `WorkflowExecutor`.
+- Integration tests proving `compliance execute` reports issue application as
+  completed when later bridge validation or workflow execution fails, and that
+  no-executable-work execution creates no job.
+- Control-plane tests proving report, apply, and execute reject stale
+  non-current policy version ids even though the underlying policy version row
+  still exists.
 - CLI envelope snapshots for report, apply, execute, stable missing-input
   errors, report generation errors, and policy execution errors.
 - Explicit mutation-count tests:
