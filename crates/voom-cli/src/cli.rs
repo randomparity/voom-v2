@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
@@ -34,6 +36,27 @@ pub enum Command {
     Health,
     /// Apply pending migrations idempotently.
     Init,
+    /// Generate or inspect execution plans.
+    #[command(subcommand)]
+    Plan(PlanCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PlanCommand {
+    /// Generate a plan from a policy file and built-in input fixture.
+    DryRun {
+        #[arg(long)]
+        policy_file: PathBuf,
+        #[arg(long)]
+        input_fixture: String,
+    },
+    /// Generate a plan from durable accepted policy and input rows.
+    Show {
+        #[arg(long)]
+        policy_version_id: u64,
+        #[arg(long)]
+        input_set_id: u64,
+    },
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

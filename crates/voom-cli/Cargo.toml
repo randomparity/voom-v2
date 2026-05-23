@@ -28,6 +28,8 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt"] }
 voom-control-plane = { workspace = true }
 voom-core = { workspace = true }
+voom-plan = { workspace = true }
+voom-policy = { workspace = true }
 voom-store = { workspace = true }
 
 [dev-dependencies]
