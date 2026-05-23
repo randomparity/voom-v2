@@ -8,7 +8,10 @@ use std::process::Command;
 
 use serde_json::Value;
 use tempfile::{NamedTempFile, tempdir};
-use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
+use voom_policy::{
+    BundleTargetInput, BundleTargetState, FixtureName, PolicyInputSetDraft, PolicyInputSourceKind,
+    PolicySyntheticTarget, TargetKind, TargetRef, load_fixture, load_policy_fixture,
+};
 use voom_store::test_support::sqlite_url_for;
 
 #[test]
@@ -131,6 +134,36 @@ fn parse_error_emits_plan_error_envelope() {
 }
 
 #[test]
+fn validation_error_emits_plan_error_envelope() {
+    let dir = tempdir().unwrap();
+    let policy_path = dir.path().join("invalid-operation.voom");
+    std::fs::write(
+        &policy_path,
+        "policy \"container-metadata\" { phase normalize { transcode video to hevc {} } }",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "plan",
+            "dry-run",
+            "--policy-file",
+            policy_path.to_str().unwrap(),
+            "--input-fixture",
+            "synthetic_noncompliant_transcode_needed",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "plan");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "POLICY_VALIDATION_ERROR");
+    insta::assert_json_snapshot!("validation_error", json);
+}
+
+#[test]
 fn plan_dry_run_missing_required_arg_emits_bad_args_envelope() {
     let output = Command::new(env!("CARGO_BIN_EXE_voom"))
         .args([
@@ -148,6 +181,53 @@ fn plan_dry_run_missing_required_arg_emits_bad_args_envelope() {
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
     insta::assert_json_snapshot!("dry_run_missing_required_arg", json);
+}
+
+#[tokio::test]
+async fn plan_generation_error_emits_plan_error_envelope() {
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
+        pool,
+        std::sync::Arc::new(voom_core::SystemClock),
+    )
+    .await
+    .unwrap();
+    let created = cp
+        .create_policy_document(
+            "container-metadata",
+            &load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap(),
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(bundle_only_input())
+        .await
+        .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &url,
+            "plan",
+            "show",
+            "--policy-version-id",
+            &created.version.id.0.to_string(),
+            "--input-set-id",
+            &input.id.0.to_string(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let mut json = envelope(output.stdout);
+    assert_eq!(json["command"], "plan");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "PLAN_GENERATION_ERROR");
+    redact_local(&mut json);
+    insta::assert_json_snapshot!("plan_generation_error", json);
 }
 
 #[tokio::test]
@@ -197,6 +277,43 @@ fn envelope(stdout: Vec<u8>) -> Value {
     let stdout = String::from_utf8(stdout).unwrap();
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must be one JSON envelope; got {stdout:?}: {e}"))
+}
+
+fn bundle_only_input() -> PolicyInputSetDraft {
+    let created_at = load_fixture(FixtureName::SyntheticCompliantBaseline)
+        .unwrap()
+        .created_at;
+    PolicyInputSetDraft {
+        slug: "bundle-only".to_owned(),
+        display_name: "Bundle Only".to_owned(),
+        schema_version: 1,
+        source_kind: PolicyInputSourceKind::Fixture,
+        created_at,
+        description: None,
+        fixture_labels: vec!["bundle_only".to_owned()],
+        synthetic_targets: vec![PolicySyntheticTarget {
+            synthetic_key: "bundle-1".to_owned(),
+            target_kind: TargetKind::AssetBundle,
+            display_name: None,
+        }],
+        media_snapshots: Vec::new(),
+        identity_evidence: Vec::new(),
+        bundle_targets: vec![BundleTargetInput {
+            ordinal: 0,
+            target: TargetRef::Synthetic {
+                key: "bundle-1".to_owned(),
+                kind: TargetKind::AssetBundle,
+            },
+            role: "feature".to_owned(),
+            desired_state: BundleTargetState::Required,
+            language: None,
+            label: None,
+            disposition: None,
+            artifact_expectation: serde_json::json!({}),
+        }],
+        quality_profiles: Vec::new(),
+        issues: Vec::new(),
+    }
 }
 
 fn redact_local(json: &mut Value) {
