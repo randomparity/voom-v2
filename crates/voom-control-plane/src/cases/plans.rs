@@ -61,8 +61,8 @@ impl ControlPlane {
             .ok_or_else(|| {
                 VoomError::NotFound(format!("policy version {policy_version_id} not found"))
             })?;
-        let policy: voom_policy::CompiledPolicy =
-            serde_json::from_value(version.compiled_json.clone()).map_err(|e| {
+        let policy: voom_policy::CompiledPolicy = serde_json::from_value(version.compiled_json)
+            .map_err(|e| {
                 VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
             })?;
         if policy.source_hash != version.source_hash

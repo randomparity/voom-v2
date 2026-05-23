@@ -86,13 +86,9 @@ pub async fn show(
 }
 
 pub fn fixture_name(label: &str) -> Result<FixtureName, String> {
-    match label {
-        "synthetic_compliant_baseline" => Ok(FixtureName::SyntheticCompliantBaseline),
-        "synthetic_noncompliant_transcode_needed" => {
-            Ok(FixtureName::SyntheticNoncompliantTranscodeNeeded)
-        }
-        _ => Err("unknown input fixture".to_owned()),
-    }
+    label
+        .parse()
+        .map_err(|voom_policy::fixtures::UnknownFixtureName| "unknown input fixture".to_owned())
 }
 
 #[cfg(test)]

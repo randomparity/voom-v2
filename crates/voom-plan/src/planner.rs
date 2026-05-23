@@ -127,29 +127,43 @@ impl<'a> PlanBuilder<'a> {
         skip_if: Option<&CompiledCondition>,
         operations: &[CompiledOperation],
     ) {
-        if run_if.is_none() && skip_if.is_none() {
-            for operation in operations {
-                self.expand_operation(phase_name, operation);
-            }
-            return;
-        }
-
-        for snapshot in &self.input.media_snapshots {
-            let should_run = run_if.map_or(Some(true), |condition| {
-                evaluate_condition(condition, snapshot)
-            });
-            let should_skip = skip_if.map_or(Some(false), |condition| {
-                evaluate_condition(condition, snapshot)
-            });
-            match (should_run, should_skip) {
-                (Some(true), Some(false)) => {
-                    self.expand_operations_for_snapshot(phase_name, snapshot, operations);
+        match (run_if, skip_if) {
+            (None, None) => {
+                for operation in operations {
+                    self.expand_operation_for_all_snapshots(phase_name, operation);
                 }
-                (Some(false), _) | (_, Some(true)) => {}
-                (None, _) | (_, None) => self.expand_blocked_insufficient_facts_for_operations(
-                    phase_name, snapshot, operations,
-                ),
             }
+            _ => {
+                for snapshot in &self.input.media_snapshots {
+                    let should_run = run_if.map_or(ConditionEval::Matched, |condition| {
+                        evaluate_condition(condition, snapshot)
+                    });
+                    let should_skip = skip_if.map_or(ConditionEval::NotMatched, |condition| {
+                        evaluate_condition(condition, snapshot)
+                    });
+                    match (should_run, should_skip) {
+                        (ConditionEval::Matched, ConditionEval::NotMatched) => {
+                            self.expand_operations_for_snapshot(phase_name, snapshot, operations);
+                        }
+                        (ConditionEval::NotMatched, _) | (_, ConditionEval::Matched) => {}
+                        (ConditionEval::Unknown, _) | (_, ConditionEval::Unknown) => {
+                            self.expand_blocked_insufficient_facts_for_operations(
+                                phase_name, snapshot, operations,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn expand_operation_for_all_snapshots(
+        &mut self,
+        phase_name: &str,
+        operation: &CompiledOperation,
+    ) {
+        for snapshot in &self.input.media_snapshots {
+            self.expand_operation_for_snapshot(phase_name, snapshot, operation);
         }
     }
 
@@ -161,75 +175,6 @@ impl<'a> PlanBuilder<'a> {
     ) {
         for operation in operations {
             self.expand_blocked_insufficient_facts_for_snapshot(phase_name, snapshot, operation);
-        }
-    }
-
-    fn expand_operation(&mut self, phase_name: &str, operation: &CompiledOperation) {
-        match operation {
-            CompiledOperation::SetContainer { container } => {
-                self.expand_set_container(phase_name, container);
-            }
-            CompiledOperation::Conditional {
-                condition,
-                operations,
-            } => {
-                self.expand_conditional(phase_name, condition, operations);
-            }
-            CompiledOperation::Rules { mode, rules } => {
-                self.expand_rules(phase_name, *mode, rules);
-            }
-            unsupported => {
-                self.expand_unsupported_operation(phase_name, unsupported);
-            }
-        }
-    }
-
-    fn expand_set_container(&mut self, phase_name: &str, container: &str) {
-        for snapshot in &self.input.media_snapshots {
-            self.expand_set_container_for_snapshot(phase_name, snapshot, container);
-        }
-    }
-
-    fn expand_unsupported_operation(&mut self, phase_name: &str, operation: &CompiledOperation) {
-        let operation_kind = operation_kind(operation);
-        let message = "operation is not supported by Sprint 5 planner";
-        let payload = operation_payload(operation);
-
-        for snapshot in &self.input.media_snapshots {
-            self.expand_blocked_unsupported_for_snapshot(
-                phase_name,
-                snapshot,
-                operation_kind,
-                payload.clone(),
-                message,
-            );
-        }
-    }
-
-    fn expand_conditional(
-        &mut self,
-        phase_name: &str,
-        condition: &CompiledCondition,
-        operations: &[CompiledOperation],
-    ) {
-        for snapshot in &self.input.media_snapshots {
-            match evaluate_condition(condition, snapshot) {
-                Some(true) => self.expand_operations_for_snapshot(phase_name, snapshot, operations),
-                Some(false) => {}
-                None => {
-                    for operation in operations {
-                        self.expand_blocked_insufficient_facts_for_snapshot(
-                            phase_name, snapshot, operation,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    fn expand_rules(&mut self, phase_name: &str, mode: RuleMatchMode, rules: &[CompiledRule]) {
-        for snapshot in &self.input.media_snapshots {
-            self.expand_rules_for_snapshot(phase_name, snapshot, mode, rules);
         }
     }
 
@@ -258,26 +203,23 @@ impl<'a> PlanBuilder<'a> {
                 condition,
                 operations,
             } => match evaluate_condition(condition, snapshot) {
-                Some(true) => self.expand_operations_for_snapshot(phase_name, snapshot, operations),
-                Some(false) => {}
-                None => {
-                    for nested_operation in operations {
-                        self.expand_blocked_insufficient_facts_for_snapshot(
-                            phase_name,
-                            snapshot,
-                            nested_operation,
-                        );
-                    }
+                ConditionEval::Matched => {
+                    self.expand_operations_for_snapshot(phase_name, snapshot, operations);
                 }
+                ConditionEval::NotMatched => {}
+                ConditionEval::Unknown => self.expand_blocked_insufficient_facts_for_operations(
+                    phase_name, snapshot, operations,
+                ),
             },
             CompiledOperation::Rules { mode, rules } => {
                 self.expand_rules_for_snapshot(phase_name, snapshot, *mode, rules);
             }
             unsupported => {
+                let operation_kind = operation_kind(unsupported);
                 self.expand_blocked_unsupported_for_snapshot(
                     phase_name,
                     snapshot,
-                    operation_kind(unsupported),
+                    operation_kind,
                     operation_payload(unsupported),
                     "operation is not supported by Sprint 5 planner",
                 );
@@ -296,7 +238,7 @@ impl<'a> PlanBuilder<'a> {
             RuleMatchMode::First => {
                 for rule in rules {
                     match rule_condition_matches(rule, snapshot) {
-                        Some(true) => {
+                        ConditionEval::Matched => {
                             self.expand_operations_for_snapshot(
                                 phase_name,
                                 snapshot,
@@ -304,13 +246,13 @@ impl<'a> PlanBuilder<'a> {
                             );
                             break;
                         }
-                        Some(false) => {}
-                        None => {
-                            for operation in &rule.operations {
-                                self.expand_blocked_insufficient_facts_for_snapshot(
-                                    phase_name, snapshot, operation,
-                                );
-                            }
+                        ConditionEval::NotMatched => {}
+                        ConditionEval::Unknown => {
+                            self.expand_blocked_insufficient_facts_for_operations(
+                                phase_name,
+                                snapshot,
+                                &rule.operations,
+                            );
                             break;
                         }
                     }
@@ -319,20 +261,20 @@ impl<'a> PlanBuilder<'a> {
             RuleMatchMode::All => {
                 for rule in rules {
                     match rule_condition_matches(rule, snapshot) {
-                        Some(true) => {
+                        ConditionEval::Matched => {
                             self.expand_operations_for_snapshot(
                                 phase_name,
                                 snapshot,
                                 &rule.operations,
                             );
                         }
-                        Some(false) => {}
-                        None => {
-                            for operation in &rule.operations {
-                                self.expand_blocked_insufficient_facts_for_snapshot(
-                                    phase_name, snapshot, operation,
-                                );
-                            }
+                        ConditionEval::NotMatched => {}
+                        ConditionEval::Unknown => {
+                            self.expand_blocked_insufficient_facts_for_operations(
+                                phase_name,
+                                snapshot,
+                                &rule.operations,
+                            );
                         }
                     }
                 }
@@ -512,10 +454,12 @@ fn policy_warning(warning: &PolicyDiagnostic) -> String {
     format!("policy:{}:{}", warning.code, warning.message)
 }
 
-fn rule_condition_matches(rule: &CompiledRule, snapshot: &MediaSnapshotInput) -> Option<bool> {
-    rule.condition.as_ref().map_or(Some(true), |condition| {
-        evaluate_condition(condition, snapshot)
-    })
+fn rule_condition_matches(rule: &CompiledRule, snapshot: &MediaSnapshotInput) -> ConditionEval {
+    rule.condition
+        .as_ref()
+        .map_or(ConditionEval::Matched, |condition| {
+            evaluate_condition(condition, snapshot)
+        })
 }
 
 fn operation_payload(operation: &CompiledOperation) -> serde_json::Value {
@@ -530,38 +474,73 @@ fn operation_payload(operation: &CompiledOperation) -> serde_json::Value {
 fn evaluate_condition(
     condition: &CompiledCondition,
     snapshot: &MediaSnapshotInput,
-) -> Option<bool> {
+) -> ConditionEval {
     match condition {
         CompiledCondition::FieldComparison { path, op, value } => {
             evaluate_field_comparison(path, *op, value, snapshot)
         }
-        CompiledCondition::FieldExists { path } => snapshot_field(path, snapshot).map(|_| true),
-        CompiledCondition::Not { inner } => evaluate_condition(inner, snapshot).map(|value| !value),
+        CompiledCondition::FieldExists { path } => {
+            ConditionEval::from_bool(snapshot_field(path, snapshot).is_some())
+        }
+        CompiledCondition::Not { inner } => evaluate_condition(inner, snapshot).negate(),
         CompiledCondition::And { conditions } => {
             let mut saw_unknown = false;
             for condition in conditions {
                 match evaluate_condition(condition, snapshot) {
-                    Some(false) => return Some(false),
-                    Some(true) => {}
-                    None => saw_unknown = true,
+                    ConditionEval::NotMatched => return ConditionEval::NotMatched,
+                    ConditionEval::Matched => {}
+                    ConditionEval::Unknown => saw_unknown = true,
                 }
             }
-            (!saw_unknown).then_some(true)
+            if saw_unknown {
+                ConditionEval::Unknown
+            } else {
+                ConditionEval::Matched
+            }
         }
         CompiledCondition::Or { conditions } => {
             let mut saw_unknown = false;
             for condition in conditions {
                 match evaluate_condition(condition, snapshot) {
-                    Some(true) => return Some(true),
-                    Some(false) => {}
-                    None => saw_unknown = true,
+                    ConditionEval::Matched => return ConditionEval::Matched,
+                    ConditionEval::NotMatched => {}
+                    ConditionEval::Unknown => saw_unknown = true,
                 }
             }
-            (!saw_unknown).then_some(false)
+            if saw_unknown {
+                ConditionEval::Unknown
+            } else {
+                ConditionEval::NotMatched
+            }
         }
         CompiledCondition::Exists { .. }
         | CompiledCondition::Count { .. }
-        | CompiledCondition::Predicate { .. } => None,
+        | CompiledCondition::Predicate { .. } => ConditionEval::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConditionEval {
+    Matched,
+    NotMatched,
+    Unknown,
+}
+
+impl ConditionEval {
+    const fn from_bool(value: bool) -> Self {
+        if value {
+            Self::Matched
+        } else {
+            Self::NotMatched
+        }
+    }
+
+    const fn negate(self) -> Self {
+        match self {
+            Self::Matched => Self::NotMatched,
+            Self::NotMatched => Self::Matched,
+            Self::Unknown => Self::Unknown,
+        }
     }
 }
 
@@ -570,40 +549,44 @@ fn evaluate_field_comparison(
     op: ComparisonOp,
     value: &CompiledValue,
     snapshot: &MediaSnapshotInput,
-) -> Option<bool> {
-    let left = snapshot_field(path, snapshot)?;
-    let right = condition_value(value, snapshot)?;
+) -> ConditionEval {
+    let Some(left) = snapshot_field(path, snapshot) else {
+        return ConditionEval::Unknown;
+    };
+    let Some(right) = condition_value(value, snapshot) else {
+        return ConditionEval::Unknown;
+    };
     compare_snapshot_values(&left, op, &right)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SnapshotFieldValue {
-    String(String),
+enum SnapshotFieldValue<'a> {
+    String(&'a str),
     Number(u64),
     Boolean(bool),
 }
 
-fn snapshot_field(path: &[String], snapshot: &MediaSnapshotInput) -> Option<SnapshotFieldValue> {
+fn snapshot_field<'a>(
+    path: &[String],
+    snapshot: &'a MediaSnapshotInput,
+) -> Option<SnapshotFieldValue<'a>> {
     let canonical = canonical_field_path(path)?;
     match canonical {
         "container" => snapshot
             .container
-            .as_ref()
-            .map(|value| SnapshotFieldValue::String(value.clone())),
+            .as_deref()
+            .map(SnapshotFieldValue::String),
         "video_codec" => snapshot
             .video_codec
-            .as_ref()
-            .map(|value| SnapshotFieldValue::String(value.clone())),
+            .as_deref()
+            .map(SnapshotFieldValue::String),
         "width" => snapshot
             .width
             .map(|value| SnapshotFieldValue::Number(u64::from(value))),
         "height" => snapshot
             .height
             .map(|value| SnapshotFieldValue::Number(u64::from(value))),
-        "hdr" => snapshot
-            .hdr
-            .as_ref()
-            .map(|value| SnapshotFieldValue::String(value.clone())),
+        "hdr" => snapshot.hdr.as_deref().map(SnapshotFieldValue::String),
         "bitrate" => snapshot.bitrate.map(SnapshotFieldValue::Number),
         "duration_millis" => snapshot.duration_millis.map(SnapshotFieldValue::Number),
         _ => None,
@@ -644,12 +627,12 @@ fn canonical_field_path(path: &[String]) -> Option<&'static str> {
     }
 }
 
-fn condition_value(
-    value: &CompiledValue,
-    snapshot: &MediaSnapshotInput,
-) -> Option<SnapshotFieldValue> {
+fn condition_value<'a>(
+    value: &'a CompiledValue,
+    snapshot: &'a MediaSnapshotInput,
+) -> Option<SnapshotFieldValue<'a>> {
     match value {
-        CompiledValue::String { value } => Some(SnapshotFieldValue::String(value.clone())),
+        CompiledValue::String { value } => Some(SnapshotFieldValue::String(value)),
         CompiledValue::Number { value } => {
             value.parse::<u64>().ok().map(SnapshotFieldValue::Number)
         }
@@ -660,10 +643,10 @@ fn condition_value(
 }
 
 fn compare_snapshot_values(
-    left: &SnapshotFieldValue,
+    left: &SnapshotFieldValue<'_>,
     op: ComparisonOp,
-    right: &SnapshotFieldValue,
-) -> Option<bool> {
+    right: &SnapshotFieldValue<'_>,
+) -> ConditionEval {
     match (left, right) {
         (SnapshotFieldValue::String(left), SnapshotFieldValue::String(right)) => {
             compare_strings(left, op, right)
@@ -675,53 +658,53 @@ fn compare_snapshot_values(
             compare_booleans(*left, op, *right)
         }
         _ => match op {
-            ComparisonOp::Eq => Some(false),
-            ComparisonOp::Ne => Some(true),
+            ComparisonOp::Eq => ConditionEval::NotMatched,
+            ComparisonOp::Ne => ConditionEval::Matched,
             ComparisonOp::Lt
             | ComparisonOp::Lte
             | ComparisonOp::Gt
             | ComparisonOp::Gte
             | ComparisonOp::Contains
-            | ComparisonOp::Matches => None,
+            | ComparisonOp::Matches => ConditionEval::Unknown,
         },
     }
 }
 
-fn compare_strings(left: &str, op: ComparisonOp, right: &str) -> Option<bool> {
+fn compare_strings(left: &str, op: ComparisonOp, right: &str) -> ConditionEval {
     match op {
-        ComparisonOp::Eq => Some(left == right),
-        ComparisonOp::Ne => Some(left != right),
-        ComparisonOp::Contains => Some(left.contains(right)),
+        ComparisonOp::Eq => ConditionEval::from_bool(left == right),
+        ComparisonOp::Ne => ConditionEval::from_bool(left != right),
+        ComparisonOp::Contains => ConditionEval::from_bool(left.contains(right)),
         ComparisonOp::Lt
         | ComparisonOp::Lte
         | ComparisonOp::Gt
         | ComparisonOp::Gte
-        | ComparisonOp::Matches => None,
+        | ComparisonOp::Matches => ConditionEval::Unknown,
     }
 }
 
-fn compare_numbers(left: u64, op: ComparisonOp, right: u64) -> Option<bool> {
+fn compare_numbers(left: u64, op: ComparisonOp, right: u64) -> ConditionEval {
     match op {
-        ComparisonOp::Eq => Some(left == right),
-        ComparisonOp::Ne => Some(left != right),
-        ComparisonOp::Lt => Some(left < right),
-        ComparisonOp::Lte => Some(left <= right),
-        ComparisonOp::Gt => Some(left > right),
-        ComparisonOp::Gte => Some(left >= right),
-        ComparisonOp::Contains | ComparisonOp::Matches => None,
+        ComparisonOp::Eq => ConditionEval::from_bool(left == right),
+        ComparisonOp::Ne => ConditionEval::from_bool(left != right),
+        ComparisonOp::Lt => ConditionEval::from_bool(left < right),
+        ComparisonOp::Lte => ConditionEval::from_bool(left <= right),
+        ComparisonOp::Gt => ConditionEval::from_bool(left > right),
+        ComparisonOp::Gte => ConditionEval::from_bool(left >= right),
+        ComparisonOp::Contains | ComparisonOp::Matches => ConditionEval::Unknown,
     }
 }
 
-fn compare_booleans(left: bool, op: ComparisonOp, right: bool) -> Option<bool> {
+fn compare_booleans(left: bool, op: ComparisonOp, right: bool) -> ConditionEval {
     match op {
-        ComparisonOp::Eq => Some(left == right),
-        ComparisonOp::Ne => Some(left != right),
+        ComparisonOp::Eq => ConditionEval::from_bool(left == right),
+        ComparisonOp::Ne => ConditionEval::from_bool(left != right),
         ComparisonOp::Lt
         | ComparisonOp::Lte
         | ComparisonOp::Gt
         | ComparisonOp::Gte
         | ComparisonOp::Contains
-        | ComparisonOp::Matches => None,
+        | ComparisonOp::Matches => ConditionEval::Unknown,
     }
 }
 

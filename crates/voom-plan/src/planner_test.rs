@@ -368,3 +368,61 @@ fn container_name_condition_selects_resolved_branch() {
     assert!(non_matching.nodes.is_empty());
     assert!(non_matching.diagnostics.is_empty());
 }
+
+#[test]
+fn missing_condition_field_blocks_nested_operation() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Conditional {
+            condition: CompiledCondition::FieldComparison {
+                path: vec!["video".to_owned(), "codec".to_owned()],
+                op: ComparisonOp::Eq,
+                value: CompiledValue::String {
+                    value: "hevc".to_owned(),
+                },
+            },
+            operations: vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        }),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn unsupported_condition_comparison_blocks_nested_operation() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Conditional {
+            condition: CompiledCondition::FieldComparison {
+                path: vec!["container".to_owned(), "name".to_owned()],
+                op: ComparisonOp::Lt,
+                value: CompiledValue::String {
+                    value: "mkv".to_owned(),
+                },
+            },
+            operations: vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        }),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
