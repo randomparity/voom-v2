@@ -356,6 +356,34 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
     assert_eq!(score.explanation["candidates"].as_array().unwrap().len(), 2);
 }
 
+#[test]
+fn decision_from_score_rejects_unknown_reason_code() {
+    let fixture_input = RemoteAcquireInput {
+        node_id: NodeId(1),
+        token: secrecy::SecretString::from("token"),
+        worker_id: WorkerId(2),
+        idempotency_key: "reason-vocab".to_owned(),
+        request_hash: "hash".to_owned(),
+        lease_ttl_seconds: 60,
+    };
+    let score = ScoreDecision {
+        outcome: ScoreOutcome::NoEligibleCandidate,
+        selected: None,
+        candidate_count: 1,
+        reason_code: "new_reason_from_scorer",
+        explanation: json!({"scoring_version": SCORING_VERSION, "candidates": []}),
+    };
+
+    let err =
+        decision_from_score(&fixture_input, &score, None, OffsetDateTime::UNIX_EPOCH).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Internal);
+    assert!(
+        err.to_string().contains("new_reason_from_scorer"),
+        "error must name the unmapped reason"
+    );
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;

@@ -397,7 +397,7 @@ impl ControlPlane {
             let score = SchedulerScorer::default().score(&[])?;
             let decision = self
                 .scheduler_decisions
-                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now)?)
                 .await?;
             return Ok(RemoteAcquirePrepared::Idle(RemoteAcquireOutcome::Idle {
                 worker_id: input.worker_id,
@@ -468,7 +468,7 @@ impl ControlPlane {
             ScoreOutcome::NoEligibleCandidate => {
                 let decision = self
                     .scheduler_decisions
-                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now)?)
                     .await?;
                 Ok(RemoteAcquirePrepared::NoCandidate(
                     RemoteAcquireOutcome::NoCandidate {
@@ -586,7 +586,7 @@ impl ControlPlane {
                             &score,
                             Some((selected.ticket_id, selected.worker_id, selected.node_id)),
                             now,
-                        ),
+                        )?,
                     )
                     .await?;
                 Ok(RemoteAcquirePrepared::Leased {
@@ -1666,7 +1666,7 @@ fn decision_from_score(
     score: &voom_scheduler::ScoreDecision,
     selected: Option<(TicketId, WorkerId, NodeId)>,
     now: OffsetDateTime,
-) -> NewSchedulerDecision {
+) -> Result<NewSchedulerDecision, VoomError> {
     let (ticket_id, selected_worker_id, selected_node_id) = selected
         .map_or((None, None, None), |(ticket_id, worker_id, node_id)| {
             (Some(ticket_id), Some(worker_id), Some(node_id))
@@ -1683,7 +1683,7 @@ fn decision_from_score(
         ),
     };
 
-    NewSchedulerDecision {
+    Ok(NewSchedulerDecision {
         decision_kind,
         request_source: SchedulerRequestSource::RemoteAcquire,
         idempotency_key: Some(input.idempotency_key.clone()),
@@ -1694,7 +1694,7 @@ fn decision_from_score(
         selected_node_id,
         selected_lease_id: None,
         outcome,
-        reason_code: scheduler_reason(score.reason_code),
+        reason_code: scheduler_reason(score.reason_code)?,
         summary: scheduler_summary(score),
         candidate_count: u32::try_from(score.candidate_count).unwrap_or(u32::MAX),
         selected_score: match score.outcome {
@@ -1704,7 +1704,7 @@ fn decision_from_score(
         suppression_key: suppression_key(input, score),
         explanation: score.explanation.clone(),
         now,
-    }
+    })
 }
 
 fn capacity_decision(
@@ -1747,25 +1747,23 @@ fn capacity_decision(
     }
 }
 
-#[expect(
-    clippy::match_same_arms,
-    reason = "the explicit scorer reason vocabulary is load-bearing documentation"
-)]
-fn scheduler_reason(reason: &str) -> SchedulerReasonCode {
+fn scheduler_reason(reason: &str) -> Result<SchedulerReasonCode, VoomError> {
     match reason {
-        "selected" => SchedulerReasonCode::Selected,
-        "no_ready_ticket" => SchedulerReasonCode::NoReadyTicket,
-        "missing_capability" => SchedulerReasonCode::MissingCapability,
-        "missing_grant" => SchedulerReasonCode::MissingGrant,
-        "operation_denied" => SchedulerReasonCode::OperationDenied,
-        "worker_not_executable" => SchedulerReasonCode::WorkerNotExecutable,
-        "node_not_executable" => SchedulerReasonCode::NodeNotExecutable,
-        "heartbeat_expired" => SchedulerReasonCode::HeartbeatExpired,
-        "unsupported_artifact_access" => SchedulerReasonCode::UnsupportedArtifactAccess,
-        "worker_capacity_full" => SchedulerReasonCode::WorkerCapacityFull,
-        "node_capacity_full" => SchedulerReasonCode::NodeCapacityFull,
-        "no_eligible_candidate" => SchedulerReasonCode::NoEligibleCandidate,
-        _ => SchedulerReasonCode::NoEligibleCandidate,
+        "selected" => Ok(SchedulerReasonCode::Selected),
+        "no_ready_ticket" => Ok(SchedulerReasonCode::NoReadyTicket),
+        "missing_capability" => Ok(SchedulerReasonCode::MissingCapability),
+        "missing_grant" => Ok(SchedulerReasonCode::MissingGrant),
+        "operation_denied" => Ok(SchedulerReasonCode::OperationDenied),
+        "worker_not_executable" => Ok(SchedulerReasonCode::WorkerNotExecutable),
+        "node_not_executable" => Ok(SchedulerReasonCode::NodeNotExecutable),
+        "heartbeat_expired" => Ok(SchedulerReasonCode::HeartbeatExpired),
+        "unsupported_artifact_access" => Ok(SchedulerReasonCode::UnsupportedArtifactAccess),
+        "worker_capacity_full" => Ok(SchedulerReasonCode::WorkerCapacityFull),
+        "node_capacity_full" => Ok(SchedulerReasonCode::NodeCapacityFull),
+        "no_eligible_candidate" => Ok(SchedulerReasonCode::NoEligibleCandidate),
+        other => Err(VoomError::Internal(format!(
+            "scheduler reason {other:?} is not mapped to the persistence vocabulary"
+        ))),
     }
 }
 
