@@ -295,6 +295,46 @@ async fn remote_acquire_no_candidate_is_success_with_decision() {
     assert_eq!(decision.reason_code.as_str(), "unsupported_artifact_access");
 }
 
+#[test]
+fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
+    let unsupported_artifact = scheduler_candidate("test.unsupported", TicketId(1));
+    let missing_capability = SchedulerCandidate {
+        ticket: TicketCandidate {
+            ticket_id: TicketId(2),
+            operation: "test.missing_capability".to_owned(),
+            priority: 0,
+            next_eligible_at_epoch_seconds: 0,
+            payload: json!({}),
+        },
+        worker: WorkerCandidate {
+            worker_id: voom_core::WorkerId(1),
+            node_id: NodeId(1),
+            executable: true,
+            has_capability: false,
+            has_grant: true,
+            denied: false,
+            active_leases: 0,
+            max_parallel: 1,
+            artifact_access: vec!["shared_mount".to_owned()],
+        },
+        node: NodeCandidate {
+            node_id: NodeId(1),
+            executable: true,
+            heartbeat_fresh: true,
+            active_leases: 0,
+            max_parallel_leases: 1,
+        },
+    };
+
+    let score = score_remote_candidates(&[unsupported_artifact, missing_capability]).unwrap();
+
+    assert_eq!(score.outcome, ScoreOutcome::NoEligibleCandidate);
+    assert_eq!(score.reason_code, "missing_capability");
+    assert_eq!(score.candidate_count, 2);
+    assert_eq!(score.explanation["operation"], serde_json::Value::Null);
+    assert_eq!(score.explanation["candidates"].as_array().unwrap().len(), 2);
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
@@ -337,6 +377,36 @@ async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
         .unwrap()
         .unwrap();
     assert_eq!(decision.reason_code.as_str(), "node_capacity_full");
+}
+
+fn scheduler_candidate(operation: &str, ticket_id: TicketId) -> SchedulerCandidate {
+    SchedulerCandidate {
+        ticket: TicketCandidate {
+            ticket_id,
+            operation: operation.to_owned(),
+            priority: 0,
+            next_eligible_at_epoch_seconds: 0,
+            payload: json!({}),
+        },
+        worker: WorkerCandidate {
+            worker_id: voom_core::WorkerId(1),
+            node_id: NodeId(1),
+            executable: true,
+            has_capability: true,
+            has_grant: true,
+            denied: false,
+            active_leases: 0,
+            max_parallel: 1,
+            artifact_access: vec!["local_path".to_owned()],
+        },
+        node: NodeCandidate {
+            node_id: NodeId(1),
+            executable: true,
+            heartbeat_fresh: true,
+            active_leases: 0,
+            max_parallel_leases: 1,
+        },
+    }
 }
 
 #[tokio::test]

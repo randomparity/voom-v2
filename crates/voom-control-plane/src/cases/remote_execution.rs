@@ -531,7 +531,7 @@ impl ControlPlane {
                                 input,
                                 SchedulerReasonCode::WorkerCapacityFull,
                                 Some(selected_candidate.ticket.ticket_id),
-                                score.candidate_count,
+                                1,
                                 worker_active,
                                 worker_limit,
                                 now,
@@ -560,7 +560,7 @@ impl ControlPlane {
                                 input,
                                 SchedulerReasonCode::NodeCapacityFull,
                                 Some(selected_candidate.ticket.ticket_id),
-                                score.candidate_count,
+                                1,
                                 node_active,
                                 node_limit,
                                 now,
@@ -1374,7 +1374,57 @@ fn aggregate_score_decision(
         }
     }
     base.candidate_count = candidate_count;
+    if base.outcome == ScoreOutcome::NoEligibleCandidate {
+        base.reason_code = first_rejection_reason(&base.explanation);
+    }
     base
+}
+
+fn first_rejection_reason(explanation: &JsonValue) -> &'static str {
+    explanation
+        .get("candidates")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("reasons").and_then(JsonValue::as_array))
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .filter_map(reason_priority)
+        .min_by_key(|(priority, _)| *priority)
+        .map_or("no_eligible_candidate", |(_, reason)| reason)
+}
+
+fn reason_priority(reason: &str) -> Option<(u8, &'static str)> {
+    static_reason_code(reason).map(|static_reason| {
+        let priority = match static_reason {
+            "missing_capability" => 0,
+            "missing_grant" => 1,
+            "operation_denied" => 2,
+            "worker_not_executable" => 3,
+            "node_not_executable" => 4,
+            "heartbeat_expired" => 5,
+            "unsupported_artifact_access" => 6,
+            "worker_capacity_full" => 7,
+            "node_capacity_full" => 8,
+            _ => 9,
+        };
+        (priority, static_reason)
+    })
+}
+
+fn static_reason_code(reason: &str) -> Option<&'static str> {
+    match reason {
+        "missing_capability" => Some("missing_capability"),
+        "missing_grant" => Some("missing_grant"),
+        "operation_denied" => Some("operation_denied"),
+        "worker_not_executable" => Some("worker_not_executable"),
+        "node_not_executable" => Some("node_not_executable"),
+        "heartbeat_expired" => Some("heartbeat_expired"),
+        "unsupported_artifact_access" => Some("unsupported_artifact_access"),
+        "worker_capacity_full" => Some("worker_capacity_full"),
+        "node_capacity_full" => Some("node_capacity_full"),
+        _ => None,
+    }
 }
 
 fn selected_candidate_for_score(
