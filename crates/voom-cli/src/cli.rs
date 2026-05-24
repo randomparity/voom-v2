@@ -48,6 +48,9 @@ pub enum Command {
     /// Register and inspect workers.
     #[command(subcommand)]
     Worker(WorkerCommand),
+    /// Inspect scheduler state.
+    #[command(subcommand)]
+    Scheduler(SchedulerCommand),
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,6 +166,44 @@ pub enum WorkerCommand {
         #[arg(long)]
         worker_id: u64,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SchedulerCommand {
+    /// Inspect scheduler decisions.
+    #[command(subcommand)]
+    Decisions(SchedulerDecisionCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SchedulerDecisionCommand {
+    /// List scheduler decisions.
+    List {
+        #[arg(long)]
+        ticket_id: Option<u64>,
+        #[arg(long)]
+        worker_id: Option<u64>,
+        #[arg(long)]
+        node_id: Option<u64>,
+        #[arg(long)]
+        outcome: Option<SchedulerDecisionOutcomeArg>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one scheduler decision.
+    Show {
+        #[arg(long)]
+        decision_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum SchedulerDecisionOutcomeArg {
+    Selected,
+    Idle,
+    NoEligibleCandidate,
+    Rejected,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
