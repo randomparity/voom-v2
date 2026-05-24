@@ -61,6 +61,21 @@ impl ApiFixture {
             .unwrap()
     }
 
+    async fn post_raw(&self, path: &str, idempotency_key: &str, body: &str) -> Response<Body> {
+        self.app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {}", self.token))
+                    .header("x-voom-idempotency-key", idempotency_key)
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     async fn ready_ticket(&self) -> TicketId {
         let ticket = self
             .cp
@@ -337,6 +352,44 @@ async fn lease_routes_reject_worker_node_mismatch() {
     assert_eq!(response_json(res).await["error"]["code"], "CONFLICT");
 }
 
+#[tokio::test]
+async fn malformed_json_returns_api_error_envelope() {
+    let fixture = api_fixture().await;
+
+    let acquire = fixture
+        .post_raw("/v1/execution/lease/acquire", "bad-acquire-json", "{")
+        .await;
+    assert_bad_args_envelope(acquire, "execution.acquire").await;
+
+    let node_heartbeat = fixture
+        .post_raw(
+            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "bad-node-heartbeat-json",
+            "{",
+        )
+        .await;
+    assert_bad_args_envelope(node_heartbeat, "execution.node_heartbeat").await;
+
+    let lease_heartbeat = fixture
+        .post_raw(
+            "/v1/execution/lease/1/heartbeat",
+            "bad-lease-heartbeat-json",
+            "{",
+        )
+        .await;
+    assert_bad_args_envelope(lease_heartbeat, "execution.lease_heartbeat").await;
+
+    let complete = fixture
+        .post_raw("/v1/execution/lease/1/complete", "bad-complete-json", "{")
+        .await;
+    assert_bad_args_envelope(complete, "execution.complete").await;
+
+    let fail = fixture
+        .post_raw("/v1/execution/lease/1/fail", "bad-fail-json", "{")
+        .await;
+    assert_bad_args_envelope(fail, "execution.fail").await;
+}
+
 async fn api_fixture() -> ApiFixture {
     let tmp = NamedTempFile::new().unwrap();
     let url = sqlite_url_for(tmp.path());
@@ -390,4 +443,13 @@ async fn api_fixture() -> ApiFixture {
 async fn response_json(res: Response<Body>) -> Value {
     let body = res.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
+}
+
+async fn assert_bad_args_envelope(res: Response<Body>, command: &str) {
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let json = response_json(res).await;
+    assert_eq!(json["schema_version"], "0");
+    assert_eq!(json["command"], command);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
 }

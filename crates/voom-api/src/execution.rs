@@ -1,6 +1,7 @@
 //! Remote execution HTTP routes.
 
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -74,7 +75,7 @@ pub(crate) fn routes() -> axum::Router<AppState> {
 async fn acquire(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
         return (
@@ -89,6 +90,10 @@ async fn acquire(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
     };
     let request_hash = match stable_request_hash("POST", "/v1/execution/lease/acquire", &body) {
@@ -120,7 +125,7 @@ async fn node_heartbeat(
     State(state): State<AppState>,
     Path(node_id): Path<u64>,
     headers: HeaderMap,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
         return (
@@ -135,6 +140,10 @@ async fn node_heartbeat(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/node/{node_id}/heartbeat");
@@ -161,7 +170,7 @@ async fn lease_heartbeat(
     State(state): State<AppState>,
     Path(lease_id): Path<u64>,
     headers: HeaderMap,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
         return (
@@ -176,6 +185,10 @@ async fn lease_heartbeat(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/lease/{lease_id}/heartbeat");
@@ -211,7 +224,7 @@ async fn complete(
     State(state): State<AppState>,
     Path(lease_id): Path<u64>,
     headers: HeaderMap,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
         return (
@@ -226,6 +239,10 @@ async fn complete(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/lease/{lease_id}/complete");
@@ -261,7 +278,7 @@ async fn fail(
     State(state): State<AppState>,
     Path(lease_id): Path<u64>,
     headers: HeaderMap,
-    Json(body): Json<JsonValue>,
+    body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
         return (
@@ -276,6 +293,10 @@ async fn fail(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
+    let body = match json_body(body) {
+        Ok(body) => body,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
     };
     let route_instance = format!("/v1/execution/lease/{lease_id}/fail");
@@ -305,6 +326,11 @@ async fn fail(
         Ok(outcome) => ok_response(FAIL_COMMAND, outcome),
         Err(err) => voom_route_error_response(FAIL_COMMAND, &err),
     }
+}
+
+fn json_body(body: Result<Json<JsonValue>, JsonRejection>) -> Result<JsonValue, String> {
+    body.map(|Json(value)| value)
+        .map_err(|err| format!("invalid JSON body: {err}"))
 }
 
 fn bearer(headers: &HeaderMap) -> Result<SecretString, String> {
