@@ -229,6 +229,18 @@ pub trait LeaseRepo: Repository {
         now: OffsetDateTime,
     ) -> Result<ForceReleaseOutcome, VoomError>;
 
+    async fn get_held_for_worker_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: LeaseId,
+        worker_id: WorkerId,
+    ) -> Result<Lease, VoomError>;
+    async fn get_held_for_worker(
+        &self,
+        lease_id: LeaseId,
+        worker_id: WorkerId,
+    ) -> Result<Lease, VoomError>;
+
     async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError>;
 }
 
@@ -780,6 +792,49 @@ impl LeaseRepo for SqliteLeaseRepo {
             .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
         let out = self
             .force_release_in_tx(&mut tx, lease_id, also_requeue, now)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+        Ok(out)
+    }
+
+    async fn get_held_for_worker_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        lease_id: LeaseId,
+        worker_id: WorkerId,
+    ) -> Result<Lease, VoomError> {
+        let lease = get_lease_in_tx(tx, lease_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("lease {lease_id}")))?;
+        if lease.worker_id != worker_id {
+            return Err(VoomError::Conflict(format!(
+                "lease {lease_id} is held by worker {}, not worker {worker_id}",
+                lease.worker_id
+            )));
+        }
+        if lease.state != LeaseState::Held {
+            return Err(VoomError::Conflict(format!(
+                "lease {lease_id} is {}, not held",
+                lease.state.as_str()
+            )));
+        }
+        Ok(lease)
+    }
+
+    async fn get_held_for_worker(
+        &self,
+        lease_id: LeaseId,
+        worker_id: WorkerId,
+    ) -> Result<Lease, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+        let out = self
+            .get_held_for_worker_in_tx(&mut tx, lease_id, worker_id)
             .await?;
         tx.commit()
             .await

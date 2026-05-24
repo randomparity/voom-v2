@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
 use voom_core::{Clock, JobId, TicketId, VoomError};
 
@@ -128,6 +128,17 @@ pub trait TicketRepo: Repository {
     ) -> Result<Option<Ticket>, VoomError>;
     async fn list_by_state(&self, state: TicketState, limit: u32)
     -> Result<Vec<Ticket>, VoomError>;
+    async fn next_ready_for_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Option<Ticket>, VoomError>;
+    async fn next_ready_for_operations(
+        &self,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Option<Ticket>, VoomError>;
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError>;
     /// Same as `list_dependents` but reads through the supplied transaction.
     /// Required for the release-lease cascade so newly-succeeded parent state
@@ -429,6 +440,59 @@ impl TicketRepo for SqliteTicketRepo {
         .await
         .map_err(|e| VoomError::Database(format!("tickets list: {e}")))?;
         rows.iter().map(row_to_ticket).collect()
+    }
+
+    async fn next_ready_for_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Option<Ticket>, VoomError> {
+        if operations.is_empty() {
+            return Ok(None);
+        }
+
+        let ts = iso8601(now)?;
+        let mut query = QueryBuilder::new(
+            "SELECT id, job_id, kind, state, priority, payload, result, attempt, \
+                    max_attempts, next_eligible_at, created_at, state_changed_at, epoch \
+             FROM tickets \
+             WHERE state = 'ready' \
+               AND next_eligible_at <= ",
+        );
+        query.push_bind(ts);
+        query.push(" AND attempt < max_attempts AND kind IN (");
+        let mut separated = query.separated(", ");
+        for operation in operations {
+            separated.push_bind(operation);
+        }
+        separated.push_unseparated(") ");
+        query.push("ORDER BY priority DESC, next_eligible_at ASC, id ASC LIMIT 1");
+
+        let row =
+            query.build().fetch_optional(&mut **tx).await.map_err(|e| {
+                VoomError::Database(format!("tickets next_ready_for_operations: {e}"))
+            })?;
+        row.as_ref().map(row_to_ticket).transpose()
+    }
+
+    async fn next_ready_for_operations(
+        &self,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Option<Ticket>, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+        let out = self
+            .next_ready_for_operations_in_tx(&mut tx, operations, now)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+        Ok(out)
     }
 
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {

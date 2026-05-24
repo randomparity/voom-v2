@@ -267,6 +267,115 @@ async fn list_inspections_with_status_filters_worker_rows_before_projecting_cont
     assert!(retired[0].node.is_none());
 }
 
+#[tokio::test]
+async fn worker_operation_eligibility_requires_capability_and_grant_without_deny() {
+    let fixture = worker_fixture().await;
+    fixture
+        .insert_capability("transcode_video", &["shared_mount"])
+        .await;
+    fixture.insert_grant(&["transcode_video"], &[]).await;
+
+    let eligible = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, "transcode_video")
+        .await
+        .unwrap();
+    assert!(eligible.has_capability);
+    assert!(eligible.has_grant);
+    assert!(!eligible.is_denied);
+    assert_eq!(eligible.artifact_access, vec!["shared_mount"]);
+}
+
+#[tokio::test]
+async fn worker_operation_eligibility_surfaces_denies() {
+    let fixture = worker_fixture().await;
+    fixture
+        .insert_capability("transcode_video", &["shared_mount"])
+        .await;
+    fixture
+        .insert_grant(&["transcode_video"], &["transcode_video"])
+        .await;
+
+    let eligible = fixture
+        .repo
+        .operation_eligibility(fixture.worker_id, "transcode_video")
+        .await
+        .unwrap();
+    assert!(eligible.is_denied);
+}
+
+#[tokio::test]
+async fn node_owned_worker_in_tx_returns_matching_worker() {
+    let (pool, _tmp, repo, node, worker) = worker_with_node_fixture().await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let found = repo
+        .node_owned_worker_in_tx(&mut tx, worker.id, node.id)
+        .await
+        .unwrap();
+
+    assert_eq!(found.id, worker.id);
+    assert_eq!(found.node_id, Some(node.id));
+}
+
+#[tokio::test]
+async fn node_owned_worker_in_tx_rejects_wrong_node() {
+    let (pool, _tmp, repo, _node, worker) = worker_with_node_fixture().await;
+    let other = register_test_node(&pool, "node-b").await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let err = repo
+        .node_owned_worker_in_tx(&mut tx, worker.id, other.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn node_owned_worker_in_tx_returns_not_found_for_missing_worker() {
+    let (pool, _tmp, repo, node, _worker) = worker_with_node_fixture().await;
+    let mut tx = pool.begin().await.unwrap();
+
+    let err = repo
+        .node_owned_worker_in_tx(&mut tx, voom_core::WorkerId(99_999), node.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn node_owned_worker_in_tx_rejects_worker_without_node() {
+    let (_tmp, repo, node) = worker_repo_with_seeded_node().await;
+    let legacy = repo
+        .register(sample_new_worker("legacy-no-node"))
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    let err = repo
+        .node_owned_worker_in_tx(&mut tx, legacy.id, node.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn node_owned_worker_in_tx_rejects_retired_worker() {
+    let (pool, _tmp, repo, node, worker) = worker_with_node_fixture().await;
+    repo.retire(worker.id, worker.epoch, T0).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+
+    let err = repo
+        .node_owned_worker_in_tx(&mut tx, worker.id, node.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
 async fn worker_repo_with_current_schema() -> (tempfile::NamedTempFile, SqliteWorkerRepo) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
@@ -299,6 +408,112 @@ async fn worker_repo_with_seeded_node() -> (tempfile::NamedTempFile, SqliteWorke
         .unwrap();
     tx.commit().await.unwrap();
     (tmp, SqliteWorkerRepo::new(pool), node)
+}
+
+async fn worker_with_node_fixture() -> (
+    sqlx::SqlitePool,
+    tempfile::NamedTempFile,
+    SqliteWorkerRepo,
+    Node,
+    Worker,
+) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
+        .await
+        .unwrap();
+    let node = register_test_node(&pool, "node-a").await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(NewWorker {
+            name: "node-worker".to_owned(),
+            kind: WorkerKind::Remote,
+            registered_at: T0,
+            node_id: Some(node.id),
+        })
+        .await
+        .unwrap();
+    (pool, tmp, repo, node, worker)
+}
+
+async fn register_test_node(pool: &sqlx::SqlitePool, name: &str) -> Node {
+    let node_repo = SqliteNodeRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+    let node = node_repo
+        .register_in_tx(
+            &mut tx,
+            NewNode {
+                name: name.to_owned(),
+                kind: NodeKind::Remote,
+                registered_at: T0,
+                heartbeat_ttl_seconds: 60,
+                auth_token_hash: format!("voom-node-token-sha256-v1:{name}"),
+                auth_token_hint: name.to_owned(),
+                metadata: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    node
+}
+
+struct WorkerFixture {
+    _tmp: tempfile::NamedTempFile,
+    repo: SqliteWorkerRepo,
+    worker_id: voom_core::WorkerId,
+}
+
+impl WorkerFixture {
+    async fn insert_capability(&self, operation: &str, artifact_access: &[&str]) {
+        self.repo
+            .record_capability(NewCapability {
+                worker_id: self.worker_id,
+                operation: operation.to_owned(),
+                codecs: vec![],
+                hardware: vec![],
+                artifact_access: artifact_access
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                extra: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn insert_grant(&self, can_execute: &[&str], denies: &[&str]) {
+        self.repo
+            .record_grant(NewGrant {
+                worker_id: self.worker_id,
+                can_execute: can_execute
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                can_access_read: vec![],
+                can_access_write: vec![],
+                denies: denies
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+                max_parallel: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+    }
+}
+
+async fn worker_fixture() -> WorkerFixture {
+    let (pool, tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool);
+    let worker = repo
+        .register(sample_new_worker("eligible-worker"))
+        .await
+        .unwrap();
+    WorkerFixture {
+        _tmp: tmp,
+        repo,
+        worker_id: worker.id,
+    }
 }
 
 async fn insert_worker_with_missing_node(pool: &sqlx::SqlitePool) -> voom_core::WorkerId {
