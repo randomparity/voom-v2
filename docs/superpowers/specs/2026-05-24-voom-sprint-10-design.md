@@ -43,8 +43,8 @@ Sprint 10 delivers:
 - Media snapshot persistence linked to the ingested file version and probing
   worker.
 - Agent-facing scan summary JSON fixtures and CLI golden tests.
-- Small fixture-media integration tests that exercise real `ffprobe` when it is
-  available in the test environment.
+- Small fixture-media integration tests that exercise real `ffprobe` in the
+  release verification environment.
 - Closeout documentation tying scan, ingest, snapshot, and provider-boundary
   behavior to repeatable evidence.
 
@@ -68,11 +68,11 @@ The Sprint 10 scan path is:
 voom scan --path <file-or-dir>
   -> local explicit-path validation
   -> local recursive discovery for directories
-  -> local size/hash/stat collection
-  -> IdentityRepo::record_discovered_file_in_tx
-  -> out-of-process ffprobe worker dispatch for probe_file
-  -> normalize probe result into Sprint 10 media snapshot JSON
-  -> IdentityRepo::record_media_snapshot_in_tx
+  -> local size/hash/stat collection for the candidate bytes
+  -> out-of-process ffprobe worker dispatch for probe_file with expected facts
+  -> worker verifies and returns observed file facts with the probe result
+  -> control plane revalidates observed facts against the candidate bytes
+  -> one transaction records discovered file and media snapshot
   -> one CLI JSON envelope with scan summary and per-file results
 ```
 
@@ -83,11 +83,39 @@ transactions. `voom-store` owns identity and snapshot persistence. The
 a typed worker-protocol result. The worker must not write the VOOM database or
 apply ingest decisions itself.
 
+Sprint 10 uses a bundled local worker lifecycle, not daemon discovery. For
+`voom scan`, the control plane launches the bundled `ffprobe` worker as a child
+process over loopback or an equivalent local worker-protocol transport, performs
+the worker handshake, and dispatches `probe_file` requests through that
+transport. Before the first dispatch, the control plane must ensure exactly one
+live durable local worker row exists for this bundled worker with `probe_file`
+capability and an execution grant. The stable bootstrap identity is the worker
+name `builtin.ffprobe`; if a live worker with that name already exists, scan
+reuses it, otherwise scan creates it with `kind = local` and `node_id = NULL`.
+The worker id from that row is the value recorded in `media_snapshots.probed_by`
+and returned in the CLI envelope.
+
+The bundled worker bootstrap is idempotent and system-owned. Repeated scans must
+not create one worker row per invocation. The bootstrap must not require the
+user to run `voom node register` or `voom worker register` before a local scan,
+and it must not introduce remote node registration, production TLS, token
+rotation, or daemon supervision into Sprint 10. It also must not use an
+in-process `ffprobe` shortcut; process separation is part of the acceptance
+surface.
+
 The local discovery and hashing steps intentionally run in the control-plane
 process for Sprint 10. They are deterministic local file-system reads, not
 media-tool execution. The provider boundary is preserved for media probing:
 `ffprobe` is invoked only by the out-of-process worker, using the same
 versioned protocol boundary as synthetic providers.
+
+Per-file persistence is atomic for successful probes: the file asset/version,
+file location, and media snapshot are recorded in one transaction after the
+worker result has passed the content-consistency gate. Probe failures do not
+create a successful media snapshot. Sprint 10 may record an issue or event for
+failed probes if that is already available through existing surfaces, but it
+must not leave a file-version row that the CLI reports as successfully scanned
+without a corresponding snapshot.
 
 Events may record scan and snapshot facts, but durable identity tables and
 `media_snapshots` remain the source of truth. Events do not route scan work.
@@ -105,8 +133,8 @@ command scans that file. If the path is a directory, the command recursively
 discovers supported media files under that directory using deterministic
 lexicographic ordering by normalized path.
 
-The command emits exactly one JSON envelope on stdout. The `data` object should
-include:
+The command emits exactly one JSON envelope on stdout. The `data` object must
+include at least:
 
 ```json
 {
@@ -137,11 +165,27 @@ include:
 }
 ```
 
+When a file status is `failed` or `failed_content_drift`, the file object must
+include an `error` object:
+
+```json
+{
+  "path": "/absolute/input/path/movie.mkv",
+  "status": "failed_content_drift",
+  "error": {
+    "code": "ARTIFACT_CHECKSUM_MISMATCH",
+    "failure_class": "artifact_checksum_mismatch",
+    "message": "file changed between hashing and probing"
+  }
+}
+```
+
 Stable file result statuses:
 
 ```text
 scanned
 skipped_unsupported_extension
+failed_content_drift
 failed
 ```
 
@@ -166,6 +210,7 @@ large files to `ffprobe`.
 
 Discovery rules:
 
+- Reject an explicit symlink with `BAD_ARGS` before canonicalization.
 - Canonicalize the requested path before scanning.
 - Reject missing paths.
 - Reject symlink traversal in Sprint 10. Symlink policy belongs with durable
@@ -180,6 +225,24 @@ Hashing uses BLAKE3 and persists the same content-hash string vocabulary already
 used by ingest fixtures. Hashing and stat collection happen before database
 ingest so `record_discovered_file_in_tx` receives stable observed bytes.
 
+The candidate file facts sent to the worker are mandatory for successful media
+snapshot persistence:
+
+- canonical local path;
+- size in bytes;
+- BLAKE3 content hash;
+- modification timestamp when the platform exposes one;
+- best-effort device/inode or equivalent stable local file key when available.
+
+The `ffprobe` worker must verify the expected size and BLAKE3 hash immediately
+before invoking `ffprobe`, then verify size and BLAKE3 hash again immediately
+after `ffprobe` exits. The worker returns both pre-probe and post-probe observed
+facts. The control plane records a snapshot only when both worker observations
+match each other and match the candidate facts used for ingest. If they differ,
+the file is reported as `failed_content_drift`; the implementation may retry
+once, but it must never persist a media snapshot for bytes that differ from the
+ingested `file_versions.content_hash`.
+
 Sprint 10 records `local_path` file locations. Local physical-object proof is
 best-effort and platform-dependent; if the existing identity proof model cannot
 capture a reliable proof portably in this sprint, the ingest path may leave
@@ -188,16 +251,21 @@ acceptance criteria because rename reconciliation is not part of this sprint.
 
 ## 6. FFprobe Worker
 
-The worker should be a real binary, not a test fake. The implementation plan
-may choose the final crate name, but the design expectation is a media-worker
-crate or binary such as `ffprobe-worker`.
+The worker should be a real binary, not a test fake. The implementation plan may
+choose the final crate name, but the design expectation is a media-worker crate
+or binary such as `ffprobe-worker`. Production `voom scan` must launch this
+binary out of process and dispatch over the worker protocol.
 
 The worker:
 
 - registers or advertises `probe_file`;
-- accepts a typed probe request containing the local file path and optional
+- accepts a typed probe request containing the local file path and mandatory
   expected size/hash metadata;
+- verifies the requested path is still a regular file with the expected size
+  and BLAKE3 hash before invoking `ffprobe`;
 - invokes `ffprobe` with JSON output;
+- verifies the regular file, size, and BLAKE3 hash again after `ffprobe`
+  exits;
 - parses the returned JSON;
 - emits structured progress frames using the existing worker protocol;
 - returns a typed probe result containing normalized container, stream, format,
@@ -206,12 +274,13 @@ The worker:
 
 The worker must fail loudly when:
 
-- `ffprobe` is not found;
-- `ffprobe` exits non-zero;
-- output is not valid JSON;
-- required fields for the Sprint 10 snapshot shape cannot be interpreted;
-- the probed file no longer matches the expected size/hash, when the request
-  supplies those expectations.
+- `ffprobe` is not found: `external_system_unavailable`;
+- `ffprobe` exits non-zero: `external_system_unavailable`;
+- output is not valid JSON: `malformed_worker_result`;
+- required fields for the Sprint 10 snapshot shape cannot be interpreted:
+  `malformed_worker_result`;
+- the probed file no longer matches the expected size/hash:
+  `artifact_checksum_mismatch`.
 
 The worker must not directly access SQLite, create file assets, or record media
 snapshots. Its only durable effect is through the control plane consuming its
@@ -260,9 +329,10 @@ use absent JSON fields for unknown values instead of sentinel strings. Numeric
 conversion must reject values that do not fit the chosen types.
 
 The stored `media_snapshots.probed_by` field records the worker id when the
-scan is dispatched through a registered worker. If early local test harnesses
-launch an ephemeral worker without durable worker registration, production CLI
-behavior must still persist a real worker id before Sprint 10 is complete.
+scan is dispatched through the bundled registered local worker. Tests may use a
+short-lived worker process, but they must still create or reuse the durable
+worker row whose id is persisted on the snapshot. A snapshot with
+`probed_by = NULL` is not acceptable for Sprint 10 CLI scan output.
 
 ## 8. Persistence And Idempotency
 
@@ -295,8 +365,14 @@ Stable command failures:
 - hashing failure: runtime error;
 - ingest persistence failure: runtime error;
 - worker launch/dispatch failure: runtime error;
-- `ffprobe` unavailable: runtime error with a stable worker failure class;
-- invalid `ffprobe` JSON: runtime error with a stable worker failure class.
+- `ffprobe` unavailable: runtime error with
+  `external_system_unavailable`;
+- non-zero `ffprobe` exit: runtime error with
+  `external_system_unavailable`;
+- invalid `ffprobe` JSON: runtime error with `malformed_worker_result`;
+- content drift between hashing and probing: runtime error with
+  `artifact_checksum_mismatch` and `failed_content_drift` in the per-file
+  failure payload.
 
 Directory scans may complete with warnings for unsupported extensions and files
 that disappear before scanning. A selected media file that fails hashing,
@@ -304,7 +380,10 @@ ingest, worker dispatch, or probing causes the command to fail and reports the
 per-file failure in the error payload. Silent skips are not allowed.
 
 The scan result must not claim success if any media file selected for probing
-failed.
+failed. If a command fails after some earlier files were successfully committed,
+the error payload must include both committed successes and the failing file so
+an agent can inspect durable state without guessing whether the command was
+all-or-nothing.
 
 ## 10. Testing
 
@@ -316,17 +395,22 @@ Required tests:
 - `ffprobe` JSON normalization unit tests using checked-in JSON fixtures;
 - worker conformance tests for successful `probe_file`, missing `ffprobe`,
   non-zero exit, invalid JSON, and expected-size/hash drift;
+- local worker bootstrap tests proving `voom scan` reuses the
+  `builtin.ffprobe` worker row, does not require manual node or worker
+  registration, and does not use an in-process `ffprobe` shortcut;
+- content-drift tests proving a changed file cannot produce a media snapshot
+  bound to the stale ingested hash;
 - control-plane integration tests proving file asset, file version, file
-  location, and media snapshot persistence;
+  location, and media snapshot persistence are atomic for successful probes;
 - CLI golden-output tests for scan success and representative failures;
 - small fixture-media integration tests that run real `ffprobe`;
 - documentation placeholder scan;
 - `just ci`.
 
-The implementation plan should make fixture-media tests deterministic. If the
-local environment lacks `ffprobe`, tests that require the binary must fail loud
-in the release verification path rather than being silently skipped. Unit tests
-for normalization can still run without the binary by using JSON fixtures.
+The implementation plan should make fixture-media tests deterministic. Release
+verification requires `ffprobe`; tests that require the binary must fail loud in
+that path rather than being silently skipped. Unit tests for normalization can
+still run without the binary by using JSON fixtures.
 
 ## 11. Project Spec Update
 
@@ -348,6 +432,8 @@ Sprint 10 is complete when:
 - The scan persists file assets, file versions, file locations, content hashes,
   and media snapshots for supported fixture media.
 - The media snapshot is produced from a real out-of-process `ffprobe` worker.
+- Repeated scans reuse the durable `builtin.ffprobe` worker row instead of
+  creating a new worker per scan.
 - The CLI reports skipped unsupported directory entries without silently
   ignoring selected media files.
 - Worker conformance tests cover success and failure cases.
