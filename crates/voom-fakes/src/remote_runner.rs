@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -13,12 +14,15 @@ use voom_fake_support::{dispatch_provider, provider_definition};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
 
+static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone)]
 pub struct RemoteRunnerConfig {
     pub base_url: String,
     pub node_id: voom_core::NodeId,
     pub token: SecretString,
     pub worker_id: WorkerId,
+    pub artifact_access: Vec<String>,
     pub max_polls: u32,
     pub idle_timeout: Duration,
     pub lease_heartbeat_interval: Duration,
@@ -77,7 +81,10 @@ impl RemoteSyntheticRunner {
     /// # Errors
     /// Returns HTTP, API-envelope, or fake-provider protocol failures.
     pub async fn run_once_to_completion(&self) -> Result<RemoteRunnerSummary, RemoteRunnerError> {
-        let mut keys = IdempotencyKeys::new(self.config.worker_id);
+        let mut keys = IdempotencyKeys::new(
+            self.config.worker_id,
+            NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
+        );
         let mut summary = RemoteRunnerSummary::default();
         let started = std::time::Instant::now();
 
@@ -97,7 +104,7 @@ impl RemoteSyntheticRunner {
                 AcquireOutcome::Leased(lease) => {
                     summary.acquired += 1;
                     self.lease_heartbeat(lease.lease_id, keys.next()).await?;
-                    match Self::dispatch(&lease) {
+                    match Self::dispatch(&lease, &self.config.artifact_access) {
                         Ok(result) => {
                             self.complete(lease.lease_id, result, keys.next()).await?;
                             summary.completed += 1;
@@ -237,7 +244,10 @@ impl RemoteSyntheticRunner {
         })
     }
 
-    fn dispatch(lease: &RemoteLeaseDispatch) -> Result<JsonValue, RemoteRunnerError> {
+    fn dispatch(
+        lease: &RemoteLeaseDispatch,
+        artifact_access: &[String],
+    ) -> Result<JsonValue, RemoteRunnerError> {
         let operation = operation_kind(&lease.operation)?;
         let provider_name = provider_for_operation(operation);
         let provider = provider_definition(provider_name)
@@ -245,7 +255,7 @@ impl RemoteSyntheticRunner {
         let request = OperationRequest {
             operation,
             lease_id: lease.lease_id,
-            payload: dispatch_payload(lease)?,
+            payload: dispatch_payload(lease, artifact_access)?,
             heartbeat_deadline_ms: u32::try_from(lease.lease_ttl_seconds.saturating_mul(1_000))
                 .unwrap_or(u32::MAX),
             progress_idle_deadline_ms: u32::try_from(
@@ -262,19 +272,24 @@ impl RemoteSyntheticRunner {
 #[derive(Debug)]
 struct IdempotencyKeys {
     worker_id: WorkerId,
+    run_id: u64,
     sequence: u64,
 }
 
 impl IdempotencyKeys {
-    const fn new(worker_id: WorkerId) -> Self {
+    const fn new(worker_id: WorkerId, run_id: u64) -> Self {
         Self {
             worker_id,
+            run_id,
             sequence: 0,
         }
     }
 
     fn next(&mut self) -> String {
-        let key = format!("runner-{}-{}", self.worker_id.0, self.sequence);
+        let key = format!(
+            "runner-{}-{}-{}",
+            self.worker_id.0, self.run_id, self.sequence
+        );
         self.sequence += 1;
         key
     }
@@ -350,7 +365,10 @@ fn provider_for_operation(operation: OperationKind) -> &'static str {
     }
 }
 
-fn dispatch_payload(lease: &RemoteLeaseDispatch) -> Result<JsonValue, RemoteRunnerError> {
+fn dispatch_payload(
+    lease: &RemoteLeaseDispatch,
+    artifact_access: &[String],
+) -> Result<JsonValue, RemoteRunnerError> {
     let mut payload = lease.dispatch_payload.clone();
     let object = payload.as_object_mut().ok_or_else(|| {
         RemoteRunnerError::MalformedResponse("dispatch payload must be an object".to_owned())
@@ -360,14 +378,10 @@ fn dispatch_payload(lease: &RemoteLeaseDispatch) -> Result<JsonValue, RemoteRunn
         serde_json::to_value(&lease.artifact_access_plan)
             .map_err(|e| RemoteRunnerError::MalformedResponse(e.to_string()))?,
     );
-    let worker_artifact_access = object.get("worker_artifact_access").cloned();
-    object
-        .entry("advertised_artifact_access")
-        .or_insert_with(|| {
-            worker_artifact_access.unwrap_or_else(|| {
-                serde_json::json!([lease.artifact_access_plan.selected_access_mode])
-            })
-        });
+    object.insert(
+        "advertised_artifact_access".to_owned(),
+        serde_json::json!(artifact_access),
+    );
     Ok(payload)
 }
 

@@ -17,7 +17,7 @@ Sprint 8 proves remote synthetic execution over bearer-token HTTP routes for loo
 | Worker capability and grant enforcement during acquire | `cargo test -p voom-control-plane remote_acquire_requires_worker_node_ownership_capability_grant_and_no_deny`; `cargo test -p voom-store operation_eligibility`. |
 | Synthetic worker setup with explicit execution grants | `cargo test -p voom-fakes remote_runner`; fixture registers a remote worker with explicit `can_execute` and `shared_mount` capability. |
 | Remote runner executes synthetic durable tickets over HTTP | `cargo test -p voom-fakes runner_polls_acquires_dispatches_heartbeats_and_completes`; fixture starts the `voom-api` router on loopback and runner calls HTTP routes with bearer auth. |
-| Remote runner fails incompatible artifact access visibly | `cargo test -p voom-fakes runner_fails_lease_when_artifact_access_is_incompatible`. |
+| Remote runner fails incompatible artifact access visibly | `cargo test -p voom-fakes runner_fails_lease_when_configured_artifact_access_is_incompatible`. |
 | Stale lease recovery | `cargo test -p voom-control-plane remote_recover_marks_stale_nodes_and_expires_due_leases`. |
 | Stale node recovery | `cargo test -p voom-control-plane remote_heartbeat_reactivates_stale_node_and_replays_lease_heartbeat`. |
 | No audit events for individual missed heartbeats | `cargo test -p voom-control-plane remote_heartbeat_reactivates_stale_node_and_replays_lease_heartbeat`; test asserts heartbeat does not emit release events. |

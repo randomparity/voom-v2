@@ -24,7 +24,6 @@ async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
         .ready_ticket(json!({
             "path": "/library/movie.mkv",
             "target_codec": "h265",
-            "worker_artifact_access": ["shared_mount"],
             "artifact_access": {
                 "inputs": ["handle:input:test"],
                 "outputs": ["handle:output:test"]
@@ -48,13 +47,52 @@ async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
 }
 
 #[tokio::test]
-async fn runner_fails_lease_when_artifact_access_is_incompatible() {
+async fn runner_uses_fresh_idempotency_keys_for_each_run() {
+    let fixture = RemoteRunnerFixture::new().await;
+    let first_ticket = fixture
+        .ready_ticket(json!({
+            "path": "/library/movie.mkv",
+            "target_codec": "h265",
+            "artifact_access": {
+                "inputs": ["handle:input:test"],
+                "outputs": ["handle:output:test"]
+            }
+        }))
+        .await;
+    let runner = RemoteSyntheticRunner::new(fixture.config());
+
+    let first = runner.run_once_to_completion().await.unwrap();
+    let second_ticket = fixture
+        .ready_ticket(json!({
+            "path": "/library/second.mkv",
+            "target_codec": "h265",
+            "artifact_access": {
+                "inputs": ["handle:input:test"],
+                "outputs": ["handle:output:test"]
+            }
+        }))
+        .await;
+    let second = runner.run_once_to_completion().await.unwrap();
+
+    assert_eq!(first.completed, 1);
+    assert_eq!(second.completed, 1);
+    assert_eq!(
+        fixture.ticket_state(first_ticket).await,
+        TicketState::Succeeded
+    );
+    assert_eq!(
+        fixture.ticket_state(second_ticket).await,
+        TicketState::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
         .ready_ticket(json!({
             "path": "/library/movie.mkv",
             "target_codec": "h265",
-            "worker_artifact_access": ["control_plane_placeholder"],
             "artifact_access": {
                 "inputs": ["handle:input:test"],
                 "outputs": ["handle:output:test"]
@@ -62,7 +100,9 @@ async fn runner_fails_lease_when_artifact_access_is_incompatible() {
         }))
         .await;
 
-    let summary = RemoteSyntheticRunner::new(fixture.config())
+    let mut config = fixture.config();
+    config.artifact_access = vec!["control_plane_placeholder".to_owned()];
+    let summary = RemoteSyntheticRunner::new(config)
         .run_once_to_completion()
         .await
         .unwrap();
@@ -147,6 +187,7 @@ impl RemoteRunnerFixture {
             node_id: self.node_id,
             token: self.token.expose_secret().to_owned().into(),
             worker_id: self.worker_id,
+            artifact_access: vec!["shared_mount".to_owned()],
             max_polls: 3,
             idle_timeout: std::time::Duration::from_millis(100),
             lease_heartbeat_interval: std::time::Duration::from_millis(10),
