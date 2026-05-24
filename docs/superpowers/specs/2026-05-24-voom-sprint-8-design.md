@@ -28,10 +28,12 @@ concurrency explanations, and locality/cost decisions stay in Sprint 9.
 
 Sprint 8 delivers:
 
-- Thin node-authenticated HTTP execution routes for remote lease acquisition,
-  lease heartbeat, lease completion, and lease failure.
+- Thin node-authenticated HTTP execution routes for remote node heartbeat,
+  lease acquisition, lease heartbeat, lease completion, and lease failure.
 - A deterministic ready-ticket acquisition path for an authenticated
   node-linked worker.
+- A remote synthetic fixture setup path that registers node-aware workers with
+  both capabilities and execution grants before the runner starts.
 - A remote synthetic runner launched by tests or CLI, not by a daemon.
 - Remote synthetic worker integration tests that execute durable tickets over
   HTTP.
@@ -52,6 +54,7 @@ Sprint 8 explicitly does not deliver:
 - Real artifact transfer.
 - Production object storage.
 - Production TLS, certificates, or token rotation.
+- Production-safe remote networking over untrusted networks.
 - A daemonized remote node agent.
 - Web UI node or execution views.
 - Real media workers.
@@ -78,6 +81,13 @@ The HTTP route layer must call control-plane use cases. It must not bypass
 repositories directly, create an event-driven work router, or embed scheduler
 policy that belongs in Sprint 9.
 
+Because production TLS and certificate management are out of scope, Sprint 8's
+bearer-token HTTP execution surface is not production-safe on untrusted
+networks. Supported Sprint 8 deployments are loopback, the integration-test
+harness, or an explicitly trusted isolated network used only to prove synthetic
+remote execution. Documentation and closeout must not present this transport as
+ready for production remote workers.
+
 ## 4. Remote Execution API
 
 The HTTP execution API is node-authenticated and worker-scoped. Each mutating
@@ -87,30 +97,33 @@ request presents the Sprint 7 node token with:
 Authorization: Bearer <token>
 ```
 
-Each request also identifies the `node_id` and `worker_id` either in the route
-or request body. The control plane verifies:
+Each request identifies the `node_id` either in the route or request body.
+Worker-scoped routes also identify `worker_id`. The control plane verifies:
 
 - the node exists;
 - the node token matches;
 - the node is not retired;
-- the node heartbeat is fresh enough for work acquisition;
-- the worker exists;
-- `workers.node_id == node_id`;
-- the worker is not retired;
-- lease ownership matches the worker for heartbeat, complete, and fail.
+- for acquire, the node heartbeat is fresh enough for work acquisition;
+- for worker-scoped routes, the worker exists;
+- for worker-scoped routes, `workers.node_id == node_id`;
+- for worker-scoped routes, the worker is not retired;
+- for acquire, the worker advertises the ticket operation;
+- for acquire, the worker has a grant allowing the ticket operation;
+- for lease heartbeat, complete, and fail, lease ownership matches the worker.
 
 Minimal routes:
 
 ```text
 POST /v1/execution/lease/acquire
+POST /v1/execution/node/{node_id}/heartbeat
 POST /v1/execution/lease/{lease_id}/heartbeat
 POST /v1/execution/lease/{lease_id}/complete
 POST /v1/execution/lease/{lease_id}/fail
 ```
 
 `acquire` is not Sprint 9's scheduler. It selects the next ready ticket
-matching one of the authenticated worker's capabilities using deterministic
-ordering:
+matching one of the authenticated worker's advertised capabilities and granted
+operations using deterministic ordering:
 
 1. priority;
 2. `next_eligible_at`;
@@ -130,6 +143,31 @@ The acquire response includes:
 - lease TTL;
 - recommended heartbeat cadence;
 - selected artifact access plan.
+
+Every mutating route requires `X-Voom-Idempotency-Key`. The key is scoped to
+the authenticated node, route, and worker when the route is worker-scoped. It
+is paired with a request hash and rejected when the same key is reused with a
+different request body. A same-key retry of the same request replays the
+original successful or failed route outcome without performing the state
+transition a second time.
+
+Runners generate a fresh key for each new logical mutation. They reuse that key
+only when retrying the same mutation after a timeout, disconnect, or lost
+response. Reusing the same key for later heartbeat ticks must replay the old
+heartbeat and therefore must not be used as the normal heartbeat cadence.
+
+This is required for remote execution because response loss is not evidence
+that the control plane failed to commit. In particular:
+
+- retrying `acquire` after a lost response must return the original lease
+  instead of acquiring a second ticket or abandoning the first lease until
+  expiry;
+- retrying node heartbeat after a lost response must return the original
+  heartbeat outcome instead of emitting a second heartbeat event;
+- retrying `complete` or `fail` after a lost response must return the original
+  terminal outcome instead of surfacing a confusing terminal-state conflict;
+- retrying `heartbeat` with the same key must not emit events and must not be
+  treated as a protocol error.
 
 Lease heartbeat produces no audit event. Heartbeats are high-volume observable
 state, recorded through `last_heartbeat_at` and `expires_at`. Missed heartbeats
@@ -209,16 +247,16 @@ accepts:
 - polling limits;
 - optional idle timeout.
 
-The runner may register a node-aware worker when tests need a self-contained
-fixture, but Sprint 8 can also support using an already registered worker. In
-both cases, execution requests authenticate with the node token and identify
-the worker.
+The runner uses an already registered node-aware worker. Tests that need a
+self-contained fixture register the node and worker through existing local
+control-plane setup before launching the remote runner, including the execution
+grants required by the remote acquire path. HTTP worker registration and broad
+CLI grant-authoring remain out of scope for Sprint 8.
 
 The runner loop is:
 
 ```text
 heartbeat node
-register or confirm worker
 poll acquire
   no work -> sleep/backoff until idle limit
   lease -> dispatch synthetic worker operation
@@ -283,6 +321,8 @@ Sprint 8 acceptance is durable and externally inspectable:
 
 - A node-authenticated remote worker can acquire a ready synthetic ticket over
   HTTP.
+- A node can heartbeat remotely over HTTP and repeated same-key heartbeat
+  retries do not emit duplicate heartbeat events.
 - A worker cannot acquire work for a node it does not belong to.
 - Invalid node tokens reject acquire, heartbeat, complete, and fail.
 - Retired or stale nodes cannot acquire work.
@@ -296,9 +336,18 @@ Sprint 8 acceptance is durable and externally inspectable:
 - Every remote dispatch records a selected artifact access plan.
 - The synthetic runner validates artifact access plans against advertised
   capability.
+- The remote acquire path requires both advertised capability and an execution
+  grant for the selected ticket operation.
+- The remote synthetic fixture setup creates at least one worker with matching
+  capabilities and grants, proving the acquire path can run without weakening
+  the grant check.
 - Incompatible artifact access fails visibly and does not mark the ticket
   succeeded.
 - Idle polling returns a non-error "no work available" outcome.
+- Same-key/same-body retries for node heartbeat, acquire, lease heartbeat,
+  complete, and fail replay the original route outcome.
+- Same-key/different-body retries for node heartbeat, acquire, lease heartbeat,
+  complete, and fail are rejected without mutating node, lease, or ticket state.
 
 Required verification:
 
@@ -318,8 +367,13 @@ control-plane, store, and fake-runner tests plus full `just ci` are required.
 Sprint 8 closeout must record evidence for:
 
 - node-token authenticated remote execution routes;
+- explicit non-production transport boundary for bearer-token HTTP;
 - worker-to-node ownership enforcement;
-- remote lease acquire, heartbeat, complete, and fail behavior;
+- remote node heartbeat plus lease acquire, heartbeat, complete, and fail
+  behavior;
+- remote execution route idempotency and duplicate-key rejection;
+- worker capability and grant enforcement during acquire;
+- synthetic worker setup with explicit execution grants;
 - remote runner execution of synthetic durable tickets;
 - stale lease recovery;
 - stale node recovery;
