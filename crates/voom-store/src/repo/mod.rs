@@ -1,5 +1,6 @@
 //! Repository pattern: trait per storage area, Sqlite impl per trait.
 
+pub mod artifact_access_plans;
 pub mod artifacts;
 pub mod bundles;
 pub mod commit_safety_gate;
@@ -18,6 +19,10 @@ pub mod tickets;
 pub mod use_leases;
 pub mod workers;
 
+pub use artifact_access_plans::{
+    ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
+    NewArtifactAccessPlan, SqliteArtifactAccessPlanRepo,
+};
 pub use artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, ArtifactRepo, NewArtifactHandle,
     NewArtifactLineage, NewArtifactLocation, SqliteArtifactRepo,
