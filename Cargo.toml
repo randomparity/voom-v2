@@ -70,7 +70,7 @@ hyper-util = { version = "0.1.10", features = ["client-legacy", "tokio", "server
 reqwest = { version = "0.12.24", default-features = false, features = ["json"] }
 secrecy = "0.10"
 thiserror = "2"
-toml = "0.8"
+toml = "1.1"
 tokio-util = { version = "0.7.13", features = ["io"] }
 trybuild = "1.0.108"
 
