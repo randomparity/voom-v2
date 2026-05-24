@@ -9,7 +9,7 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
 use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
-    ScoreOutcome, TicketCandidate, WorkerCandidate,
+    ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
 use voom_store::repo::artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
@@ -22,7 +22,7 @@ use voom_store::repo::remote_idempotency::{
 };
 use voom_store::repo::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
-    SchedulerDecisionRepo, SchedulerReasonCode, SchedulerRequestSource,
+    SchedulerDecisionRepo, SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
 use voom_store::repo::tickets::{Ticket, TicketRepo};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility, WorkerRepo};
@@ -398,7 +398,7 @@ impl ControlPlane {
             set_operation_set(&mut score.explanation, &operations);
             let decision = self
                 .scheduler_decisions
-                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now)?)
+                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
                 .await?;
             return Ok(RemoteAcquirePrepared::Idle(RemoteAcquireOutcome::Idle {
                 worker_id: input.worker_id,
@@ -469,7 +469,7 @@ impl ControlPlane {
             ScoreOutcome::NoEligibleCandidate => {
                 let decision = self
                     .scheduler_decisions
-                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now)?)
+                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
                     .await?;
                 Ok(RemoteAcquirePrepared::NoCandidate(
                     RemoteAcquireOutcome::NoCandidate {
@@ -530,7 +530,7 @@ impl ControlPlane {
                             tx,
                             capacity_decision(
                                 input,
-                                SchedulerReasonCode::WorkerCapacityFull,
+                                StoreSchedulerReasonCode::WorkerCapacityFull,
                                 selected_candidate,
                                 1,
                                 worker_active,
@@ -559,7 +559,7 @@ impl ControlPlane {
                             tx,
                             capacity_decision(
                                 input,
-                                SchedulerReasonCode::NodeCapacityFull,
+                                StoreSchedulerReasonCode::NodeCapacityFull,
                                 selected_candidate,
                                 1,
                                 node_active,
@@ -587,7 +587,7 @@ impl ControlPlane {
                             &score,
                             Some((selected.ticket_id, selected.worker_id, selected.node_id)),
                             now,
-                        )?,
+                        ),
                     )
                     .await?;
                 Ok(RemoteAcquirePrepared::Leased {
@@ -1381,7 +1381,7 @@ fn aggregate_score_decision(
     base
 }
 
-fn first_rejection_reason(explanation: &JsonValue) -> &'static str {
+fn first_rejection_reason(explanation: &JsonValue) -> ScoreReasonCode {
     explanation
         .get("candidates")
         .and_then(JsonValue::as_array)
@@ -1390,42 +1390,9 @@ fn first_rejection_reason(explanation: &JsonValue) -> &'static str {
         .filter_map(|row| row.get("reasons").and_then(JsonValue::as_array))
         .flatten()
         .filter_map(JsonValue::as_str)
-        .filter_map(reason_priority)
-        .min_by_key(|(priority, _)| *priority)
-        .map_or("no_eligible_candidate", |(_, reason)| reason)
-}
-
-fn reason_priority(reason: &str) -> Option<(u8, &'static str)> {
-    static_reason_code(reason).map(|static_reason| {
-        let priority = match static_reason {
-            "missing_capability" => 0,
-            "missing_grant" => 1,
-            "operation_denied" => 2,
-            "worker_not_executable" => 3,
-            "node_not_executable" => 4,
-            "heartbeat_expired" => 5,
-            "unsupported_artifact_access" => 6,
-            "worker_capacity_full" => 7,
-            "node_capacity_full" => 8,
-            _ => 9,
-        };
-        (priority, static_reason)
-    })
-}
-
-fn static_reason_code(reason: &str) -> Option<&'static str> {
-    match reason {
-        "missing_capability" => Some("missing_capability"),
-        "missing_grant" => Some("missing_grant"),
-        "operation_denied" => Some("operation_denied"),
-        "worker_not_executable" => Some("worker_not_executable"),
-        "node_not_executable" => Some("node_not_executable"),
-        "heartbeat_expired" => Some("heartbeat_expired"),
-        "unsupported_artifact_access" => Some("unsupported_artifact_access"),
-        "worker_capacity_full" => Some("worker_capacity_full"),
-        "node_capacity_full" => Some("node_capacity_full"),
-        _ => None,
-    }
+        .filter_map(ScoreReasonCode::parse)
+        .min_by_key(|reason| reason.priority())
+        .unwrap_or(ScoreReasonCode::NoEligibleCandidate)
 }
 
 fn selected_candidate_for_score(
@@ -1667,7 +1634,7 @@ fn decision_from_score(
     score: &voom_scheduler::ScoreDecision,
     selected: Option<(TicketId, WorkerId, NodeId)>,
     now: OffsetDateTime,
-) -> Result<NewSchedulerDecision, VoomError> {
+) -> NewSchedulerDecision {
     let (ticket_id, selected_worker_id, selected_node_id) = selected
         .map_or((None, None, None), |(ticket_id, worker_id, node_id)| {
             (Some(ticket_id), Some(worker_id), Some(node_id))
@@ -1684,7 +1651,7 @@ fn decision_from_score(
         ),
     };
 
-    Ok(NewSchedulerDecision {
+    NewSchedulerDecision {
         decision_kind,
         request_source: SchedulerRequestSource::RemoteAcquire,
         idempotency_key: Some(input.idempotency_key.clone()),
@@ -1695,7 +1662,7 @@ fn decision_from_score(
         selected_node_id,
         selected_lease_id: None,
         outcome,
-        reason_code: scheduler_reason(score.reason_code)?,
+        reason_code: scheduler_reason(score.reason_code),
         summary: scheduler_summary(score),
         candidate_count: u32::try_from(score.candidate_count).unwrap_or(u32::MAX),
         selected_score: match score.outcome {
@@ -1705,12 +1672,12 @@ fn decision_from_score(
         suppression_key: suppression_key(input, score),
         explanation: score.explanation.clone(),
         now,
-    })
+    }
 }
 
 fn capacity_decision(
     input: &RemoteAcquireInput,
-    reason_code: SchedulerReasonCode,
+    reason_code: StoreSchedulerReasonCode,
     selected_candidate: &SchedulerCandidate,
     candidate_count: usize,
     observed_active: u32,
@@ -1753,12 +1720,23 @@ fn capacity_decision(
     }
 }
 
-fn scheduler_reason(reason: &str) -> Result<SchedulerReasonCode, VoomError> {
-    SchedulerReasonCode::parse(reason).map_err(|_| {
-        VoomError::Internal(format!(
-            "scheduler reason {reason:?} is not mapped to the persistence vocabulary"
-        ))
-    })
+fn scheduler_reason(reason: ScoreReasonCode) -> StoreSchedulerReasonCode {
+    match reason {
+        ScoreReasonCode::Selected => StoreSchedulerReasonCode::Selected,
+        ScoreReasonCode::NoReadyTicket => StoreSchedulerReasonCode::NoReadyTicket,
+        ScoreReasonCode::MissingCapability => StoreSchedulerReasonCode::MissingCapability,
+        ScoreReasonCode::MissingGrant => StoreSchedulerReasonCode::MissingGrant,
+        ScoreReasonCode::OperationDenied => StoreSchedulerReasonCode::OperationDenied,
+        ScoreReasonCode::WorkerNotExecutable => StoreSchedulerReasonCode::WorkerNotExecutable,
+        ScoreReasonCode::NodeNotExecutable => StoreSchedulerReasonCode::NodeNotExecutable,
+        ScoreReasonCode::HeartbeatExpired => StoreSchedulerReasonCode::HeartbeatExpired,
+        ScoreReasonCode::UnsupportedArtifactAccess => {
+            StoreSchedulerReasonCode::UnsupportedArtifactAccess
+        }
+        ScoreReasonCode::WorkerCapacityFull => StoreSchedulerReasonCode::WorkerCapacityFull,
+        ScoreReasonCode::NodeCapacityFull => StoreSchedulerReasonCode::NodeCapacityFull,
+        ScoreReasonCode::NoEligibleCandidate => StoreSchedulerReasonCode::NoEligibleCandidate,
+    }
 }
 
 fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
@@ -1775,7 +1753,7 @@ fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
         }
         ScoreOutcome::Idle => "no ready tickets".to_owned(),
         ScoreOutcome::NoEligibleCandidate => {
-            format!("no eligible candidate: {}", score.reason_code)
+            format!("no eligible candidate: {}", score.reason_code.as_str())
         }
     }
 }
@@ -1789,7 +1767,7 @@ fn suppression_key(
     }
     Some(remote_acquire_suppression_key(
         input,
-        score.reason_code,
+        score.reason_code.as_str(),
         &operation_fingerprint(&score.explanation),
     ))
 }

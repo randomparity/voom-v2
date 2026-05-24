@@ -74,12 +74,83 @@ pub enum ScoreOutcome {
     NoEligibleCandidate,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreReasonCode {
+    Selected,
+    NoReadyTicket,
+    MissingCapability,
+    MissingGrant,
+    OperationDenied,
+    WorkerNotExecutable,
+    NodeNotExecutable,
+    HeartbeatExpired,
+    UnsupportedArtifactAccess,
+    WorkerCapacityFull,
+    NodeCapacityFull,
+    NoEligibleCandidate,
+}
+
+impl ScoreReasonCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Selected => "selected",
+            Self::NoReadyTicket => "no_ready_ticket",
+            Self::MissingCapability => "missing_capability",
+            Self::MissingGrant => "missing_grant",
+            Self::OperationDenied => "operation_denied",
+            Self::WorkerNotExecutable => "worker_not_executable",
+            Self::NodeNotExecutable => "node_not_executable",
+            Self::HeartbeatExpired => "heartbeat_expired",
+            Self::UnsupportedArtifactAccess => "unsupported_artifact_access",
+            Self::WorkerCapacityFull => "worker_capacity_full",
+            Self::NodeCapacityFull => "node_capacity_full",
+            Self::NoEligibleCandidate => "no_eligible_candidate",
+        }
+    }
+
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::MissingCapability => 0,
+            Self::MissingGrant => 1,
+            Self::OperationDenied => 2,
+            Self::WorkerNotExecutable => 3,
+            Self::NodeNotExecutable => 4,
+            Self::HeartbeatExpired => 5,
+            Self::UnsupportedArtifactAccess => 6,
+            Self::WorkerCapacityFull => 7,
+            Self::NodeCapacityFull => 8,
+            Self::Selected | Self::NoReadyTicket | Self::NoEligibleCandidate => 9,
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "selected" => Some(Self::Selected),
+            "no_ready_ticket" => Some(Self::NoReadyTicket),
+            "missing_capability" => Some(Self::MissingCapability),
+            "missing_grant" => Some(Self::MissingGrant),
+            "operation_denied" => Some(Self::OperationDenied),
+            "worker_not_executable" => Some(Self::WorkerNotExecutable),
+            "node_not_executable" => Some(Self::NodeNotExecutable),
+            "heartbeat_expired" => Some(Self::HeartbeatExpired),
+            "unsupported_artifact_access" => Some(Self::UnsupportedArtifactAccess),
+            "worker_capacity_full" => Some(Self::WorkerCapacityFull),
+            "node_capacity_full" => Some(Self::NodeCapacityFull),
+            "no_eligible_candidate" => Some(Self::NoEligibleCandidate),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScoreDecision {
     pub outcome: ScoreOutcome,
     pub selected: Option<SelectedCandidate>,
     pub candidate_count: usize,
-    pub reason_code: &'static str,
+    pub reason_code: ScoreReasonCode,
     pub explanation: JsonValue,
 }
 
@@ -93,7 +164,7 @@ impl SchedulerScorer {
                 outcome: ScoreOutcome::Idle,
                 selected: None,
                 candidate_count: 0,
-                reason_code: "no_ready_ticket",
+                reason_code: ScoreReasonCode::NoReadyTicket,
                 explanation: json!({
                     "scoring_version": SCORING_VERSION,
                     "operation": null,
@@ -158,7 +229,7 @@ impl SchedulerScorer {
                 "score": score,
                 "selected_access_mode": access_mode,
                 "factors": factor_json(candidate, access_mode, score),
-                "reasons": reasons,
+                "reasons": reasons.iter().map(|reason| reason.as_str()).collect::<Vec<_>>(),
             }));
         }
 
@@ -181,7 +252,7 @@ impl SchedulerScorer {
                     score,
                 }),
                 candidate_count: candidates.len(),
-                reason_code: "selected",
+                reason_code: ScoreReasonCode::Selected,
                 explanation,
             });
         }
@@ -212,34 +283,34 @@ fn weights_json() -> JsonValue {
 fn hard_gate_reasons(
     candidate: &SchedulerCandidate,
     access_mode: Option<&str>,
-) -> Vec<&'static str> {
+) -> Vec<ScoreReasonCode> {
     let mut reasons = Vec::new();
     if !candidate.worker.has_capability {
-        reasons.push("missing_capability");
+        reasons.push(ScoreReasonCode::MissingCapability);
     }
     if !candidate.worker.has_grant {
-        reasons.push("missing_grant");
+        reasons.push(ScoreReasonCode::MissingGrant);
     }
     if candidate.worker.denied {
-        reasons.push("operation_denied");
+        reasons.push(ScoreReasonCode::OperationDenied);
     }
     if !candidate.worker.executable {
-        reasons.push("worker_not_executable");
+        reasons.push(ScoreReasonCode::WorkerNotExecutable);
     }
     if !candidate.node.executable {
-        reasons.push("node_not_executable");
+        reasons.push(ScoreReasonCode::NodeNotExecutable);
     }
     if !candidate.node.heartbeat_fresh {
-        reasons.push("heartbeat_expired");
+        reasons.push(ScoreReasonCode::HeartbeatExpired);
     }
     if access_mode.is_none() {
-        reasons.push("unsupported_artifact_access");
+        reasons.push(ScoreReasonCode::UnsupportedArtifactAccess);
     }
     if candidate.worker.active_leases >= candidate.worker.max_parallel {
-        reasons.push("worker_capacity_full");
+        reasons.push(ScoreReasonCode::WorkerCapacityFull);
     }
     if candidate.node.active_leases >= candidate.node.max_parallel_leases {
-        reasons.push("node_capacity_full");
+        reasons.push(ScoreReasonCode::NodeCapacityFull);
     }
     reasons
 }
@@ -312,47 +383,14 @@ fn tie_key(candidate: &SchedulerCandidate) -> (std::cmp::Reverse<i64>, i64, u64,
     )
 }
 
-fn first_rejection_reason(rows: &[JsonValue]) -> &'static str {
+fn first_rejection_reason(rows: &[JsonValue]) -> ScoreReasonCode {
     rows.iter()
         .filter_map(|row| row["reasons"].as_array())
         .flat_map(|reasons| reasons.iter())
         .filter_map(serde_json::Value::as_str)
-        .filter_map(reason_priority)
-        .min_by_key(|(priority, _)| *priority)
-        .map_or("no_eligible_candidate", |(_, reason)| reason)
-}
-
-fn reason_priority(reason: &str) -> Option<(u8, &'static str)> {
-    static_reason_code(reason).map(|static_reason| {
-        let priority = match static_reason {
-            "missing_capability" => 0,
-            "missing_grant" => 1,
-            "operation_denied" => 2,
-            "worker_not_executable" => 3,
-            "node_not_executable" => 4,
-            "heartbeat_expired" => 5,
-            "unsupported_artifact_access" => 6,
-            "worker_capacity_full" => 7,
-            "node_capacity_full" => 8,
-            _ => 9,
-        };
-        (priority, static_reason)
-    })
-}
-
-fn static_reason_code(reason: &str) -> Option<&'static str> {
-    match reason {
-        "missing_capability" => Some("missing_capability"),
-        "missing_grant" => Some("missing_grant"),
-        "operation_denied" => Some("operation_denied"),
-        "worker_not_executable" => Some("worker_not_executable"),
-        "node_not_executable" => Some("node_not_executable"),
-        "heartbeat_expired" => Some("heartbeat_expired"),
-        "unsupported_artifact_access" => Some("unsupported_artifact_access"),
-        "worker_capacity_full" => Some("worker_capacity_full"),
-        "node_capacity_full" => Some("node_capacity_full"),
-        _ => None,
-    }
+        .filter_map(ScoreReasonCode::parse)
+        .min_by_key(|reason| reason.priority())
+        .unwrap_or(ScoreReasonCode::NoEligibleCandidate)
 }
 
 /// Lightweight worker projection the supervisor passes to
