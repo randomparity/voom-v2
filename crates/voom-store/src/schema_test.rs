@@ -28,7 +28,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 9);
+    assert_eq!(expected_migrations(), 10);
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -66,6 +66,61 @@ async fn nodes_schema_preserves_registry_constraints_and_worker_link() {
     .await
     .unwrap();
     assert_eq!(fk_count, 1);
+}
+
+#[tokio::test]
+async fn remote_execution_schema_contains_idempotency_and_artifact_access_tables() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = crate::test_support::sqlite_url_for(tmp.path());
+    crate::init(&url).await.unwrap();
+    let pool = crate::connect(&url).await.unwrap();
+
+    let idem_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'remote_idempotency_keys'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(idem_sql.contains("node_id"));
+    assert!(idem_sql.contains("route_key"));
+    assert!(idem_sql.contains("request_hash"));
+    assert!(idem_sql.contains("response_json"));
+    assert!(idem_sql.contains("worker_scope_id"));
+    assert!(idem_sql.contains("UNIQUE (node_id, route_key, worker_scope_id, idempotency_key)"));
+    assert!(idem_sql.contains("worker_id IS NOT NULL"));
+
+    let plan_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'artifact_access_plans'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(plan_sql.contains("lease_id"));
+    assert!(plan_sql.contains("ticket_id"));
+    assert!(plan_sql.contains("worker_id"));
+    assert!(plan_sql.contains("node_id"));
+    assert!(plan_sql.contains("selected_access_mode"));
+    assert!(plan_sql.contains("CHECK (status IN ('selected','consumed','rejected','failed'))"));
+    assert!(plan_sql.contains("CHECK (json_valid(input_handles))"));
+    assert!(plan_sql.contains("CHECK (json_valid(output_handles))"));
+    assert!(plan_sql.contains("CHECK (json_valid(evidence))"));
+
+    for index_name in [
+        "remote_idempotency_by_node_created",
+        "artifact_access_plans_by_ticket",
+        "artifact_access_plans_by_worker",
+        "artifact_access_plans_by_node",
+        "artifact_access_plans_by_mode_status",
+    ] {
+        let index_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(index_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(index_count, 1, "missing index {index_name}");
+    }
 }
 
 #[tokio::test]
