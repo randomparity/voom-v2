@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/scan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scan",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "BAD_ARGS",
+    "message": "unsupported media extension: [scan-dir]/note.txt"
+  }
+}
