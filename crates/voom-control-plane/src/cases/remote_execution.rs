@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
+use voom_scheduler::{SCORING_VERSION, SchedulerScorer, ScoreOutcome};
 use voom_store::repo::artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
     NewArtifactAccessPlan,
@@ -15,6 +16,10 @@ use voom_store::repo::leases::{LeaseRepo, NewLease};
 use voom_store::repo::nodes::{NodeAuthRecord, NodeKind, NodeRepo, NodeStatus};
 use voom_store::repo::remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteIdempotencyRepo, RemoteMutationReplay,
+};
+use voom_store::repo::scheduler_decisions::{
+    NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
+    SchedulerDecisionRepo, SchedulerReasonCode, SchedulerRequestSource,
 };
 use voom_store::repo::tickets::{Ticket, TicketRepo};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility, WorkerRepo};
@@ -53,13 +58,21 @@ pub struct RemoteAcquireInput {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RemoteAcquireOutcome {
-    Idle { worker_id: WorkerId },
+    Idle {
+        worker_id: WorkerId,
+        scheduler_decision_id: u64,
+    },
+    NoCandidate {
+        worker_id: WorkerId,
+        scheduler_decision_id: u64,
+    },
     Leased(RemoteLeaseDispatch),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteLeaseDispatch {
     pub lease_id: LeaseId,
+    pub scheduler_decision_id: u64,
     pub ticket_id: TicketId,
     pub worker_id: WorkerId,
     pub operation: String,
@@ -143,11 +156,21 @@ pub struct RemoteRecoverReport {
     pub failed_tickets: Vec<TicketId>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Task 3 carries the selected scheduler decision through prepared state for lease linking"
+)]
 enum RemoteAcquirePrepared {
     Idle(RemoteAcquireOutcome),
+    #[expect(
+        dead_code,
+        reason = "Task 4 will convert eligibility exhaustion into a successful no-candidate outcome"
+    )]
+    NoCandidate(RemoteAcquireOutcome),
     Leased {
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
+        scheduler_decision: SchedulerDecision,
         selected_access_mode: ArtifactAccessMode,
     },
 }
@@ -311,7 +334,7 @@ impl ControlPlane {
         };
 
         let outcome = match prepared {
-            RemoteAcquirePrepared::Idle(outcome) => {
+            RemoteAcquirePrepared::Idle(outcome) | RemoteAcquirePrepared::NoCandidate(outcome) => {
                 self.complete_remote_ok_in_tx(
                     &mut tx,
                     input.node_id,
@@ -327,6 +350,7 @@ impl ControlPlane {
             RemoteAcquirePrepared::Leased {
                 ticket,
                 eligibility,
+                scheduler_decision,
                 selected_access_mode,
             } => {
                 self.remote_acquire_leased_in_tx(
@@ -334,6 +358,7 @@ impl ControlPlane {
                     &input,
                     ticket,
                     eligibility,
+                    scheduler_decision,
                     selected_access_mode,
                     now,
                 )
@@ -362,8 +387,18 @@ impl ControlPlane {
             .ready_for_operations_in_tx(tx, &operations, now)
             .await?;
         if tickets.is_empty() {
+            #[expect(
+                clippy::default_constructed_unit_structs,
+                reason = "Task 3 intentionally wires the default scheduler scorer"
+            )]
+            let score = SchedulerScorer::default().score(&[])?;
+            let decision = self
+                .scheduler_decisions
+                .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                .await?;
             return Ok(RemoteAcquirePrepared::Idle(RemoteAcquireOutcome::Idle {
                 worker_id: input.worker_id,
+                scheduler_decision_id: decision.id,
             }));
         }
 
@@ -385,9 +420,41 @@ impl ControlPlane {
                 Ok(()) => {
                     let selected_access_mode =
                         select_access_mode(input.worker_id, &eligibility.artifact_access)?;
+                    let scheduler_decision = self
+                        .scheduler_decisions
+                        .create_in_tx(
+                            tx,
+                            NewSchedulerDecision {
+                                decision_kind: SchedulerDecisionKind::LeaseAcquire,
+                                request_source: SchedulerRequestSource::RemoteAcquire,
+                                idempotency_key: Some(input.idempotency_key.clone()),
+                                request_node_id: Some(input.node_id),
+                                request_worker_id: Some(input.worker_id),
+                                ticket_id: Some(ticket.id),
+                                selected_worker_id: Some(input.worker_id),
+                                selected_node_id: Some(input.node_id),
+                                selected_lease_id: None,
+                                outcome: SchedulerDecisionOutcome::Selected,
+                                reason_code: SchedulerReasonCode::Selected,
+                                summary: format!(
+                                    "selected worker {} on node {} for ticket {}",
+                                    input.worker_id, input.node_id, ticket.id
+                                ),
+                                candidate_count: 1,
+                                selected_score: None,
+                                suppression_key: None,
+                                explanation: json!({
+                                    "scoring_version": SCORING_VERSION,
+                                    "interim": "first_eligible"
+                                }),
+                                now,
+                            },
+                        )
+                        .await?;
                     return Ok(RemoteAcquirePrepared::Leased {
                         ticket,
                         eligibility,
+                        scheduler_decision,
                         selected_access_mode,
                     });
                 }
@@ -402,12 +469,17 @@ impl ControlPlane {
         Err(err)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "remote acquire keeps the transaction input and selected facts explicit"
+    )]
     async fn remote_acquire_leased_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         input: &RemoteAcquireInput,
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
+        scheduler_decision: SchedulerDecision,
         selected_access_mode: ArtifactAccessMode,
         now: time::OffsetDateTime,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
@@ -436,8 +508,13 @@ impl ControlPlane {
                 ),
             )
             .await?;
+        let scheduler_decision = self
+            .scheduler_decisions
+            .link_selected_lease_in_tx(tx, scheduler_decision.id, lease.id, now)
+            .await?;
         let outcome = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
             lease_id: lease.id,
+            scheduler_decision_id: scheduler_decision.id,
             ticket_id: ticket.id,
             worker_id: input.worker_id,
             operation: ticket.kind,
@@ -1101,6 +1178,107 @@ fn is_remote_replayable_error(err: &VoomError) -> bool {
     )
 }
 
+fn decision_from_score(
+    input: &RemoteAcquireInput,
+    score: &voom_scheduler::ScoreDecision,
+    selected: Option<(TicketId, WorkerId, NodeId)>,
+    now: OffsetDateTime,
+) -> NewSchedulerDecision {
+    let (ticket_id, selected_worker_id, selected_node_id) = selected
+        .map_or((None, None, None), |(ticket_id, worker_id, node_id)| {
+            (Some(ticket_id), Some(worker_id), Some(node_id))
+        });
+    let (decision_kind, outcome) = match score.outcome {
+        ScoreOutcome::Selected => (
+            SchedulerDecisionKind::LeaseAcquire,
+            SchedulerDecisionOutcome::Selected,
+        ),
+        ScoreOutcome::Idle => (SchedulerDecisionKind::Idle, SchedulerDecisionOutcome::Idle),
+        ScoreOutcome::NoEligibleCandidate => (
+            SchedulerDecisionKind::NoCandidate,
+            SchedulerDecisionOutcome::NoEligibleCandidate,
+        ),
+    };
+
+    NewSchedulerDecision {
+        decision_kind,
+        request_source: SchedulerRequestSource::RemoteAcquire,
+        idempotency_key: Some(input.idempotency_key.clone()),
+        request_node_id: Some(input.node_id),
+        request_worker_id: Some(input.worker_id),
+        ticket_id,
+        selected_worker_id,
+        selected_node_id,
+        selected_lease_id: None,
+        outcome,
+        reason_code: scheduler_reason(score.reason_code),
+        summary: scheduler_summary(score),
+        candidate_count: u32::try_from(score.candidate_count).unwrap_or(u32::MAX),
+        selected_score: match score.outcome {
+            ScoreOutcome::Selected => score.selected.as_ref().map(|selected| selected.score),
+            ScoreOutcome::Idle | ScoreOutcome::NoEligibleCandidate => None,
+        },
+        suppression_key: suppression_key(input, score),
+        explanation: score.explanation.clone(),
+        now,
+    }
+}
+
+#[expect(
+    clippy::match_same_arms,
+    reason = "the explicit scorer reason vocabulary is load-bearing documentation"
+)]
+fn scheduler_reason(reason: &str) -> SchedulerReasonCode {
+    match reason {
+        "selected" => SchedulerReasonCode::Selected,
+        "no_ready_ticket" => SchedulerReasonCode::NoReadyTicket,
+        "missing_capability" => SchedulerReasonCode::MissingCapability,
+        "missing_grant" => SchedulerReasonCode::MissingGrant,
+        "operation_denied" => SchedulerReasonCode::OperationDenied,
+        "worker_not_executable" => SchedulerReasonCode::WorkerNotExecutable,
+        "node_not_executable" => SchedulerReasonCode::NodeNotExecutable,
+        "heartbeat_expired" => SchedulerReasonCode::HeartbeatExpired,
+        "unsupported_artifact_access" => SchedulerReasonCode::UnsupportedArtifactAccess,
+        "worker_capacity_full" => SchedulerReasonCode::WorkerCapacityFull,
+        "node_capacity_full" => SchedulerReasonCode::NodeCapacityFull,
+        "no_eligible_candidate" => SchedulerReasonCode::NoEligibleCandidate,
+        _ => SchedulerReasonCode::NoEligibleCandidate,
+    }
+}
+
+fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
+    match score.outcome {
+        ScoreOutcome::Selected => {
+            if let Some(selected) = &score.selected {
+                format!(
+                    "selected worker {} on node {} for ticket {}",
+                    selected.worker_id, selected.node_id, selected.ticket_id
+                )
+            } else {
+                "selected scheduler candidate".to_owned()
+            }
+        }
+        ScoreOutcome::Idle => "no ready tickets".to_owned(),
+        ScoreOutcome::NoEligibleCandidate => {
+            format!("no eligible candidate: {}", score.reason_code)
+        }
+    }
+}
+
+fn suppression_key(
+    input: &RemoteAcquireInput,
+    score: &voom_scheduler::ScoreDecision,
+) -> Option<String> {
+    if score.outcome == ScoreOutcome::Selected {
+        return None;
+    }
+    let bucket = input.lease_ttl_seconds.max(1) / 30;
+    Some(format!(
+        "remote_acquire:node:{}:worker:{}:reason:{}:bucket:{}",
+        input.node_id, input.worker_id, score.reason_code, bucket
+    ))
+}
+
 fn artifact_plan_input(
     input: &RemoteAcquireInput,
     ticket: &Ticket,
@@ -1265,7 +1443,14 @@ fn string_array_evidence(value: &JsonValue, field: &'static str) -> Result<Vec<S
 }
 
 fn replay_acquire(replay: RemoteMutationReplay) -> Result<RemoteAcquireOutcome, VoomError> {
-    replay_remote(replay, "remote acquire")
+    match replay {
+        RemoteMutationReplay::Ok { data } => {
+            let data = acquire_replay_with_legacy_decision_id(data);
+            serde_json::from_value(data)
+                .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}")))
+        }
+        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
+    }
 }
 
 fn replay_node_heartbeat(
@@ -1297,6 +1482,22 @@ where
             .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}"))),
         RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
     }
+}
+
+fn acquire_replay_with_legacy_decision_id(mut data: JsonValue) -> JsonValue {
+    let Some(outcome) = data.get("outcome").and_then(JsonValue::as_str) else {
+        return data;
+    };
+    if !matches!(outcome, "idle" | "no_candidate" | "leased") {
+        return data;
+    }
+    let Some(object) = data.as_object_mut() else {
+        return data;
+    };
+    object
+        .entry("scheduler_decision_id")
+        .or_insert(JsonValue::from(0_u64));
+    data
 }
 
 fn replay_error(code: &str, message: String) -> VoomError {

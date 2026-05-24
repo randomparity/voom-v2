@@ -25,7 +25,8 @@ use voom_store::repo::{
     bundles::SqliteBundleRepo, events::SqliteEventRepo, identity::SqliteIdentityRepo,
     issues::SqliteIssueRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo, nodes::SqliteNodeRepo,
     policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo,
-    remote_idempotency::SqliteRemoteIdempotencyRepo, tickets::SqliteTicketRepo,
+    remote_idempotency::SqliteRemoteIdempotencyRepo,
+    scheduler_decisions::SqliteSchedulerDecisionRepo, tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
@@ -63,6 +64,7 @@ pub struct ControlPlane {
     pub(crate) use_leases: SqliteUseLeaseRepo,
     pub(crate) policy_inputs: SqlitePolicyInputRepo,
     pub(crate) policies: SqlitePolicyRepo,
+    pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -90,6 +92,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("use_leases", &self.use_leases)
             .field("policy_inputs", &self.policy_inputs)
             .field("policies", &self.policies)
+            .field("scheduler_decisions", &self.scheduler_decisions)
             .finish()
     }
 }
@@ -166,6 +169,7 @@ impl ControlPlane {
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),
             policy_inputs: SqlitePolicyInputRepo::new(pool.clone()),
             policies: SqlitePolicyRepo::new(pool.clone()),
+            scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -309,6 +313,11 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
         &self.remote_idempotency
+    }
+
+    #[must_use]
+    pub fn scheduler_decisions(&self) -> &SqliteSchedulerDecisionRepo {
+        &self.scheduler_decisions
     }
 
     #[cfg(any(test, feature = "test-support"))]

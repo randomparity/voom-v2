@@ -10,6 +10,10 @@ use voom_store::repo::artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
 };
 use voom_store::repo::nodes::NodeKind;
+use voom_store::repo::remote_idempotency::RemoteMutationReplay;
+use voom_store::repo::scheduler_decisions::{
+    SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerDecisionRepo,
+};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 
@@ -173,13 +177,156 @@ async fn remote_acquire_returns_idle_when_no_ready_work() {
         .await
         .unwrap();
 
+    let RemoteAcquireOutcome::Idle {
+        worker_id,
+        scheduler_decision_id: _,
+    } = outcome
+    else {
+        panic!("expected idle remote acquire");
+    };
+    assert_eq!(worker_id, fixture.worker_id);
+    assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 0);
+}
+
+#[tokio::test]
+async fn remote_acquire_idle_returns_and_persists_scheduler_decision() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("acquire-idle-decision", "hash-idle-decision"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::Idle {
+        worker_id,
+        scheduler_decision_id,
+    } = outcome
+    else {
+        panic!("expected idle remote acquire");
+    };
+    assert_eq!(worker_id, fixture.worker_id);
+
+    let decision = fixture
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.outcome, SchedulerDecisionOutcome::Idle);
+    assert_eq!(decision.request_worker_id, Some(fixture.worker_id));
+}
+
+#[tokio::test]
+async fn remote_acquire_leased_returns_scheduler_decision_id_linked_to_lease() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    fixture.ready_ticket(OP).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("acquire-leased-decision", "hash-leased-decision"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected remote lease dispatch");
+    };
+    let decision = fixture
+        .cp
+        .scheduler_decisions()
+        .get(dispatch.scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.selected_lease_id, Some(dispatch.lease_id));
+    assert_eq!(decision.selected_worker_id, Some(fixture.worker_id));
+}
+
+#[tokio::test]
+async fn remote_acquire_replays_new_idle_decision_without_duplicate_log() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let input = fixture.acquire_input("acquire-idle-replay", "hash-idle-replay");
+
+    let first = fixture.cp.remote_acquire(input.clone()).await.unwrap();
+    let replay = fixture.cp.remote_acquire(input).await.unwrap();
+
+    assert_eq!(replay, first);
+    let rows = fixture
+        .cp
+        .scheduler_decisions()
+        .list(SchedulerDecisionFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn remote_acquire_replays_legacy_idle_without_decision_id() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    seed_legacy_acquire_replay(
+        &fixture,
+        "legacy-idle",
+        "hash-legacy-idle",
+        json!({
+            "outcome": "idle",
+            "worker_id": fixture.worker_id,
+        }),
+    )
+    .await;
+
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("legacy-idle", "hash-legacy-idle"))
+        .await
+        .unwrap();
+
     assert_eq!(
-        outcome,
+        replay,
         RemoteAcquireOutcome::Idle {
-            worker_id: fixture.worker_id
+            worker_id: fixture.worker_id,
+            scheduler_decision_id: 0,
         }
     );
-    assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 0);
+}
+
+#[tokio::test]
+async fn remote_acquire_replays_legacy_lease_without_decision_id() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    seed_legacy_acquire_replay(
+        &fixture,
+        "legacy-leased",
+        "hash-legacy-leased",
+        json!({
+            "outcome": "leased",
+            "lease_id": 91,
+            "ticket_id": 92,
+            "worker_id": fixture.worker_id,
+            "operation": OP,
+            "dispatch_payload": {"dispatch": {"kind": OP}},
+            "lease_ttl_seconds": 60,
+            "heartbeat_after_seconds": 30,
+            "artifact_access_plan": {
+                "id": 93,
+                "input_handles": ["handle:input:test"],
+                "output_handles": ["handle:output:test"],
+                "selected_access_mode": "shared_mount"
+            }
+        }),
+    )
+    .await;
+
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("legacy-leased", "hash-legacy-leased"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::Leased(dispatch) = replay else {
+        panic!("expected legacy leased replay");
+    };
+    assert_eq!(dispatch.scheduler_decision_id, 0);
+    assert_eq!(dispatch.worker_id, fixture.worker_id);
 }
 
 #[tokio::test]
@@ -734,6 +881,31 @@ async fn fixture_lease_id(fixture: &RemoteFixture) -> LeaseId {
         .await
         .unwrap();
     LeaseId(u64::try_from(leases).unwrap())
+}
+
+async fn seed_legacy_acquire_replay(
+    fixture: &RemoteFixture,
+    idempotency_key: &str,
+    request_hash: &str,
+    data: serde_json::Value,
+) {
+    let response = serde_json::to_string(&RemoteMutationReplay::Ok { data }).unwrap();
+    sqlx::query(
+        "INSERT INTO remote_idempotency_keys \
+         (node_id, route_key, worker_scope_id, worker_id, idempotency_key, request_hash, \
+          response_json, status, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', '1970-01-01T00:00:00Z')",
+    )
+    .bind(i64::try_from(fixture.node_id.0).unwrap())
+    .bind(ROUTE_ACQUIRE)
+    .bind(i64::try_from(fixture.worker_id.0).unwrap())
+    .bind(i64::try_from(fixture.worker_id.0).unwrap())
+    .bind(idempotency_key)
+    .bind(request_hash)
+    .bind(response)
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
 }
 
 async fn remote_fixture(
