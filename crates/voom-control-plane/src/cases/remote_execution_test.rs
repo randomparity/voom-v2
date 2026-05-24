@@ -420,6 +420,33 @@ fn suppression_key_includes_operation_fingerprint() {
     assert!(probe_key.contains("ops:probe"));
 }
 
+#[test]
+fn capacity_suppression_key_includes_operation_fingerprint() {
+    let fixture_input = RemoteAcquireInput {
+        node_id: NodeId(1),
+        token: secrecy::SecretString::from("token"),
+        worker_id: WorkerId(2),
+        idempotency_key: "capacity-operation-fingerprint".to_owned(),
+        request_hash: "hash".to_owned(),
+        lease_ttl_seconds: 60,
+    };
+
+    let transcode_key = capacity_suppression_key(
+        &fixture_input,
+        SchedulerReasonCode::NodeCapacityFull.as_str(),
+        "transcode",
+    );
+    let probe_key = capacity_suppression_key(
+        &fixture_input,
+        SchedulerReasonCode::NodeCapacityFull.as_str(),
+        "probe",
+    );
+
+    assert_ne!(transcode_key, probe_key);
+    assert!(transcode_key.contains("ops:transcode"));
+    assert!(probe_key.contains("ops:probe"));
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;

@@ -531,7 +531,7 @@ impl ControlPlane {
                             capacity_decision(
                                 input,
                                 SchedulerReasonCode::WorkerCapacityFull,
-                                Some(selected_candidate.ticket.ticket_id),
+                                selected_candidate,
                                 1,
                                 worker_active,
                                 worker_limit,
@@ -560,7 +560,7 @@ impl ControlPlane {
                             capacity_decision(
                                 input,
                                 SchedulerReasonCode::NodeCapacityFull,
-                                Some(selected_candidate.ticket.ticket_id),
+                                selected_candidate,
                                 1,
                                 node_active,
                                 node_limit,
@@ -1712,7 +1712,7 @@ fn decision_from_score(
 fn capacity_decision(
     input: &RemoteAcquireInput,
     reason_code: SchedulerReasonCode,
-    ticket_id: Option<TicketId>,
+    selected_candidate: &SchedulerCandidate,
     candidate_count: usize,
     observed_active: u32,
     observed_limit: u32,
@@ -1734,12 +1734,17 @@ fn capacity_decision(
         summary: format!("no eligible candidate: {reason}"),
         candidate_count: u32::try_from(candidate_count).unwrap_or(u32::MAX),
         selected_score: None,
-        suppression_key: Some(capacity_suppression_key(input, reason)),
+        suppression_key: Some(capacity_suppression_key(
+            input,
+            reason,
+            &selected_candidate.ticket.operation,
+        )),
         explanation: json!({
             "scoring_version": SCORING_VERSION,
             "outcome": "no_eligible_candidate",
             "reason": reason,
-            "selected_ticket_id": ticket_id.map(|id| id.0),
+            "operation": selected_candidate.ticket.operation,
+            "selected_ticket_id": selected_candidate.ticket.ticket_id.0,
             "observed": {
                 "active_leases": observed_active,
                 "limit": observed_limit
@@ -1806,11 +1811,11 @@ fn suppression_key(
     ))
 }
 
-fn capacity_suppression_key(input: &RemoteAcquireInput, reason: &str) -> String {
+fn capacity_suppression_key(input: &RemoteAcquireInput, reason: &str, operation: &str) -> String {
     let bucket = input.lease_ttl_seconds.max(1) / 30;
     format!(
-        "remote_acquire:node:{}:worker:{}:reason:{}:ops:capacity_recheck:bucket:{}",
-        input.node_id, input.worker_id, reason, bucket
+        "remote_acquire:node:{}:worker:{}:reason:{}:ops:{}:bucket:{}",
+        input.node_id, input.worker_id, reason, operation, bucket
     )
 }
 
