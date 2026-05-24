@@ -24,14 +24,18 @@ const PROVIDER_VERSION_UNKNOWN: &str = "unknown";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfprobeConfig {
     ffprobe_bin: OsString,
+    provider_version: String,
 }
 
 impl FfprobeConfig {
     #[must_use]
     pub fn from_process_env() -> Self {
+        let ffprobe_bin = std::env::var_os(FFPROBE_BIN_ENV)
+            .unwrap_or_else(|| OsString::from(DEFAULT_FFPROBE_BIN));
         Self {
-            ffprobe_bin: std::env::var_os(FFPROBE_BIN_ENV)
-                .unwrap_or_else(|| OsString::from(DEFAULT_FFPROBE_BIN)),
+            provider_version: detect_ffprobe_version(&ffprobe_bin)
+                .unwrap_or_else(|| PROVIDER_VERSION_UNKNOWN.to_owned()),
+            ffprobe_bin,
         }
     }
 
@@ -51,11 +55,20 @@ impl FfprobeConfig {
                 }
             })
             .unwrap_or_else(|| OsString::from(DEFAULT_FFPROBE_BIN));
-        Self { ffprobe_bin }
+        Self {
+            provider_version: detect_ffprobe_version(&ffprobe_bin)
+                .unwrap_or_else(|| PROVIDER_VERSION_UNKNOWN.to_owned()),
+            ffprobe_bin,
+        }
     }
 
     fn ffprobe_bin(&self) -> &OsStr {
         &self.ffprobe_bin
+    }
+
+    #[must_use]
+    pub fn provider_version(&self) -> &str {
+        &self.provider_version
     }
 }
 
@@ -198,7 +211,7 @@ async fn probe_file(
 
     let raw = run_ffprobe_json(&path, config).await?;
     let probed_at = Utc::now().to_rfc3339();
-    let snapshot = normalize_ffprobe_json(&raw, PROVIDER_VERSION_UNKNOWN, &probed_at)
+    let snapshot = normalize_ffprobe_json(&raw, config.provider_version(), &probed_at)
         .map_err(FfprobeError::from)?;
 
     let post_probe = Box::pin(observe_file_facts(&path))
@@ -210,11 +223,30 @@ async fn probe_file(
     Ok(ProbeFileResult {
         status: ProbeFileStatus::Probed,
         provider: "ffprobe".to_owned(),
-        provider_version: PROVIDER_VERSION_UNKNOWN.to_owned(),
+        provider_version: config.provider_version().to_owned(),
         pre_probe,
         post_probe,
         snapshot,
     })
+}
+
+fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
+    let output = std::process::Command::new(ffprobe_bin)
+        .arg("-version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    parse_ffprobe_version(stdout.lines().next().unwrap_or_default())
+}
+
+fn parse_ffprobe_version(line: &str) -> Option<String> {
+    line.strip_prefix("ffprobe version ")
+        .and_then(|tail| tail.split_whitespace().next())
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
 }
 
 fn verify_expected_facts(

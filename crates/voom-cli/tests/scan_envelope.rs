@@ -42,6 +42,25 @@ async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
 }
 
 #[tokio::test]
+async fn scan_file_success_finds_worker_beside_cli_without_worker_env() {
+    let seeded = seed().await;
+    let media = tiny_media_fixture();
+
+    let output = scan_command_without_worker_env(&seeded.url, &media)
+        .output()
+        .unwrap();
+
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "scan");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["summary"]["ingested"], 1);
+    assert_eq!(json["data"]["summary"]["probed"], 1);
+    assert_eq!(json["data"]["summary"]["snapshots_recorded"], 1);
+    assert_eq!(json["data"]["files"][0]["probe_worker_id"], 1);
+}
+
+#[tokio::test]
 async fn scan_directory_reports_unsupported_entries_as_skipped() {
     let seeded = seed().await;
     let dir = TempDir::new().unwrap();
@@ -188,6 +207,17 @@ fn scan_command(url: &str, path: &Path) -> Command {
         .args(["--database-url", url, "scan", "--path"])
         .arg(path)
         .env("VOOM_FFPROBE_WORKER_BIN", built_worker_binary());
+    command
+}
+
+fn scan_command_without_worker_env(url: &str, path: &Path) -> Command {
+    let _worker_binary = built_worker_binary();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
+    command
+        .args(["--database-url", url, "scan", "--path"])
+        .arg(path)
+        .env_remove("VOOM_FFPROBE_WORKER_BIN")
+        .env("PATH", "/usr/bin:/bin");
     command
 }
 

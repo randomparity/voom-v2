@@ -58,6 +58,7 @@ pub struct ScanFileReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanReportFileStatus {
     Scanned,
+    SkippedInaccessible,
     SkippedUnsupportedExtension,
     FailedContentDrift,
     Failed,
@@ -412,6 +413,7 @@ fn push_scan_error(
 fn file_status_from_discovery(status: discovery::FileScanStatus) -> ScanReportFileStatus {
     match status {
         discovery::FileScanStatus::FailedContentDrift => ScanReportFileStatus::FailedContentDrift,
+        discovery::FileScanStatus::SkippedInaccessible => ScanReportFileStatus::SkippedInaccessible,
         discovery::FileScanStatus::SkippedSymlink
         | discovery::FileScanStatus::SkippedUnsupportedExtension => {
             ScanReportFileStatus::SkippedUnsupportedExtension

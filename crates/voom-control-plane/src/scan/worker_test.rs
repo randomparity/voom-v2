@@ -160,6 +160,28 @@ fn dispatch_setup_protocol_failures_are_worker_crashes() {
     }
 }
 
+#[test]
+fn default_ffprobe_worker_command_prefers_current_exe_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let current_exe = dir.path().join("voom");
+    let worker = dir.path().join("voom-ffprobe-worker");
+    std::fs::write(&worker, b"").unwrap();
+
+    let command = bundled_ffprobe_command_from(None, Ok(current_exe));
+
+    assert_eq!(command.program, worker.as_os_str());
+}
+
+#[test]
+fn default_ffprobe_worker_command_falls_back_to_path_when_sibling_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let current_exe = dir.path().join("voom");
+
+    let command = bundled_ffprobe_command_from(None, Ok(current_exe));
+
+    assert_eq!(command.program, OsStr::new("voom-ffprobe-worker"));
+}
+
 fn ffprobe_worker_command() -> WorkerCommand {
     if let Some(binary) = std::env::var_os("CARGO_BIN_EXE_voom-ffprobe-worker") {
         return WorkerCommand::new(binary);

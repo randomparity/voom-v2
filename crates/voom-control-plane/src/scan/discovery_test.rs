@@ -1,5 +1,7 @@
 use super::*;
 
+use std::os::unix::fs::PermissionsExt;
+
 use voom_core::ErrorCode;
 
 #[tokio::test]
@@ -132,4 +134,32 @@ async fn directory_walk_does_not_traverse_symlinked_directory() {
     );
     assert_eq!(discovered.skipped.len(), 1);
     assert_eq!(discovered.skipped[0].status, FileScanStatus::SkippedSymlink);
+}
+
+#[tokio::test]
+async fn unreadable_child_directory_is_skipped_without_aborting_scan() {
+    let root = tempfile::tempdir().unwrap();
+    let readable = root.path().join("readable.mp4");
+    std::fs::write(&readable, b"media").unwrap();
+    let unreadable = root.path().join("unreadable");
+    std::fs::create_dir(&unreadable).unwrap();
+    let mut permissions = std::fs::metadata(&unreadable).unwrap().permissions();
+    permissions.set_mode(0o000);
+    std::fs::set_permissions(&unreadable, permissions).unwrap();
+
+    let discovered = discover_path(root.path()).await.unwrap();
+
+    let mut restore = std::fs::metadata(&unreadable).unwrap().permissions();
+    restore.set_mode(0o700);
+    std::fs::set_permissions(&unreadable, restore).unwrap();
+    assert_eq!(discovered.candidates.len(), 1);
+    assert_eq!(
+        discovered.candidates[0].path,
+        readable.canonicalize().unwrap()
+    );
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(
+        discovered.skipped[0].status,
+        FileScanStatus::SkippedInaccessible
+    );
 }

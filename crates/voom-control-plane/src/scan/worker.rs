@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -358,10 +359,31 @@ async fn consume_probe_file_stream(
 }
 
 fn bundled_ffprobe_command() -> WorkerCommand {
-    std::env::var_os(FFPROBE_WORKER_BIN_ENV).map_or_else(
-        || WorkerCommand::new("voom-ffprobe-worker"),
-        WorkerCommand::new,
+    bundled_ffprobe_command_from(
+        std::env::var_os(FFPROBE_WORKER_BIN_ENV),
+        std::env::current_exe(),
     )
+}
+
+fn bundled_ffprobe_command_from(
+    configured_bin: Option<OsString>,
+    current_exe: std::io::Result<PathBuf>,
+) -> WorkerCommand {
+    if let Some(configured_bin) = configured_bin {
+        return WorkerCommand::new(configured_bin);
+    }
+    if let Ok(current_exe) = current_exe
+        && let Some(exe_dir) = current_exe.parent()
+    {
+        let sibling = exe_dir.join(format!(
+            "voom-ffprobe-worker{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        if sibling.is_file() {
+            return WorkerCommand::new(sibling);
+        }
+    }
+    WorkerCommand::new("voom-ffprobe-worker")
 }
 
 fn spawn_worker(

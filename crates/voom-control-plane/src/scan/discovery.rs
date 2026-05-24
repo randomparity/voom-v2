@@ -18,6 +18,7 @@ pub enum ScanMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileScanStatus {
     FailedContentDrift,
+    SkippedInaccessible,
     SkippedSymlink,
     SkippedUnsupportedExtension,
 }
@@ -129,22 +130,30 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
     let mut skipped = Vec::new();
 
     while let Some(dir) = pending.pop() {
-        let mut entries = fs::read_dir(&dir)
-            .await
-            .map_err(|err| internal(format!("cannot read directory {}: {err}", dir.display())))?;
-        while let Some(entry) = entries.next_entry().await.map_err(|err| {
-            internal(format!(
-                "cannot read directory entry {}: {err}",
-                dir.display()
-            ))
-        })? {
+        let Ok(mut entries) = fs::read_dir(&dir).await else {
+            skipped.push(SkippedFile {
+                path: dir,
+                status: FileScanStatus::SkippedInaccessible,
+            });
+            continue;
+        };
+        while let Some(entry) = if let Ok(entry) = entries.next_entry().await {
+            entry
+        } else {
+            skipped.push(SkippedFile {
+                path: dir.clone(),
+                status: FileScanStatus::SkippedInaccessible,
+            });
+            None
+        } {
             let entry_path = entry.path();
-            let metadata = fs::symlink_metadata(&entry_path).await.map_err(|err| {
-                internal(format!(
-                    "cannot inspect directory entry {}: {err}",
-                    entry_path.display()
-                ))
-            })?;
+            let Ok(metadata) = fs::symlink_metadata(&entry_path).await else {
+                skipped.push(SkippedFile {
+                    path: entry_path,
+                    status: FileScanStatus::SkippedInaccessible,
+                });
+                continue;
+            };
             let file_type = metadata.file_type();
             if file_type.is_symlink() {
                 skipped.push(SkippedFile {

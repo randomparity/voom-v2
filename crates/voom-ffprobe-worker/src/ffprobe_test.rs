@@ -57,6 +57,24 @@ async fn helper_process_invalid_json_maps_to_malformed_worker_result() {
     ));
 }
 
+#[tokio::test]
+async fn ffprobe_config_captures_provider_version_from_helper() {
+    let dir_result = tempfile::tempdir();
+    assert!(dir_result.is_ok());
+    let Ok(dir) = dir_result else {
+        return;
+    };
+    let fake_ffprobe = write_fake_ffprobe(
+        dir.path(),
+        "if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version 6.1.2-test Copyright\\n'; exit 0; fi\n\
+         printf '{\"format\":{\"format_name\":\"mov,mp4\"},\"streams\":[]}\\n'\n",
+    );
+
+    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+
+    assert_eq!(config.provider_version(), "6.1.2-test");
+}
+
 fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("ffprobe");
     let script = format!("#!/bin/sh\n{body}");

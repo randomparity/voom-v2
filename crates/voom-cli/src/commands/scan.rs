@@ -207,6 +207,7 @@ fn mode_wire(mode: voom_control_plane::scan::discovery::ScanMode) -> &'static st
 fn status_wire(status: ScanReportFileStatus) -> &'static str {
     match status {
         ScanReportFileStatus::Scanned => "scanned",
+        ScanReportFileStatus::SkippedInaccessible => "skipped_inaccessible",
         ScanReportFileStatus::SkippedUnsupportedExtension => "skipped_unsupported_extension",
         ScanReportFileStatus::FailedContentDrift => "failed_content_drift",
         ScanReportFileStatus::Failed => "failed",
