@@ -97,7 +97,26 @@ impl ControlPlane {
         ttl: Duration,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        self.leases.heartbeat(lease_id, ttl, now).await
+        let mut tx = begin_tx(&self.pool).await?;
+        let lease = self
+            .heartbeat_lease_in_tx(&mut tx, lease_id, ttl, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(lease)
+    }
+
+    /// Heartbeat a lease inside the caller's transaction. Emits no event.
+    ///
+    /// # Errors
+    /// Propagates `LeaseRepo::heartbeat_in_tx` errors.
+    pub(crate) async fn heartbeat_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        ttl: Duration,
+        now: OffsetDateTime,
+    ) -> Result<Lease, VoomError> {
+        self.leases.heartbeat_in_tx(tx, lease_id, ttl, now).await
     }
 
     /// Release a lease successfully. Emits `lease.released` +
