@@ -1,7 +1,7 @@
 //! Remote execution HTTP routes.
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -9,12 +9,19 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use voom_control_plane::cases::remote_execution::RemoteAcquireInput;
-use voom_core::{NodeId, WorkerId};
+use voom_control_plane::cases::remote_execution::{
+    RemoteAcquireInput, RemoteCompleteInput, RemoteFailInput, RemoteLeaseHeartbeatInput,
+    RemoteNodeHeartbeatInput,
+};
+use voom_core::{FailureClass, LeaseId, NodeId, WorkerId};
 
 use crate::{AppState, bad_args_response, ok_response, voom_route_error_response};
 
 const ACQUIRE_COMMAND: &str = "execution.acquire";
+const NODE_HEARTBEAT_COMMAND: &str = "execution.node_heartbeat";
+const LEASE_HEARTBEAT_COMMAND: &str = "execution.lease_heartbeat";
+const COMPLETE_COMMAND: &str = "execution.complete";
+const FAIL_COMMAND: &str = "execution.fail";
 
 #[derive(Debug, Deserialize, Serialize)]
 struct AcquireRequest {
@@ -24,8 +31,44 @@ struct AcquireRequest {
     lease_ttl_seconds: i64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct LeaseHeartbeatRequest {
+    node_id: u64,
+    worker_id: u64,
+    #[serde(default = "default_lease_ttl_seconds")]
+    lease_ttl_seconds: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CompleteRequest {
+    node_id: u64,
+    worker_id: u64,
+    result: JsonValue,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FailRequest {
+    node_id: u64,
+    worker_id: u64,
+    reason: String,
+    class: FailureClass,
+    #[serde(default)]
+    evidence: JsonValue,
+}
+
 pub(crate) fn routes() -> axum::Router<AppState> {
-    axum::Router::new().route("/v1/execution/lease/acquire", post(acquire))
+    axum::Router::new()
+        .route(
+            "/v1/execution/node/{node_id}/heartbeat",
+            post(node_heartbeat),
+        )
+        .route("/v1/execution/lease/acquire", post(acquire))
+        .route(
+            "/v1/execution/lease/{lease_id}/heartbeat",
+            post(lease_heartbeat),
+        )
+        .route("/v1/execution/lease/{lease_id}/complete", post(complete))
+        .route("/v1/execution/lease/{lease_id}/fail", post(fail))
 }
 
 async fn acquire(
@@ -70,6 +113,197 @@ async fn acquire(
     {
         Ok(outcome) => ok_response(ACQUIRE_COMMAND, outcome),
         Err(err) => voom_route_error_response(ACQUIRE_COMMAND, &err),
+    }
+}
+
+async fn node_heartbeat(
+    State(state): State<AppState>,
+    Path(node_id): Path<u64>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> axum::response::Response {
+    let Some(control_plane) = state.control_plane else {
+        return (
+            StatusCode::NOT_FOUND,
+            "remote execution routes are not configured",
+        )
+            .into_response();
+    };
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+    };
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/node/{node_id}/heartbeat");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+    };
+
+    match control_plane
+        .remote_node_heartbeat(RemoteNodeHeartbeatInput {
+            node_id: NodeId(node_id),
+            token,
+            idempotency_key,
+            request_hash,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(NODE_HEARTBEAT_COMMAND, outcome),
+        Err(err) => voom_route_error_response(NODE_HEARTBEAT_COMMAND, &err),
+    }
+}
+
+async fn lease_heartbeat(
+    State(state): State<AppState>,
+    Path(lease_id): Path<u64>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> axum::response::Response {
+    let Some(control_plane) = state.control_plane else {
+        return (
+            StatusCode::NOT_FOUND,
+            "remote execution routes are not configured",
+        )
+            .into_response();
+    };
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/lease/{lease_id}/heartbeat");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
+    let request: LeaseHeartbeatRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(err) => {
+            return bad_args_response(LEASE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
+        }
+    };
+
+    match control_plane
+        .remote_lease_heartbeat(RemoteLeaseHeartbeatInput {
+            node_id: NodeId(request.node_id),
+            token,
+            worker_id: WorkerId(request.worker_id),
+            lease_id: LeaseId(lease_id),
+            idempotency_key,
+            request_hash,
+            lease_ttl_seconds: request.lease_ttl_seconds,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(LEASE_HEARTBEAT_COMMAND, outcome),
+        Err(err) => voom_route_error_response(LEASE_HEARTBEAT_COMMAND, &err),
+    }
+}
+
+async fn complete(
+    State(state): State<AppState>,
+    Path(lease_id): Path<u64>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> axum::response::Response {
+    let Some(control_plane) = state.control_plane else {
+        return (
+            StatusCode::NOT_FOUND,
+            "remote execution routes are not configured",
+        )
+            .into_response();
+    };
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/lease/{lease_id}/complete");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
+    let request: CompleteRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(err) => {
+            return bad_args_response(COMPLETE_COMMAND, format!("invalid JSON body: {err}"));
+        }
+    };
+
+    match control_plane
+        .remote_complete(RemoteCompleteInput {
+            node_id: NodeId(request.node_id),
+            token,
+            worker_id: WorkerId(request.worker_id),
+            lease_id: LeaseId(lease_id),
+            idempotency_key,
+            request_hash,
+            result: request.result,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(COMPLETE_COMMAND, outcome),
+        Err(err) => voom_route_error_response(COMPLETE_COMMAND, &err),
+    }
+}
+
+async fn fail(
+    State(state): State<AppState>,
+    Path(lease_id): Path<u64>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> axum::response::Response {
+    let Some(control_plane) = state.control_plane else {
+        return (
+            StatusCode::NOT_FOUND,
+            "remote execution routes are not configured",
+        )
+            .into_response();
+    };
+    let token = match bearer(&headers) {
+        Ok(token) => token,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
+    let idempotency_key = match idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
+    let route_instance = format!("/v1/execution/lease/{lease_id}/fail");
+    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+        Ok(hash) => hash,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
+    let request: FailRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(err) => return bad_args_response(FAIL_COMMAND, format!("invalid JSON body: {err}")),
+    };
+
+    match control_plane
+        .remote_fail(RemoteFailInput {
+            node_id: NodeId(request.node_id),
+            token,
+            worker_id: WorkerId(request.worker_id),
+            lease_id: LeaseId(lease_id),
+            idempotency_key,
+            request_hash,
+            reason: request.reason,
+            class: request.class,
+            evidence: request.evidence,
+        })
+        .await
+    {
+        Ok(outcome) => ok_response(FAIL_COMMAND, outcome),
+        Err(err) => voom_route_error_response(FAIL_COMMAND, &err),
     }
 }
 

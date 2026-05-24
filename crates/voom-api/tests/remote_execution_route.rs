@@ -16,8 +16,9 @@ use voom_control_plane::cases::{
     workers::{NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput},
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{NodeId, WorkerId};
+use voom_core::{FailureClass, LeaseId, NodeId, TicketId, WorkerId};
 use voom_store::repo::nodes::NodeKind;
+use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 
@@ -25,7 +26,9 @@ const OP: &str = "test.remote";
 
 struct ApiFixture {
     _tmp: NamedTempFile,
+    url: String,
     app: axum::Router,
+    cp: ControlPlane,
     node_id: NodeId,
     token: String,
     worker_id: WorkerId,
@@ -33,18 +36,83 @@ struct ApiFixture {
 
 impl ApiFixture {
     async fn post_json(&self, path: &str, idempotency_key: &str, body: Value) -> Response<Body> {
+        self.post_json_with_token(path, idempotency_key, &self.token, body)
+            .await
+    }
+
+    async fn post_json_with_token(
+        &self,
+        path: &str,
+        idempotency_key: &str,
+        token: &str,
+        body: Value,
+    ) -> Response<Body> {
         self.app
             .clone()
             .oneshot(
                 Request::post(path)
                     .header("content-type", "application/json")
-                    .header("authorization", format!("Bearer {}", self.token))
+                    .header("authorization", format!("Bearer {token}"))
                     .header("x-voom-idempotency-key", idempotency_key)
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
             .unwrap()
+    }
+
+    async fn ready_ticket(&self) -> TicketId {
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: None,
+                kind: OP.to_owned(),
+                priority: 0,
+                payload: json!({
+                    "dispatch": {"kind": OP},
+                    "artifact_access": {
+                        "inputs": ["handle:input:route"],
+                        "outputs": ["handle:output:route"]
+                    }
+                }),
+                max_attempts: 2,
+                created_at: time::OffsetDateTime::UNIX_EPOCH,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, time::OffsetDateTime::UNIX_EPOCH)
+            .await
+            .unwrap();
+        ticket.id
+    }
+
+    async fn acquire_lease(&self, key: &str) -> (LeaseId, TicketId) {
+        self.ready_ticket().await;
+        let res = self
+            .post_json(
+                "/v1/execution/lease/acquire",
+                key,
+                json!({"node_id": self.node_id.0, "worker_id": self.worker_id.0}),
+            )
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = response_json(res).await;
+        assert_eq!(json["data"]["outcome"], "leased");
+        (
+            LeaseId(json["data"]["lease_id"].as_u64().unwrap()),
+            TicketId(json["data"]["ticket_id"].as_u64().unwrap()),
+        )
+    }
+
+    async fn ticket_state(&self, ticket_id: TicketId) -> TicketState {
+        let pool = voom_store::connect(&self.url).await.unwrap();
+        SqliteTicketRepo::new(pool)
+            .get(ticket_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
     }
 }
 
@@ -118,6 +186,157 @@ async fn acquire_same_key_replays_and_different_body_conflicts() {
     assert_eq!(response_json(conflict).await["error"]["code"], "CONFLICT");
 }
 
+#[tokio::test]
+async fn node_and_lease_heartbeat_routes_are_idempotent() {
+    let fixture = api_fixture().await;
+
+    let node_body = json!({});
+    let first = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "node-heartbeat-key",
+            node_body.clone(),
+        )
+        .await;
+    let replay = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "node-heartbeat-key",
+            node_body,
+        )
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(first).await, response_json(replay).await);
+
+    let (lease_id, _) = fixture.acquire_lease("heartbeat-acquire-key").await;
+    let lease_body = json!({
+        "node_id": fixture.node_id.0,
+        "worker_id": fixture.worker_id.0,
+        "lease_ttl_seconds": 60
+    });
+    let first = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/heartbeat", lease_id.0),
+            "lease-heartbeat-key",
+            lease_body.clone(),
+        )
+        .await;
+    let replay = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/heartbeat", lease_id.0),
+            "lease-heartbeat-key",
+            lease_body,
+        )
+        .await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(first).await, response_json(replay).await);
+}
+
+#[tokio::test]
+async fn complete_route_releases_ticket_consumes_plan_and_replays() {
+    let fixture = api_fixture().await;
+    let (lease_id, ticket_id) = fixture.acquire_lease("complete-acquire-key").await;
+    let body = json!({
+        "node_id": fixture.node_id.0,
+        "worker_id": fixture.worker_id.0,
+        "result": {
+            "ok": true,
+            "artifact_access": {"validated": true}
+        }
+    });
+
+    let first = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/complete", lease_id.0),
+            "complete-key",
+            body.clone(),
+        )
+        .await;
+    let replay = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/complete", lease_id.0),
+            "complete-key",
+            body,
+        )
+        .await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(first).await, response_json(replay).await);
+    assert_eq!(
+        fixture.ticket_state(ticket_id).await,
+        TicketState::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn fail_route_fails_ticket_rejects_plan_and_replays() {
+    let fixture = api_fixture().await;
+    let (lease_id, ticket_id) = fixture.acquire_lease("fail-acquire-key").await;
+    let body = json!({
+        "node_id": fixture.node_id.0,
+        "worker_id": fixture.worker_id.0,
+        "reason": "artifact access mode shared_mount is not available",
+        "class": FailureClass::ArtifactUnavailable,
+        "evidence": {"validated": false}
+    });
+
+    let first = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/fail", lease_id.0),
+            "fail-key",
+            body.clone(),
+        )
+        .await;
+    let replay = fixture
+        .post_json(
+            &format!("/v1/execution/lease/{}/fail", lease_id.0),
+            "fail-key",
+            body,
+        )
+        .await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(first).await, response_json(replay).await);
+    assert_eq!(fixture.ticket_state(ticket_id).await, TicketState::Ready);
+}
+
+#[tokio::test]
+async fn lease_routes_reject_worker_node_mismatch() {
+    let fixture = api_fixture().await;
+    let other = fixture
+        .cp
+        .register_node(RegisterNodeInput {
+            name: "other-remote-node".to_owned(),
+            kind: NodeKind::Remote,
+            heartbeat_ttl_seconds: 60,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+    let (lease_id, _) = fixture.acquire_lease("mismatch-acquire-key").await;
+
+    let res = fixture
+        .post_json_with_token(
+            &format!("/v1/execution/lease/{}/heartbeat", lease_id.0),
+            "mismatch-heartbeat-key",
+            other.token.expose_secret(),
+            json!({
+                "node_id": other.node.id.0,
+                "worker_id": fixture.worker_id.0,
+                "lease_ttl_seconds": 60
+            }),
+        )
+        .await;
+
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    assert_eq!(response_json(res).await["error"]["code"], "CONFLICT");
+}
+
 async fn api_fixture() -> ApiFixture {
     let tmp = NamedTempFile::new().unwrap();
     let url = sqlite_url_for(tmp.path());
@@ -156,10 +375,12 @@ async fn api_fixture() -> ApiFixture {
         .await
         .unwrap();
     let hp = HealthPlane::open(&url).await.unwrap();
-    let app = router_with_control_plane(hp, cp);
+    let app = router_with_control_plane(hp, cp.clone());
     ApiFixture {
         _tmp: tmp,
+        url,
         app,
+        cp,
         node_id: registered.node.id,
         token: registered.token.expose_secret().to_owned(),
         worker_id: worker.id,

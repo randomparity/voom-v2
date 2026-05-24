@@ -24,6 +24,7 @@ voom-core = { workspace = true }
 http-body-util = "0.1.3"
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }
 voom-store = { workspace = true, features = ["test-support"] }
