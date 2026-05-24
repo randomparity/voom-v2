@@ -1249,7 +1249,6 @@ fn candidate_from_ticket(
             operation: ticket.kind.clone(),
             priority: ticket.priority,
             next_eligible_at_epoch_seconds: ticket.next_eligible_at.unix_timestamp(),
-            payload: ticket.payload.clone(),
         },
         worker: WorkerCandidate {
             worker_id: input.worker_id,
@@ -1755,23 +1754,11 @@ fn capacity_decision(
 }
 
 fn scheduler_reason(reason: &str) -> Result<SchedulerReasonCode, VoomError> {
-    match reason {
-        "selected" => Ok(SchedulerReasonCode::Selected),
-        "no_ready_ticket" => Ok(SchedulerReasonCode::NoReadyTicket),
-        "missing_capability" => Ok(SchedulerReasonCode::MissingCapability),
-        "missing_grant" => Ok(SchedulerReasonCode::MissingGrant),
-        "operation_denied" => Ok(SchedulerReasonCode::OperationDenied),
-        "worker_not_executable" => Ok(SchedulerReasonCode::WorkerNotExecutable),
-        "node_not_executable" => Ok(SchedulerReasonCode::NodeNotExecutable),
-        "heartbeat_expired" => Ok(SchedulerReasonCode::HeartbeatExpired),
-        "unsupported_artifact_access" => Ok(SchedulerReasonCode::UnsupportedArtifactAccess),
-        "worker_capacity_full" => Ok(SchedulerReasonCode::WorkerCapacityFull),
-        "node_capacity_full" => Ok(SchedulerReasonCode::NodeCapacityFull),
-        "no_eligible_candidate" => Ok(SchedulerReasonCode::NoEligibleCandidate),
-        other => Err(VoomError::Internal(format!(
-            "scheduler reason {other:?} is not mapped to the persistence vocabulary"
-        ))),
-    }
+    SchedulerReasonCode::parse(reason).map_err(|_| {
+        VoomError::Internal(format!(
+            "scheduler reason {reason:?} is not mapped to the persistence vocabulary"
+        ))
+    })
 }
 
 fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
@@ -1800,22 +1787,26 @@ fn suppression_key(
     if score.outcome == ScoreOutcome::Selected {
         return None;
     }
-    let bucket = input.lease_ttl_seconds.max(1) / 30;
-    Some(format!(
-        "remote_acquire:node:{}:worker:{}:reason:{}:ops:{}:bucket:{}",
-        input.node_id,
-        input.worker_id,
+    Some(remote_acquire_suppression_key(
+        input,
         score.reason_code,
-        operation_fingerprint(&score.explanation),
-        bucket
+        &operation_fingerprint(&score.explanation),
     ))
 }
 
 fn capacity_suppression_key(input: &RemoteAcquireInput, reason: &str, operation: &str) -> String {
+    remote_acquire_suppression_key(input, reason, operation)
+}
+
+fn remote_acquire_suppression_key(
+    input: &RemoteAcquireInput,
+    reason: &str,
+    operation_fingerprint: &str,
+) -> String {
     let bucket = input.lease_ttl_seconds.max(1) / 30;
     format!(
         "remote_acquire:node:{}:worker:{}:reason:{}:ops:{}:bucket:{}",
-        input.node_id, input.worker_id, reason, operation, bucket
+        input.node_id, input.worker_id, reason, operation_fingerprint, bucket
     )
 }
 

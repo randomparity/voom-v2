@@ -23,7 +23,6 @@ pub struct TicketCandidate {
     pub operation: String,
     pub priority: i64,
     pub next_eligible_at_epoch_seconds: i64,
-    pub payload: JsonValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +128,8 @@ impl SchedulerScorer {
         }
 
         for (index, candidate) in candidates.iter().enumerate() {
-            let reasons = hard_gate_reasons(candidate);
             let access_mode = select_access_mode(&candidate.worker.artifact_access);
+            let reasons = hard_gate_reasons(candidate, access_mode);
             let eligible = reasons.is_empty() && access_mode.is_some();
             let score = access_mode
                 .filter(|_| eligible)
@@ -210,7 +209,10 @@ fn weights_json() -> JsonValue {
     })
 }
 
-fn hard_gate_reasons(candidate: &SchedulerCandidate) -> Vec<&'static str> {
+fn hard_gate_reasons(
+    candidate: &SchedulerCandidate,
+    access_mode: Option<&str>,
+) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if !candidate.worker.has_capability {
         reasons.push("missing_capability");
@@ -230,7 +232,7 @@ fn hard_gate_reasons(candidate: &SchedulerCandidate) -> Vec<&'static str> {
     if !candidate.node.heartbeat_fresh {
         reasons.push("heartbeat_expired");
     }
-    if select_access_mode(&candidate.worker.artifact_access).is_none() {
+    if access_mode.is_none() {
         reasons.push("unsupported_artifact_access");
     }
     if candidate.worker.active_leases >= candidate.worker.max_parallel {

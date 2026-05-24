@@ -134,7 +134,7 @@ impl SchedulerReasonCode {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    pub fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "selected" => Ok(Self::Selected),
             "no_ready_ticket" => Ok(Self::NoReadyTicket),

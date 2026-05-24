@@ -1,5 +1,4 @@
 use super::*;
-use serde_json::json;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_worker_protocol::OperationKind;
 
@@ -15,12 +14,6 @@ fn scored_candidate(
             operation: operation.to_owned(),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
-            payload: json!({
-                "artifact_access": {
-                    "inputs": ["handle:input:test"],
-                    "outputs": ["handle:output:test"]
-                }
-            }),
         },
         worker: WorkerCandidate {
             worker_id: WorkerId(worker_id),

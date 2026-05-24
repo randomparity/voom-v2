@@ -325,7 +325,6 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
             operation: "test.missing_capability".to_owned(),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
-            payload: json!({}),
         },
         worker: WorkerCandidate {
             worker_id: voom_core::WorkerId(1),
@@ -497,7 +496,6 @@ fn scheduler_candidate(operation: &str, ticket_id: TicketId) -> SchedulerCandida
             operation: operation.to_owned(),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
-            payload: json!({}),
         },
         worker: WorkerCandidate {
             worker_id: voom_core::WorkerId(1),
