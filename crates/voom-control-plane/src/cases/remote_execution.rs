@@ -514,6 +514,9 @@ impl ControlPlane {
                         ))
                     })?
                     .clone();
+                // Scoring uses advisory candidate capacity facts. Re-read the selected
+                // worker and node capacity in this transaction immediately before lease
+                // creation so capacity-full decisions record current active/limit values.
                 let worker_active = active_lease_count_for_worker_operation_in_tx(
                     tx,
                     input.worker_id,
