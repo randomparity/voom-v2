@@ -14,6 +14,7 @@ pub mod nodes;
 pub mod policies;
 pub mod policy_inputs;
 pub mod remote_idempotency;
+pub mod scheduler_decisions;
 pub mod schema_meta;
 pub mod tickets;
 pub mod use_leases;
@@ -58,6 +59,11 @@ pub use policy_inputs::{
 pub use remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteIdempotencyRepo, RemoteMutationReplay,
     SqliteRemoteIdempotencyRepo,
+};
+pub use scheduler_decisions::{
+    NewSchedulerDecision, SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionKind,
+    SchedulerDecisionOutcome, SchedulerDecisionRepo, SchedulerNodeLimit, SchedulerReasonCode,
+    SchedulerRequestSource, SqliteSchedulerDecisionRepo,
 };
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};

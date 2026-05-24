@@ -21,12 +21,25 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
-    artifact_access_plans::SqliteArtifactAccessPlanRepo, artifacts::SqliteArtifactRepo,
-    bundles::SqliteBundleRepo, events::SqliteEventRepo, identity::SqliteIdentityRepo,
-    issues::SqliteIssueRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo, nodes::SqliteNodeRepo,
-    policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo,
-    remote_idempotency::SqliteRemoteIdempotencyRepo, tickets::SqliteTicketRepo,
-    use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
+    artifact_access_plans::SqliteArtifactAccessPlanRepo,
+    artifacts::SqliteArtifactRepo,
+    bundles::SqliteBundleRepo,
+    events::SqliteEventRepo,
+    identity::SqliteIdentityRepo,
+    issues::SqliteIssueRepo,
+    jobs::SqliteJobRepo,
+    leases::SqliteLeaseRepo,
+    nodes::SqliteNodeRepo,
+    policies::SqlitePolicyRepo,
+    policy_inputs::SqlitePolicyInputRepo,
+    remote_idempotency::SqliteRemoteIdempotencyRepo,
+    scheduler_decisions::{
+        SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionRepo,
+        SqliteSchedulerDecisionRepo,
+    },
+    tickets::SqliteTicketRepo,
+    use_leases::SqliteUseLeaseRepo,
+    workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -63,6 +76,7 @@ pub struct ControlPlane {
     pub(crate) use_leases: SqliteUseLeaseRepo,
     pub(crate) policy_inputs: SqlitePolicyInputRepo,
     pub(crate) policies: SqlitePolicyRepo,
+    pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -90,6 +104,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("use_leases", &self.use_leases)
             .field("policy_inputs", &self.policy_inputs)
             .field("policies", &self.policies)
+            .field("scheduler_decisions", &self.scheduler_decisions)
             .finish()
     }
 }
@@ -166,6 +181,7 @@ impl ControlPlane {
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),
             policy_inputs: SqlitePolicyInputRepo::new(pool.clone()),
             policies: SqlitePolicyRepo::new(pool.clone()),
+            scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -309,6 +325,29 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
         &self.remote_idempotency
+    }
+
+    /// Read one durable scheduler decision.
+    ///
+    /// # Errors
+    /// Propagates scheduler decision repository read errors.
+    pub async fn scheduler_decision(
+        &self,
+        id: u64,
+    ) -> Result<Option<SchedulerDecision>, VoomError> {
+        self.scheduler_decisions.get(id).await
+    }
+
+    /// List durable scheduler decisions through a read-only `ControlPlane`
+    /// surface. Scheduler decision writes remain owned by remote acquire.
+    ///
+    /// # Errors
+    /// Propagates scheduler decision repository read errors.
+    pub async fn scheduler_decisions(
+        &self,
+        filter: SchedulerDecisionFilter,
+    ) -> Result<Vec<SchedulerDecision>, VoomError> {
+        self.scheduler_decisions.list(filter).await
     }
 
     #[cfg(any(test, feature = "test-support"))]

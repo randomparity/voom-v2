@@ -114,6 +114,7 @@ impl ApiFixture {
         assert_eq!(res.status(), StatusCode::OK);
         let json = response_json(res).await;
         assert_eq!(json["data"]["outcome"], "leased");
+        assert!(json["data"]["scheduler_decision_id"].as_u64().unwrap() > 0);
         (
             LeaseId(json["data"]["lease_id"].as_u64().unwrap()),
             TicketId(json["data"]["ticket_id"].as_u64().unwrap()),
@@ -169,6 +170,7 @@ async fn acquire_returns_idle_as_success() {
     let json = response_json(res).await;
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["outcome"], "idle");
+    assert!(json["data"]["scheduler_decision_id"].as_u64().unwrap() > 0);
     assert!(
         json.get("local").is_none(),
         "API must not include local block"
