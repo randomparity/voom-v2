@@ -1283,6 +1283,9 @@ fn score_remote_candidates(candidates: &[SchedulerCandidate]) -> Result<ScoreDec
         return SchedulerScorer::default().score(candidates);
     }
 
+    // Remote acquire is still scoped to one worker's ready-ticket snapshot, so
+    // candidate breadth stays bounded. Keep the scorer API simple with cloned
+    // homogeneous operation slices unless this path grows beyond that scope.
     let mut operation_order = Vec::new();
     let mut by_operation: HashMap<String, Vec<SchedulerCandidate>> = HashMap::new();
     for candidate in candidates {
