@@ -6,12 +6,15 @@ use voom_core::{
     ErrorCode, FailureClass, LeaseId, NodeId, TicketId, clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
+use voom_scheduler::ScoreReasonCode;
 use voom_store::repo::artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
 };
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::remote_idempotency::RemoteMutationReplay;
-use voom_store::repo::scheduler_decisions::{SchedulerDecisionFilter, SchedulerDecisionOutcome};
+use voom_store::repo::scheduler_decisions::{
+    SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerReasonCode,
+};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 
@@ -349,37 +352,25 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
     let score = score_remote_candidates(&[unsupported_artifact, missing_capability]).unwrap();
 
     assert_eq!(score.outcome, ScoreOutcome::NoEligibleCandidate);
-    assert_eq!(score.reason_code, "missing_capability");
+    assert_eq!(score.reason_code, ScoreReasonCode::MissingCapability);
     assert_eq!(score.candidate_count, 2);
     assert_eq!(score.explanation["operation"], serde_json::Value::Null);
     assert_eq!(score.explanation["candidates"].as_array().unwrap().len(), 2);
 }
 
 #[test]
-fn decision_from_score_rejects_unknown_reason_code() {
-    let fixture_input = RemoteAcquireInput {
-        node_id: NodeId(1),
-        token: secrecy::SecretString::from("token"),
-        worker_id: WorkerId(2),
-        idempotency_key: "reason-vocab".to_owned(),
-        request_hash: "hash".to_owned(),
-        lease_ttl_seconds: 60,
-    };
-    let score = ScoreDecision {
-        outcome: ScoreOutcome::NoEligibleCandidate,
-        selected: None,
-        candidate_count: 1,
-        reason_code: "new_reason_from_scorer",
-        explanation: json!({"scoring_version": SCORING_VERSION, "candidates": []}),
-    };
-
-    let err =
-        decision_from_score(&fixture_input, &score, None, OffsetDateTime::UNIX_EPOCH).unwrap_err();
-
-    assert_eq!(err.error_code(), ErrorCode::Internal);
-    assert!(
-        err.to_string().contains("new_reason_from_scorer"),
-        "error must name the unmapped reason"
+fn scheduler_reason_maps_typed_score_reason_codes_to_store_vocab() {
+    assert_eq!(
+        scheduler_reason(ScoreReasonCode::MissingGrant),
+        SchedulerReasonCode::MissingGrant
+    );
+    assert_eq!(
+        scheduler_reason(ScoreReasonCode::UnsupportedArtifactAccess),
+        SchedulerReasonCode::UnsupportedArtifactAccess
+    );
+    assert_eq!(
+        scheduler_reason(ScoreReasonCode::NoEligibleCandidate),
+        SchedulerReasonCode::NoEligibleCandidate
     );
 }
 
@@ -397,7 +388,7 @@ fn suppression_key_includes_operation_fingerprint() {
         outcome: ScoreOutcome::NoEligibleCandidate,
         selected: None,
         candidate_count: 1,
-        reason_code: "unsupported_artifact_access",
+        reason_code: ScoreReasonCode::UnsupportedArtifactAccess,
         explanation: json!({
             "scoring_version": SCORING_VERSION,
             "candidates": [{"operation": "transcode", "reasons": ["unsupported_artifact_access"]}]

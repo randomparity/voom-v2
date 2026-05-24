@@ -158,7 +158,7 @@ fn scorer_reports_stable_no_eligible_reason_code() {
     let out = scorer.score(&[full_node, missing_grant]).unwrap();
 
     assert_eq!(out.selected, None);
-    assert_eq!(out.reason_code, "missing_grant");
+    assert_eq!(out.reason_code, ScoreReasonCode::MissingGrant);
 }
 
 #[test]
