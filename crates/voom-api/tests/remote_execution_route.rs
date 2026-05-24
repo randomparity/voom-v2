@@ -395,6 +395,47 @@ async fn malformed_json_returns_api_error_envelope() {
     assert_bad_args_envelope(fail, "execution.fail").await;
 }
 
+#[tokio::test]
+async fn malformed_path_ids_return_api_error_envelope() {
+    let fixture = api_fixture().await;
+
+    let node_heartbeat = fixture
+        .post_raw(
+            "/v1/execution/node/not-a-node/heartbeat",
+            "bad-node-path",
+            "{}",
+        )
+        .await;
+    assert_bad_args_envelope(node_heartbeat, "execution.node_heartbeat").await;
+
+    let lease_heartbeat = fixture
+        .post_raw(
+            "/v1/execution/lease/not-a-lease/heartbeat",
+            "bad-lease-heartbeat-path",
+            "{}",
+        )
+        .await;
+    assert_bad_args_envelope(lease_heartbeat, "execution.lease_heartbeat").await;
+
+    let complete = fixture
+        .post_raw(
+            "/v1/execution/lease/not-a-lease/complete",
+            "bad-complete-path",
+            "{}",
+        )
+        .await;
+    assert_bad_args_envelope(complete, "execution.complete").await;
+
+    let fail = fixture
+        .post_raw(
+            "/v1/execution/lease/not-a-lease/fail",
+            "bad-fail-path",
+            "{}",
+        )
+        .await;
+    assert_bad_args_envelope(fail, "execution.fail").await;
+}
+
 async fn api_fixture() -> ApiFixture {
     let tmp = NamedTempFile::new().unwrap();
     let url = sqlite_url_for(tmp.path());

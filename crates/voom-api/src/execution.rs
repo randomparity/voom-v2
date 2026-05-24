@@ -1,7 +1,7 @@
 //! Remote execution HTTP routes.
 
 use axum::Json;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
@@ -123,7 +123,7 @@ async fn acquire(
 
 async fn node_heartbeat(
     State(state): State<AppState>,
-    Path(node_id): Path<u64>,
+    path: Result<Path<u64>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
@@ -140,6 +140,10 @@ async fn node_heartbeat(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
+    };
+    let node_id = match path_id(path) {
+        Ok(id) => id,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
     let body = match json_body(body) {
@@ -168,7 +172,7 @@ async fn node_heartbeat(
 
 async fn lease_heartbeat(
     State(state): State<AppState>,
-    Path(lease_id): Path<u64>,
+    path: Result<Path<u64>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
@@ -185,6 +189,10 @@ async fn lease_heartbeat(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
+    };
+    let lease_id = match path_id(path) {
+        Ok(id) => id,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
     };
     let body = match json_body(body) {
@@ -222,7 +230,7 @@ async fn lease_heartbeat(
 
 async fn complete(
     State(state): State<AppState>,
-    Path(lease_id): Path<u64>,
+    path: Result<Path<u64>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
@@ -239,6 +247,10 @@ async fn complete(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
+    };
+    let lease_id = match path_id(path) {
+        Ok(id) => id,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
     let body = match json_body(body) {
@@ -276,7 +288,7 @@ async fn complete(
 
 async fn fail(
     State(state): State<AppState>,
-    Path(lease_id): Path<u64>,
+    path: Result<Path<u64>, PathRejection>,
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
@@ -293,6 +305,10 @@ async fn fail(
     };
     let idempotency_key = match idempotency_key(&headers) {
         Ok(key) => key,
+        Err(message) => return bad_args_response(FAIL_COMMAND, message),
+    };
+    let lease_id = match path_id(path) {
+        Ok(id) => id,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
     };
     let body = match json_body(body) {
@@ -331,6 +347,11 @@ async fn fail(
 fn json_body(body: Result<Json<JsonValue>, JsonRejection>) -> Result<JsonValue, String> {
     body.map(|Json(value)| value)
         .map_err(|err| format!("invalid JSON body: {err}"))
+}
+
+fn path_id(path: Result<Path<u64>, PathRejection>) -> Result<u64, String> {
+    path.map(|Path(id)| id)
+        .map_err(|err| format!("invalid path id: {err}"))
 }
 
 fn bearer(headers: &HeaderMap) -> Result<SecretString, String> {
