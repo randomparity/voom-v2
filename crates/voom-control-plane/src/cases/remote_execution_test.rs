@@ -384,6 +384,42 @@ fn decision_from_score_rejects_unknown_reason_code() {
     );
 }
 
+#[test]
+fn suppression_key_includes_operation_fingerprint() {
+    let fixture_input = RemoteAcquireInput {
+        node_id: NodeId(1),
+        token: secrecy::SecretString::from("token"),
+        worker_id: WorkerId(2),
+        idempotency_key: "operation-fingerprint".to_owned(),
+        request_hash: "hash".to_owned(),
+        lease_ttl_seconds: 60,
+    };
+    let transcode = ScoreDecision {
+        outcome: ScoreOutcome::NoEligibleCandidate,
+        selected: None,
+        candidate_count: 1,
+        reason_code: "unsupported_artifact_access",
+        explanation: json!({
+            "scoring_version": SCORING_VERSION,
+            "candidates": [{"operation": "transcode", "reasons": ["unsupported_artifact_access"]}]
+        }),
+    };
+    let probe = ScoreDecision {
+        explanation: json!({
+            "scoring_version": SCORING_VERSION,
+            "candidates": [{"operation": "probe", "reasons": ["unsupported_artifact_access"]}]
+        }),
+        ..transcode.clone()
+    };
+
+    let transcode_key = suppression_key(&fixture_input, &transcode).unwrap();
+    let probe_key = suppression_key(&fixture_input, &probe).unwrap();
+
+    assert_ne!(transcode_key, probe_key);
+    assert!(transcode_key.contains("ops:transcode"));
+    assert!(probe_key.contains("ops:probe"));
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;

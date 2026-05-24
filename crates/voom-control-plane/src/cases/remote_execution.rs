@@ -394,7 +394,8 @@ impl ControlPlane {
                 clippy::default_constructed_unit_structs,
                 reason = "Task 3 intentionally wires the default scheduler scorer"
             )]
-            let score = SchedulerScorer::default().score(&[])?;
+            let mut score = SchedulerScorer::default().score(&[])?;
+            set_operation_set(&mut score.explanation, &operations);
             let decision = self
                 .scheduler_decisions
                 .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now)?)
@@ -1369,6 +1370,7 @@ fn aggregate_score_decision(
     }
     if let Some(object) = base.explanation.as_object_mut() {
         object.insert("candidates".to_owned(), JsonValue::Array(candidate_rows));
+        object.insert("operation_set".to_owned(), json!(operations));
         if operations.len() != 1 {
             object.insert("operation".to_owned(), JsonValue::Null);
         }
@@ -1795,17 +1797,63 @@ fn suppression_key(
     }
     let bucket = input.lease_ttl_seconds.max(1) / 30;
     Some(format!(
-        "remote_acquire:node:{}:worker:{}:reason:{}:bucket:{}",
-        input.node_id, input.worker_id, score.reason_code, bucket
+        "remote_acquire:node:{}:worker:{}:reason:{}:ops:{}:bucket:{}",
+        input.node_id,
+        input.worker_id,
+        score.reason_code,
+        operation_fingerprint(&score.explanation),
+        bucket
     ))
 }
 
 fn capacity_suppression_key(input: &RemoteAcquireInput, reason: &str) -> String {
     let bucket = input.lease_ttl_seconds.max(1) / 30;
     format!(
-        "remote_acquire:node:{}:worker:{}:reason:{}:bucket:{}",
+        "remote_acquire:node:{}:worker:{}:reason:{}:ops:capacity_recheck:bucket:{}",
         input.node_id, input.worker_id, reason, bucket
     )
+}
+
+fn set_operation_set(explanation: &mut JsonValue, operations: &[String]) {
+    if let Some(object) = explanation.as_object_mut() {
+        object.insert("operation_set".to_owned(), json!(operations));
+    }
+}
+
+fn operation_fingerprint(explanation: &JsonValue) -> String {
+    let mut operations = explanation
+        .get("operation_set")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(JsonValue::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if operations.is_empty()
+        && let Some(operation) = explanation.get("operation").and_then(JsonValue::as_str)
+    {
+        operations.push(operation.to_owned());
+    }
+
+    if operations.is_empty() {
+        operations = explanation
+            .get("candidates")
+            .and_then(JsonValue::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| candidate.get("operation").and_then(JsonValue::as_str))
+            .map(ToOwned::to_owned)
+            .collect();
+    }
+
+    operations.sort();
+    operations.dedup();
+    if operations.is_empty() {
+        "none".to_owned()
+    } else {
+        operations.join("+")
+    }
 }
 
 fn artifact_plan_input(

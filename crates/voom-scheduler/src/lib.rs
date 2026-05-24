@@ -152,6 +152,7 @@ impl SchedulerScorer {
 
             explanation_candidates.push(json!({
                 "ticket_id": candidate.ticket.ticket_id.0,
+                "operation": candidate.ticket.operation,
                 "worker_id": candidate.worker.worker_id.0,
                 "node_id": candidate.node.node_id.0,
                 "eligible": eligible,
