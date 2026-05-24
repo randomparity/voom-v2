@@ -405,7 +405,7 @@ impl ControlPlane {
             .artifact_access_plans
             .create_selected_in_tx(
                 tx,
-                artifact_plan_input(input, &ticket, &eligibility, lease.id, now),
+                artifact_plan_input(input, &ticket, &eligibility, lease.id, now)?,
             )
             .await?;
         let outcome = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
@@ -1140,21 +1140,21 @@ fn artifact_plan_input(
     eligibility: &WorkerOperationEligibility,
     lease_id: LeaseId,
     now: time::OffsetDateTime,
-) -> NewArtifactAccessPlan {
-    NewArtifactAccessPlan {
+) -> Result<NewArtifactAccessPlan, VoomError> {
+    Ok(NewArtifactAccessPlan {
         lease_id,
         ticket_id: ticket.id,
         worker_id: input.worker_id,
         node_id: input.node_id,
         input_handles: artifact_handles(&ticket.payload, "inputs"),
         output_handles: artifact_handles(&ticket.payload, "outputs"),
-        selected_access_mode: select_access_mode(&eligibility.artifact_access),
+        selected_access_mode: select_access_mode(input.worker_id, &eligibility.artifact_access)?,
         evidence: json!({
             "selected_by": "remote_acquire",
             "route": ROUTE_ACQUIRE,
         }),
         now,
-    }
+    })
 }
 
 fn artifact_handles(payload: &JsonValue, direction: &str) -> Vec<String> {
@@ -1177,15 +1177,20 @@ fn artifact_handles(payload: &JsonValue, direction: &str) -> Vec<String> {
         })
 }
 
-fn select_access_mode(modes: &[String]) -> ArtifactAccessMode {
+fn select_access_mode(
+    worker_id: WorkerId,
+    modes: &[String],
+) -> Result<ArtifactAccessMode, VoomError> {
     if modes.iter().any(|mode| mode == "shared_mount") {
-        ArtifactAccessMode::SharedMount
+        Ok(ArtifactAccessMode::SharedMount)
     } else if modes.iter().any(|mode| mode == "control_plane_placeholder") {
-        ArtifactAccessMode::ControlPlanePlaceholder
+        Ok(ArtifactAccessMode::ControlPlanePlaceholder)
     } else if modes.iter().any(|mode| mode == "staged_output_placeholder") {
-        ArtifactAccessMode::StagedOutputPlaceholder
+        Ok(ArtifactAccessMode::StagedOutputPlaceholder)
     } else {
-        ArtifactAccessMode::ControlPlanePlaceholder
+        Err(VoomError::Conflict(format!(
+            "remote acquire rejected: worker {worker_id} has no supported artifact access mode"
+        )))
     }
 }
 

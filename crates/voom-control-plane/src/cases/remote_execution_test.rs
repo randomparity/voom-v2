@@ -286,6 +286,32 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 }
 
 #[tokio::test]
+async fn remote_acquire_rejects_unsupported_artifact_access_mode_without_leasing() {
+    let fixture = remote_fixture(&[(OP, vec!["local_path"])], &[OP], &[]).await;
+    let ticket_id = fixture.ready_ticket(OP).await;
+
+    let err = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("unsupported-access", "hash-unsupported-access"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        fixture
+            .cp
+            .tickets()
+            .get(ticket_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+    assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 0);
+}
+
+#[tokio::test]
 async fn remote_acquire_requires_remote_node_and_worker_kind() {
     let local_node = fixture_with_options(
         NodeKind::Local,
