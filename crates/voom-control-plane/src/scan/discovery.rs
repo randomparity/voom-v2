@@ -24,6 +24,7 @@ pub enum FileScanStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredScan {
+    pub root: PathBuf,
     pub mode: ScanMode,
     pub candidates: Vec<ScanCandidate>,
     pub skipped: Vec<SkippedFile>,
@@ -112,17 +113,18 @@ async fn discover_file(path: &Path) -> Result<DiscoveredScan, ScanError> {
             path.display()
         )));
     }
+    let root = canonicalize(path).await?;
     Ok(DiscoveredScan {
+        root: root.clone(),
         mode: ScanMode::File,
-        candidates: vec![ScanCandidate {
-            path: canonicalize(path).await?,
-        }],
+        candidates: vec![ScanCandidate { path: root }],
         skipped: Vec::new(),
     })
 }
 
 async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
-    let mut pending = vec![canonicalize(path).await?];
+    let root = canonicalize(path).await?;
+    let mut pending = vec![root.clone()];
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
 
@@ -169,6 +171,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
     skipped.sort_by_key(|skipped| normalized_path(&skipped.path));
 
     Ok(DiscoveredScan {
+        root,
         mode: ScanMode::Directory,
         candidates,
         skipped,

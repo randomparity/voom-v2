@@ -6,7 +6,7 @@ use clap::Parser;
 use voom_cli::cli::{
     Cli, Command, ComplianceCommand, NodeCommand, PlanCommand, SchedulerCommand, WorkerCommand,
 };
-use voom_cli::commands::{compliance, health, init, node, plan, scheduler, version, worker};
+use voom_cli::commands::{compliance, health, init, node, plan, scan, scheduler, version, worker};
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
 use voom_control_plane::HealthPlane;
@@ -200,7 +200,25 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Node(ref command) => dispatch_node(&cli, command.clone()).await,
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
+        Command::Scan { ref path } => dispatch_scan(&cli, path).await,
     }
+}
+
+async fn dispatch_scan(cli: &Cli, path: &std::path::Path) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("scan", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        scan::run(&cfg.database_url, local, path).await?,
+    ))
 }
 
 async fn dispatch_node(cli: &Cli, command: NodeCommand) -> Result<Exit> {

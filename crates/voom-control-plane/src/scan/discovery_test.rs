@@ -13,6 +13,7 @@ async fn explicit_supported_file_is_single_candidate() {
     assert_eq!(discovered.mode, ScanMode::File);
     assert_eq!(discovered.candidates.len(), 1);
     assert!(discovered.skipped.is_empty());
+    assert_eq!(discovered.root, path.canonicalize().unwrap());
     assert_eq!(discovered.candidates[0].path, path.canonicalize().unwrap());
     assert!(discovered.candidates[0].path.is_absolute());
 }
@@ -29,6 +30,7 @@ async fn directory_discovery_returns_supported_media_in_lexicographic_order() {
     let discovered = discover_path(dir.path()).await.unwrap();
 
     assert_eq!(discovered.mode, ScanMode::Directory);
+    assert_eq!(discovered.root, dir.path().canonicalize().unwrap());
     let names: Vec<_> = discovered
         .candidates
         .iter()
