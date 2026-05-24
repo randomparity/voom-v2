@@ -1701,12 +1701,15 @@ normalized shape expected for Sprint 3 onward.
 
 - Goal: make scheduling decisions explainable across capability, health,
   locality, cost, and concurrency.
-- Deliverables: scheduler scoring model, node-level concurrency limits,
-  worker-level concurrency limits, locality/cost scoring using artifact
-  access plans, decision logs, deterministic scoring fixtures, and
-  remote-node scheduler integration tests.
-- Explicitly out of scope: real media execution, daemon scheduling
-  windows, production metrics endpoint, and UI scheduler controls.
+- Deliverables: reusable scheduler scoring model, node-level concurrency
+  limits, worker-level concurrency limits, locality/cost scoring using
+  synthetic artifact access plans, durable scheduler decision table, CLI
+  decision inspection, deterministic scoring fixtures, and remote-node
+  scheduler integration tests.
+- Explicitly out of scope: real media execution, daemon scheduling loops,
+  scheduling windows, dynamic throttles, production metrics endpoints, UI
+  scheduler controls, real media transfer/object-store cost modeling, and
+  policy-configurable scoring weights.
 - Acceptance focus: scheduler choices are deterministic under fixtures,
   explainable to operators, and respect node/worker concurrency limits.
 - Verification expectations: scoring unit tests, concurrency integration
