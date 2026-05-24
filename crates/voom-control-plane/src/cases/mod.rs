@@ -28,6 +28,7 @@ pub mod nodes;
 pub mod plans;
 pub mod policies;
 pub mod policy_inputs;
+pub mod remote_execution;
 pub mod tickets;
 pub mod use_leases;
 pub mod workers;

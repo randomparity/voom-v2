@@ -109,6 +109,14 @@ pub struct WorkerInspection {
     pub node: Option<WorkerNodeContext>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerOperationEligibility {
+    pub has_capability: bool,
+    pub has_grant: bool,
+    pub is_denied: bool,
+    pub artifact_access: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewCapability {
     pub worker_id: WorkerId,
@@ -191,6 +199,25 @@ pub trait WorkerRepo: Repository {
         status: Option<WorkerStatus>,
         limit: u32,
     ) -> Result<Vec<WorkerInspection>, VoomError>;
+
+    async fn operation_eligibility_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<WorkerOperationEligibility, VoomError>;
+    async fn operation_eligibility(
+        &self,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<WorkerOperationEligibility, VoomError>;
+
+    async fn node_owned_worker_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        node_id: NodeId,
+    ) -> Result<Worker, VoomError>;
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +489,104 @@ impl WorkerRepo for SqliteWorkerRepo {
         .map_err(|e| VoomError::Database(format!("workers inspection list: {e}")))?;
         rows.iter().map(row_to_inspection).collect()
     }
+
+    async fn operation_eligibility_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<WorkerOperationEligibility, VoomError> {
+        let capability_rows = sqlx::query(
+            "SELECT artifact_access FROM worker_capabilities \
+             WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(worker_id.0))
+        .bind(operation)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("worker_capabilities eligibility: {e}")))?;
+
+        let mut artifact_access = Vec::new();
+        for row in &capability_rows {
+            let access: String = row
+                .try_get("artifact_access")
+                .map_err(|e| map_row_err("worker_capabilities eligibility", &e))?;
+            artifact_access.extend(parse_string_array_json(&access, "artifact_access")?);
+        }
+
+        let grant_rows = sqlx::query(
+            "SELECT can_execute, denies FROM worker_grants WHERE worker_id = ? ORDER BY id ASC",
+        )
+        .bind(i64_from_u64(worker_id.0))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("worker_grants eligibility: {e}")))?;
+
+        let mut has_grant = false;
+        let mut is_denied = false;
+        for row in &grant_rows {
+            let can_execute: String = row
+                .try_get("can_execute")
+                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+            let denies: String = row
+                .try_get("denies")
+                .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
+            has_grant |= parse_string_array_json(&can_execute, "can_execute")?
+                .iter()
+                .any(|item| item == operation);
+            is_denied |= parse_string_array_json(&denies, "denies")?
+                .iter()
+                .any(|item| item == operation);
+        }
+
+        Ok(WorkerOperationEligibility {
+            has_capability: !capability_rows.is_empty(),
+            has_grant,
+            is_denied,
+            artifact_access,
+        })
+    }
+
+    async fn operation_eligibility(
+        &self,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<WorkerOperationEligibility, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+        let out = self
+            .operation_eligibility_in_tx(&mut tx, worker_id, operation)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+        Ok(out)
+    }
+
+    async fn node_owned_worker_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        node_id: NodeId,
+    ) -> Result<Worker, VoomError> {
+        let worker = get_in_tx(tx, worker_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("worker {worker_id}")))?;
+        if worker.node_id != Some(node_id) {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} is not owned by node {node_id}"
+            )));
+        }
+        if worker.status == WorkerStatus::Retired {
+            return Err(VoomError::Conflict(format!(
+                "worker {worker_id} is retired"
+            )));
+        }
+        Ok(worker)
+    }
 }
 
 async fn get_in_tx(
@@ -553,6 +678,11 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
         })
         .transpose()?;
     Ok(WorkerInspection { worker, node })
+}
+
+fn parse_string_array_json(input: &str, field: &'static str) -> Result<Vec<String>, VoomError> {
+    serde_json::from_str(input)
+        .map_err(|e| VoomError::Database(format!("parse worker {field}: {e}")))
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 //! Repository pattern: trait per storage area, Sqlite impl per trait.
 
+pub mod artifact_access_plans;
 pub mod artifacts;
 pub mod bundles;
 pub mod commit_safety_gate;
@@ -12,11 +13,16 @@ pub mod leases;
 pub mod nodes;
 pub mod policies;
 pub mod policy_inputs;
+pub mod remote_idempotency;
 pub mod schema_meta;
 pub mod tickets;
 pub mod use_leases;
 pub mod workers;
 
+pub use artifact_access_plans::{
+    ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
+    NewArtifactAccessPlan, SqliteArtifactAccessPlanRepo,
+};
 pub use artifacts::{
     ArtifactHandle, ArtifactLineage, ArtifactLocation, ArtifactRepo, NewArtifactHandle,
     NewArtifactLineage, NewArtifactLocation, SqliteArtifactRepo,
@@ -49,6 +55,10 @@ pub use policy_inputs::{
     PolicyInputSetSummary, PolicyInputTargetRef, PolicyMediaSnapshotInput,
     PolicyQualityProfileSelection, PolicySyntheticTarget, SqlitePolicyInputRepo,
 };
+pub use remote_idempotency::{
+    IdempotencyOutcome, RemoteIdempotencyInput, RemoteIdempotencyRepo, RemoteMutationReplay,
+    SqliteRemoteIdempotencyRepo,
+};
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};
 pub use use_leases::{
@@ -58,7 +68,8 @@ pub use use_leases::{
 };
 pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
-    WorkerInspection, WorkerKind, WorkerNodeContext, WorkerRepo, WorkerStatus,
+    WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerRepo,
+    WorkerStatus,
 };
 
 /// Marker trait so future repository traits compose uniformly.

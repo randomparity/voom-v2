@@ -4,7 +4,7 @@ use serde_json::json;
 use time::Duration;
 use voom_core::clock_test_support::FrozenClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, TicketId, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, TicketId, VoomError, WorkerId};
 
 use crate::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
 use crate::repo::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
@@ -158,6 +158,90 @@ async fn release_transitions_lease_and_ticket_to_succeeded() {
     let t = trepo.get(tid).await.unwrap().unwrap();
     assert_eq!(t.state, TicketState::Succeeded);
     assert_eq!(t.result.unwrap(), json!({"ok": true}));
+}
+
+#[tokio::test]
+async fn get_held_for_worker_returns_held_lease_for_matching_worker() {
+    let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let found = lrepo.get_held_for_worker(lease.id, wid).await.unwrap();
+
+    assert_eq!(found.id, lease.id);
+    assert_eq!(found.worker_id, wid);
+    assert_eq!(found.state, LeaseState::Held);
+}
+
+#[tokio::test]
+async fn get_held_for_worker_returns_conflict_for_wrong_worker() {
+    let (_pool, _trepo, wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let other = wrepo
+        .register(NewWorker {
+            name: "w-2".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    let err = lrepo
+        .get_held_for_worker(lease.id, other.id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn get_held_for_worker_returns_conflict_for_non_held_lease() {
+    let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let lease = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    lrepo
+        .release(lease.id, json!({"ok": true}), T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+
+    let err = lrepo.get_held_for_worker(lease.id, wid).await.unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn get_held_for_worker_returns_not_found_for_missing_lease() {
+    let (_pool, _trepo, _wrepo, lrepo, _tid, wid, _tmp) = setup().await;
+
+    let err = lrepo
+        .get_held_for_worker(LeaseId(99_999), wid)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::NotFound(_)), "got: {err:?}");
 }
 
 #[tokio::test]

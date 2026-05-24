@@ -29,11 +29,27 @@ impl ControlPlane {
     /// Propagates repo and event-append errors.
     pub async fn acquire_lease(&self, input: NewLease) -> Result<Lease, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
+        let lease = self.acquire_lease_in_tx(&mut tx, input).await?;
+        commit_tx(tx).await?;
+        Ok(lease)
+    }
+
+    /// Acquire a worker lease and emit lease/ticket events.
+    ///
+    /// The caller owns the transaction boundary.
+    ///
+    /// # Errors
+    /// Propagates repo and event-append errors.
+    pub(crate) async fn acquire_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewLease,
+    ) -> Result<Lease, VoomError> {
         let now = input.now;
-        let lease = self.leases.acquire_in_tx(&mut tx, input).await?;
+        let lease = self.leases.acquire_in_tx(tx, input).await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -48,14 +64,14 @@ impl ControlPlane {
         .await?;
         let ticket = self
             .tickets
-            .get_in_tx(&mut tx, lease.ticket_id)
+            .get_in_tx(tx, lease.ticket_id)
             .await?
             .ok_or_else(|| {
                 VoomError::Internal("acquire_lease: ticket vanished mid-tx".to_owned())
             })?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Ticket,
             Some(ticket.id.0),
             now,
@@ -67,7 +83,6 @@ impl ControlPlane {
             }),
         )
         .await?;
-        commit_tx(tx).await?;
         Ok(lease)
     }
 
@@ -82,7 +97,26 @@ impl ControlPlane {
         ttl: Duration,
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
-        self.leases.heartbeat(lease_id, ttl, now).await
+        let mut tx = begin_tx(&self.pool).await?;
+        let lease = self
+            .heartbeat_lease_in_tx(&mut tx, lease_id, ttl, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(lease)
+    }
+
+    /// Heartbeat a lease inside the caller's transaction. Emits no event.
+    ///
+    /// # Errors
+    /// Propagates `LeaseRepo::heartbeat_in_tx` errors.
+    pub(crate) async fn heartbeat_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        ttl: Duration,
+        now: OffsetDateTime,
+    ) -> Result<Lease, VoomError> {
+        self.leases.heartbeat_in_tx(tx, lease_id, ttl, now).await
     }
 
     /// Release a lease successfully. Emits `lease.released` +
@@ -101,12 +135,30 @@ impl ControlPlane {
     ) -> Result<Lease, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let lease = self
-            .leases
-            .release_in_tx(&mut tx, lease_id, result, now)
+            .release_lease_in_tx(&mut tx, lease_id, result, now)
             .await?;
+        commit_tx(tx).await?;
+        Ok(lease)
+    }
+
+    /// Release a lease successfully, emit lease/ticket events, and promote
+    /// newly unblocked dependents.
+    ///
+    /// The caller owns the transaction boundary.
+    ///
+    /// # Errors
+    /// Propagates repo and event-append errors.
+    pub(crate) async fn release_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        result: JsonValue,
+        now: OffsetDateTime,
+    ) -> Result<Lease, VoomError> {
+        let lease = self.leases.release_in_tx(tx, lease_id, result, now).await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -122,7 +174,7 @@ impl ControlPlane {
         .await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Ticket,
             Some(lease.ticket_id.0),
             now,
@@ -134,17 +186,17 @@ impl ControlPlane {
         .await?;
         let dependents = self
             .tickets
-            .list_dependents_in_tx(&mut tx, lease.ticket_id)
+            .list_dependents_in_tx(tx, lease.ticket_id)
             .await?;
         for dep in dependents {
             let promoted = self
                 .tickets
-                .mark_ready_if_unblocked_in_tx(&mut tx, dep.id, now)
+                .mark_ready_if_unblocked_in_tx(tx, dep.id, now)
                 .await?;
             for t in &promoted {
                 append_event(
                     &self.events,
-                    &mut tx,
+                    tx,
                     SubjectType::Ticket,
                     Some(t.id.0),
                     now,
@@ -153,7 +205,6 @@ impl ControlPlane {
                 .await?;
             }
         }
-        commit_tx(tx).await?;
         Ok(lease)
     }
 
@@ -170,6 +221,27 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<Lease, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
+        let lease = self
+            .fail_lease_in_tx(&mut tx, lease_id, reason, class, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(lease)
+    }
+
+    /// Fail a lease and emit lease/ticket failure events.
+    ///
+    /// The caller owns the transaction boundary.
+    ///
+    /// # Errors
+    /// Propagates repo and event-append errors.
+    pub(crate) async fn fail_lease_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        lease_id: LeaseId,
+        reason: String,
+        class: FailureClass,
+        now: OffsetDateTime,
+    ) -> Result<Lease, VoomError> {
         // Snapshot one u32 from the shared RNG up front. Holding the
         // std Mutex across the awaits that follow would trip the
         // workspace-level `await_holding_lock` lint and the
@@ -178,11 +250,11 @@ impl ControlPlane {
         let mut shot = self.snapshot_rng();
         let lease = self
             .leases
-            .fail_in_tx(&mut tx, lease_id, class, now, &*self.clock, &mut shot)
+            .fail_in_tx(tx, lease_id, class, now, &*self.clock, &mut shot)
             .await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Lease,
             Some(lease.id.0),
             now,
@@ -198,14 +270,14 @@ impl ControlPlane {
         .await?;
         let ticket = self
             .tickets
-            .get_in_tx(&mut tx, lease.ticket_id)
+            .get_in_tx(tx, lease.ticket_id)
             .await?
             .ok_or_else(|| VoomError::Internal("fail_lease: ticket vanished mid-tx".to_owned()))?;
         match ticket.state {
             TicketState::Ready => {
                 append_event(
                     &self.events,
-                    &mut tx,
+                    tx,
                     SubjectType::Ticket,
                     Some(ticket.id.0),
                     now,
@@ -223,7 +295,7 @@ impl ControlPlane {
             TicketState::Failed => {
                 append_event(
                     &self.events,
-                    &mut tx,
+                    tx,
                     SubjectType::Ticket,
                     Some(ticket.id.0),
                     now,
@@ -244,7 +316,6 @@ impl ControlPlane {
                 )));
             }
         }
-        commit_tx(tx).await?;
         Ok(lease)
     }
 

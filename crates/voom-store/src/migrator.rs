@@ -35,6 +35,10 @@ const MIGRATION_0008_SQL: &str = include_str!("../../../migrations/0008_issue_de
 /// SQL for migration 0009 (Sprint 7 node registry), embedded at compile time.
 const MIGRATION_0009_SQL: &str = include_str!("../../../migrations/0009_nodes.sql");
 
+/// SQL for migration 0010 (Sprint 8 remote execution persistence), embedded
+/// at compile time.
+const MIGRATION_0010_SQL: &str = include_str!("../../../migrations/0010_remote_execution.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -111,6 +115,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("nodes"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0009_SQL),
+            false,
+        ),
+        Migration::new(
+            10,
+            Cow::Borrowed("remote_execution"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0010_SQL),
             false,
         ),
     ]),

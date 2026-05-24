@@ -7,31 +7,50 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use serde::Serialize;
-use voom_control_plane::{HealthPlane, HealthSnapshot};
+use voom_control_plane::{ControlPlane, HealthPlane, HealthSnapshot};
 use voom_core::{ErrorCode, VoomError, format_iso8601};
 
 pub const SCHEMA_VERSION: &str = "0";
 
+mod execution;
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub health_plane: HealthPlane,
+    pub control_plane: Option<ControlPlane>,
     /// Number of tokio worker threads, snapshotted at router construction
     /// so `/health` doesn't re-syscall `available_parallelism()` per request.
     tokio_workers: usize,
 }
 
 pub fn router(health_plane: HealthPlane) -> axum::Router {
-    let tokio_workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    base_router(AppState {
+        health_plane,
+        control_plane: None,
+        tokio_workers: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+    })
+}
+
+pub fn router_with_control_plane(
+    health_plane: HealthPlane,
+    control_plane: ControlPlane,
+) -> axum::Router {
+    base_router(AppState {
+        health_plane,
+        control_plane: Some(control_plane),
+        tokio_workers: std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+    })
+}
+
+fn base_router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
-        .with_state(AppState {
-            health_plane,
-            tokio_workers,
-        })
+        .merge(execution::routes())
+        .with_state(state)
 }
 
 #[derive(Debug, Serialize)]
-struct Envelope<T: Serialize> {
+pub(crate) struct Envelope<T: Serialize> {
     schema_version: &'static str,
     command: &'static str,
     status: &'static str,
@@ -41,7 +60,7 @@ struct Envelope<T: Serialize> {
 }
 
 #[derive(Debug, Serialize)]
-struct ErrorBody {
+pub(crate) struct ErrorBody {
     code: &'static str,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,6 +120,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
                 .unwrap_or_else(|| unreachable!("non-Current snapshot has a diagnostic"));
             err_response(
                 StatusCode::SERVICE_UNAVAILABLE,
+                "health",
                 diag.code.as_str(),
                 diag.message,
                 diag.hint,
@@ -193,18 +213,60 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::WorkerIncarnationStale
         | ErrorCode::AmbiguousWorkerSelection => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
-    err_response(status, err.code(), err.to_string(), hint)
+    err_response(status, "health", err.code(), err.to_string(), hint)
+}
+
+pub(crate) fn voom_route_error_response(
+    command: &'static str,
+    err: &VoomError,
+) -> axum::response::Response {
+    let status = match err.error_code() {
+        ErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ErrorCode::Conflict => StatusCode::CONFLICT,
+        ErrorCode::ConfigInvalid | ErrorCode::BadArgs => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    err_response(status, command, err.code(), err.to_string(), None)
+}
+
+pub(crate) fn bad_args_response(
+    command: &'static str,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    err_response(
+        StatusCode::BAD_REQUEST,
+        command,
+        ErrorCode::BadArgs.as_str(),
+        message.into(),
+        None,
+    )
+}
+
+pub(crate) fn ok_response<T: Serialize>(
+    command: &'static str,
+    data: T,
+) -> axum::response::Response {
+    let env = Envelope {
+        schema_version: SCHEMA_VERSION,
+        command,
+        status: "ok",
+        data: Some(data),
+        warnings: Vec::new(),
+        error: None,
+    };
+    (StatusCode::OK, Json(env)).into_response()
 }
 
 fn err_response(
     status: StatusCode,
+    command: &'static str,
     code: &'static str,
     message: String,
     hint: Option<String>,
 ) -> axum::response::Response {
     let env: Envelope<()> = Envelope {
         schema_version: SCHEMA_VERSION,
-        command: "health",
+        command,
         status: "error",
         data: None,
         warnings: Vec::new(),

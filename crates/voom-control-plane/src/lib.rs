@@ -21,10 +21,11 @@ use sqlx::SqlitePool;
 use time::OffsetDateTime;
 use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
-    artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
-    identity::SqliteIdentityRepo, issues::SqliteIssueRepo, jobs::SqliteJobRepo,
-    leases::SqliteLeaseRepo, nodes::SqliteNodeRepo, policies::SqlitePolicyRepo,
-    policy_inputs::SqlitePolicyInputRepo, tickets::SqliteTicketRepo,
+    artifact_access_plans::SqliteArtifactAccessPlanRepo, artifacts::SqliteArtifactRepo,
+    bundles::SqliteBundleRepo, events::SqliteEventRepo, identity::SqliteIdentityRepo,
+    issues::SqliteIssueRepo, jobs::SqliteJobRepo, leases::SqliteLeaseRepo, nodes::SqliteNodeRepo,
+    policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo,
+    remote_idempotency::SqliteRemoteIdempotencyRepo, tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
@@ -53,6 +54,8 @@ pub struct ControlPlane {
     pub(crate) workers: SqliteWorkerRepo,
     pub(crate) nodes: SqliteNodeRepo,
     pub(crate) leases: SqliteLeaseRepo,
+    pub(crate) remote_idempotency: SqliteRemoteIdempotencyRepo,
+    pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) issues: SqliteIssueRepo,
     pub(crate) identity: SqliteIdentityRepo,
@@ -78,6 +81,8 @@ impl std::fmt::Debug for ControlPlane {
             .field("workers", &self.workers)
             .field("nodes", &self.nodes)
             .field("leases", &self.leases)
+            .field("remote_idempotency", &self.remote_idempotency)
+            .field("artifact_access_plans", &self.artifact_access_plans)
             .field("artifacts", &self.artifacts)
             .field("issues", &self.issues)
             .field("identity", &self.identity)
@@ -152,6 +157,8 @@ impl ControlPlane {
             workers: SqliteWorkerRepo::new(pool.clone()),
             nodes: SqliteNodeRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
+            remote_idempotency: SqliteRemoteIdempotencyRepo::new(pool.clone()),
+            artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             issues: SqliteIssueRepo::new(pool.clone()),
             identity: SqliteIdentityRepo::new(pool.clone()),
@@ -287,6 +294,36 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn leases(&self) -> &SqliteLeaseRepo {
         &self.leases
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
+        &self.remote_idempotency
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(
+        dead_code,
+        reason = "callers reach `self.remote_idempotency` directly today"
+    )]
+    #[must_use]
+    pub(crate) fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
+        &self.remote_idempotency
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
+        &self.artifact_access_plans
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(
+        dead_code,
+        reason = "callers reach `self.artifact_access_plans` directly today"
+    )]
+    #[must_use]
+    pub(crate) fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
+        &self.artifact_access_plans
     }
 
     #[cfg(any(test, feature = "test-support"))]

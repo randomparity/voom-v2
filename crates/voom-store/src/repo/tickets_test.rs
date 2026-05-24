@@ -1,6 +1,6 @@
 use super::*;
 
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use voom_core::VoomError;
 
 use crate::test_support::fresh_initialized_pool_at;
@@ -9,6 +9,45 @@ async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let p = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (p, tmp)
+}
+
+struct TicketFixture {
+    repo: SqliteTicketRepo,
+    _tmp: tempfile::NamedTempFile,
+    now: OffsetDateTime,
+}
+
+async fn ticket_fixture() -> TicketFixture {
+    let (pool, tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool);
+    TicketFixture {
+        repo,
+        _tmp: tmp,
+        now: OffsetDateTime::UNIX_EPOCH + Duration::seconds(30),
+    }
+}
+
+impl TicketFixture {
+    async fn ready_ticket(&self, kind: &str, priority: i64, eligible_after_secs: i64) -> Ticket {
+        let ticket = self
+            .repo
+            .create(NewTicket {
+                job_id: None,
+                kind: kind.to_owned(),
+                priority,
+                payload: serde_json::json!({}),
+                max_attempts: 3,
+                created_at: OffsetDateTime::UNIX_EPOCH + Duration::seconds(eligible_after_secs),
+            })
+            .await
+            .unwrap();
+        self.repo
+            .mark_ready_if_unblocked(ticket.id, self.now)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+    }
 }
 
 fn sample_new_ticket() -> NewTicket {
@@ -31,6 +70,42 @@ async fn create_starts_in_pending_state() {
     assert_eq!(t.state, TicketState::Pending);
     assert_eq!(t.attempt, 0);
     assert_eq!(t.max_attempts, 3);
+}
+
+#[tokio::test]
+async fn next_ready_for_operations_orders_by_priority_next_eligible_and_ticket_id() {
+    let fixture = ticket_fixture().await;
+    let low = fixture.ready_ticket("transcode_video", 1, 10).await;
+    let high_late = fixture.ready_ticket("transcode_video", 10, 20).await;
+    let high_early = fixture.ready_ticket("transcode_video", 10, 5).await;
+
+    let selected = fixture
+        .repo
+        .next_ready_for_operations(&["transcode_video".to_owned()], fixture.now)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(selected.id, high_early.id);
+    assert_ne!(selected.id, low.id);
+    assert_ne!(selected.id, high_late.id);
+}
+
+#[tokio::test]
+async fn next_ready_for_operations_uses_ticket_id_as_final_tiebreaker() {
+    let fixture = ticket_fixture().await;
+    let first = fixture.ready_ticket("transcode_video", 10, 5).await;
+    let second = fixture.ready_ticket("transcode_video", 10, 5).await;
+
+    let selected = fixture
+        .repo
+        .next_ready_for_operations(&["transcode_video".to_owned()], fixture.now)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(selected.id, first.id);
+    assert_ne!(selected.id, second.id);
 }
 
 #[tokio::test]

@@ -81,6 +81,32 @@ async fn nodes_heartbeat_with_valid_token_activates_node_and_emits_event() {
 }
 
 #[tokio::test]
+async fn nodes_heartbeat_in_tx_rolls_back_with_caller_transaction() {
+    let now = T0 + Duration::seconds(30);
+    let (cp, _tmp) = cp_at(now).await;
+    let registered = cp
+        .register_node(register_input("synthetic-a"))
+        .await
+        .unwrap();
+    let mut tx = begin_tx(&cp.pool).await.unwrap();
+
+    let node = cp
+        .heartbeat_node_in_tx(&mut tx, registered.node.id, now)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(node.status, NodeStatus::Active);
+    let stored = cp.get_node(registered.node.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.status,
+        NodeStatus::Registered,
+        "helper must leave commit/rollback ownership with the caller"
+    );
+    assert_eq!(events(&cp, EventKind::NodeHeartbeatRecorded).await.len(), 0);
+}
+
+#[tokio::test]
 async fn nodes_heartbeat_with_invalid_token_returns_conflict_without_mutation() {
     let (cp, _tmp) = cp_at(T0).await;
     let registered = cp
