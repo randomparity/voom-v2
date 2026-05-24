@@ -2,9 +2,10 @@
 
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use rand::RngCore;
+use rand::SeedableRng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde::Serialize;
@@ -13,8 +14,6 @@ use voom_core::{FailureClass, LeaseId, WorkerId};
 use voom_fake_support::{dispatch_provider, provider_definition};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
-
-static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct RemoteRunnerConfig {
@@ -81,10 +80,8 @@ impl RemoteSyntheticRunner {
     /// # Errors
     /// Returns HTTP, API-envelope, or fake-provider protocol failures.
     pub async fn run_once_to_completion(&self) -> Result<RemoteRunnerSummary, RemoteRunnerError> {
-        let mut keys = IdempotencyKeys::new(
-            self.config.worker_id,
-            NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed),
-        );
+        let run_id = new_run_id();
+        let mut keys = IdempotencyKeys::new(self.config.worker_id, &run_id);
         let mut summary = RemoteRunnerSummary::default();
         let started = std::time::Instant::now();
 
@@ -272,15 +269,15 @@ impl RemoteSyntheticRunner {
 #[derive(Debug)]
 struct IdempotencyKeys {
     worker_id: WorkerId,
-    run_id: u64,
+    run_id: String,
     sequence: u64,
 }
 
 impl IdempotencyKeys {
-    const fn new(worker_id: WorkerId, run_id: u64) -> Self {
+    fn new(worker_id: WorkerId, run_id: &str) -> Self {
         Self {
             worker_id,
-            run_id,
+            run_id: run_id.to_owned(),
             sequence: 0,
         }
     }
@@ -293,6 +290,13 @@ impl IdempotencyKeys {
         self.sequence += 1;
         key
     }
+}
+
+fn new_run_id() -> String {
+    let mut rng = rand::rngs::StdRng::from_os_rng();
+    let high = rng.next_u64();
+    let low = rng.next_u64();
+    format!("{high:016x}{low:016x}")
 }
 
 #[derive(Debug, Deserialize)]

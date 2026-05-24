@@ -87,6 +87,15 @@ async fn runner_uses_fresh_idempotency_keys_for_each_run() {
 }
 
 #[tokio::test]
+async fn runner_instances_use_random_idempotency_run_ids() {
+    let first = super::new_run_id();
+    let second = super::new_run_id();
+
+    assert_eq!(first.len(), 32);
+    assert_ne!(first, second);
+}
+
+#[tokio::test]
 async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
