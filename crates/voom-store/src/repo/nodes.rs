@@ -313,17 +313,15 @@ impl NodeRepo for SqliteNodeRepo {
         let rows = sqlx::query(
             "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
              heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
-             FROM nodes WHERE status != 'retired' ORDER BY last_seen_at ASC, id ASC",
+             FROM nodes WHERE status IN ('registered','active') \
+             ORDER BY last_seen_at ASC, id ASC",
         )
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("nodes stale candidates: {e}")))?;
-        let candidates = rows
-            .iter()
-            .map(row_to_node)
-            .collect::<Result<Vec<_>, _>>()?;
         let mut changed = Vec::new();
-        for node in candidates {
+        for row in &rows {
+            let node = row_to_node(row)?;
             if let Some(node) = mark_stale_candidate_in_tx(tx, &node, now).await? {
                 changed.push(node);
             }
