@@ -87,7 +87,7 @@ just ci
 - Create: `migrations/0010_remote_execution.sql`
 - Modify: `crates/voom-store/src/schema_test.rs`
 
-- [ ] **Step 1: Add failing schema tests**
+- [x] **Step 1: Add failing schema tests**
 
 Add tests to `crates/voom-store/src/schema_test.rs`:
 
@@ -130,7 +130,7 @@ async fn remote_execution_schema_contains_idempotency_and_artifact_access_tables
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -140,7 +140,7 @@ cargo test -p voom-store remote_execution_schema_contains_idempotency_and_artifa
 
 Expected: FAIL because the tables do not exist.
 
-- [ ] **Step 3: Add migration**
+- [x] **Step 3: Add migration**
 
 Create `migrations/0010_remote_execution.sql`:
 
@@ -201,7 +201,7 @@ CREATE INDEX artifact_access_plans_by_mode_status
     ON artifact_access_plans (selected_access_mode, status, id);
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -226,7 +226,7 @@ git commit -m "feat: add remote execution persistence schema"
 - Create: `crates/voom-store/src/repo/remote_idempotency_test.rs`
 - Modify: `crates/voom-store/src/repo/mod.rs`
 
-- [ ] **Step 1: Add failing repository tests**
+- [x] **Step 1: Add failing repository tests**
 
 Create `crates/voom-store/src/repo/remote_idempotency_test.rs` with tests for insert, same-request replay, and conflict:
 
@@ -337,7 +337,7 @@ async fn same_scope_key_with_different_hash_is_conflict() {
 
 Define `fixture()` in the same test file by initializing a temp database, inserting a node and node-linked worker through raw SQL or existing test support, then returning a small fixture struct containing `pool`, `repo`, `node_id`, and `worker_id`.
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -347,7 +347,7 @@ cargo test -p voom-store remote_idempotency
 
 Expected: compile failure because the repo module does not exist.
 
-- [ ] **Step 3: Implement repository**
+- [x] **Step 3: Implement repository**
 
 Create `crates/voom-store/src/repo/remote_idempotency.rs`:
 
@@ -447,7 +447,7 @@ pub use remote_idempotency::{
 };
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -471,7 +471,7 @@ git commit -m "feat: persist remote route idempotency"
 - Create: `crates/voom-store/src/repo/artifact_access_plans_test.rs`
 - Modify: `crates/voom-store/src/repo/mod.rs`
 
-- [ ] **Step 1: Add failing repository tests**
+- [x] **Step 1: Add failing repository tests**
 
 Create tests that insert a selected plan and query it by each required dimension:
 
@@ -540,7 +540,7 @@ async fn plan_status_transition_records_reason_and_evidence() {
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -550,7 +550,7 @@ cargo test -p voom-store artifact_access
 
 Expected: compile failure because `artifact_access_plans` does not exist.
 
-- [ ] **Step 3: Implement repository**
+- [x] **Step 3: Implement repository**
 
 Create typed enums and structs:
 
@@ -635,7 +635,7 @@ async fn list_by_mode_and_status(
 
 Export the module in `repo/mod.rs`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -662,7 +662,7 @@ git commit -m "feat: persist artifact access plans"
 - Modify: `crates/voom-store/src/repo/leases.rs`
 - Modify: `crates/voom-store/src/repo/leases_test.rs`
 
-- [ ] **Step 1: Add failing worker eligibility tests**
+- [x] **Step 1: Add failing worker eligibility tests**
 
 Add tests asserting worker capability and grant checks:
 
@@ -699,7 +699,7 @@ async fn worker_operation_eligibility_surfaces_denies() {
 }
 ```
 
-- [ ] **Step 2: Add failing ready-ticket selection tests**
+- [x] **Step 2: Add failing ready-ticket selection tests**
 
 Add a test that seeds three ready tickets and asserts deterministic order:
 
@@ -724,7 +724,7 @@ async fn next_ready_for_operations_orders_by_priority_next_eligible_and_ticket_i
 }
 ```
 
-- [ ] **Step 3: Run focused failures**
+- [x] **Step 3: Run focused failures**
 
 Run:
 
@@ -735,7 +735,7 @@ cargo test -p voom-store next_ready_for_operations
 
 Expected: compile failures because helper methods do not exist.
 
-- [ ] **Step 4: Implement helpers**
+- [x] **Step 4: Implement helpers**
 
 Add a `WorkerOperationEligibility` projection:
 
@@ -793,7 +793,7 @@ async fn get_held_for_worker_in_tx(
 
 Return `NOT_FOUND` for missing rows and `CONFLICT` for wrong worker or non-held state. Remote execution use cases must call these `_in_tx` helpers inside the idempotency transaction; non-transactional convenience wrappers may be added for tests, but they must not be used by `remote_execution.rs`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run:
 
@@ -824,7 +824,7 @@ git commit -m "feat: add remote acquire selection helpers"
 - Create: `crates/voom-control-plane/src/cases/remote_execution.rs`
 - Create: `crates/voom-control-plane/src/cases/remote_execution_test.rs`
 
-- [ ] **Step 1: Add failing acquire and idle tests**
+- [x] **Step 1: Add failing acquire and idle tests**
 
 Create `remote_execution_test.rs` with tests:
 
@@ -864,7 +864,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_and_grant() {
 }
 ```
 
-- [ ] **Step 2: Add failing lease transition and idempotency tests**
+- [x] **Step 2: Add failing lease transition and idempotency tests**
 
 Add tests:
 
@@ -932,7 +932,7 @@ async fn remote_same_key_different_body_rejects_without_second_mutation() {
 }
 ```
 
-- [ ] **Step 3: Run focused failures**
+- [x] **Step 3: Run focused failures**
 
 Run:
 
@@ -943,7 +943,7 @@ cargo test -p voom-control-plane remote_complete
 
 Expected: compile failure because remote execution types and methods do not exist.
 
-- [ ] **Step 4: Implement types and use cases**
+- [x] **Step 4: Implement types and use cases**
 
 Create request/response types:
 
@@ -1081,7 +1081,7 @@ For terminal routes:
 - `remote_fail` must read the selected artifact access plan by `lease_id`. Mark it `rejected` when the failure reason/class indicates incompatible selected mode, malformed policy plan, or worker-declared artifact validation failure. Mark it `failed` for worker crashes/timeouts or unrelated execution failures. Then call `fail_lease_in_tx`.
 - Plan status update, lease release/fail, ticket transition, events, and idempotency completion must commit atomically. A retry of a completed terminal route must replay without changing the artifact plan a second time.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run:
 
@@ -1110,7 +1110,7 @@ git commit -m "feat: add remote execution use cases"
 - Create: `crates/voom-api/tests/remote_execution_route.rs`
 - Modify: `crates/voom-api/tests/health_route.rs`
 
-- [ ] **Step 1: Add failing route tests**
+- [x] **Step 1: Add failing route tests**
 
 Create `crates/voom-api/tests/remote_execution_route.rs`:
 
@@ -1155,7 +1155,7 @@ async fn acquire_returns_idle_as_success() {
 
 Add tests for bad token on each route, worker/node mismatch, same-key replay, and same-key/different-body rejection.
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -1165,7 +1165,7 @@ cargo test -p voom-api remote_execution_route
 
 Expected: compile failure because execution routes and router state are missing.
 
-- [ ] **Step 3: Add route module and state**
+- [x] **Step 3: Add route module and state**
 
 Update `AppState` in `lib.rs`:
 
@@ -1220,7 +1220,7 @@ fn stable_request_hash<T: serde::Serialize>(
 
 Hash canonical serialized JSON with `blake3::hash(bytes).to_hex().to_string()` so the API does not add a second hashing crate.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -1244,7 +1244,7 @@ git commit -m "feat: expose remote execution routes"
 - Modify: `crates/voom-control-plane/src/cases/remote_execution.rs`
 - Modify: `crates/voom-control-plane/src/cases/remote_execution_test.rs`
 
-- [ ] **Step 1: Add failing recovery tests**
+- [x] **Step 1: Add failing recovery tests**
 
 Add control-plane tests:
 
@@ -1264,7 +1264,7 @@ async fn remote_recovery_marks_stale_nodes_and_expires_due_leases() {
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -1274,7 +1274,7 @@ cargo test -p voom-control-plane remote_recovery
 
 Expected: compile failure until the recovery use case exists.
 
-- [ ] **Step 3: Implement recovery**
+- [x] **Step 3: Implement recovery**
 
 Add:
 
@@ -1290,7 +1290,7 @@ pub struct RemoteRecoveryReport {
 
 Implement `ControlPlane::remote_recover(now)` by calling existing `mark_stale_nodes(now)` and `expire_due(now)`, then projecting ids from their reports. This method is intentionally not idempotency-keyed because recovery is an operator/test action and the underlying operations are idempotent by due state. Do not add an HTTP recovery route in Sprint 8; the remote HTTP surface is node-authenticated worker execution, and recovery does not have a production-ready remote admin-auth model yet.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -1313,7 +1313,7 @@ git commit -m "feat: add remote recovery hook"
 - Modify: `crates/voom-fake-support/src/lib.rs`
 - Modify: `crates/voom-fake-support/src/lib_test.rs`
 
-- [ ] **Step 1: Add failing fake-support tests**
+- [x] **Step 1: Add failing fake-support tests**
 
 Add tests:
 
@@ -1353,7 +1353,7 @@ fn incompatible_artifact_access_mode_is_retriable_failure() {
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -1363,7 +1363,7 @@ cargo test -p voom-fake-support artifact_access
 
 Expected: compile failure because helper does not exist.
 
-- [ ] **Step 3: Implement evidence helper and wire into result payload**
+- [x] **Step 3: Implement evidence helper and wire into result payload**
 
 Add helper:
 
@@ -1393,7 +1393,7 @@ Rules:
 
 Merge this object into existing fake provider result payloads before emitting the `ProgressFrame::Result`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -1419,7 +1419,7 @@ git commit -m "feat: validate synthetic artifact access evidence"
 - Create: `crates/voom-fakes/src/remote_runner_test.rs`
 - Modify: `crates/voom-fakes/src/bin/remote_synthetic_runner.rs` if a binary is needed for CLI-launched manual proof.
 
-- [ ] **Step 1: Add failing runner tests**
+- [x] **Step 1: Add failing runner tests**
 
 Create tests:
 
@@ -1455,7 +1455,7 @@ async fn runner_fails_lease_when_artifact_access_is_incompatible() {
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -1465,7 +1465,7 @@ cargo test -p voom-fakes remote_runner
 
 Expected: compile failure because runner does not exist.
 
-- [ ] **Step 3: Implement runner**
+- [x] **Step 3: Implement runner**
 
 Create:
 
@@ -1505,7 +1505,7 @@ Generate idempotency keys as deterministic strings in tests:
 format!("runner-{}-{}", self.config.worker_id.0, sequence)
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -1528,7 +1528,7 @@ git commit -m "feat: add remote synthetic runner"
 - Create: `crates/voom-fakes/tests/remote_runner.rs`
 - Modify: `crates/voom-control-plane/tests/durable_workflow.rs` only if existing workflow fixtures need a helper export.
 
-- [ ] **Step 1: Add failing integration tests**
+- [x] **Step 1: Add failing integration tests**
 
 Create integration tests covering acceptance:
 
@@ -1578,7 +1578,7 @@ async fn stale_node_cannot_acquire_until_heartbeat_reactivates_it() {
 }
 ```
 
-- [ ] **Step 2: Run focused failure**
+- [x] **Step 2: Run focused failure**
 
 Run:
 
@@ -1588,7 +1588,7 @@ cargo test -p voom-fakes remote_runner --test remote_runner
 
 Expected: FAIL until runner, API route setup, and fixtures align.
 
-- [ ] **Step 3: Implement fixtures and fix integration gaps**
+- [x] **Step 3: Implement fixtures and fix integration gaps**
 
 Implement `RemoteExecutionFixture` with:
 
@@ -1602,7 +1602,7 @@ Implement `RemoteExecutionFixture` with:
 - ticket creation and readiness through existing ticket control-plane/repo paths;
 - event assertions through `EventRepo`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
@@ -1625,7 +1625,7 @@ git commit -m "test: prove remote synthetic execution over http"
 **Files:**
 - Create: `docs/superpowers/plans/2026-05-24-voom-sprint-8-closeout.md`
 
-- [ ] **Step 1: Create closeout matrix**
+- [x] **Step 1: Create closeout matrix**
 
 Create `docs/superpowers/plans/2026-05-24-voom-sprint-8-closeout.md`:
 
@@ -1657,7 +1657,7 @@ Create `docs/superpowers/plans/2026-05-24-voom-sprint-8-closeout.md`:
 | Scheduler scoring and broad API hardening deferred | Sprint 8 spec §2 and this closeout transport boundary |
 ```
 
-- [ ] **Step 2: Verify closeout has no unchecked acceptance rows**
+- [x] **Step 2: Verify closeout has no unchecked acceptance rows**
 
 Run:
 
@@ -1667,7 +1667,7 @@ rg -n "Evidence:|Acceptance Matrix|not production-safe|Sprint 9|artifact access|
 
 Expected: matches each required closeout topic.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/plans/2026-05-24-voom-sprint-8-closeout.md
@@ -1679,7 +1679,7 @@ git commit -m "docs: add sprint 8 closeout matrix"
 **Files:**
 - Review all files changed by Tasks 1-11.
 
-- [ ] **Step 1: Run required targeted verification**
+- [x] **Step 1: Run required targeted verification**
 
 Run:
 
@@ -1692,7 +1692,7 @@ cargo test -p voom-fakes remote
 
 Expected: PASS. If a command has zero matching tests, add or rename tests so the command exercises Sprint 8 behavior before continuing.
 
-- [ ] **Step 2: Run test layout check**
+- [x] **Step 2: Run test layout check**
 
 Run:
 
@@ -1702,7 +1702,7 @@ just check-test-layout
 
 Expected: PASS. Any new unit test file must be a sibling `*_test.rs` referenced from the source file with `#[path = "..."]`.
 
-- [ ] **Step 3: Run full CI**
+- [x] **Step 3: Run full CI**
 
 Run:
 
@@ -1712,7 +1712,7 @@ just ci
 
 Expected: PASS with no skipped required Sprint 8 checks.
 
-- [ ] **Step 4: Inspect final diff**
+- [x] **Step 4: Inspect final diff**
 
 Run:
 
@@ -1724,7 +1724,7 @@ git diff --check
 
 Expected: no whitespace errors; changed files match the Sprint 8 scope.
 
-- [ ] **Step 5: Commit final fixes**
+- [x] **Step 5: Commit final fixes**
 
 If verification required fixes, replace the example file paths below with the actual files changed by that fix:
 
