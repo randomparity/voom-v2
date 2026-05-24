@@ -1,0 +1,470 @@
+use super::*;
+
+use serde_json::json;
+use time::OffsetDateTime;
+use voom_core::{ErrorCode, LeaseId, NodeId, TicketId, clock_test_support::FrozenClock};
+use voom_events::EventKind;
+use voom_store::repo::artifact_access_plans::{
+    ArtifactAccessMode, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
+};
+use voom_store::repo::nodes::NodeKind;
+use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::workers::WorkerKind;
+
+use crate::cases::{
+    count,
+    nodes::RegisterNodeInput,
+    workers::{NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput},
+};
+
+const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+const OP: &str = "test.remote";
+
+struct RemoteFixture {
+    cp: crate::ControlPlane,
+    _tmp: tempfile::NamedTempFile,
+    node_id: NodeId,
+    token: secrecy::SecretString,
+    worker_id: voom_core::WorkerId,
+}
+
+impl RemoteFixture {
+    async fn ready_ticket(&self, kind: &str) -> TicketId {
+        self.ready_ticket_with_priority(kind, 0).await
+    }
+
+    async fn ready_ticket_with_priority(&self, kind: &str, priority: i64) -> TicketId {
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: None,
+                kind: kind.to_owned(),
+                priority,
+                payload: json!({
+                    "dispatch": {"kind": kind},
+                    "artifact_access": {
+                        "inputs": ["handle:input:test"],
+                        "outputs": ["handle:output:test"]
+                    }
+                }),
+                max_attempts: 2,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        ticket.id
+    }
+
+    fn acquire_input(&self, idempotency_key: &str, request_hash: &str) -> RemoteAcquireInput {
+        RemoteAcquireInput {
+            node_id: self.node_id,
+            token: self.token.clone(),
+            worker_id: self.worker_id,
+            idempotency_key: idempotency_key.to_owned(),
+            request_hash: request_hash.to_owned(),
+            lease_ttl_seconds: 60,
+        }
+    }
+
+    fn complete_input(
+        &self,
+        lease_id: LeaseId,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> RemoteCompleteInput {
+        RemoteCompleteInput {
+            node_id: self.node_id,
+            token: self.token.clone(),
+            worker_id: self.worker_id,
+            lease_id,
+            idempotency_key: idempotency_key.to_owned(),
+            request_hash: request_hash.to_owned(),
+            result: json!({
+                "ok": true,
+                "artifact_access": {"validated": true}
+            }),
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_acquire_returns_idle_when_no_ready_work() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("acquire-idle", "hash-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        RemoteAcquireOutcome::Idle {
+            worker_id: fixture.worker_id
+        }
+    );
+    assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 0);
+}
+
+#[tokio::test]
+async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_deny() {
+    let wrong_owner = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let other_node = wrong_owner
+        .cp
+        .register_node(remote_node_input("other-node"))
+        .await
+        .unwrap();
+    wrong_owner.ready_ticket(OP).await;
+    let err = wrong_owner
+        .cp
+        .remote_acquire(RemoteAcquireInput {
+            node_id: other_node.node.id,
+            token: other_node.token,
+            worker_id: wrong_owner.worker_id,
+            idempotency_key: "wrong-owner".to_owned(),
+            request_hash: "hash-wrong-owner".to_owned(),
+            lease_ttl_seconds: 60,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+
+    let missing_grant = remote_fixture(&[(OP, vec!["shared_mount"])], &[], &[]).await;
+    let missing_grant_ticket = missing_grant.ready_ticket(OP).await;
+    let err = missing_grant
+        .cp
+        .remote_acquire(missing_grant.acquire_input("missing-grant", "hash-missing-grant"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        missing_grant
+            .cp
+            .tickets()
+            .get(missing_grant_ticket)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+
+    let missing_capability = remote_fixture(&[], &[OP], &[]).await;
+    let missing_capability_ticket = missing_capability.ready_ticket(OP).await;
+    let err = missing_capability
+        .cp
+        .remote_acquire(
+            missing_capability.acquire_input("missing-capability", "hash-missing-capability"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        missing_capability
+            .cp
+            .tickets()
+            .get(missing_capability_ticket)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+
+    let denied = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[OP]).await;
+    let denied_ticket = denied.ready_ticket(OP).await;
+    let err = denied
+        .cp
+        .remote_acquire(denied.acquire_input("denied", "hash-denied"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        denied
+            .cp
+            .tickets()
+            .get(denied_ticket)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+
+    let eligible = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let ticket_id = eligible.ready_ticket(OP).await;
+    let outcome = eligible
+        .cp
+        .remote_acquire(eligible.acquire_input("eligible", "hash-eligible"))
+        .await
+        .unwrap();
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected remote lease dispatch");
+    };
+    assert_eq!(dispatch.ticket_id, ticket_id);
+    assert_eq!(dispatch.worker_id, eligible.worker_id);
+    assert_eq!(
+        dispatch.artifact_access_plan.selected_access_mode,
+        ArtifactAccessMode::SharedMount
+    );
+}
+
+#[tokio::test]
+async fn remote_acquire_requires_remote_node_and_worker_kind() {
+    let local_node = fixture_with_options(
+        NodeKind::Local,
+        WorkerKind::Remote,
+        &[(OP, vec!["shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    local_node.ready_ticket(OP).await;
+    let err = local_node
+        .cp
+        .remote_acquire(local_node.acquire_input("local-node", "hash-local-node"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+
+    let local_worker = fixture_with_options(
+        NodeKind::Remote,
+        WorkerKind::Local,
+        &[(OP, vec!["shared_mount"])],
+        &[OP],
+        &[],
+    )
+    .await;
+    let ticket_id = local_worker.ready_ticket(OP).await;
+    let err = local_worker
+        .cp
+        .remote_acquire(local_worker.acquire_input("local-worker", "hash-local-worker"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        local_worker
+            .cp
+            .tickets()
+            .get(ticket_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+}
+
+#[tokio::test]
+async fn remote_acquire_skips_ineligible_higher_priority_work_for_eligible_ticket() {
+    let fixture = remote_fixture(
+        &[
+            ("test.denied", vec!["shared_mount"]),
+            ("test.allowed", vec!["shared_mount"]),
+        ],
+        &["test.denied", "test.allowed"],
+        &["test.denied"],
+    )
+    .await;
+    fixture.ready_ticket_with_priority("test.denied", 10).await;
+    let eligible_ticket = fixture.ready_ticket_with_priority("test.allowed", 0).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("skip-denied", "hash-skip-denied"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected eligible lower-priority lease");
+    };
+    assert_eq!(dispatch.ticket_id, eligible_ticket);
+    assert_eq!(dispatch.operation, "test.allowed");
+}
+
+#[tokio::test]
+async fn remote_complete_reuses_success_path_and_replays_same_idempotency_key() {
+    let fixture = leased_fixture().await;
+    let complete =
+        fixture.complete_input(fixture_lease_id(&fixture).await, "complete-ok", "hash-1");
+
+    let first = fixture.cp.remote_complete(complete.clone()).await.unwrap();
+    let second = fixture.cp.remote_complete(complete).await.unwrap();
+
+    assert_eq!(second, first);
+    assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
+    assert_eq!(count(&fixture.cp, EventKind::TicketSucceeded).await, 1);
+
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(first.lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
+}
+
+#[tokio::test]
+async fn remote_complete_replay_ignores_later_node_retirement() {
+    let fixture = leased_fixture().await;
+    let complete = fixture.complete_input(
+        fixture_lease_id(&fixture).await,
+        "complete-before-retire",
+        "hash-1",
+    );
+
+    let first = fixture.cp.remote_complete(complete.clone()).await.unwrap();
+    let node = fixture.cp.get_node(fixture.node_id).await.unwrap().unwrap();
+    fixture
+        .cp
+        .retire_node(fixture.node_id, node.epoch, T0)
+        .await
+        .unwrap();
+
+    let replay = fixture.cp.remote_complete(complete).await.unwrap();
+
+    assert_eq!(replay, first);
+    assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
+}
+
+#[tokio::test]
+async fn remote_complete_same_key_different_body_rejects_without_second_mutation() {
+    let fixture = leased_fixture().await;
+    let lease_id = fixture_lease_id(&fixture).await;
+    fixture
+        .cp
+        .remote_complete(fixture.complete_input(lease_id, "complete-conflict", "hash-1"))
+        .await
+        .unwrap();
+
+    let err = fixture
+        .cp
+        .remote_complete(fixture.complete_input(lease_id, "complete-conflict", "hash-2"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(count(&fixture.cp, EventKind::LeaseReleased).await, 1);
+    assert_eq!(count(&fixture.cp, EventKind::TicketSucceeded).await, 1);
+}
+
+async fn leased_fixture() -> RemoteFixture {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    fixture.ready_ticket(OP).await;
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("leased-fixture", "hash-acquire"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, RemoteAcquireOutcome::Leased(_)));
+    fixture
+}
+
+async fn fixture_lease_id(fixture: &RemoteFixture) -> LeaseId {
+    let leases = sqlx::query_scalar::<_, i64>("SELECT id FROM leases ORDER BY id DESC LIMIT 1")
+        .fetch_one(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    LeaseId(u64::try_from(leases).unwrap())
+}
+
+async fn remote_fixture(
+    capabilities: &[(&str, Vec<&str>)],
+    can_execute: &[&str],
+    denies: &[&str],
+) -> RemoteFixture {
+    fixture_with_options(
+        NodeKind::Remote,
+        WorkerKind::Remote,
+        capabilities,
+        can_execute,
+        denies,
+    )
+    .await
+}
+
+async fn fixture_with_options(
+    node_kind: NodeKind,
+    worker_kind: WorkerKind,
+    capabilities: &[(&str, Vec<&str>)],
+    can_execute: &[&str],
+    denies: &[&str],
+) -> RemoteFixture {
+    let (cp, tmp) = cp_at(T0).await;
+    let registered = cp
+        .register_node(node_input("remote-node", node_kind))
+        .await
+        .unwrap();
+    let worker = cp
+        .register_worker_for_node(RegisterWorkerForNodeInput {
+            node_id: registered.node.id,
+            token: registered.token.clone(),
+            name: "remote-worker".to_owned(),
+            kind: worker_kind,
+            capabilities: capabilities
+                .iter()
+                .map(|(operation, artifact_access)| NewWorkerCapabilityDraft {
+                    operation: (*operation).to_owned(),
+                    codecs: vec!["json".to_owned()],
+                    hardware: Vec::new(),
+                    artifact_access: artifact_access
+                        .iter()
+                        .map(|mode| (*mode).to_owned())
+                        .collect(),
+                    extra: json!({}),
+                })
+                .collect(),
+            grants: vec![NewWorkerGrantDraft {
+                can_execute: can_execute.iter().map(|op| (*op).to_owned()).collect(),
+                can_access_read: Vec::new(),
+                can_access_write: Vec::new(),
+                denies: denies.iter().map(|op| (*op).to_owned()).collect(),
+                max_parallel: json!({"limit": 1}),
+            }],
+        })
+        .await
+        .unwrap();
+
+    RemoteFixture {
+        cp,
+        _tmp: tmp,
+        node_id: registered.node.id,
+        token: registered.token,
+        worker_id: worker.id,
+    }
+}
+
+async fn cp_at(now: OffsetDateTime) -> (crate::ControlPlane, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        std::sync::Arc::new(FrozenClock::new(now)),
+        std::sync::Arc::new(std::sync::Mutex::new(
+            voom_core::rng_test_support::FrozenRng::new(0x0808_0808),
+        )),
+    )
+    .await
+    .unwrap();
+    (cp, tmp)
+}
+
+fn remote_node_input(name: &str) -> RegisterNodeInput {
+    node_input(name, NodeKind::Remote)
+}
+
+fn node_input(name: &str, kind: NodeKind) -> RegisterNodeInput {
+    RegisterNodeInput {
+        name: name.to_owned(),
+        kind,
+        heartbeat_ttl_seconds: 60,
+        metadata: json!({}),
+    }
+}

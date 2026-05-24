@@ -117,6 +117,7 @@ pub struct Node {
 #[derive(Clone)]
 pub struct NodeAuthRecord {
     pub id: NodeId,
+    pub kind: NodeKind,
     pub status: NodeStatus,
     pub last_seen_at: OffsetDateTime,
     pub heartbeat_ttl_seconds: u32,
@@ -127,6 +128,7 @@ impl fmt::Debug for NodeAuthRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NodeAuthRecord")
             .field("id", &self.id)
+            .field("kind", &self.kind)
             .field("status", &self.status)
             .field("last_seen_at", &self.last_seen_at)
             .field("heartbeat_ttl_seconds", &self.heartbeat_ttl_seconds)
@@ -260,7 +262,7 @@ impl NodeRepo for SqliteNodeRepo {
         id: NodeId,
     ) -> Result<Option<NodeAuthRecord>, VoomError> {
         let row = sqlx::query(
-            "SELECT id, status, last_seen_at, heartbeat_ttl_seconds, auth_token_hash \
+            "SELECT id, kind, status, last_seen_at, heartbeat_ttl_seconds, auth_token_hash \
              FROM nodes WHERE id = ?",
         )
         .bind(i64_from_u64(id.0))
@@ -474,6 +476,7 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
 
 fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, VoomError> {
     let id: i64 = row.try_get("id").map_err(|e| map_row_err("nodes", &e))?;
+    let kind: String = row.try_get("kind").map_err(|e| map_row_err("nodes", &e))?;
     let status: String = row
         .try_get("status")
         .map_err(|e| map_row_err("nodes", &e))?;
@@ -488,6 +491,7 @@ fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, V
         .map_err(|e| map_row_err("nodes", &e))?;
     Ok(NodeAuthRecord {
         id: NodeId(u64_from_i64(id)),
+        kind: NodeKind::parse(&kind)?,
         status: NodeStatus::parse(&status)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         heartbeat_ttl_seconds: u32_from_i64(heartbeat_ttl_seconds)?,

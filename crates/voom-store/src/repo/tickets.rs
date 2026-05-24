@@ -134,6 +134,12 @@ pub trait TicketRepo: Repository {
         operations: &[String],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError>;
+    async fn ready_for_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Vec<Ticket>, VoomError>;
     async fn next_ready_for_operations(
         &self,
         operations: &[String],
@@ -448,8 +454,21 @@ impl TicketRepo for SqliteTicketRepo {
         operations: &[String],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError> {
+        Ok(self
+            .ready_for_operations_in_tx(tx, operations, now)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn ready_for_operations_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        operations: &[String],
+        now: OffsetDateTime,
+    ) -> Result<Vec<Ticket>, VoomError> {
         if operations.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let ts = iso8601(now)?;
@@ -467,13 +486,13 @@ impl TicketRepo for SqliteTicketRepo {
             separated.push_bind(operation);
         }
         separated.push_unseparated(") ");
-        query.push("ORDER BY priority DESC, next_eligible_at ASC, id ASC LIMIT 1");
+        query.push("ORDER BY priority DESC, next_eligible_at ASC, id ASC");
 
-        let row =
-            query.build().fetch_optional(&mut **tx).await.map_err(|e| {
+        let rows =
+            query.build().fetch_all(&mut **tx).await.map_err(|e| {
                 VoomError::Database(format!("tickets next_ready_for_operations: {e}"))
             })?;
-        row.as_ref().map(row_to_ticket).transpose()
+        rows.iter().map(row_to_ticket).collect()
     }
 
     async fn next_ready_for_operations(
