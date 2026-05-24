@@ -1724,11 +1724,15 @@ normalized shape expected for Sprint 3 onward.
 
 - Goal: introduce the first real media input path while preserving the
   provider boundary.
-- Deliverables: real library scan command, hashing/location ingest,
+- Deliverables: explicit-path real scan command, hashing/location ingest,
   `ffprobe` worker, media snapshot persistence, file asset/version
-  updates, and scan/report CLI JSON fixtures.
+  updates, and scan/report CLI JSON fixtures. Sprint 10 scan accepts a
+  user-supplied file or directory path only; durable library roots and
+  configured recurring library scans are a future task after explicit
+  ingest is proven.
 - Explicitly out of scope: staged artifact mutation, transcoding,
-  remuxing, backup, daemon watching, and remote media transfer.
+  remuxing, backup, daemon watching, durable library roots, configured
+  recurring scans, and remote media transfer.
 - Acceptance focus: CLI scan creates file assets, versions, locations,
   hashes, and media snapshots through an out-of-process provider.
 - Verification expectations: ingest tests, `ffprobe` worker conformance
