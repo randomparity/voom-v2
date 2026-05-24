@@ -322,24 +322,17 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
-        validate_decision_shape(&input)?;
-        validate_suppression_key(&input)?;
-        reject_selected_lease_on_create(&input)?;
-        let sql = format!(
-            "INSERT INTO scheduler_decisions \
-             (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, \
-              request_source, idempotency_key, request_node_id, request_worker_id, ticket_id, \
-              selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
-              summary, candidate_count, selected_score, suppression_key, explanation_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             RETURNING {DECISION_COLS}"
-        );
-        let now = iso8601(input.now)?;
-        let explanation = serialize_json(&input.explanation, "scheduler decision explanation")?;
-        let row = bind_decision_query(sqlx::query(&sql), &input, now, explanation)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|e| VoomError::Database(format!("scheduler_decisions insert: {e}")))?;
+        let prepared = prepare_decision_insert(&input)?;
+        let sql = decision_insert_sql(&format!("RETURNING {DECISION_COLS}"));
+        let row = bind_decision_query(
+            sqlx::query(&sql),
+            &input,
+            prepared.now,
+            prepared.explanation,
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scheduler_decisions insert: {e}")))?;
         row_to_decision(&row)
     }
 
@@ -364,40 +357,19 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
-        validate_decision_shape(&input)?;
-        validate_suppression_key(&input)?;
-        reject_selected_lease_on_create(&input)?;
-        validate_suppression_equivalence_in_tx(tx, &input).await?;
-        let sql = format!(
-            "INSERT INTO scheduler_decisions \
-             (created_at, updated_at, first_seen_at, last_seen_at, decision_kind, \
-              request_source, idempotency_key, request_node_id, request_worker_id, ticket_id, \
-              selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
-              summary, candidate_count, selected_score, suppression_key, explanation_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(suppression_key) WHERE suppression_key IS NOT NULL DO UPDATE SET \
-                 updated_at = excluded.updated_at, \
-                 last_seen_at = excluded.last_seen_at, \
-                 suppressed_count = scheduler_decisions.suppressed_count + 1 \
-             WHERE scheduler_decisions.decision_kind = excluded.decision_kind \
-               AND scheduler_decisions.request_source = excluded.request_source \
-               AND scheduler_decisions.request_node_id IS excluded.request_node_id \
-               AND scheduler_decisions.request_worker_id IS excluded.request_worker_id \
-               AND scheduler_decisions.ticket_id IS excluded.ticket_id \
-               AND scheduler_decisions.selected_worker_id IS excluded.selected_worker_id \
-               AND scheduler_decisions.selected_node_id IS excluded.selected_node_id \
-               AND scheduler_decisions.outcome = excluded.outcome \
-               AND scheduler_decisions.reason_code = excluded.reason_code \
-               AND scheduler_decisions.candidate_count = excluded.candidate_count \
-               AND scheduler_decisions.selected_score IS excluded.selected_score \
-             RETURNING {DECISION_COLS}"
-        );
-        let now = iso8601(input.now)?;
-        let explanation = serialize_json(&input.explanation, "scheduler decision explanation")?;
-        let row = bind_decision_query(sqlx::query(&sql), &input, now, explanation)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| VoomError::Database(format!("scheduler_decisions upsert: {e}")))?;
+        let prepared = prepare_decision_insert(&input)?;
+        let sql = decision_insert_sql(&format!(
+            "{DECISION_INSERT_SUPPRESS_CLAUSE} RETURNING {DECISION_COLS}"
+        ));
+        let row = bind_decision_query(
+            sqlx::query(&sql),
+            &input,
+            prepared.now,
+            prepared.explanation,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("scheduler_decisions upsert: {e}")))?;
         row.as_ref()
             .map(row_to_decision)
             .transpose()?
@@ -564,6 +536,50 @@ const DECISION_COLS: &str = "id, created_at, updated_at, first_seen_at, last_see
      ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
      summary, candidate_count, selected_score, suppressed_count, suppression_key, \
      explanation_json";
+const DECISION_INSERT_COLS: &str = "created_at, updated_at, first_seen_at, last_seen_at, \
+     decision_kind, request_source, idempotency_key, request_node_id, request_worker_id, \
+     ticket_id, selected_worker_id, selected_node_id, selected_lease_id, outcome, reason_code, \
+     summary, candidate_count, selected_score, suppression_key, explanation_json";
+const DECISION_INSERT_VALUES: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+const DECISION_INSERT_SUPPRESS_CLAUSE: &str = "ON CONFLICT(suppression_key) WHERE suppression_key IS NOT NULL DO UPDATE SET \
+         updated_at = excluded.updated_at, \
+         last_seen_at = excluded.last_seen_at, \
+         suppressed_count = scheduler_decisions.suppressed_count + 1 \
+     WHERE scheduler_decisions.decision_kind = excluded.decision_kind \
+       AND scheduler_decisions.request_source = excluded.request_source \
+       AND scheduler_decisions.request_node_id IS excluded.request_node_id \
+       AND scheduler_decisions.request_worker_id IS excluded.request_worker_id \
+       AND scheduler_decisions.ticket_id IS excluded.ticket_id \
+       AND scheduler_decisions.selected_worker_id IS excluded.selected_worker_id \
+       AND scheduler_decisions.selected_node_id IS excluded.selected_node_id \
+       AND scheduler_decisions.outcome = excluded.outcome \
+       AND scheduler_decisions.reason_code = excluded.reason_code \
+       AND scheduler_decisions.candidate_count = excluded.candidate_count \
+       AND scheduler_decisions.selected_score IS excluded.selected_score";
+
+struct PreparedSchedulerDecisionInsert {
+    now: String,
+    explanation: String,
+}
+
+fn prepare_decision_insert(
+    input: &NewSchedulerDecision,
+) -> Result<PreparedSchedulerDecisionInsert, VoomError> {
+    validate_decision_shape(input)?;
+    validate_suppression_key(input)?;
+    reject_selected_lease_on_create(input)?;
+    Ok(PreparedSchedulerDecisionInsert {
+        now: iso8601(input.now)?,
+        explanation: serialize_json(&input.explanation, "scheduler decision explanation")?,
+    })
+}
+
+fn decision_insert_sql(suffix: &str) -> String {
+    format!(
+        "INSERT INTO scheduler_decisions ({DECISION_INSERT_COLS}) \
+         VALUES ({DECISION_INSERT_VALUES}) {suffix}"
+    )
+}
 
 fn validate_decision_shape(input: &NewSchedulerDecision) -> Result<(), VoomError> {
     validate_request_context(input)?;
@@ -678,46 +694,6 @@ fn reject_selected_lease_on_create(input: &NewSchedulerDecision) -> Result<(), V
     Err(VoomError::Config(
         "scheduler selected_lease_id must be linked after decision creation".to_owned(),
     ))
-}
-
-async fn validate_suppression_equivalence_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    input: &NewSchedulerDecision,
-) -> Result<(), VoomError> {
-    let Some(suppression_key) = input.suppression_key.as_deref() else {
-        return Ok(());
-    };
-
-    let row = sqlx::query(&format!(
-        "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE suppression_key = ?"
-    ))
-    .bind(suppression_key)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| VoomError::Database(format!("scheduler_decisions suppression get: {e}")))?;
-
-    let Some(row) = row else {
-        return Ok(());
-    };
-    let existing = row_to_decision(&row)?;
-    if existing.decision_kind == input.decision_kind
-        && existing.request_source == input.request_source
-        && existing.request_node_id == input.request_node_id
-        && existing.request_worker_id == input.request_worker_id
-        && existing.ticket_id == input.ticket_id
-        && existing.selected_worker_id == input.selected_worker_id
-        && existing.selected_node_id == input.selected_node_id
-        && existing.outcome == input.outcome
-        && existing.reason_code == input.reason_code
-        && existing.candidate_count == input.candidate_count
-        && existing.selected_score == input.selected_score
-    {
-        return Ok(());
-    }
-
-    Err(VoomError::Conflict(format!(
-        "scheduler suppression_key {suppression_key:?} already belongs to a different decision"
-    )))
 }
 
 async fn validate_selected_lease_link_in_tx(
