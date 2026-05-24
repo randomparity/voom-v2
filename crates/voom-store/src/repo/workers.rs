@@ -188,6 +188,12 @@ pub trait WorkerRepo: Repository {
     ) -> Result<Worker, VoomError>;
 
     async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError>;
+    async fn get_by_name_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        name: &str,
+    ) -> Result<Option<Worker>, VoomError>;
+    async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError>;
     async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError>;
     async fn list_by_status(
         &self,
@@ -211,6 +217,18 @@ pub trait WorkerRepo: Repository {
         worker_id: WorkerId,
         operation: &str,
     ) -> Result<WorkerOperationEligibility, VoomError>;
+    async fn has_capability_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<bool, VoomError>;
+    async fn has_execute_grant_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<bool, VoomError>;
 
     async fn node_owned_worker_in_tx<'tx>(
         &self,
@@ -430,6 +448,27 @@ impl WorkerRepo for SqliteWorkerRepo {
         row.as_ref().map(row_to_worker).transpose()
     }
 
+    async fn get_by_name_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        name: &str,
+    ) -> Result<Option<Worker>, VoomError> {
+        get_by_name_in_tx(tx, name).await
+    }
+
+    async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+        let out = self.get_by_name_in_tx(&mut tx, name).await?;
+        tx.commit()
+            .await
+            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+        Ok(out)
+    }
+
     async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError> {
         let row = sqlx::query(
             "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
@@ -566,6 +605,48 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
+    async fn has_capability_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<bool, VoomError> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM worker_capabilities WHERE worker_id = ? AND operation = ?)",
+        )
+        .bind(i64_from_u64(worker_id.0))
+        .bind(operation)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("worker_capabilities exists: {e}")))?;
+        Ok(exists != 0)
+    }
+
+    async fn has_execute_grant_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        worker_id: WorkerId,
+        operation: &str,
+    ) -> Result<bool, VoomError> {
+        let rows = sqlx::query("SELECT can_execute FROM worker_grants WHERE worker_id = ?")
+            .bind(i64_from_u64(worker_id.0))
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("worker_grants execute exists: {e}")))?;
+        for row in &rows {
+            let can_execute: String = row
+                .try_get("can_execute")
+                .map_err(|e| map_row_err("worker_grants execute exists", &e))?;
+            if parse_string_array_json(&can_execute, "can_execute")?
+                .iter()
+                .any(|item| item == operation)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn node_owned_worker_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -601,6 +682,21 @@ async fn get_in_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("workers reload: {e}")))?;
+    row.as_ref().map(row_to_worker).transpose()
+}
+
+async fn get_by_name_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    name: &str,
+) -> Result<Option<Worker>, VoomError> {
+    let row = sqlx::query(
+        "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+         FROM workers WHERE name = ?",
+    )
+    .bind(name)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::Database(format!("workers get by name: {e}")))?;
     row.as_ref().map(row_to_worker).transpose()
 }
 
