@@ -244,6 +244,102 @@ async fn remote_acquire_leased_returns_scheduler_decision_id_linked_to_lease() {
 }
 
 #[tokio::test]
+async fn remote_acquire_uses_scored_priority_then_tie_breaker() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let low = fixture.ready_ticket_with_priority(OP, 0).await;
+    let high = fixture.ready_ticket_with_priority(OP, 10).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("priority-score", "hash-priority-score"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::Leased(dispatch) = outcome else {
+        panic!("expected remote lease dispatch");
+    };
+    assert_eq!(dispatch.ticket_id, high);
+    assert_eq!(
+        fixture.cp.tickets().get(low).await.unwrap().unwrap().state,
+        TicketState::Ready
+    );
+}
+
+#[tokio::test]
+async fn remote_acquire_no_candidate_is_success_with_decision() {
+    let fixture = remote_fixture(&[(OP, vec!["local_path"])], &[OP], &[]).await;
+    fixture.ready_ticket(OP).await;
+
+    let outcome = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("unsupported-no-candidate", "hash-no-candidate"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::NoCandidate {
+        worker_id,
+        scheduler_decision_id,
+    } = outcome
+    else {
+        panic!("expected successful no-candidate remote acquire");
+    };
+    assert_eq!(worker_id, fixture.worker_id);
+
+    let decision = fixture
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code.as_str(), "unsupported_artifact_access");
+}
+
+#[tokio::test]
+async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    sqlx::query("UPDATE worker_grants SET max_parallel = ? WHERE worker_id = ?")
+        .bind(serde_json::to_string(&json!({"limit": 2})).unwrap())
+        .bind(i64::try_from(fixture.worker_id.0).unwrap())
+        .execute(fixture.cp.pool_for_test())
+        .await
+        .unwrap();
+    fixture.ready_ticket_with_priority(OP, 10).await;
+    fixture.ready_ticket_with_priority(OP, 9).await;
+
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("node-limit-first", "hash-node-limit-first"))
+        .await
+        .unwrap();
+    assert!(matches!(first, RemoteAcquireOutcome::Leased(_)));
+
+    let second = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("node-limit-second", "hash-node-limit-second"))
+        .await
+        .unwrap();
+
+    let RemoteAcquireOutcome::NoCandidate {
+        worker_id,
+        scheduler_decision_id,
+    } = second
+    else {
+        panic!("expected node-capacity no-candidate remote acquire");
+    };
+    assert_eq!(worker_id, fixture.worker_id);
+
+    let decision = fixture
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code.as_str(), "node_capacity_full");
+}
+
+#[tokio::test]
 async fn remote_acquire_replays_new_idle_decision_without_duplicate_log() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
     let input = fixture.acquire_input("acquire-idle-replay", "hash-idle-replay");
@@ -330,6 +426,10 @@ async fn remote_acquire_replays_legacy_lease_without_decision_id() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "single scenario preserves the hard-error and scheduler-no-candidate boundary"
+)]
 async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_deny() {
     let wrong_owner = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
     let other_node = wrong_owner
@@ -354,12 +454,26 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 
     let missing_grant = remote_fixture(&[(OP, vec!["shared_mount"])], &[], &[]).await;
     let missing_grant_ticket = missing_grant.ready_ticket(OP).await;
-    let err = missing_grant
+    let outcome = missing_grant
         .cp
         .remote_acquire(missing_grant.acquire_input("missing-grant", "hash-missing-grant"))
         .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+        .unwrap();
+    let RemoteAcquireOutcome::NoCandidate {
+        scheduler_decision_id,
+        ..
+    } = outcome
+    else {
+        panic!("expected missing-grant no-candidate");
+    };
+    let decision = missing_grant
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code.as_str(), "missing_grant");
     assert_eq!(
         missing_grant
             .cp
@@ -374,14 +488,28 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 
     let missing_capability = remote_fixture(&[], &[OP], &[]).await;
     let missing_capability_ticket = missing_capability.ready_ticket(OP).await;
-    let err = missing_capability
+    let outcome = missing_capability
         .cp
         .remote_acquire(
             missing_capability.acquire_input("missing-capability", "hash-missing-capability"),
         )
         .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+        .unwrap();
+    let RemoteAcquireOutcome::NoCandidate {
+        scheduler_decision_id,
+        ..
+    } = outcome
+    else {
+        panic!("expected missing-capability no-candidate");
+    };
+    let decision = missing_capability
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code.as_str(), "missing_capability");
     assert_eq!(
         missing_capability
             .cp
@@ -396,12 +524,26 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 
     let denied = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[OP]).await;
     let denied_ticket = denied.ready_ticket(OP).await;
-    let err = denied
+    let outcome = denied
         .cp
         .remote_acquire(denied.acquire_input("denied", "hash-denied"))
         .await
-        .unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+        .unwrap();
+    let RemoteAcquireOutcome::NoCandidate {
+        scheduler_decision_id,
+        ..
+    } = outcome
+    else {
+        panic!("expected denied no-candidate");
+    };
+    let decision = denied
+        .cp
+        .scheduler_decisions()
+        .get(scheduler_decision_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decision.reason_code.as_str(), "operation_denied");
     assert_eq!(
         denied
             .cp
@@ -433,17 +575,17 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
 }
 
 #[tokio::test]
-async fn remote_acquire_rejects_unsupported_artifact_access_mode_without_leasing() {
+async fn remote_acquire_replays_unsupported_artifact_access_no_candidate_without_leasing() {
     let fixture = remote_fixture(&[(OP, vec!["local_path"])], &[OP], &[]).await;
     let ticket_id = fixture.ready_ticket(OP).await;
 
-    let err = fixture
+    let first = fixture
         .cp
         .remote_acquire(fixture.acquire_input("unsupported-access", "hash-unsupported-access"))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert!(matches!(first, RemoteAcquireOutcome::NoCandidate { .. }));
     sqlx::query(
         "UPDATE worker_capabilities \
          SET artifact_access = ? \
@@ -460,9 +602,9 @@ async fn remote_acquire_rejects_unsupported_artifact_access_mode_without_leasing
         .cp
         .remote_acquire(fixture.acquire_input("unsupported-access", "hash-unsupported-access"))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(replay.error_code(), ErrorCode::Conflict);
+    assert_eq!(replay, first);
     assert_eq!(
         fixture
             .cp
