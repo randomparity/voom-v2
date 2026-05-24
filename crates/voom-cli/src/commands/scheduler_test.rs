@@ -39,10 +39,37 @@ async fn decision_data_maps_full_record() {
         .await
         .unwrap();
 
+    let summary = DecisionSummaryData::from(created.clone());
     let data = DecisionData::from(created);
 
-    assert_eq!(data.id, 1);
-    assert_eq!(data.outcome, "selected");
+    assert_eq!(summary.id, 1);
+    assert_eq!(summary.created_at, "1970-01-01 0:00:00.0 +00:00:00");
+    assert_eq!(summary.outcome, "selected");
+    assert_eq!(summary.reason_code, "selected");
+    assert_eq!(summary.summary, "selected");
+    assert_eq!(summary.request_worker_id, Some(2));
+    assert_eq!(summary.request_node_id, Some(1));
+    assert_eq!(summary.ticket_id, Some(3));
+    assert_eq!(summary.selected_worker_id, Some(2));
+    assert_eq!(summary.selected_node_id, Some(1));
+    assert_eq!(summary.selected_lease_id, None);
+    assert_eq!(summary.candidate_count, 1);
+    assert_eq!(summary.selected_score, Some(100));
+    assert_eq!(summary.suppressed_count, 0);
+
+    assert_eq!(data.created_at, summary.created_at);
+    assert_eq!(data.updated_at, "1970-01-01 0:00:00.0 +00:00:00");
+    assert_eq!(data.reason_code, summary.reason_code);
+    assert_eq!(data.summary, summary.summary);
+    assert_eq!(data.request_worker_id, summary.request_worker_id);
+    assert_eq!(data.request_node_id, summary.request_node_id);
+    assert_eq!(data.ticket_id, summary.ticket_id);
+    assert_eq!(data.selected_worker_id, summary.selected_worker_id);
+    assert_eq!(data.selected_node_id, summary.selected_node_id);
+    assert_eq!(data.selected_lease_id, summary.selected_lease_id);
+    assert_eq!(data.candidate_count, summary.candidate_count);
+    assert_eq!(data.selected_score, summary.selected_score);
+    assert_eq!(data.suppressed_count, summary.suppressed_count);
     assert_eq!(data.explanation_json, json!({"scoring_version":1}));
 }
 
