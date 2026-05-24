@@ -1,0 +1,133 @@
+use super::*;
+
+use voom_core::ErrorCode;
+
+#[tokio::test]
+async fn explicit_supported_file_is_single_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("clip.MP4");
+    std::fs::write(&path, b"clip").unwrap();
+
+    let discovered = discover_path(&path).await.unwrap();
+
+    assert_eq!(discovered.mode, ScanMode::File);
+    assert_eq!(discovered.candidates.len(), 1);
+    assert!(discovered.skipped.is_empty());
+    assert_eq!(discovered.candidates[0].path, path.canonicalize().unwrap());
+    assert!(discovered.candidates[0].path.is_absolute());
+}
+
+#[tokio::test]
+async fn directory_discovery_returns_supported_media_in_lexicographic_order() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("b")).unwrap();
+    std::fs::create_dir(dir.path().join("a")).unwrap();
+    std::fs::write(dir.path().join("b").join("z.mkv"), b"z").unwrap();
+    std::fs::write(dir.path().join("a").join("a.mp4"), b"a").unwrap();
+    std::fs::write(dir.path().join("a").join("notes.txt"), b"skip").unwrap();
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert_eq!(discovered.mode, ScanMode::Directory);
+    let names: Vec<_> = discovered
+        .candidates
+        .iter()
+        .map(|candidate| {
+            candidate
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["a.mp4", "z.mkv"]);
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(
+        discovered.skipped[0].status,
+        FileScanStatus::SkippedUnsupportedExtension
+    );
+}
+
+#[tokio::test]
+async fn unsupported_file_inside_directory_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"clip").unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"notes").unwrap();
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert_eq!(discovered.candidates.len(), 1);
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(
+        discovered.skipped[0].status,
+        FileScanStatus::SkippedUnsupportedExtension
+    );
+}
+
+#[tokio::test]
+async fn directory_skipped_entries_are_returned_in_lexicographic_order() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("z.txt"), b"z").unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"clip").unwrap();
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    let names: Vec<_> = discovered
+        .skipped
+        .iter()
+        .map(|skipped| {
+            skipped
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, vec!["a.txt", "z.txt"]);
+}
+
+#[tokio::test]
+async fn unsupported_explicit_file_is_bad_args() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    std::fs::write(&path, b"notes").unwrap();
+
+    let err = discover_path(&path).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::BadArgs);
+}
+
+#[tokio::test]
+async fn explicit_symlink_is_rejected_before_canonicalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clip.mp4");
+    let link = dir.path().join("link.mp4");
+    std::fs::write(&target, b"clip").unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let err = discover_path(&link).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::BadArgs);
+}
+
+#[tokio::test]
+async fn directory_walk_does_not_traverse_symlinked_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.mp4"), b"outside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+
+    let discovered = discover_path(root.path()).await.unwrap();
+
+    assert!(
+        discovered
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.path.ends_with("outside.mp4"))
+    );
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(discovered.skipped[0].status, FileScanStatus::SkippedSymlink);
+}
