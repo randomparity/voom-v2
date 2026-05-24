@@ -297,6 +297,25 @@ async fn remote_acquire_rejects_unsupported_artifact_access_mode_without_leasing
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::Conflict);
+    sqlx::query(
+        "UPDATE worker_capabilities \
+         SET artifact_access = ? \
+         WHERE worker_id = ? AND operation = ?",
+    )
+    .bind(serde_json::to_string(&vec!["shared_mount"]).unwrap())
+    .bind(i64::try_from(fixture.worker_id.0).unwrap())
+    .bind(OP)
+    .execute(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("unsupported-access", "hash-unsupported-access"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(replay.error_code(), ErrorCode::Conflict);
     assert_eq!(
         fixture
             .cp

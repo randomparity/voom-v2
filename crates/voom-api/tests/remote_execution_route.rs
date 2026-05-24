@@ -10,7 +10,7 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 use tower::ServiceExt;
-use voom_api::router_with_control_plane;
+use voom_api::{router, router_with_control_plane};
 use voom_control_plane::cases::{
     nodes::RegisterNodeInput,
     workers::{NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput},
@@ -434,6 +434,33 @@ async fn malformed_path_ids_return_api_error_envelope() {
         )
         .await;
     assert_bad_args_envelope(fail, "execution.fail").await;
+}
+
+#[tokio::test]
+async fn unconfigured_remote_execution_route_returns_api_error_envelope() {
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let app = router(HealthPlane::open(&url).await.unwrap());
+
+    let res = app
+        .oneshot(
+            Request::post("/v1/execution/lease/acquire")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer test-token")
+                .header("x-voom-idempotency-key", "unconfigured-acquire")
+                .body(Body::from(r#"{"node_id":1,"worker_id":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let json = response_json(res).await;
+    assert_eq!(json["schema_version"], "0");
+    assert_eq!(json["command"], "execution.acquire");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
 }
 
 async fn api_fixture() -> ApiFixture {

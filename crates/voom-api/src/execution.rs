@@ -4,7 +4,6 @@ use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
 use axum::routing::post;
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -14,7 +13,7 @@ use voom_control_plane::cases::remote_execution::{
     RemoteAcquireInput, RemoteCompleteInput, RemoteFailInput, RemoteLeaseHeartbeatInput,
     RemoteNodeHeartbeatInput,
 };
-use voom_core::{FailureClass, LeaseId, NodeId, WorkerId};
+use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, WorkerId};
 
 use crate::{AppState, bad_args_response, ok_response, voom_route_error_response};
 
@@ -78,11 +77,7 @@ async fn acquire(
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
-        return (
-            StatusCode::NOT_FOUND,
-            "remote execution routes are not configured",
-        )
-            .into_response();
+        return not_configured_response(ACQUIRE_COMMAND);
     };
     let token = match bearer(&headers) {
         Ok(token) => token,
@@ -128,11 +123,7 @@ async fn node_heartbeat(
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
-        return (
-            StatusCode::NOT_FOUND,
-            "remote execution routes are not configured",
-        )
-            .into_response();
+        return not_configured_response(NODE_HEARTBEAT_COMMAND);
     };
     let token = match bearer(&headers) {
         Ok(token) => token,
@@ -177,11 +168,7 @@ async fn lease_heartbeat(
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
-        return (
-            StatusCode::NOT_FOUND,
-            "remote execution routes are not configured",
-        )
-            .into_response();
+        return not_configured_response(LEASE_HEARTBEAT_COMMAND);
     };
     let token = match bearer(&headers) {
         Ok(token) => token,
@@ -235,11 +222,7 @@ async fn complete(
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
-        return (
-            StatusCode::NOT_FOUND,
-            "remote execution routes are not configured",
-        )
-            .into_response();
+        return not_configured_response(COMPLETE_COMMAND);
     };
     let token = match bearer(&headers) {
         Ok(token) => token,
@@ -293,11 +276,7 @@ async fn fail(
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
     let Some(control_plane) = state.control_plane else {
-        return (
-            StatusCode::NOT_FOUND,
-            "remote execution routes are not configured",
-        )
-            .into_response();
+        return not_configured_response(FAIL_COMMAND);
     };
     let token = match bearer(&headers) {
         Ok(token) => token,
@@ -342,6 +321,16 @@ async fn fail(
         Ok(outcome) => ok_response(FAIL_COMMAND, outcome),
         Err(err) => voom_route_error_response(FAIL_COMMAND, &err),
     }
+}
+
+fn not_configured_response(command: &'static str) -> axum::response::Response {
+    crate::err_response(
+        StatusCode::NOT_FOUND,
+        command,
+        ErrorCode::NotFound.as_str(),
+        "remote execution routes are not configured".to_owned(),
+        None,
+    )
 }
 
 fn json_body(body: Result<Json<JsonValue>, JsonRejection>) -> Result<JsonValue, String> {

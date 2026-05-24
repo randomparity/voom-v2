@@ -146,6 +146,7 @@ enum RemoteAcquirePrepared {
     Leased {
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
+        selected_access_mode: ArtifactAccessMode,
     },
 }
 
@@ -326,9 +327,17 @@ impl ControlPlane {
             RemoteAcquirePrepared::Leased {
                 ticket,
                 eligibility,
+                selected_access_mode,
             } => {
-                self.remote_acquire_leased_in_tx(&mut tx, &input, ticket, eligibility, now)
-                    .await?
+                self.remote_acquire_leased_in_tx(
+                    &mut tx,
+                    &input,
+                    ticket,
+                    eligibility,
+                    selected_access_mode,
+                    now,
+                )
+                .await?
             }
         };
         commit_tx(tx).await?;
@@ -366,9 +375,12 @@ impl ControlPlane {
                 .await?;
             match require_eligible(input.worker_id, &ticket, &eligibility) {
                 Ok(()) => {
+                    let selected_access_mode =
+                        select_access_mode(input.worker_id, &eligibility.artifact_access)?;
                     return Ok(RemoteAcquirePrepared::Leased {
                         ticket,
                         eligibility,
+                        selected_access_mode,
                     });
                 }
                 Err(err) => {
@@ -388,6 +400,7 @@ impl ControlPlane {
         input: &RemoteAcquireInput,
         ticket: Ticket,
         eligibility: WorkerOperationEligibility,
+        selected_access_mode: ArtifactAccessMode,
         now: time::OffsetDateTime,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
         let lease = self
@@ -405,7 +418,14 @@ impl ControlPlane {
             .artifact_access_plans
             .create_selected_in_tx(
                 tx,
-                artifact_plan_input(input, &ticket, &eligibility, lease.id, now)?,
+                artifact_plan_input(
+                    input,
+                    &ticket,
+                    &eligibility,
+                    selected_access_mode,
+                    lease.id,
+                    now,
+                ),
             )
             .await?;
         let outcome = RemoteAcquireOutcome::Leased(RemoteLeaseDispatch {
@@ -1138,23 +1158,25 @@ fn artifact_plan_input(
     input: &RemoteAcquireInput,
     ticket: &Ticket,
     eligibility: &WorkerOperationEligibility,
+    selected_access_mode: ArtifactAccessMode,
     lease_id: LeaseId,
     now: time::OffsetDateTime,
-) -> Result<NewArtifactAccessPlan, VoomError> {
-    Ok(NewArtifactAccessPlan {
+) -> NewArtifactAccessPlan {
+    NewArtifactAccessPlan {
         lease_id,
         ticket_id: ticket.id,
         worker_id: input.worker_id,
         node_id: input.node_id,
         input_handles: artifact_handles(&ticket.payload, "inputs"),
         output_handles: artifact_handles(&ticket.payload, "outputs"),
-        selected_access_mode: select_access_mode(input.worker_id, &eligibility.artifact_access)?,
+        selected_access_mode,
         evidence: json!({
             "selected_by": "remote_acquire",
             "route": ROUTE_ACQUIRE,
+            "advertised_artifact_access": eligibility.artifact_access,
         }),
         now,
-    })
+    }
 }
 
 fn artifact_handles(payload: &JsonValue, direction: &str) -> Vec<String> {
