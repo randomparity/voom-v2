@@ -17,6 +17,7 @@ pub enum ScanMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileScanStatus {
+    FailedContentDrift,
     SkippedSymlink,
     SkippedUnsupportedExtension,
 }
