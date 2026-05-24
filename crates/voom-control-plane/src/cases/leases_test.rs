@@ -70,6 +70,37 @@ async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
 }
 
 #[tokio::test]
+async fn acquire_lease_in_tx_rolls_back_with_caller_transaction() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let mut tx = begin_tx(&cp.pool).await.unwrap();
+
+    let lease = cp
+        .acquire_lease_in_tx(
+            &mut tx,
+            NewLease {
+                ticket_id: t.id,
+                worker_id: w.id,
+                ttl: TDuration::seconds(60),
+                now: T0,
+            },
+        )
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(lease.ticket_id, t.id);
+    assert!(
+        cp.leases().get(lease.id).await.unwrap().is_none(),
+        "helper must leave commit/rollback ownership with the caller"
+    );
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, 0);
+    assert_eq!(count(&cp, EventKind::TicketLeased).await, 0);
+}
+
+#[tokio::test]
 async fn release_lease_emits_lease_released_and_ticket_succeeded() {
     let (cp, _tmp) = cp().await;
     let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();

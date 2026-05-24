@@ -2,6 +2,7 @@
 
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
+use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::{NodeId, VoomError};
 use voom_events::payload::{
@@ -110,10 +111,27 @@ impl ControlPlane {
                 "nodes heartbeat rejected: id={node_id} is retired"
             )));
         }
-        let node = self.nodes.heartbeat_in_tx(&mut tx, auth.id, now).await?;
+        let node = self.heartbeat_node_in_tx(&mut tx, auth.id, now).await?;
+        commit_tx(tx).await?;
+        Ok(node)
+    }
+
+    /// Record a node heartbeat and emit `node.heartbeat_recorded`.
+    ///
+    /// The caller owns the transaction boundary and any authentication.
+    ///
+    /// # Errors
+    /// Propagates repository and event-append errors.
+    pub(crate) async fn heartbeat_node_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        node_id: NodeId,
+        now: OffsetDateTime,
+    ) -> Result<Node, VoomError> {
+        let node = self.nodes.heartbeat_in_tx(tx, node_id, now).await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Node,
             Some(node.id.0),
             now,
@@ -125,7 +143,6 @@ impl ControlPlane {
             }),
         )
         .await?;
-        commit_tx(tx).await?;
         Ok(node)
     }
 
