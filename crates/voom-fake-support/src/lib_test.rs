@@ -135,6 +135,78 @@ fn remux_and_transcode_emit_output_path() {
 }
 
 #[test]
+fn artifact_access_evidence_validates_selected_advertised_mode() {
+    let payload = artifact_access_payload("shared_mount", &["shared_mount"]);
+
+    let evidence = synthetic_artifact_access_evidence(&payload).unwrap();
+
+    assert_eq!(
+        evidence,
+        serde_json::json!({
+            "artifact_access": {
+                "inputs_consumed": ["handle:input:1"],
+                "outputs_declared": ["handle:output:1"],
+                "mode": "shared_mount",
+                "validated": true
+            }
+        })
+    );
+}
+
+#[test]
+fn artifact_access_evidence_rejects_unadvertised_selected_mode() {
+    let payload = artifact_access_payload("shared_mount", &["control_plane_placeholder"]);
+
+    let err = synthetic_artifact_access_evidence(&payload).unwrap_err();
+
+    let voom_worker_protocol::ProtocolError::InvalidPayload { detail } = err else {
+        panic!("expected invalid payload for unadvertised artifact access mode");
+    };
+    assert!(detail.contains("artifact access mode shared_mount is not advertised"));
+}
+
+#[test]
+fn artifact_access_evidence_is_empty_without_plan() {
+    let evidence =
+        synthetic_artifact_access_evidence(&serde_json::json!({"path": "/library/movie.mkv"}))
+            .unwrap();
+
+    assert_eq!(evidence, serde_json::json!({}));
+}
+
+#[test]
+fn artifact_access_evidence_is_merged_into_result_payload() {
+    let req = request(
+        OperationKind::ProbeFile,
+        serde_json::json!({
+            "path": "/library/file-000.mkv",
+            "artifact_access_plan": {
+                "id": 7,
+                "input_handles": ["handle:input:1"],
+                "output_handles": ["handle:output:1"],
+                "selected_access_mode": "shared_mount"
+            },
+            "advertised_artifact_access": ["shared_mount"]
+        }),
+    );
+
+    let result = dispatch_provider(&provider_definition("fake-prober").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames);
+
+    assert_eq!(
+        payload["artifact_access"],
+        serde_json::json!({
+            "inputs_consumed": ["handle:input:1"],
+            "outputs_declared": ["handle:output:1"],
+            "mode": "shared_mount",
+            "validated": true
+        })
+    );
+}
+
+#[test]
 fn missing_path_is_invalid_payload() {
     let provider = provider_definition("fake-scanner").unwrap();
     let req = request(
@@ -183,4 +255,19 @@ fn terminal_payload(frames: &[ProgressFrame]) -> &serde_json::Value {
         panic!("expected terminal result frame");
     };
     payload
+}
+
+fn artifact_access_payload(
+    selected_access_mode: &str,
+    advertised_artifact_access: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
+        "artifact_access_plan": {
+            "id": 7,
+            "input_handles": ["handle:input:1"],
+            "output_handles": ["handle:output:1"],
+            "selected_access_mode": selected_access_mode
+        },
+        "advertised_artifact_access": advertised_artifact_access
+    })
 }

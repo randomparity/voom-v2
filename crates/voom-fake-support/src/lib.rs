@@ -521,6 +521,30 @@ fn scenario(payload: &serde_json::Value) -> &str {
         .unwrap_or("default")
 }
 
+pub fn synthetic_artifact_access_evidence(
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, ProtocolError> {
+    let Some(plan) = payload.get("artifact_access_plan") else {
+        return Ok(serde_json::json!({}));
+    };
+    let selected_access_mode = string_field(plan, "selected_access_mode")?;
+    let advertised_access_modes = advertised_access_modes(payload, plan)?;
+    if !advertised_access_modes.contains(&selected_access_mode) {
+        return Err(invalid(format!(
+            "artifact access mode {selected_access_mode} is not advertised"
+        )));
+    }
+
+    Ok(serde_json::json!({
+        "artifact_access": {
+            "inputs_consumed": string_array_field(plan, "input_handles")?,
+            "outputs_declared": string_array_field(plan, "output_handles")?,
+            "mode": selected_access_mode,
+            "validated": true,
+        }
+    }))
+}
+
 fn result_payload(
     provider: &str,
     operation: OperationKind,
@@ -610,7 +634,37 @@ fn result_payload(
         }
         _ => return Err(invalid(format!("unknown provider {provider}"))),
     }
+    let artifact_access_evidence = synthetic_artifact_access_evidence(payload)?;
+    let artifact_access_object = artifact_access_evidence
+        .as_object()
+        .ok_or_else(|| invalid("artifact access evidence must be object"))?;
+    for (key, value) in artifact_access_object {
+        object.insert(key.clone(), value.clone());
+    }
     Ok(result)
+}
+
+fn advertised_access_modes<'a>(
+    payload: &'a serde_json::Value,
+    plan: &'a serde_json::Value,
+) -> Result<Vec<&'a str>, ProtocolError> {
+    for (source, field) in [
+        (payload, "advertised_artifact_access"),
+        (payload, "advertised_access_modes"),
+        (plan, "advertised_artifact_access"),
+        (plan, "advertised_access_modes"),
+    ] {
+        if let Some(modes) = optional_string_array_field(source, field)? {
+            return Ok(modes);
+        }
+    }
+    if payload
+        .get("artifact_access")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return string_array_field(payload, "artifact_access");
+    }
+    Ok(Vec::new())
 }
 
 fn optional_u64(
@@ -624,6 +678,38 @@ fn optional_u64(
             .ok_or_else(|| invalid(format!("{field} must be an unsigned integer"))),
         None => Ok(None),
     }
+}
+
+fn optional_string_array_field<'a>(
+    payload: &'a serde_json::Value,
+    field: &'static str,
+) -> Result<Option<Vec<&'a str>>, ProtocolError> {
+    payload
+        .as_object()
+        .and_then(|object| object.get(field))
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| invalid(format!("{field} must be an array")))
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .map(|item| {
+                            item.as_str()
+                                .ok_or_else(|| invalid(format!("{field} must contain strings")))
+                        })
+                        .collect()
+                })
+        })
+        .transpose()
+}
+
+fn string_array_field<'a>(
+    payload: &'a serde_json::Value,
+    field: &'static str,
+) -> Result<Vec<&'a str>, ProtocolError> {
+    optional_string_array_field(payload, field)?
+        .ok_or_else(|| invalid(format!("payload missing {field}")))
 }
 
 fn progress_frame(
