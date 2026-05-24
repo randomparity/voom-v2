@@ -1,0 +1,27 @@
+{
+  "format": {
+    "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+    "format_long_name": "QuickTime / MOV",
+    "duration": "1.000000",
+    "bit_rate": "128000"
+  },
+  "streams": [
+    {
+      "index": 0,
+      "codec_type": "video",
+      "codec_name": "h264",
+      "width": 320,
+      "height": 180,
+      "duration": "1.000000",
+      "avg_frame_rate": "30/1"
+    },
+    {
+      "index": 1,
+      "codec_type": "audio",
+      "codec_name": "aac",
+      "duration": "1.000000",
+      "sample_rate": "48000",
+      "channels": 2
+    }
+  ]
+}

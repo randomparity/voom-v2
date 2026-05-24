@@ -15,6 +15,7 @@ members = [
     "crates/voom-conformance",
     "crates/voom-fake-support",
     "crates/voom-fakes",
+    "crates/voom-ffprobe-worker",
 ]
 
 [workspace.package]
