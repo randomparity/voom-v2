@@ -223,6 +223,7 @@ impl RemuxProviderLaunch {
                 name: "cli-compliance-remux".to_owned(),
                 kind: WorkerKind::Synthetic,
                 registered_at: cp.clock().now(),
+                node_id: None,
             })
             .await?;
         let mut child = Command::new(provider_binary("fake-remuxer")?)

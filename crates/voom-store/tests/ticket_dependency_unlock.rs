@@ -40,6 +40,7 @@ async fn linear_chain_unlocks_in_order() {
             name: "w".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();

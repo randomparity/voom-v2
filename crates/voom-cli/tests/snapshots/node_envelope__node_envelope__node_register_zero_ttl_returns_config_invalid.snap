@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/node_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "node",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "CONFIG_INVALID",
+    "message": "config error: nodes register requires heartbeat_ttl_seconds > 0"
+  }
+}

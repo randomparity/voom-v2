@@ -27,6 +27,7 @@ fn worker(name: &str) -> NewWorker {
         name: name.to_owned(),
         kind: WorkerKind::Synthetic,
         registered_at: T0,
+        node_id: None,
     }
 }
 

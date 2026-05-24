@@ -178,6 +178,7 @@ async fn add_dependency_rejects_leased_dependent() {
             name: "w".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: OffsetDateTime::UNIX_EPOCH,
+            node_id: None,
         })
         .await
         .unwrap();

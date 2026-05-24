@@ -20,7 +20,12 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::LeaseReleased,
         EventKind::LeaseExpired,
         EventKind::LeaseForceReleased,
+        EventKind::NodeRegistered,
+        EventKind::NodeHeartbeatRecorded,
+        EventKind::NodeMarkedStale,
+        EventKind::NodeRetired,
         EventKind::WorkerRegistered,
+        EventKind::WorkerLinkedToNode,
         EventKind::WorkerCapabilityRecorded,
         EventKind::WorkerGrantRecorded,
         EventKind::WorkerRetired,
@@ -77,6 +82,21 @@ fn issue_lifecycle_event_kinds_use_dotted_wire_format() {
 }
 
 #[test]
+fn node_event_kinds_use_dotted_wire_format() {
+    assert_eq!(EventKind::NodeRegistered.as_str(), "node.registered");
+    assert_eq!(
+        EventKind::NodeHeartbeatRecorded.as_str(),
+        "node.heartbeat_recorded"
+    );
+    assert_eq!(EventKind::NodeMarkedStale.as_str(), "node.marked_stale");
+    assert_eq!(EventKind::NodeRetired.as_str(), "node.retired");
+    assert_eq!(
+        EventKind::WorkerLinkedToNode.as_str(),
+        "worker.linked_to_node"
+    );
+}
+
+#[test]
 fn every_kind_round_trips_through_as_str_and_from_str() {
     // Programmatically enumerate every variant — if a new variant is added
     // without an as_str/from_str pair, this test fails.
@@ -98,7 +118,12 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::LeaseReleased,
         EventKind::LeaseExpired,
         EventKind::LeaseForceReleased,
+        EventKind::NodeRegistered,
+        EventKind::NodeHeartbeatRecorded,
+        EventKind::NodeMarkedStale,
+        EventKind::NodeRetired,
         EventKind::WorkerRegistered,
+        EventKind::WorkerLinkedToNode,
         EventKind::WorkerCapabilityRecorded,
         EventKind::WorkerGrantRecorded,
         EventKind::WorkerRetired,

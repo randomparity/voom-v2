@@ -905,6 +905,7 @@ impl DurableWorkflowFixture {
                 name: name.to_owned(),
                 kind: WorkerKind::Synthetic,
                 registered_at: T0,
+                node_id: None,
             })
             .await?;
         let operation_names: Vec<String> = operations.iter().copied().map(operation_name).collect();

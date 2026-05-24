@@ -20,6 +20,7 @@ macro_rules! define_id {
 define_id!(TicketId);
 define_id!(LeaseId);
 define_id!(WorkerId);
+define_id!(NodeId);
 define_id!(JobId);
 define_id!(EventId);
 define_id!(ArtifactHandleId);

@@ -79,6 +79,7 @@ impl RemuxProviderLaunch {
                 name: "compliance-remux".to_owned(),
                 kind: WorkerKind::Synthetic,
                 registered_at: cp.clock().now(),
+                node_id: None,
             })
             .await?;
         let mut child = tokio::process::Command::new(provider_binary("fake-remuxer")?)

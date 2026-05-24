@@ -231,6 +231,7 @@ impl WorkerBuilder {
             name: self.name,
             kind: self.kind,
             registered_at: self.registered_at,
+            node_id: None,
         })
         .await
     }

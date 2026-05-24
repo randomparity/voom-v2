@@ -23,12 +23,14 @@ use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
     artifacts::SqliteArtifactRepo, bundles::SqliteBundleRepo, events::SqliteEventRepo,
     identity::SqliteIdentityRepo, issues::SqliteIssueRepo, jobs::SqliteJobRepo,
-    leases::SqliteLeaseRepo, policies::SqlitePolicyRepo, policy_inputs::SqlitePolicyInputRepo,
-    tickets::SqliteTicketRepo, use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
+    leases::SqliteLeaseRepo, nodes::SqliteNodeRepo, policies::SqlitePolicyRepo,
+    policy_inputs::SqlitePolicyInputRepo, tickets::SqliteTicketRepo,
+    use_leases::SqliteUseLeaseRepo, workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod cases;
+pub mod node_auth;
 pub mod workflow;
 
 pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
@@ -49,6 +51,7 @@ pub struct ControlPlane {
     pub(crate) jobs: SqliteJobRepo,
     pub(crate) tickets: SqliteTicketRepo,
     pub(crate) workers: SqliteWorkerRepo,
+    pub(crate) nodes: SqliteNodeRepo,
     pub(crate) leases: SqliteLeaseRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) issues: SqliteIssueRepo,
@@ -73,6 +76,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("jobs", &self.jobs)
             .field("tickets", &self.tickets)
             .field("workers", &self.workers)
+            .field("nodes", &self.nodes)
             .field("leases", &self.leases)
             .field("artifacts", &self.artifacts)
             .field("issues", &self.issues)
@@ -146,6 +150,7 @@ impl ControlPlane {
             jobs: SqliteJobRepo::new(pool.clone()),
             tickets: SqliteTicketRepo::new(pool.clone()),
             workers: SqliteWorkerRepo::new(pool.clone()),
+            nodes: SqliteNodeRepo::new(pool.clone()),
             leases: SqliteLeaseRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             issues: SqliteIssueRepo::new(pool.clone()),
@@ -258,6 +263,18 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn workers(&self) -> &SqliteWorkerRepo {
         &self.workers
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn nodes(&self) -> &SqliteNodeRepo {
+        &self.nodes
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[expect(dead_code, reason = "callers reach `self.nodes` directly today")]
+    #[must_use]
+    pub(crate) fn nodes(&self) -> &SqliteNodeRepo {
+        &self.nodes
     }
 
     #[cfg(any(test, feature = "test-support"))]

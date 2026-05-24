@@ -24,6 +24,7 @@ pub mod compliance;
 pub mod identity;
 pub mod jobs;
 pub mod leases;
+pub mod nodes;
 pub mod plans;
 pub mod policies;
 pub mod policy_inputs;

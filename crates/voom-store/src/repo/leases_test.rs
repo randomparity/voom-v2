@@ -64,6 +64,7 @@ async fn setup() -> (
             name: "w-1".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -413,6 +414,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
             name: "w-1".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -477,6 +479,7 @@ async fn force_release_with_requeue_marks_ready_when_attempts_remain() {
             name: "w-1".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();
@@ -782,6 +785,7 @@ async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
             name: "w-cap".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();

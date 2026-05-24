@@ -1,0 +1,25 @@
+---
+source: crates/voom-cli/tests/node_envelope.rs
+expression: show_json
+---
+{
+  "schema_version": "0",
+  "command": "node",
+  "status": "ok",
+  "data": {
+    "node": {
+      "id": 1,
+      "name": "local-a",
+      "kind": "local",
+      "status": "registered",
+      "heartbeat_ttl_seconds": 60,
+      "epoch": 0
+    }
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

@@ -41,6 +41,7 @@ async fn acquire_rejects_retired_worker_and_leaves_ticket_ready() {
             name: "w".to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: T0,
+            node_id: None,
         })
         .await
         .unwrap();

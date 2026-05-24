@@ -1,0 +1,49 @@
+---
+source: crates/voom-cli/tests/worker_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "worker",
+  "status": "ok",
+  "data": {
+    "workers": [
+      {
+        "id": 1,
+        "node_id": 1,
+        "name": "linked",
+        "kind": "local",
+        "status": "registered",
+        "registered_at": "[registered-at]",
+        "last_seen_at": "[last-seen-at]",
+        "retired_at": null,
+        "epoch": 0,
+        "node": {
+          "id": 1,
+          "name": "node-a",
+          "kind": "local",
+          "status": "registered",
+          "last_seen_at": "[node-last-seen-at]"
+        }
+      },
+      {
+        "id": 2,
+        "node_id": null,
+        "name": "legacy",
+        "kind": "synthetic",
+        "status": "registered",
+        "registered_at": "[registered-at]",
+        "last_seen_at": "[last-seen-at]",
+        "retired_at": null,
+        "epoch": 0,
+        "node": null
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
