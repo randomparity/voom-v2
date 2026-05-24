@@ -12,6 +12,7 @@ pub mod leases;
 pub mod nodes;
 pub mod policies;
 pub mod policy_inputs;
+pub mod remote_idempotency;
 pub mod schema_meta;
 pub mod tickets;
 pub mod use_leases;
@@ -48,6 +49,10 @@ pub use policy_inputs::{
     PolicyBundleTargetInput, PolicyIdentityEvidenceInput, PolicyInputRepo, PolicyInputSet,
     PolicyInputSetSummary, PolicyInputTargetRef, PolicyMediaSnapshotInput,
     PolicyQualityProfileSelection, PolicySyntheticTarget, SqlitePolicyInputRepo,
+};
+pub use remote_idempotency::{
+    IdempotencyOutcome, RemoteIdempotencyInput, RemoteIdempotencyRepo, RemoteMutationReplay,
+    SqliteRemoteIdempotencyRepo,
 };
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};
