@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_store::repo::scheduler_decisions::{
-    SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerDecisionRepo,
+    SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionOutcome,
 };
 
 use crate::cli::{SchedulerCommand, SchedulerDecisionCommand, SchedulerDecisionOutcomeArg};
@@ -105,7 +105,7 @@ async fn list(
         outcome: outcome.map(outcome_arg_to_store),
         limit,
     };
-    match cp.scheduler_decisions().list(filter).await {
+    match cp.scheduler_decisions(filter).await {
         Ok(decisions) => emit_ok(
             "scheduler",
             ListData {
@@ -127,7 +127,7 @@ async fn show(database_url: &str, local: Local, decision_id: u64) -> io::Result<
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    match cp.scheduler_decisions().get(decision_id).await {
+    match cp.scheduler_decision(decision_id).await {
         Ok(Some(decision)) => emit_ok(
             "scheduler",
             ShowData {

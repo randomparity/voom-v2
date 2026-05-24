@@ -11,9 +11,7 @@ use voom_store::repo::artifact_access_plans::{
 };
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::remote_idempotency::RemoteMutationReplay;
-use voom_store::repo::scheduler_decisions::{
-    SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerDecisionRepo,
-};
+use voom_store::repo::scheduler_decisions::{SchedulerDecisionFilter, SchedulerDecisionOutcome};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 
@@ -209,8 +207,7 @@ async fn remote_acquire_idle_returns_and_persists_scheduler_decision() {
 
     let decision = fixture
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -234,8 +231,7 @@ async fn remote_acquire_leased_returns_scheduler_decision_id_linked_to_lease() {
     };
     let decision = fixture
         .cp
-        .scheduler_decisions()
-        .get(dispatch.scheduler_decision_id)
+        .scheduler_decision(dispatch.scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -262,8 +258,7 @@ async fn remote_acquire_replay_returns_original_scheduler_decision_without_resco
     assert_eq!(replay, first);
     let decision_count = fixture
         .cp
-        .scheduler_decisions()
-        .list(SchedulerDecisionFilter::default())
+        .scheduler_decisions(SchedulerDecisionFilter::default())
         .await
         .unwrap()
         .len();
@@ -314,8 +309,7 @@ async fn remote_acquire_no_candidate_is_success_with_decision() {
 
     let decision = fixture
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -398,8 +392,7 @@ async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
 
     let decision = fixture
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -447,8 +440,7 @@ async fn remote_acquire_replays_new_idle_decision_without_duplicate_log() {
     assert_eq!(replay, first);
     let rows = fixture
         .cp
-        .scheduler_decisions()
-        .list(SchedulerDecisionFilter::default())
+        .scheduler_decisions(SchedulerDecisionFilter::default())
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
@@ -565,8 +557,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
     };
     let decision = missing_grant
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -601,8 +592,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
     };
     let decision = missing_capability
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();
@@ -635,8 +625,7 @@ async fn remote_acquire_requires_worker_node_ownership_capability_grant_and_no_d
     };
     let decision = denied
         .cp
-        .scheduler_decisions()
-        .get(scheduler_decision_id)
+        .scheduler_decision(scheduler_decision_id)
         .await
         .unwrap()
         .unwrap();

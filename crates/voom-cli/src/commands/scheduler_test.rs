@@ -15,9 +15,8 @@ async fn decision_data_maps_full_record() {
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
     seed_refs(&pool).await;
-    let cp = voom_control_plane::ControlPlane::open(&url).await.unwrap();
-    let created = cp
-        .scheduler_decisions()
+    let repo = voom_store::repo::scheduler_decisions::SqliteSchedulerDecisionRepo::new(pool);
+    let created = repo
         .create(NewSchedulerDecision {
             decision_kind: SchedulerDecisionKind::LeaseAcquire,
             request_source: SchedulerRequestSource::RemoteAcquire,
