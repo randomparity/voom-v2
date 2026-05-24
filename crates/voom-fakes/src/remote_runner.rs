@@ -426,3 +426,7 @@ impl From<ProtocolError> for RemoteRunnerError {
         Self::Protocol(value.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "remote_runner_test.rs"]
+mod tests;

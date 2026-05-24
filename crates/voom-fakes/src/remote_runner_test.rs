@@ -13,7 +13,7 @@ use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketS
 use voom_store::repo::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 
-use super::remote_runner::{RemoteRunnerConfig, RemoteSyntheticRunner};
+use super::{RemoteRunnerConfig, RemoteSyntheticRunner};
 
 const OP: &str = "transcode_video";
 
