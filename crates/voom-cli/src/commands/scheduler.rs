@@ -59,6 +59,24 @@ struct DecisionData {
     explanation_json: JsonValue,
 }
 
+#[derive(Debug)]
+struct DecisionScalarData {
+    id: u64,
+    created_at: String,
+    outcome: &'static str,
+    reason_code: String,
+    summary: String,
+    request_worker_id: Option<u64>,
+    request_node_id: Option<u64>,
+    ticket_id: Option<u64>,
+    selected_worker_id: Option<u64>,
+    selected_node_id: Option<u64>,
+    selected_lease_id: Option<u64>,
+    candidate_count: u32,
+    selected_score: Option<i64>,
+    suppressed_count: u32,
+}
+
 pub async fn run(database_url: &str, local: Local, command: SchedulerCommand) -> io::Result<i32> {
     match command {
         SchedulerCommand::Decisions(SchedulerDecisionCommand::List {
@@ -166,7 +184,7 @@ fn outcome_str(outcome: SchedulerDecisionOutcome) -> &'static str {
     outcome.as_str()
 }
 
-impl From<SchedulerDecision> for DecisionSummaryData {
+impl From<SchedulerDecision> for DecisionScalarData {
     fn from(decision: SchedulerDecision) -> Self {
         Self {
             id: decision.id,
@@ -187,25 +205,58 @@ impl From<SchedulerDecision> for DecisionSummaryData {
     }
 }
 
+fn split_decision(mut decision: SchedulerDecision) -> (DecisionScalarData, String, JsonValue) {
+    let updated_at = decision.updated_at.to_string();
+    let explanation_json = std::mem::take(&mut decision.explanation);
+    (
+        DecisionScalarData::from(decision),
+        updated_at,
+        explanation_json,
+    )
+}
+
+impl From<SchedulerDecision> for DecisionSummaryData {
+    fn from(decision: SchedulerDecision) -> Self {
+        let scalars = DecisionScalarData::from(decision);
+        Self {
+            id: scalars.id,
+            created_at: scalars.created_at,
+            outcome: scalars.outcome,
+            reason_code: scalars.reason_code,
+            summary: scalars.summary,
+            request_worker_id: scalars.request_worker_id,
+            request_node_id: scalars.request_node_id,
+            ticket_id: scalars.ticket_id,
+            selected_worker_id: scalars.selected_worker_id,
+            selected_node_id: scalars.selected_node_id,
+            selected_lease_id: scalars.selected_lease_id,
+            candidate_count: scalars.candidate_count,
+            selected_score: scalars.selected_score,
+            suppressed_count: scalars.suppressed_count,
+        }
+    }
+}
+
 impl From<SchedulerDecision> for DecisionData {
     fn from(decision: SchedulerDecision) -> Self {
+        let (scalars, updated_at, explanation_json) = split_decision(decision);
         Self {
-            id: decision.id,
-            created_at: decision.created_at.to_string(),
-            updated_at: decision.updated_at.to_string(),
-            outcome: outcome_str(decision.outcome),
-            reason_code: decision.reason_code.as_str().to_owned(),
-            summary: decision.summary,
-            request_worker_id: decision.request_worker_id.map(|id| id.0),
-            request_node_id: decision.request_node_id.map(|id| id.0),
-            ticket_id: decision.ticket_id.map(|id| id.0),
-            selected_worker_id: decision.selected_worker_id.map(|id| id.0),
-            selected_node_id: decision.selected_node_id.map(|id| id.0),
-            selected_lease_id: decision.selected_lease_id.map(|id| id.0),
-            candidate_count: decision.candidate_count,
-            selected_score: decision.selected_score,
-            suppressed_count: decision.suppressed_count,
-            explanation_json: decision.explanation,
+            id: scalars.id,
+            created_at: scalars.created_at,
+            updated_at,
+            outcome: scalars.outcome,
+            reason_code: scalars.reason_code,
+            summary: scalars.summary,
+            request_worker_id: scalars.request_worker_id,
+            request_node_id: scalars.request_node_id,
+            ticket_id: scalars.ticket_id,
+            selected_worker_id: scalars.selected_worker_id,
+            selected_node_id: scalars.selected_node_id,
+            selected_lease_id: scalars.selected_lease_id,
+            candidate_count: scalars.candidate_count,
+            selected_score: scalars.selected_score,
+            suppressed_count: scalars.suppressed_count,
+            explanation_json,
         }
     }
 }
