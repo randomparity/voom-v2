@@ -294,7 +294,15 @@ fn write_media_file(dir: &Path) -> PathBuf {
 
 fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("ffprobe");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
+             {body}"
+        ),
+    )
+    .unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&path, permissions).unwrap();

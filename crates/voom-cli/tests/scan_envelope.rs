@@ -324,6 +324,7 @@ fn write_drifting_ffprobe(dir: &Path) -> PathBuf {
         &path,
         "#!/usr/bin/env sh\n\
          set -eu\n\
+         if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
          last=''\n\
          for arg in \"$@\"; do last=\"$arg\"; done\n\
          printf drift >> \"$last\"\n\

@@ -409,7 +409,11 @@ fn tiny_wav_bytes() -> Vec<u8> {
 
 fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let path = dir.join("ffprobe");
-    let script = format!("#!/bin/sh\n{body}");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
+         {body}"
+    );
     let write_result = std::fs::write(&path, script);
     assert!(write_result.is_ok());
     let metadata_result = std::fs::metadata(&path);
