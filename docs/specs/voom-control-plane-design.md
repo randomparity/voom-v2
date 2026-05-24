@@ -1600,7 +1600,7 @@ normalized shape expected for Sprint 3 onward.
   the CLI, Web UI, and daemon MVP requirements without depending on a
   parser.
 - Verification expectations: policy-model unit tests, fixture
-  round-trip tests, documentation placeholder scan, and `just ci`.
+  round-trip tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 3 design and acceptance matrix mapping
   each policy input requirement to a model or fixture.
 
@@ -1617,8 +1617,8 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: valid policies compile deterministically and invalid
   policies produce stable machine-readable errors.
 - Verification expectations: parser/validator unit tests, golden
-  diagnostic tests, fixture compatibility tests, documentation
-  placeholder scan, and `just ci`.
+  diagnostic tests, fixture compatibility tests, documentation completeness
+  scan, and `just ci`.
 - Closeout documentation: Sprint 4 design and acceptance matrix covering
   grammar scope, diagnostics, and compatibility rules.
 
@@ -1636,7 +1636,7 @@ normalized shape expected for Sprint 3 onward.
   plan DAG JSON that agent workflows can inspect without running work.
 - Verification expectations: plan-generation tests, CLI golden-output
   tests for dry-run and plan-only modes, schema fixture tests,
-  documentation placeholder scan, and `just ci`.
+  documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 5 design and acceptance matrix tying
   CLI plan behavior to stable JSON schemas and error envelopes.
 
@@ -1655,7 +1655,7 @@ normalized shape expected for Sprint 3 onward.
   `WorkflowExecutor`.
 - Verification expectations: report unit tests, issue-creation tests,
   synthetic execution integration tests, CLI golden-output tests,
-  documentation placeholder scan, and `just ci`.
+  documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 6 closeout matrix for policy/report
   behavior, CLI JSON contracts, issue creation, and synthetic execution.
 
@@ -1673,8 +1673,8 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: nodes and remote-capable workers register durably
   with inspectable identity and health state.
 - Verification expectations: migration/repository tests, registration
-  integration tests, CLI/API inspection golden tests, documentation
-  placeholder scan, and `just ci`.
+  integration tests, CLI/API inspection golden tests, documentation completeness
+  scan, and `just ci`.
 - Closeout documentation: Sprint 7 design and acceptance matrix covering
   node identity, registration, heartbeat state, and inspection surfaces.
 
@@ -1692,8 +1692,8 @@ normalized shape expected for Sprint 3 onward.
   lost workers/nodes recover cleanly, and each remote dispatch records
   how the worker is expected to access artifacts.
 - Verification expectations: remote lease integration tests, stale
-  recovery tests, artifact-access fixture tests, documentation
-  placeholder scan, and `just ci`.
+  recovery tests, artifact-access fixture tests, documentation completeness
+  scan, and `just ci`.
 - Closeout documentation: Sprint 8 closeout matrix for remote lease
   lifecycle, recovery, and artifact access planning.
 
@@ -1713,7 +1713,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: scheduler choices are deterministic under fixtures,
   explainable to operators, and respect node/worker concurrency limits.
 - Verification expectations: scoring unit tests, concurrency integration
-  tests, scheduler decision-log fixture tests, documentation placeholder
+  tests, scheduler decision-log fixture tests, documentation completeness
   scan, and `just ci`.
 - Closeout documentation: Sprint 9 acceptance matrix tying each scoring
   factor to fixtures, logs, and scheduler behavior.
@@ -1730,6 +1730,12 @@ normalized shape expected for Sprint 3 onward.
   user-supplied file or directory path only; durable library roots and
   configured recurring library scans are a future task after explicit
   ingest is proven.
+- Sprint 10 scan is explicit-path only: `voom scan --path <file-or-dir>`.
+  Durable library roots, scheduled scans, watch loops, and policy-driven scan
+  selection are deferred until after explicit ingest proves the identity and
+  provider boundary. Media probing for this path is performed by the bundled
+  out-of-process `builtin.ffprobe` worker; the control plane may hash local
+  bytes but must not invoke `ffprobe` in-process.
 - Explicitly out of scope: staged artifact mutation, transcoding,
   remuxing, backup, daemon watching, durable library roots, configured
   recurring scans, and remote media transfer.
@@ -1737,7 +1743,7 @@ normalized shape expected for Sprint 3 onward.
   hashes, and media snapshots through an out-of-process provider.
 - Verification expectations: ingest tests, `ffprobe` worker conformance
   tests, CLI golden-output tests, small fixture-media integration tests,
-  documentation placeholder scan, and `just ci`.
+  documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 10 closeout matrix for scan, ingest,
   snapshot, and provider-boundary behavior.
 
@@ -1753,7 +1759,7 @@ normalized shape expected for Sprint 3 onward.
   audited, and recoverable on failure.
 - Verification expectations: staged-commit tests, verification worker
   conformance tests, rollback/recovery tests, CLI golden-output tests,
-  documentation placeholder scan, and `just ci`.
+  documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 11 acceptance matrix for artifact
   staging, verification, commit, audit, and recovery.
 
@@ -1770,7 +1776,7 @@ normalized shape expected for Sprint 3 onward.
   protocol and staged artifact commit flow.
 - Verification expectations: worker conformance tests, transcode
   fixture-media integration tests, staged-commit integration tests, CLI
-  golden-output tests, documentation placeholder scan, and `just ci`.
+  golden-output tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 12 closeout matrix for transcode
   execution, progress, verification, and commit behavior.
 
@@ -1787,7 +1793,7 @@ normalized shape expected for Sprint 3 onward.
   provider protocol and staged artifact commit flow.
 - Verification expectations: worker conformance tests, remux fixture
   integration tests, staged-commit integration tests, CLI golden-output
-  tests, documentation placeholder scan, and `just ci`.
+  tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 13 closeout matrix for remux/track-edit
   execution, progress, verification, and commit behavior.
 
@@ -1806,7 +1812,7 @@ normalized shape expected for Sprint 3 onward.
   provider boundary for real media.
 - Verification expectations: full CLI workflow integration tests,
   backup worker conformance tests, sidecar ingest tests, CLI golden
-  tests, documentation placeholder scan, and `just ci`.
+  tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 14 real-media CLI closeout matrix.
 
 ### Daemon
@@ -1823,7 +1829,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: library changes produce correct durable state after
   stability windows.
 - Verification expectations: watcher fixture tests, reconciliation
-  integration tests, daemon status tests, documentation placeholder
+  integration tests, daemon status tests, documentation completeness
   scan, and `just ci`.
 - Closeout documentation: Sprint 15 closeout matrix for watch,
   debounce, session, and reconciliation behavior.
@@ -1840,7 +1846,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: queued work runs continuously and windows/throttles
   affect leasing without changing policy results.
 - Verification expectations: scheduler-loop integration tests, window
-  and throttle tests, restart tests, documentation placeholder scan, and
+  and throttle tests, restart tests, documentation completeness scan, and
   `just ci`.
 - Closeout documentation: Sprint 16 closeout matrix for daemon
   scheduling, throttles, and restart-safe leasing.
@@ -1856,7 +1862,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: the daemon recovers from restart, updates issues,
   cleans stale use leases, and runs external-system health/sync jobs.
 - Verification expectations: lifecycle-loop integration tests, restart
-  recovery tests, event-stream tests, documentation placeholder scan, and
+  recovery tests, event-stream tests, documentation completeness scan, and
   `just ci`.
 - Closeout documentation: Sprint 17 daemon MVP closeout matrix.
 
@@ -1873,7 +1879,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: operators can see what is running, waiting, failed,
   and why.
 - Verification expectations: API route tests, UI component/route tests,
-  accessibility smoke checks, documentation placeholder scan, and
+  accessibility smoke checks, documentation completeness scan, and
   `just ci`.
 - Closeout documentation: Sprint 18 UI operations-console closeout
   matrix.
@@ -1889,7 +1895,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: users can inspect a file asset's versions,
   locations, evidence, media work, variants, bundles, and sidecars.
 - Verification expectations: API route tests, UI route/component tests,
-  fixture data tests, documentation placeholder scan, and `just ci`.
+  fixture data tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 19 UI library/file closeout matrix.
 
 #### Sprint 20: Policy And Reporting Views
@@ -1904,7 +1910,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: users can inspect compliance, issues, quality,
   external sync, retention, use leases, and blocked operations.
 - Verification expectations: API route tests, UI route/component tests,
-  report fixture tests, documentation placeholder scan, and `just ci`.
+  report fixture tests, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 20 UI reporting closeout matrix.
 
 #### Sprint 21: UI Actions And Live Event Streaming
@@ -1919,7 +1925,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: UI actions use the same API as CLI/daemon workflows
   and live state updates are delivered through the event stream.
 - Verification expectations: API route tests, UI end-to-end tests,
-  event-stream tests, failed-action tests, documentation placeholder
+  event-stream tests, failed-action tests, documentation completeness
   scan, and `just ci`.
 - Closeout documentation: Sprint 21 Web UI MVP closeout matrix.
 
@@ -1937,7 +1943,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: namespaced operation and result schemas can be
   registered, validated, and referenced by the policy compiler.
 - Verification expectations: manifest parser tests, schema validation
-  tests, policy-compiler integration tests, documentation placeholder
+  tests, policy-compiler integration tests, documentation completeness
   scan, and `just ci`.
 - Closeout documentation: Sprint 22 plugin schema closeout matrix.
 
@@ -1952,7 +1958,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: example providers use the SDK and pass the public
   conformance suite.
 - Verification expectations: SDK example tests, plugin conformance
-  tests, documentation example checks, documentation placeholder scan,
+  tests, documentation example checks, documentation completeness scan,
   and `just ci`.
 - Closeout documentation: Sprint 23 provider SDK closeout matrix.
 
@@ -1968,8 +1974,8 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: version compatibility is enforced and a sample
   third-party provider can be installed, validated, and documented.
 - Verification expectations: compatibility tests, sample provider
-  integration tests, install/validate workflow tests, documentation
-  placeholder scan, and `just ci`.
+  integration tests, install/validate workflow tests, documentation completeness
+  scan, and `just ci`.
 - Closeout documentation: Sprint 24 Plugin SDK MVP closeout matrix.
 
 ### Hardening And Release
@@ -1986,7 +1992,7 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: common destructive operations can require approval
   and can be rolled back or explained from durable evidence.
 - Verification expectations: approval-gate tests, rollback tests,
-  backup-policy tests, safety report tests, documentation placeholder
+  backup-policy tests, safety report tests, documentation completeness
   scan, and `just ci`.
 - Closeout documentation: Sprint 25 safety closeout matrix.
 
@@ -2003,8 +2009,8 @@ normalized shape expected for Sprint 3 onward.
 - Acceptance focus: operators can inspect why work was routed, paused,
   retried, blocked, failed, or cleaned up.
 - Verification expectations: metrics tests, trace propagation tests,
-  report fixture tests, scheduler decision-log tests, documentation
-  placeholder scan, and `just ci`.
+  report fixture tests, scheduler decision-log tests, documentation completeness
+  scan, and `just ci`.
 - Closeout documentation: Sprint 26 observability closeout matrix.
 
 #### Sprint 27: Production Readiness
@@ -2021,7 +2027,7 @@ normalized shape expected for Sprint 3 onward.
   documentation.
 - Verification expectations: package/install tests, migration upgrade
   tests, benchmark gate runs, documentation checks, release-process dry
-  run, documentation placeholder scan, and `just ci`.
+  run, documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 27 production readiness checklist and
   release-candidate acceptance matrix.
 
