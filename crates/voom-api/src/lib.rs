@@ -43,14 +43,10 @@ pub fn router_with_control_plane(
 }
 
 fn base_router(state: AppState) -> axum::Router {
-    let tokio_workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     axum::Router::new()
         .route("/health", get(health))
         .merge(execution::routes())
-        .with_state(AppState {
-            tokio_workers,
-            ..state
-        })
+        .with_state(state)
 }
 
 #[derive(Debug, Serialize)]

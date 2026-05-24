@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use voom_core::{FailureClass, LeaseId, WorkerId};
-use voom_fake_support::{dispatch_provider, provider_definition};
+use voom_fake_support::{dispatch_provider, provider_definition_for_operation};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{OperationKind, OperationRequest, ProgressFrame, ProtocolError};
 
@@ -69,6 +69,9 @@ pub struct RemoteSyntheticRunner {
 impl RemoteSyntheticRunner {
     #[must_use]
     pub fn new(config: RemoteRunnerConfig) -> Self {
+        let mut config = config;
+        let base_url_len = config.base_url.trim_end_matches('/').len();
+        config.base_url.truncate(base_url_len);
         Self {
             config,
             client: reqwest::Client::new(),
@@ -213,7 +216,7 @@ impl RemoteSyntheticRunner {
     where
         T: for<'de> Deserialize<'de>,
     {
-        let url = format!("{}{}", self.config.base_url.trim_end_matches('/'), path);
+        let url = format!("{}{}", self.config.base_url, path);
         let response = self
             .client
             .post(url)
@@ -246,8 +249,7 @@ impl RemoteSyntheticRunner {
         artifact_access: &[String],
     ) -> Result<JsonValue, RemoteRunnerError> {
         let operation = operation_kind(&lease.operation)?;
-        let provider_name = provider_for_operation(operation);
-        let provider = provider_definition(provider_name)
+        let provider = provider_definition_for_operation(operation)
             .ok_or_else(|| RemoteRunnerError::UnsupportedOperation(lease.operation.clone()))?;
         let request = OperationRequest {
             operation,
@@ -349,24 +351,6 @@ struct RemoteArtifactAccessPlan {
 fn operation_kind(operation: &str) -> Result<OperationKind, RemoteRunnerError> {
     serde_json::from_value(serde_json::json!(operation))
         .map_err(|e| RemoteRunnerError::MalformedResponse(format!("operation {operation}: {e}")))
-}
-
-fn provider_for_operation(operation: OperationKind) -> &'static str {
-    match operation {
-        OperationKind::ScanLibrary => "fake-scanner",
-        OperationKind::ProbeFile | OperationKind::HashFile => "fake-prober",
-        OperationKind::TranscodeVideo
-        | OperationKind::ExtractAudio
-        | OperationKind::TranscribeAudio => "fake-transcoder",
-        OperationKind::Remux => "fake-remuxer",
-        OperationKind::BackUpFile | OperationKind::DeleteArtifact => "fake-backup-store",
-        OperationKind::VerifyArtifact => "fake-health-checker",
-        OperationKind::IdentifyMedia => "fake-identity-provider",
-        OperationKind::SyncExternalSystem => "fake-external-system",
-        OperationKind::ScoreQuality => "fake-quality-scorer",
-        OperationKind::CommitArtifact => "fake-issue-provider",
-        OperationKind::EditTracks => "fake-use-lease-provider",
-    }
 }
 
 fn dispatch_payload(

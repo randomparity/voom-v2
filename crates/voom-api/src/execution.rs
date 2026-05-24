@@ -9,6 +9,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::remote_execution::{
     RemoteAcquireInput, RemoteCompleteInput, RemoteFailInput, RemoteLeaseHeartbeatInput,
     RemoteNodeHeartbeatInput,
@@ -76,15 +77,11 @@ async fn acquire(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = state.control_plane else {
+    let Some(control_plane) = configured_control_plane(state) else {
         return not_configured_response(ACQUIRE_COMMAND);
     };
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
-    };
-    let idempotency_key = match idempotency_key(&headers) {
-        Ok(key) => key,
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
         Err(message) => return bad_args_response(ACQUIRE_COMMAND, message),
     };
     let body = match json_body(body) {
@@ -122,15 +119,11 @@ async fn node_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = state.control_plane else {
+    let Some(control_plane) = configured_control_plane(state) else {
         return not_configured_response(NODE_HEARTBEAT_COMMAND);
     };
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
-    };
-    let idempotency_key = match idempotency_key(&headers) {
-        Ok(key) => key,
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
     let node_id = match path_id(path) {
@@ -167,15 +160,11 @@ async fn lease_heartbeat(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = state.control_plane else {
+    let Some(control_plane) = configured_control_plane(state) else {
         return not_configured_response(LEASE_HEARTBEAT_COMMAND);
     };
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
-    };
-    let idempotency_key = match idempotency_key(&headers) {
-        Ok(key) => key,
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
         Err(message) => return bad_args_response(LEASE_HEARTBEAT_COMMAND, message),
     };
     let lease_id = match path_id(path) {
@@ -221,15 +210,11 @@ async fn complete(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = state.control_plane else {
+    let Some(control_plane) = configured_control_plane(state) else {
         return not_configured_response(COMPLETE_COMMAND);
     };
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
-    };
-    let idempotency_key = match idempotency_key(&headers) {
-        Ok(key) => key,
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
         Err(message) => return bad_args_response(COMPLETE_COMMAND, message),
     };
     let lease_id = match path_id(path) {
@@ -275,15 +260,11 @@ async fn fail(
     headers: HeaderMap,
     body: Result<Json<JsonValue>, JsonRejection>,
 ) -> axum::response::Response {
-    let Some(control_plane) = state.control_plane else {
+    let Some(control_plane) = configured_control_plane(state) else {
         return not_configured_response(FAIL_COMMAND);
     };
-    let token = match bearer(&headers) {
-        Ok(token) => token,
-        Err(message) => return bad_args_response(FAIL_COMMAND, message),
-    };
-    let idempotency_key = match idempotency_key(&headers) {
-        Ok(key) => key,
+    let (token, idempotency_key) = match request_credentials(&headers) {
+        Ok(credentials) => credentials,
         Err(message) => return bad_args_response(FAIL_COMMAND, message),
     };
     let lease_id = match path_id(path) {
@@ -321,6 +302,16 @@ async fn fail(
         Ok(outcome) => ok_response(FAIL_COMMAND, outcome),
         Err(err) => voom_route_error_response(FAIL_COMMAND, &err),
     }
+}
+
+fn configured_control_plane(state: AppState) -> Option<ControlPlane> {
+    state.control_plane
+}
+
+fn request_credentials(headers: &HeaderMap) -> Result<(SecretString, String), String> {
+    let token = bearer(headers)?;
+    let key = idempotency_key(headers)?;
+    Ok((token, key))
 }
 
 fn not_configured_response(command: &'static str) -> axum::response::Response {

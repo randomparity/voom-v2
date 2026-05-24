@@ -31,7 +31,9 @@ async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
         }))
         .await;
 
-    let summary = RemoteSyntheticRunner::new(fixture.config())
+    let mut config = fixture.config();
+    config.base_url.push('/');
+    let summary = RemoteSyntheticRunner::new(config)
         .run_once_to_completion()
         .await
         .unwrap();

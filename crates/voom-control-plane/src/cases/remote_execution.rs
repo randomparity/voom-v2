@@ -1,10 +1,12 @@
 //! Remote execution use cases for node-owned workers.
 
+use std::collections::HashMap;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
-use voom_core::{FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
 use voom_store::repo::artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
     NewArtifactAccessPlan,
@@ -151,15 +153,11 @@ enum RemoteAcquirePrepared {
 }
 
 struct RemoteCompletePrepared {
-    ticket_id: TicketId,
-    worker_id: WorkerId,
     plan_id: u64,
     evidence: JsonValue,
 }
 
 struct RemoteFailPrepared {
-    ticket_id: TicketId,
-    worker_id: WorkerId,
     plan_id: u64,
     status: ArtifactAccessPlanStatus,
 }
@@ -295,7 +293,9 @@ impl ControlPlane {
         {
             Ok(prepared) => prepared,
             Err(err) => {
-                complete_remote_replayable_error(&err)?;
+                if !is_remote_replayable_error(&err) {
+                    return Err(err);
+                }
                 self.complete_remote_error_in_tx(
                     &mut tx,
                     input.node_id,
@@ -368,11 +368,19 @@ impl ControlPlane {
         }
 
         let mut first_ineligible = None;
+        let mut eligibility_by_operation = HashMap::new();
         for ticket in tickets {
-            let eligibility = self
-                .workers
-                .operation_eligibility_in_tx(tx, input.worker_id, &ticket.kind)
-                .await?;
+            let eligibility =
+                if let Some(eligibility) = eligibility_by_operation.get(&ticket.kind).cloned() {
+                    eligibility
+                } else {
+                    let eligibility = self
+                        .workers
+                        .operation_eligibility_in_tx(tx, input.worker_id, &ticket.kind)
+                        .await?;
+                    eligibility_by_operation.insert(ticket.kind.clone(), eligibility.clone());
+                    eligibility
+                };
             match require_eligible(input.worker_id, &ticket, &eligibility) {
                 Ok(()) => {
                     let selected_access_mode =
@@ -511,7 +519,9 @@ impl ControlPlane {
                     .await?
             }
             Err(err) => {
-                complete_remote_replayable_error(&err)?;
+                if !is_remote_replayable_error(&err) {
+                    return Err(err);
+                }
                 self.complete_remote_error_in_tx(
                     &mut tx,
                     input.node_id,
@@ -632,7 +642,9 @@ impl ControlPlane {
         let prepared = match self.remote_complete_preflight_in_tx(&mut tx, &input).await {
             Ok(prepared) => prepared,
             Err(err) => {
-                complete_remote_replayable_error(&err)?;
+                if !is_remote_replayable_error(&err) {
+                    return Err(err);
+                }
                 self.complete_remote_error_in_tx(
                     &mut tx,
                     input.node_id,
@@ -664,8 +676,7 @@ impl ControlPlane {
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
             .await?;
         require_remote_worker(&worker)?;
-        let held = self
-            .leases
+        self.leases
             .get_held_for_worker_in_tx(tx, input.lease_id, input.worker_id)
             .await?;
         let plan = self
@@ -680,8 +691,6 @@ impl ControlPlane {
             })?;
         let evidence = validated_artifact_complete_evidence(&input.result, &plan)?;
         Ok(RemoteCompletePrepared {
-            ticket_id: held.ticket_id,
-            worker_id: held.worker_id,
             plan_id: plan.id,
             evidence,
         })
@@ -711,8 +720,8 @@ impl ControlPlane {
             .await?;
         let outcome = RemoteCompleteOutcome {
             lease_id: released.id,
-            ticket_id: prepared.ticket_id,
-            worker_id: prepared.worker_id,
+            ticket_id: released.ticket_id,
+            worker_id: released.worker_id,
             artifact_access_plan: remote_plan(&consumed),
         };
         self.complete_remote_ok_in_tx(
@@ -783,7 +792,9 @@ impl ControlPlane {
         let prepared = match self.remote_fail_preflight_in_tx(&mut tx, &input).await {
             Ok(prepared) => prepared,
             Err(err) => {
-                complete_remote_replayable_error(&err)?;
+                if !is_remote_replayable_error(&err) {
+                    return Err(err);
+                }
                 self.complete_remote_error_in_tx(
                     &mut tx,
                     input.node_id,
@@ -814,8 +825,7 @@ impl ControlPlane {
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
             .await?;
         require_remote_worker(&worker)?;
-        let held = self
-            .leases
+        self.leases
             .get_held_for_worker_in_tx(tx, input.lease_id, input.worker_id)
             .await?;
         let plan = self
@@ -829,8 +839,6 @@ impl ControlPlane {
                 ))
             })?;
         Ok(RemoteFailPrepared {
-            ticket_id: held.ticket_id,
-            worker_id: held.worker_id,
             plan_id: plan.id,
             status: artifact_failure_status(input.class, &input.reason),
         })
@@ -860,8 +868,8 @@ impl ControlPlane {
             .await?;
         let outcome = RemoteFailOutcome {
             lease_id: failed.id,
-            ticket_id: prepared.ticket_id,
-            worker_id: prepared.worker_id,
+            ticket_id: failed.ticket_id,
+            worker_id: failed.worker_id,
             artifact_access_plan: remote_plan(&marked),
         };
         self.complete_remote_ok_in_tx(
@@ -1086,72 +1094,11 @@ fn require_positive_ttl(ttl_seconds: i64) -> Result<(), VoomError> {
     Ok(())
 }
 
-fn complete_remote_replayable_error(err: &VoomError) -> Result<(), VoomError> {
-    match err {
-        VoomError::Conflict(_) | VoomError::Config(_) | VoomError::NotFound(_) => Ok(()),
-        VoomError::Database(message) => Err(VoomError::Database(message.clone())),
-        VoomError::Migration(message) => Err(VoomError::Migration(message.clone())),
-        VoomError::DirtyMigration(message) => Err(VoomError::DirtyMigration(message.clone())),
-        VoomError::SchemaTooNew(message) => Err(VoomError::SchemaTooNew(message.clone())),
-        VoomError::Internal(message) => Err(VoomError::Internal(message.clone())),
-        VoomError::DependencyCycle(message) => Err(VoomError::DependencyCycle(message.clone())),
-        VoomError::BlockedByUseLease(message) => Err(VoomError::BlockedByUseLease(message.clone())),
-        VoomError::BlockedByPendingCommit(message) => {
-            Err(VoomError::BlockedByPendingCommit(message.clone()))
-        }
-        VoomError::BlockedByClosureGrew(message) => {
-            Err(VoomError::BlockedByClosureGrew(message.clone()))
-        }
-        VoomError::StaleIdentityEvidence(message) => {
-            Err(VoomError::StaleIdentityEvidence(message.clone()))
-        }
-        VoomError::ClosureResolutionIncomplete(message) => {
-            Err(VoomError::ClosureResolutionIncomplete(message.clone()))
-        }
-        VoomError::WorkerTimeout(message) => Err(VoomError::WorkerTimeout(message.clone())),
-        VoomError::WorkerCrash(message) => Err(VoomError::WorkerCrash(message.clone())),
-        VoomError::NoEligibleWorker(message) => Err(VoomError::NoEligibleWorker(message.clone())),
-        VoomError::ArtifactUnavailable(message) => {
-            Err(VoomError::ArtifactUnavailable(message.clone()))
-        }
-        VoomError::ArtifactChecksumMismatch(message) => {
-            Err(VoomError::ArtifactChecksumMismatch(message.clone()))
-        }
-        VoomError::ExternalSystemUnavailable(message) => {
-            Err(VoomError::ExternalSystemUnavailable(message.clone()))
-        }
-        VoomError::ExternalSystemRateLimited(message) => {
-            Err(VoomError::ExternalSystemRateLimited(message.clone()))
-        }
-        VoomError::VerificationFailure(message) => {
-            Err(VoomError::VerificationFailure(message.clone()))
-        }
-        VoomError::BackupFailure(message) => Err(VoomError::BackupFailure(message.clone())),
-        VoomError::CommitFailure(message) => Err(VoomError::CommitFailure(message.clone())),
-        VoomError::PolicyParseError(message) => Err(VoomError::PolicyParseError(message.clone())),
-        VoomError::PolicyValidationError(message) => {
-            Err(VoomError::PolicyValidationError(message.clone()))
-        }
-        VoomError::PlanGeneration(message) => Err(VoomError::PlanGeneration(message.clone())),
-        VoomError::ComplianceReport(message) => Err(VoomError::ComplianceReport(message.clone())),
-        VoomError::PolicyExecution(message) => Err(VoomError::PolicyExecution(message.clone())),
-        VoomError::MissingCapability(message) => Err(VoomError::MissingCapability(message.clone())),
-        VoomError::MalformedWorkerResult(message) => {
-            Err(VoomError::MalformedWorkerResult(message.clone()))
-        }
-        VoomError::UserCancellation(message) => Err(VoomError::UserCancellation(message.clone())),
-        VoomError::ApprovalRequired(message) => Err(VoomError::ApprovalRequired(message.clone())),
-        VoomError::PriorityPolicyConflict(message) => {
-            Err(VoomError::PriorityPolicyConflict(message.clone()))
-        }
-        VoomError::WorkerRetired(message) => Err(VoomError::WorkerRetired(message.clone())),
-        VoomError::WorkerIncarnationStale(message) => {
-            Err(VoomError::WorkerIncarnationStale(message.clone()))
-        }
-        VoomError::AmbiguousWorkerSelection(message) => {
-            Err(VoomError::AmbiguousWorkerSelection(message.clone()))
-        }
-    }
+fn is_remote_replayable_error(err: &VoomError) -> bool {
+    matches!(
+        err.error_code(),
+        ErrorCode::Conflict | ErrorCode::ConfigInvalid | ErrorCode::NotFound
+    )
 }
 
 fn artifact_plan_input(
@@ -1318,45 +1265,36 @@ fn string_array_evidence(value: &JsonValue, field: &'static str) -> Result<Vec<S
 }
 
 fn replay_acquire(replay: RemoteMutationReplay) -> Result<RemoteAcquireOutcome, VoomError> {
-    match replay {
-        RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}"))),
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
-    }
+    replay_remote(replay, "remote acquire")
 }
 
 fn replay_node_heartbeat(
     replay: RemoteMutationReplay,
 ) -> Result<RemoteNodeHeartbeatOutcome, VoomError> {
-    match replay {
-        RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("remote node heartbeat replay decode: {e}"))),
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
-    }
+    replay_remote(replay, "remote node heartbeat")
 }
 
 fn replay_lease_heartbeat(
     replay: RemoteMutationReplay,
 ) -> Result<RemoteLeaseHeartbeatOutcome, VoomError> {
-    match replay {
-        RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("remote lease heartbeat replay decode: {e}"))),
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
-    }
+    replay_remote(replay, "remote lease heartbeat")
 }
 
 fn replay_complete(replay: RemoteMutationReplay) -> Result<RemoteCompleteOutcome, VoomError> {
-    match replay {
-        RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("remote complete replay decode: {e}"))),
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
-    }
+    replay_remote(replay, "remote complete")
 }
 
 fn replay_fail(replay: RemoteMutationReplay) -> Result<RemoteFailOutcome, VoomError> {
+    replay_remote(replay, "remote fail")
+}
+
+fn replay_remote<T>(replay: RemoteMutationReplay, label: &str) -> Result<T, VoomError>
+where
+    T: serde::de::DeserializeOwned,
+{
     match replay {
         RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("remote fail replay decode: {e}"))),
+            .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}"))),
         RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
     }
 }

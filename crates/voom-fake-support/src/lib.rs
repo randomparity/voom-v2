@@ -228,6 +228,15 @@ pub fn provider_definition(binary_name: &str) -> Option<ProviderDefinition> {
     provider_entry(binary_name).map(|entry| entry.definition)
 }
 
+#[must_use]
+pub fn provider_definition_for_operation(operation: OperationKind) -> Option<ProviderDefinition> {
+    PROVIDERS
+        .iter()
+        .copied()
+        .find(|entry| supports_operation(&entry.definition, operation))
+        .map(|entry| entry.definition)
+}
+
 pub fn dispatch_provider(
     provider: &ProviderDefinition,
     req: &OperationRequest,

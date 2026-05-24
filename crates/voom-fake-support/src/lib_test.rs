@@ -32,6 +32,14 @@ fn provider_definition_accepts_secondary_operation() {
 }
 
 #[test]
+fn provider_definition_for_operation_reuses_catalog_secondary_operations() {
+    let provider = provider_definition_for_operation(OperationKind::HashFile).unwrap();
+
+    assert_eq!(provider.binary_name, "fake-prober");
+    assert_eq!(provider.provider, "fake-prober");
+}
+
+#[test]
 fn scanner_fan_out_count_controls_file_count() {
     let req = request(
         OperationKind::ScanLibrary,
