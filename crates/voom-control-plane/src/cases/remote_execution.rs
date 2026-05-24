@@ -341,6 +341,7 @@ impl ControlPlane {
         input: &RemoteAcquireInput,
         now: time::OffsetDateTime,
     ) -> Result<RemoteAcquirePrepared, VoomError> {
+        require_positive_ttl(input.lease_ttl_seconds)?;
         let worker = self
             .workers
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
@@ -522,6 +523,7 @@ impl ControlPlane {
         tx: &mut Transaction<'_, Sqlite>,
         input: &RemoteLeaseHeartbeatInput,
     ) -> Result<(), VoomError> {
+        require_positive_ttl(input.lease_ttl_seconds)?;
         let worker = self
             .workers
             .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
@@ -1064,6 +1066,15 @@ fn require_remote_worker(worker: &Worker) -> Result<(), VoomError> {
     Ok(())
 }
 
+fn require_positive_ttl(ttl_seconds: i64) -> Result<(), VoomError> {
+    if ttl_seconds <= 0 {
+        return Err(VoomError::Config(format!(
+            "lease ttl must be positive, got {ttl_seconds}s"
+        )));
+    }
+    Ok(())
+}
+
 fn complete_remote_replayable_error(err: &VoomError) -> Result<(), VoomError> {
     match err {
         VoomError::Conflict(_) | VoomError::Config(_) | VoomError::NotFound(_) => Ok(()),
@@ -1188,6 +1199,19 @@ fn select_access_mode(modes: &[String]) -> ArtifactAccessMode {
 }
 
 fn artifact_failure_status(class: FailureClass, reason: &str) -> ArtifactAccessPlanStatus {
+    if matches!(
+        class,
+        FailureClass::WorkerTimeout
+            | FailureClass::WorkerCrash
+            | FailureClass::ProgressTimeout
+            | FailureClass::ExternalSystemUnavailable
+            | FailureClass::ExternalSystemRateLimited
+            | FailureClass::BackupFailure
+            | FailureClass::CommitFailure
+    ) {
+        return ArtifactAccessPlanStatus::Failed;
+    }
+
     let reason = reason.to_ascii_lowercase();
     if matches!(
         class,

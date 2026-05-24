@@ -2474,7 +2474,9 @@ name = "voom-api"
 version = "0.1.0-dev"
 dependencies = [
  "axum",
+ "blake3",
  "http-body-util",
+ "secrecy",
  "serde",
  "serde_json",
  "sqlx",

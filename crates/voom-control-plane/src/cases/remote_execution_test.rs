@@ -72,6 +72,22 @@ impl RemoteFixture {
         }
     }
 
+    fn acquire_input_with_ttl(
+        &self,
+        idempotency_key: &str,
+        request_hash: &str,
+        lease_ttl_seconds: i64,
+    ) -> RemoteAcquireInput {
+        RemoteAcquireInput {
+            node_id: self.node_id,
+            token: self.token.clone(),
+            worker_id: self.worker_id,
+            idempotency_key: idempotency_key.to_owned(),
+            request_hash: request_hash.to_owned(),
+            lease_ttl_seconds,
+        }
+    }
+
     fn complete_input(
         &self,
         lease_id: LeaseId,
@@ -338,6 +354,44 @@ async fn remote_acquire_skips_ineligible_higher_priority_work_for_eligible_ticke
 }
 
 #[tokio::test]
+async fn remote_acquire_invalid_ttl_is_idempotent_and_does_not_lease() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    let ticket_id = fixture.ready_ticket(OP).await;
+
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input_with_ttl("bad-ttl", "hash-a", 0))
+        .await
+        .unwrap_err();
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input_with_ttl("bad-ttl", "hash-a", 0))
+        .await
+        .unwrap_err();
+    let conflict = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input_with_ttl("bad-ttl", "hash-b", 60))
+        .await
+        .unwrap_err();
+
+    assert_eq!(first.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(replay.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(conflict.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        fixture
+            .cp
+            .tickets()
+            .get(ticket_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        TicketState::Ready
+    );
+    assert_eq!(count(&fixture.cp, EventKind::LeaseAcquired).await, 0);
+}
+
+#[tokio::test]
 async fn remote_complete_reuses_success_path_and_replays_same_idempotency_key() {
     let fixture = leased_fixture().await;
     let complete =
@@ -409,6 +463,36 @@ async fn remote_heartbeat_reactivates_stale_node_and_replays_lease_heartbeat() {
 }
 
 #[tokio::test]
+async fn remote_lease_heartbeat_invalid_ttl_is_idempotent_and_does_not_move_expiry() {
+    let fixture = leased_fixture().await;
+    let lease_id = fixture_lease_id(&fixture).await;
+    let before = fixture.cp.leases().get(lease_id).await.unwrap().unwrap();
+
+    let mut input = fixture.lease_heartbeat_input(lease_id, "bad-heartbeat-ttl", "hash-a");
+    input.lease_ttl_seconds = 0;
+    let first = fixture
+        .cp
+        .remote_lease_heartbeat(input.clone())
+        .await
+        .unwrap_err();
+    let replay = fixture.cp.remote_lease_heartbeat(input).await.unwrap_err();
+    let mut different = fixture.lease_heartbeat_input(lease_id, "bad-heartbeat-ttl", "hash-b");
+    different.lease_ttl_seconds = 60;
+    let conflict = fixture
+        .cp
+        .remote_lease_heartbeat(different)
+        .await
+        .unwrap_err();
+    let after = fixture.cp.leases().get(lease_id).await.unwrap().unwrap();
+
+    assert_eq!(first.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(replay.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(conflict.error_code(), ErrorCode::Conflict);
+    assert_eq!(after.last_heartbeat_at, before.last_heartbeat_at);
+    assert_eq!(after.expires_at, before.expires_at);
+}
+
+#[tokio::test]
 async fn remote_complete_replay_ignores_later_node_retirement() {
     let fixture = leased_fixture().await;
     let complete = fixture.complete_input(
@@ -454,6 +538,37 @@ async fn remote_fail_marks_artifact_plan_and_replays_without_second_mutation() {
         .unwrap()
         .unwrap();
     assert_eq!(plan.status, ArtifactAccessPlanStatus::Rejected);
+}
+
+#[tokio::test]
+async fn remote_fail_marks_timeouts_and_crashes_as_failed_even_with_artifact_reason() {
+    let fixture = leased_fixture().await;
+    let lease_id = fixture_lease_id(&fixture).await;
+
+    fixture
+        .cp
+        .remote_fail(RemoteFailInput {
+            node_id: fixture.node_id,
+            token: fixture.token.clone(),
+            worker_id: fixture.worker_id,
+            lease_id,
+            idempotency_key: "fail-timeout".to_owned(),
+            request_hash: "hash-fail-timeout".to_owned(),
+            reason: "artifact upload timed out".to_owned(),
+            class: FailureClass::WorkerTimeout,
+            evidence: json!({"timeout": true}),
+        })
+        .await
+        .unwrap();
+
+    let plan = fixture
+        .cp
+        .artifact_access_plans()
+        .get_by_lease(lease_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.status, ArtifactAccessPlanStatus::Failed);
 }
 
 #[tokio::test]
