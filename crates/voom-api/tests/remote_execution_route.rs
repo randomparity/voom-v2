@@ -259,7 +259,12 @@ async fn complete_route_releases_ticket_consumes_plan_and_replays() {
         "worker_id": fixture.worker_id.0,
         "result": {
             "ok": true,
-            "artifact_access": {"validated": true}
+            "artifact_access": {
+                "validated": true,
+                "mode": "shared_mount",
+                "inputs_consumed": ["handle:input:route"],
+                "outputs_declared": ["handle:output:route"]
+            }
         }
     });
 

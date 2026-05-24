@@ -658,16 +658,7 @@ impl ControlPlane {
                     input.lease_id
                 ))
             })?;
-        if input.result["artifact_access"]["validated"] != JsonValue::Bool(true) {
-            return Err(VoomError::Conflict(
-                "remote complete rejected: artifact access validation missing".to_owned(),
-            ));
-        }
-        let evidence = input
-            .result
-            .get("artifact_access")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let evidence = validated_artifact_complete_evidence(&input.result, &plan)?;
         Ok(RemoteCompletePrepared {
             ticket_id: held.ticket_id,
             worker_id: held.worker_id,
@@ -1240,6 +1231,63 @@ fn remote_plan(plan: &ArtifactAccessPlan) -> RemoteArtifactAccessPlan {
         output_handles: plan.output_handles.clone(),
         selected_access_mode: plan.selected_access_mode,
     }
+}
+
+fn validated_artifact_complete_evidence(
+    result: &JsonValue,
+    plan: &ArtifactAccessPlan,
+) -> Result<JsonValue, VoomError> {
+    let evidence = result.get("artifact_access").ok_or_else(|| {
+        VoomError::Conflict(
+            "remote complete rejected: artifact access validation missing".to_owned(),
+        )
+    })?;
+    if evidence.get("validated") != Some(&JsonValue::Bool(true)) {
+        return Err(VoomError::Conflict(
+            "remote complete rejected: artifact access validation missing".to_owned(),
+        ));
+    }
+    let mode = evidence
+        .get("mode")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            VoomError::Conflict("remote complete rejected: artifact access mode missing".to_owned())
+        })?;
+    if mode != plan.selected_access_mode.as_str() {
+        return Err(VoomError::Conflict(format!(
+            "remote complete rejected: artifact access mode {mode} does not match selected mode {}",
+            plan.selected_access_mode.as_str()
+        )));
+    }
+    let inputs = string_array_evidence(evidence, "inputs_consumed")?;
+    if inputs != plan.input_handles {
+        return Err(VoomError::Conflict(
+            "remote complete rejected: artifact input handles do not match selected plan"
+                .to_owned(),
+        ));
+    }
+    let outputs = string_array_evidence(evidence, "outputs_declared")?;
+    if outputs != plan.output_handles {
+        return Err(VoomError::Conflict(
+            "remote complete rejected: artifact output handles do not match selected plan"
+                .to_owned(),
+        ));
+    }
+    Ok(evidence.clone())
+}
+
+fn string_array_evidence(value: &JsonValue, field: &'static str) -> Result<Vec<String>, VoomError> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| VoomError::Conflict(format!("remote complete rejected: {field} missing")))?
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_owned).ok_or_else(|| {
+                VoomError::Conflict(format!("remote complete rejected: {field} must be strings"))
+            })
+        })
+        .collect()
 }
 
 fn replay_acquire(replay: RemoteMutationReplay) -> Result<RemoteAcquireOutcome, VoomError> {

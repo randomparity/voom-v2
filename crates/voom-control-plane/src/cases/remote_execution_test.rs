@@ -103,7 +103,12 @@ impl RemoteFixture {
             request_hash: request_hash.to_owned(),
             result: json!({
                 "ok": true,
-                "artifact_access": {"validated": true}
+                "artifact_access": {
+                    "validated": true,
+                    "mode": "shared_mount",
+                    "inputs_consumed": ["handle:input:test"],
+                    "outputs_declared": ["handle:output:test"]
+                }
             }),
         }
     }
@@ -412,6 +417,59 @@ async fn remote_complete_reuses_success_path_and_replays_same_idempotency_key() 
         .unwrap()
         .unwrap();
     assert_eq!(plan.status, ArtifactAccessPlanStatus::Consumed);
+}
+
+#[tokio::test]
+async fn remote_complete_rejects_incomplete_or_mismatched_artifact_evidence() {
+    let missing = leased_fixture().await;
+    let missing_lease_id = fixture_lease_id(&missing).await;
+    let mut missing_input =
+        missing.complete_input(missing_lease_id, "missing-evidence", "hash-missing");
+    missing_input.result = json!({
+        "ok": true,
+        "artifact_access": {"validated": true}
+    });
+
+    let err = missing.cp.remote_complete(missing_input).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(
+        missing
+            .cp
+            .leases()
+            .get(missing_lease_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .released_at,
+        None
+    );
+
+    let mismatched = leased_fixture().await;
+    let mismatched_lease_id = fixture_lease_id(&mismatched).await;
+    let mut mismatched_input = mismatched.complete_input(
+        mismatched_lease_id,
+        "mismatched-evidence",
+        "hash-mismatched",
+    );
+    mismatched_input.result = json!({
+        "ok": true,
+        "artifact_access": {
+            "validated": true,
+            "mode": "control_plane_placeholder",
+            "inputs_consumed": ["handle:input:test"],
+            "outputs_declared": ["handle:output:test"]
+        }
+    });
+
+    let err = mismatched
+        .cp
+        .remote_complete(mismatched_input)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+    assert_eq!(count(&mismatched.cp, EventKind::TicketSucceeded).await, 0);
 }
 
 #[tokio::test]
