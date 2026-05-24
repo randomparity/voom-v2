@@ -244,6 +244,33 @@ async fn remote_acquire_leased_returns_scheduler_decision_id_linked_to_lease() {
 }
 
 #[tokio::test]
+async fn remote_acquire_replay_returns_original_scheduler_decision_without_rescoring() {
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    fixture.ready_ticket(OP).await;
+
+    let first = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("replay-decision", "hash-replay-decision"))
+        .await
+        .unwrap();
+    let replay = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("replay-decision", "hash-replay-decision"))
+        .await
+        .unwrap();
+
+    assert_eq!(replay, first);
+    let decision_count = fixture
+        .cp
+        .scheduler_decisions()
+        .list(SchedulerDecisionFilter::default())
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(decision_count, 1);
+}
+
+#[tokio::test]
 async fn remote_acquire_uses_scored_priority_then_tie_breaker() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
     let low = fixture.ready_ticket_with_priority(OP, 0).await;

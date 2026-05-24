@@ -158,6 +158,30 @@ async fn idle_decisions_are_suppressed_by_key() {
 }
 
 #[tokio::test]
+async fn suppression_key_keeps_selected_rows_separate_from_idle_rows() {
+    let (repo, _tmp) = repo().await;
+    let selected = repo.create(selected_input()).await.unwrap();
+    let mut idle = selected_input();
+    idle.decision_kind = SchedulerDecisionKind::Idle;
+    idle.outcome = SchedulerDecisionOutcome::Idle;
+    idle.reason_code = SchedulerReasonCode::NoReadyTicket;
+    idle.suppression_key = Some("remote_acquire:worker:5:no_ready_ticket:0".to_owned());
+    idle.ticket_id = None;
+    idle.selected_worker_id = None;
+    idle.selected_node_id = None;
+    idle.selected_score = None;
+    idle.candidate_count = 0;
+    repo.create_or_suppress(idle.clone()).await.unwrap();
+    repo.create_or_suppress(idle).await.unwrap();
+
+    let rows = repo.list(SchedulerDecisionFilter::default()).await.unwrap();
+
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|row| row.id == selected.id));
+    assert!(rows.iter().any(|row| row.suppressed_count == 1));
+}
+
+#[tokio::test]
 async fn list_filters_by_request_worker_and_outcome() {
     let (repo, _tmp) = repo().await;
 
