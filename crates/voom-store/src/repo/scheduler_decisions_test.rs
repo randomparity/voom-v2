@@ -318,6 +318,10 @@ async fn suppression_key_reuse_requires_equivalent_decision() {
     let err = repo.create_or_suppress(input).await.unwrap_err();
 
     assert_eq!(err.error_code(), voom_core::ErrorCode::Conflict);
+    assert!(
+        err.to_string()
+            .contains("already belongs to a different decision")
+    );
 }
 
 #[tokio::test]
