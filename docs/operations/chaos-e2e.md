@@ -8,6 +8,8 @@ just chaos-e2e-ci
 
 It is intentionally outside default `just ci` because it requires `uv`, Python
 3.13, ffmpeg/ffprobe 7.0+, MKVToolNix, and the pinned Chaos Librarian submodule.
+Setup fails unless Chaos Librarian reports static, filesystem-mutation, and
+media-mutation readiness from `chaos-librarian capabilities --json`.
 
 Maintainers should run the manual `chaos-e2e` GitHub Actions workflow before or
 after changes that affect:
