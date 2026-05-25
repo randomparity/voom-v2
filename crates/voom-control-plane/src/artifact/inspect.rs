@@ -143,7 +143,8 @@ impl ControlPlane {
         }
 
         let mut summaries = Vec::new();
-        for handle_id in list_handle_ids_newest_first(self).await? {
+        let handle_limit = input.state.is_none().then_some(input.limit);
+        for handle_id in list_handle_ids_newest_first(self, handle_limit).await? {
             let detail = build_artifact_detail(self, handle_id).await?;
             if input.state.is_none_or(|state| detail.state == state) {
                 summaries.push(detail.into_summary());
@@ -183,22 +184,17 @@ async fn build_artifact_detail(
     cp: &ControlPlane,
     handle_id: ArtifactHandleId,
 ) -> Result<ArtifactDetail, VoomError> {
-    let handle = cp
-        .artifacts
-        .get_handle(handle_id)
-        .await?
-        .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
-    let facts = read_handle_facts(cp, handle.id).await?;
-    let locations = cp.artifacts.list_locations_for_handle(handle.id).await?;
+    let facts = read_handle_facts(cp, handle_id).await?;
+    let locations = cp.artifacts.list_locations_for_handle(facts.id).await?;
     let live_staging = one_live_staging_location(&locations);
     let verifications = cp
         .artifacts
-        .list_verifications(handle.id)
+        .list_verifications(facts.id)
         .await?
         .into_iter()
         .map(VerificationSummary::from)
         .collect::<Vec<_>>();
-    let raw_commits = cp.artifacts.list_commit_records(handle.id).await?;
+    let raw_commits = cp.artifacts.list_commit_records(facts.id).await?;
     let state = derive_state(live_staging, &verifications, &raw_commits);
     let staging_path = live_staging.map(|location| PathBuf::from(&location.value));
     let latest_verification = verifications.last().cloned();
@@ -378,11 +374,22 @@ async fn observe_path(path: impl AsRef<Path>) -> Result<PathObservation, VoomErr
 
 async fn list_handle_ids_newest_first(
     cp: &ControlPlane,
+    limit: Option<u32>,
 ) -> Result<Vec<ArtifactHandleId>, VoomError> {
-    let rows = sqlx::query("SELECT id FROM artifact_handles ORDER BY id DESC")
-        .fetch_all(cp.pool_for_test_or_internal())
-        .await
-        .map_err(|err| VoomError::Database(format!("artifact_handles list: {err}")))?;
+    let rows = match limit {
+        Some(limit) => {
+            sqlx::query("SELECT id FROM artifact_handles ORDER BY id DESC LIMIT ?")
+                .bind(i64::from(limit))
+                .fetch_all(&cp.pool)
+                .await
+        }
+        None => {
+            sqlx::query("SELECT id FROM artifact_handles ORDER BY id DESC")
+                .fetch_all(&cp.pool)
+                .await
+        }
+    }
+    .map_err(|err| VoomError::Database(format!("artifact_handles list: {err}")))?;
     rows.iter()
         .map(|row| {
             let id: i64 = row
@@ -402,9 +409,10 @@ async fn read_handle_facts(
          FROM artifact_handles WHERE id = ?",
     )
     .bind(i64_from_u64(handle_id.0, "artifact_handles.id")?)
-    .fetch_one(cp.pool_for_test_or_internal())
+    .fetch_optional(&cp.pool)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_handles facts: {err}")))?;
+    .map_err(|err| VoomError::Database(format!("artifact_handles facts: {err}")))?
+    .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
     let id: i64 = row
         .try_get("id")
         .map_err(|err| VoomError::Database(format!("artifact_handles.id: {err}")))?;
@@ -438,16 +446,6 @@ fn i64_from_u64(value: u64, name: &str) -> Result<i64, VoomError> {
 
 fn u64_from_i64(value: i64, name: &str) -> Result<u64, VoomError> {
     u64::try_from(value).map_err(|err| VoomError::Database(format!("{name} is negative: {err}")))
-}
-
-trait ControlPlanePool {
-    fn pool_for_test_or_internal(&self) -> &sqlx::SqlitePool;
-}
-
-impl ControlPlanePool for ControlPlane {
-    fn pool_for_test_or_internal(&self) -> &sqlx::SqlitePool {
-        &self.pool
-    }
 }
 
 #[cfg(test)]

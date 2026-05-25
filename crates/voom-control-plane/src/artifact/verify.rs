@@ -199,7 +199,7 @@ async fn load_expected_artifact_facts(
         .bind(i64::try_from(handle_id.0).map_err(|err| {
             VoomError::Internal(format!("artifact handle id exceeds SQLite integer: {err}"))
         })?)
-        .fetch_optional(cp.pool_for_test_or_internal())
+        .fetch_optional(&cp.pool)
         .await
         .map_err(|e| VoomError::Database(format!("artifact_handles facts: {e}")))?;
     let Some(row) = row else {
@@ -526,40 +526,11 @@ fn failure_class_wire(class: FailureClass) -> Result<String, VoomError> {
 }
 
 fn parse_error_code(code: &str) -> Result<ErrorCode, VoomError> {
-    for candidate in [
-        ErrorCode::WorkerTimeout,
-        ErrorCode::WorkerCrash,
-        ErrorCode::NoEligibleWorker,
-        ErrorCode::ArtifactUnavailable,
-        ErrorCode::ArtifactChecksumMismatch,
-        ErrorCode::ExternalSystemUnavailable,
-        ErrorCode::ExternalSystemRateLimited,
-        ErrorCode::VerificationFailure,
-        ErrorCode::BackupFailure,
-        ErrorCode::CommitFailure,
-        ErrorCode::PolicyParseError,
-        ErrorCode::PolicyValidationError,
-        ErrorCode::MissingCapability,
-        ErrorCode::MalformedWorkerResult,
-        ErrorCode::UserCancellation,
-    ] {
-        if candidate.as_str() == code {
-            return Ok(candidate);
-        }
-    }
-    Err(VoomError::Internal(format!(
-        "unsupported persisted verification error code {code}"
-    )))
-}
-
-trait ControlPlanePool {
-    fn pool_for_test_or_internal(&self) -> &sqlx::SqlitePool;
-}
-
-impl ControlPlanePool for ControlPlane {
-    fn pool_for_test_or_internal(&self) -> &sqlx::SqlitePool {
-        &self.pool
-    }
+    ErrorCode::from_wire_str(code).ok_or_else(|| {
+        VoomError::Internal(format!(
+            "unsupported persisted verification error code {code}"
+        ))
+    })
 }
 
 #[cfg(test)]
