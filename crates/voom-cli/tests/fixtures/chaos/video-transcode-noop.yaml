@@ -21,7 +21,7 @@ works:
               duration_seconds: 1.0
               video:
                 source: color_bars
-                codec: hevc
+                codec: h264
                 resolution: sd
               audio:
                 - source: sine
