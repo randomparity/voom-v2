@@ -996,22 +996,26 @@ async fn dispatch_ticket_inner(
     options: WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
     let mut payload = workflow_payload.rendered_payload.clone();
+    let mut transcode_staging_path = None;
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
     let validate_transcode_result = workflow_payload.operation == OperationKind::TranscodeVideo
         && payload.get("source_file_version_id").is_some();
     if validate_transcode_result {
-        payload = match transcode_worker_payload(control, ticket.id, lease_id, &payload).await {
-            Ok(payload) => payload,
-            Err(source) => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    failure_class_for_error(&source),
-                    source,
-                )
-                .await;
-            }
-        };
+        let worker_payload =
+            match transcode_worker_payload(control, ticket.id, lease_id, &payload).await {
+                Ok(payload) => payload,
+                Err(source) => {
+                    return fail_lease_and_return(
+                        control,
+                        lease_id,
+                        failure_class_for_error(&source),
+                        source,
+                    )
+                    .await;
+                }
+            };
+        transcode_staging_path = Some(worker_payload.staging_path);
+        payload = worker_payload.payload;
     }
     let request = OperationRequest {
         operation: workflow_payload.operation,
@@ -1064,6 +1068,7 @@ async fn dispatch_ticket_inner(
         lease_id,
         workflow_payload.operation,
         validate_transcode_result,
+        transcode_staging_path,
         dispatch,
         options,
     )
@@ -1075,6 +1080,7 @@ async fn consume_dispatch_stream(
     lease_id: LeaseId,
     operation: OperationKind,
     validate_transcode_result: bool,
+    transcode_staging_path: Option<String>,
     mut dispatch: DispatchStream,
     options: WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
@@ -1120,6 +1126,7 @@ async fn consume_dispatch_stream(
                             lease_id,
                             operation,
                             validate_transcode_result,
+                            transcode_staging_path,
                             frame,
                         )
                         .await;
@@ -1165,12 +1172,17 @@ async fn consume_dispatch_stream(
     }
 }
 
+struct TranscodeWorkerPayload {
+    payload: Value,
+    staging_path: String,
+}
+
 async fn transcode_worker_payload(
     control: &ControlPlane,
     ticket_id: TicketId,
     lease_id: LeaseId,
     payload: &Value,
-) -> Result<Value, VoomError> {
+) -> Result<TranscodeWorkerPayload, VoomError> {
     let source_file_version_id =
         voom_core::FileVersionId(required_u64(payload, "source_file_version_id")?);
     let source_location_id =
@@ -1219,8 +1231,13 @@ async fn transcode_worker_payload(
         },
         profile: TranscodeVideoProfile::default_hevc(),
     };
-    serde_json::to_value(request)
-        .map_err(|err| VoomError::Internal(format!("encode transcode worker payload: {err}")))
+    let staging_path = output_path.to_string_lossy().into_owned();
+    let payload = serde_json::to_value(request)
+        .map_err(|err| VoomError::Internal(format!("encode transcode worker payload: {err}")))?;
+    Ok(TranscodeWorkerPayload {
+        payload,
+        staging_path,
+    })
 }
 
 async fn create_transcode_staging_parent(
@@ -1422,10 +1439,11 @@ async fn handle_terminal_frame(
     lease_id: LeaseId,
     operation: OperationKind,
     validate_transcode_result: bool,
+    transcode_staging_path: Option<String>,
     frame: ProgressFrame,
 ) -> Result<(), VoomError> {
     match frame {
-        ProgressFrame::Result { payload, .. } => {
+        ProgressFrame::Result { mut payload, .. } => {
             if !payload.is_object() {
                 return fail_lease_and_return(
                     control,
@@ -1439,6 +1457,20 @@ async fn handle_terminal_frame(
             }
             if operation == OperationKind::TranscodeVideo && validate_transcode_result {
                 validate_transcode_result_payload(control, lease_id, &payload).await?;
+            }
+            if let Some(staging_path) = transcode_staging_path {
+                let Some(object) = payload.as_object_mut() else {
+                    return fail_lease_and_return(
+                        control,
+                        lease_id,
+                        FailureClass::MalformedWorkerResult,
+                        VoomError::MalformedWorkerResult(format!(
+                            "result payload for lease {lease_id} must be an object"
+                        )),
+                    )
+                    .await;
+                };
+                object.insert("staging_path".to_owned(), Value::String(staging_path));
             }
             release_lease_with_retry(control, lease_id, payload).await?;
             Ok(())

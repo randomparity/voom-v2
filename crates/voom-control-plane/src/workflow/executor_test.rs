@@ -353,6 +353,36 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
 }
 
 #[tokio::test]
+async fn policy_transcode_success_result_includes_generated_staging_path() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    fixture.run_with_options(options).await.unwrap();
+
+    let result = fixture.first_ticket_result().await;
+    let staging_path = result["staging_path"].as_str().unwrap();
+    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.hevc.mkv"));
+}
+
+#[tokio::test]
 async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     let dir = tempfile::tempdir().unwrap();
@@ -804,6 +834,15 @@ impl ExecutorFixture {
                 .await
                 .unwrap();
         serde_json::from_str(&payload).unwrap()
+    }
+
+    async fn first_ticket_result(&self) -> Value {
+        let result: String =
+            sqlx::query_scalar("SELECT result FROM tickets ORDER BY id ASC LIMIT 1")
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
+        serde_json::from_str(&result).unwrap()
     }
 }
 
