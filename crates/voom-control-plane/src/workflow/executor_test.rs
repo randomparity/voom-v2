@@ -352,6 +352,40 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
     assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let outside = dir.path().join("outside");
+    tokio::fs::create_dir(&outside).await.unwrap();
+    let symlink_root = dir.path().join("stage-link");
+    std::os::unix::fs::symlink(&outside, &symlink_root).unwrap();
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = symlink_root;
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
+}
+
 #[test]
 fn summary_branch_count_only_excludes_synthetic_root_ticket() {
     let synthetic_root = WorkflowTicketPayload::new_for_test(

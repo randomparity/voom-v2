@@ -1000,7 +1000,18 @@ async fn dispatch_ticket_inner(
     if workflow_payload.operation == OperationKind::TranscodeVideo
         && payload.get("source_file_version_id").is_some()
     {
-        payload = transcode_worker_payload(control, ticket.id, lease_id, &payload).await?;
+        payload = match transcode_worker_payload(control, ticket.id, lease_id, &payload).await {
+            Ok(payload) => payload,
+            Err(source) => {
+                return fail_lease_and_return(
+                    control,
+                    lease_id,
+                    failure_class_for_error(&source),
+                    source,
+                )
+                .await;
+            }
+        };
     }
     let request = OperationRequest {
         operation: workflow_payload.operation,
@@ -1178,17 +1189,7 @@ async fn transcode_worker_payload(
         ));
     }
 
-    let staging_parent = PathBuf::from(staging_root)
-        .join(format!("ticket-{}", ticket_id.0))
-        .join(format!("lease-{}", lease_id.0));
-    tokio::fs::create_dir_all(&staging_parent)
-        .await
-        .map_err(|err| {
-            VoomError::Config(format!(
-                "create transcode staging parent {}: {err}",
-                staging_parent.display()
-            ))
-        })?;
+    let staging_parent = create_transcode_staging_parent(staging_root, ticket_id, lease_id).await?;
     let output_path = staging_parent.join(transcode_output_file_name(&source_location.value));
     let request = TranscodeVideoRequest {
         input: TranscodeVideoInput {
@@ -1211,6 +1212,88 @@ async fn transcode_worker_payload(
     };
     serde_json::to_value(request)
         .map_err(|err| VoomError::Internal(format!("encode transcode worker payload: {err}")))
+}
+
+async fn create_transcode_staging_parent(
+    staging_root: &str,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+) -> Result<PathBuf, VoomError> {
+    let root = PathBuf::from(staging_root);
+    reject_existing_symlink_components(&root).await?;
+    tokio::fs::create_dir_all(&root).await.map_err(|err| {
+        VoomError::Config(format!(
+            "create transcode staging root {staging_root}: {err}"
+        ))
+    })?;
+    reject_symlink_dir(&root, "transcode staging root").await?;
+    let canonical_root = tokio::fs::canonicalize(&root).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize transcode staging root {staging_root}: {err}"
+        ))
+    })?;
+    let parent = root
+        .join(format!("ticket-{}", ticket_id.0))
+        .join(format!("lease-{}", lease_id.0));
+    reject_existing_symlink_components(&parent).await?;
+    tokio::fs::create_dir_all(&parent).await.map_err(|err| {
+        VoomError::Config(format!(
+            "create transcode staging parent {}: {err}",
+            parent.display()
+        ))
+    })?;
+    reject_symlink_dir(&parent, "transcode staging parent").await?;
+    let canonical_parent = tokio::fs::canonicalize(&parent).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize transcode staging parent {}: {err}",
+            parent.display()
+        ))
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(VoomError::Config(format!(
+            "transcode staging parent {} escapes root {}",
+            canonical_parent.display(),
+            canonical_root.display()
+        )));
+    }
+    Ok(canonical_parent)
+}
+
+async fn reject_existing_symlink_components(path: &std::path::Path) -> Result<(), VoomError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(VoomError::Config(format!(
+                    "transcode staging path component must not be a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => {
+                return Err(VoomError::Config(format!(
+                    "inspect transcode staging path component {}: {err}",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn reject_symlink_dir(path: &std::path::Path, label: &str) -> Result<(), VoomError> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("{label} {}: {err}", path.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(VoomError::Config(format!(
+            "{label} must be a non-symlink directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 async fn select_transcode_source_location(
