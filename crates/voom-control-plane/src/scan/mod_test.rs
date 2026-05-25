@@ -186,7 +186,7 @@ async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
     assert_eq!(launcher.shutdowns(), vec![launched_worker_id]);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn non_utf8_candidate_path_fails_before_worker_dispatch() {
     use std::ffi::OsString;
