@@ -736,6 +736,11 @@ pub trait IdentityRepo: Repository {
         &self,
         id: MediaSnapshotId,
     ) -> Result<Option<MediaSnapshot>, VoomError>;
+    async fn get_media_snapshot_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: MediaSnapshotId,
+    ) -> Result<Option<MediaSnapshot>, VoomError>;
     async fn list_media_snapshots_by_version(
         &self,
         version_id: FileVersionId,
@@ -1674,6 +1679,14 @@ impl IdentityRepo for SqliteIdentityRepo {
             .await
             .map_err(|e| VoomError::Database(format!("media_snapshots get: {e}")))?;
         row.as_ref().map(row_to_media_snapshot).transpose()
+    }
+
+    async fn get_media_snapshot_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: MediaSnapshotId,
+    ) -> Result<Option<MediaSnapshot>, VoomError> {
+        get_media_snapshot_in_tx(tx, id).await
     }
 
     async fn list_media_snapshots_by_version(

@@ -42,6 +42,9 @@ pub enum Command {
     /// Generate, apply, or execute compliance reports.
     #[command(subcommand)]
     Compliance(ComplianceCommand),
+    /// Manage policy documents and input sets.
+    #[command(subcommand)]
+    Policy(PolicyCommand),
     /// Register and manage execution nodes.
     #[command(subcommand)]
     Node(NodeCommand),
@@ -76,6 +79,30 @@ pub enum PlanCommand {
         policy_version_id: u64,
         #[arg(long)]
         input_set_id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PolicyCommand {
+    /// Manage policy input sets.
+    #[command(subcommand)]
+    Input(PolicyInputCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PolicyInputCommand {
+    /// Create a policy input set from existing scan-created rows.
+    CreateFromScan {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        file_version_id: u64,
+        #[arg(long)]
+        media_snapshot_id: u64,
+        #[arg(long)]
+        container: String,
+        #[arg(long)]
+        video_codec: String,
     },
 }
 
