@@ -424,6 +424,9 @@ async fn cleanup_staging_file_if_unchanged(
     if current.size_bytes != expected.size_bytes || current.content_hash != expected.content_hash {
         return Err("staging path changed before cleanup".to_owned());
     }
+    if current.modified_at != expected.modified_at {
+        return Err("staging path changed before cleanup".to_owned());
+    }
     tokio::fs::remove_file(staging_path)
         .await
         .map_err(|err| err.to_string())

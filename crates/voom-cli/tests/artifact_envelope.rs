@@ -19,7 +19,7 @@ const BASIC_FFPROBE_JSON: &str =
 #[tokio::test]
 async fn artifact_full_flow_outputs_committed_envelopes() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
+    let dir = artifact_tempdir();
     let media = tiny_media_fixture();
     let staging = dir.path().join("staged.mp4");
     let target = dir.path().join("committed.mp4");
@@ -94,7 +94,7 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
 #[tokio::test]
 async fn artifact_list_and_show_cover_all_inspection_states() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
+    let dir = artifact_tempdir();
     let staged = create_staged_artifact(&seeded.url, dir.path(), "staged");
     let verified = create_verified_artifact(&seeded.url, dir.path(), "verified");
     let committed = create_committed_artifact(&seeded.url, dir.path(), "committed");
@@ -171,7 +171,7 @@ async fn artifact_list_and_show_cover_all_inspection_states() {
 #[tokio::test]
 async fn artifact_failure_envelopes_are_actionable() {
     let seeded = seed().await;
-    let dir = TempDir::new().unwrap();
+    let dir = artifact_tempdir();
     let unverified = create_staged_artifact(&seeded.url, dir.path(), "unverified");
     let drift = create_verified_artifact(&seeded.url, dir.path(), "drift");
     std::fs::write(&drift.staging_path, b"changed bytes").unwrap();
@@ -556,6 +556,10 @@ fn tiny_media_fixture() -> PathBuf {
         .join("crates/voom-ffprobe-worker/fixtures/media/tiny.mp4")
         .canonicalize()
         .unwrap()
+}
+
+fn artifact_tempdir() -> TempDir {
+    TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 fn success_ffprobe_binary() -> &'static PathBuf {
