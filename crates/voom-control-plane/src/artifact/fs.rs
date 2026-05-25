@@ -16,6 +16,7 @@ pub struct ArtifactFileFacts {
     pub size_bytes: u64,
     pub content_hash: String,
     pub modified_at: Option<SystemTime>,
+    pub local_file_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,11 +197,17 @@ pub async fn observe_regular_file(path: impl AsRef<Path>) -> Result<ArtifactFile
         )));
     }
 
+    #[cfg(unix)]
+    let local_file_key = Some(local_file_key(&metadata));
+    #[cfg(not(unix))]
+    let local_file_key = None;
+
     Ok(ArtifactFileFacts {
         path: canonical,
         size_bytes: metadata.len(),
         content_hash: format!("blake3:{}", hasher.finalize().to_hex()),
         modified_at: metadata.modified().ok(),
+        local_file_key,
     })
 }
 
@@ -530,6 +537,13 @@ fn same_file_facts(left: &ArtifactFileFacts, right: &ArtifactFileFacts) -> bool 
 
 fn metadata_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
     before.len() != after.len() || before.modified().ok() != after.modified().ok()
+}
+
+#[cfg(unix)]
+fn local_file_key(metadata: &std::fs::Metadata) -> String {
+    use std::os::unix::fs::MetadataExt;
+
+    format!("unix:{}:{}", metadata.dev(), metadata.ino())
 }
 
 async fn reject_symlink_components(path: &Path) -> Result<(), VoomError> {
