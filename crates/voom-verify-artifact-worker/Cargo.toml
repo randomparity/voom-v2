@@ -1,0 +1,25 @@
+[package]
+name = "voom-verify-artifact-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+voom-core.workspace = true
+voom-worker-protocol.workspace = true
+
+blake3.workspace = true
+chrono.workspace = true
+libc.workspace = true
+secrecy.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros", "net", "sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

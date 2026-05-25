@@ -16,6 +16,7 @@ members = [
     "crates/voom-fake-support",
     "crates/voom-fakes",
     "crates/voom-ffprobe-worker",
+    "crates/voom-verify-artifact-worker",
 ]
 
 [workspace.package]
@@ -68,6 +69,7 @@ http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1.5", features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1.10", features = ["client-legacy", "tokio", "server", "server-auto", "http1"] }
+libc = "0.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["json"] }
 secrecy = "0.10"
 thiserror = "2"

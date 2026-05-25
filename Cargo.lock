@@ -2758,6 +2758,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "voom-verify-artifact-worker"
+version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "chrono",
+ "libc",
+ "secrecy",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "voom-core",
+ "voom-worker-protocol",
+]
+
+[[package]]
 name = "voom-worker-protocol"
 version = "0.1.0-dev"
 dependencies = [
