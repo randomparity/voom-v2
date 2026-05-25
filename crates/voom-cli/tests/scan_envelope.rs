@@ -27,7 +27,7 @@ async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
     assert_eq!(json["command"], "scan");
     assert_eq!(json["status"], "ok");
     redact_common(&mut json);
-    redact_paths(&mut json, &[path_redaction(&media, "[media]/tiny.mp4")]);
+    redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
     redact_content_hashes(&mut json);
     insta::assert_json_snapshot!(
         "scan_file_success_outputs_envelope_and_persists_snapshot",
@@ -80,12 +80,12 @@ async fn scan_directory_reports_unsupported_entries_as_skipped() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["summary"]["skipped"], 1);
     redact_common(&mut json);
-    redact_paths(
+    redact_path_set(
         &mut json,
         &[
-            path_redaction(dir.path(), "[scan-dir]"),
-            path_redaction(&media, "[scan-dir]/tiny.mp4"),
-            path_redaction(&note, "[scan-dir]/note.txt"),
+            (dir.path(), "[scan-dir]"),
+            (media.as_path(), "[scan-dir]/tiny.mp4"),
+            (note.as_path(), "[scan-dir]/note.txt"),
         ],
     );
     redact_content_hashes(&mut json);
@@ -113,7 +113,7 @@ async fn scan_unsupported_explicit_file_is_bad_args() {
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");
     redact_common(&mut json);
-    redact_paths(&mut json, &[path_redaction(&note, "[scan-dir]/note.txt")]);
+    redact_path_set(&mut json, &[(note.as_path(), "[scan-dir]/note.txt")]);
     insta::assert_json_snapshot!("scan_unsupported_explicit_file_is_bad_args", json);
 
     let pool = voom_store::connect(&seeded.url).await.unwrap();
@@ -135,7 +135,7 @@ async fn scan_reuses_builtin_ffprobe_worker_row() {
     assert_eq!(json["command"], "scan");
     assert_eq!(json["status"], "ok");
     redact_common(&mut json);
-    redact_paths(&mut json, &[path_redaction(&media, "[media]/tiny.mp4")]);
+    redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
     redact_content_hashes(&mut json);
     insta::assert_json_snapshot!("scan_reuses_builtin_ffprobe_worker_row", json);
 
@@ -178,11 +178,11 @@ async fn scan_content_drift_fails_without_snapshot() {
         "artifact_checksum_mismatch"
     );
     redact_common(&mut json);
-    redact_paths(
+    redact_path_set(
         &mut json,
         &[
-            path_redaction(&media, "[scan-dir]/drift.mp4"),
-            path_redaction(&fake_ffprobe, "[scan-dir]/ffprobe"),
+            (media.as_path(), "[scan-dir]/drift.mp4"),
+            (fake_ffprobe.as_path(), "[scan-dir]/ffprobe"),
         ],
     );
     redact_content_hashes(&mut json);
@@ -394,9 +394,24 @@ fn redact_common(json: &mut Value) {
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
 }
 
-fn path_redaction(path: &Path, replacement: &str) -> (String, String) {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    (path.display().to_string(), replacement.to_owned())
+fn redact_path_set(value: &mut Value, paths: &[(&Path, &str)]) {
+    let replacements = paths
+        .iter()
+        .flat_map(|(path, replacement)| path_redactions(path, replacement))
+        .collect::<Vec<_>>();
+    redact_paths(value, &replacements);
+}
+
+fn path_redactions(path: &Path, replacement: &str) -> Vec<(String, String)> {
+    let replacement = replacement.to_owned();
+    let mut redactions = vec![(path.display().to_string(), replacement.clone())];
+    if let Ok(canonical) = path.canonicalize() {
+        let canonical = canonical.display().to_string();
+        if redactions.iter().all(|(needle, _)| needle != &canonical) {
+            redactions.push((canonical, replacement));
+        }
+    }
+    redactions
 }
 
 fn redact_paths(value: &mut Value, replacements: &[(String, String)]) {

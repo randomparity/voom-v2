@@ -84,7 +84,7 @@ fn ffprobe_config_version_probe_times_out_quickly() {
     let fake_ffprobe = write_executable(
         dir.path(),
         "#!/bin/sh\n\
-         if [ \"${1:-}\" = '-version' ]; then sleep 5; exit 0; fi\n\
+         if [ \"${1:-}\" = '-version' ]; then exec sleep 5; fi\n\
          printf '{\"format\":{\"format_name\":\"mov,mp4\"},\"streams\":[]}\\n'\n",
     );
     let started = std::time::Instant::now();
