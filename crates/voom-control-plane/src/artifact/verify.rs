@@ -54,7 +54,7 @@ pub(crate) trait VerifyArtifactDispatcher: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BundledVerifyArtifactDispatcher;
+pub(crate) struct BundledVerifyArtifactDispatcher;
 
 #[async_trait]
 impl VerifyArtifactDispatcher for BundledVerifyArtifactDispatcher {
