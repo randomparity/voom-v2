@@ -8,7 +8,7 @@ fn normalizes_ffprobe_json_into_sprint10_snapshot() {
         return;
     };
 
-    let snapshot_result = normalize_ffprobe_json(&raw, "7.0", "2026-05-24T00:00:00Z");
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
     assert!(snapshot_result.is_ok());
     let Ok(snapshot) = snapshot_result else {
         return;
@@ -35,7 +35,7 @@ fn rejects_non_numeric_duration() {
         "streams": []
     });
 
-    let result = normalize_ffprobe_json(&raw, "7.0", "2026-05-24T00:00:00Z");
+    let result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
@@ -61,7 +61,7 @@ fn omits_unknown_ffprobe_sentinel_values() {
         ]
     });
 
-    let snapshot_result = normalize_ffprobe_json(&raw, "7.0", "2026-05-24T00:00:00Z");
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
     assert!(snapshot_result.is_ok());
     let Ok(snapshot) = snapshot_result else {
         return;
@@ -86,7 +86,7 @@ fn rejects_malformed_present_numeric_values() {
         ]
     });
 
-    let result = normalize_ffprobe_json(&raw, "7.0", "2026-05-24T00:00:00Z");
+    let result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
@@ -106,7 +106,7 @@ fn rejects_malformed_top_level_sections() {
             "streams": {}
         }),
     ] {
-        let result = normalize_ffprobe_json(&raw, "7.0", "2026-05-24T00:00:00Z");
+        let result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
 
         assert!(matches!(
             result.as_ref().map_err(WorkerError::failure_class),

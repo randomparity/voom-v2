@@ -330,52 +330,6 @@ async fn worker_operation_eligibility_surfaces_denies() {
 }
 
 #[tokio::test]
-async fn capability_existence_helper_detects_probe_file() {
-    let fixture = worker_fixture().await;
-    fixture
-        .insert_capability("probe_file", &["local_path"])
-        .await;
-    let mut tx = fixture.repo.pool.begin().await.unwrap();
-
-    assert!(
-        fixture
-            .repo
-            .has_capability_in_tx(&mut tx, fixture.worker_id, "probe_file")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !fixture
-            .repo
-            .has_capability_in_tx(&mut tx, fixture.worker_id, "transcode_video")
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn execute_grant_existence_helper_detects_probe_file() {
-    let fixture = worker_fixture().await;
-    fixture.insert_grant(&["probe_file"], &[]).await;
-    let mut tx = fixture.repo.pool.begin().await.unwrap();
-
-    assert!(
-        fixture
-            .repo
-            .has_execute_grant_in_tx(&mut tx, fixture.worker_id, "probe_file")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !fixture
-            .repo
-            .has_execute_grant_in_tx(&mut tx, fixture.worker_id, "transcode_video")
-            .await
-            .unwrap()
-    );
-}
-
-#[tokio::test]
 async fn node_owned_worker_in_tx_returns_matching_worker() {
     let (pool, _tmp, repo, node, worker) = worker_with_node_fixture().await;
     let mut tx = pool.begin().await.unwrap();

@@ -3,7 +3,7 @@ use super::{ObservedCandidateFacts, ScanPersistError, persist_scanned_media_snap
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::scan::discovery::FileScanStatus;
+use crate::scan::ScanReportFileStatus;
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::clock_test_support::ManualClock;
@@ -89,7 +89,7 @@ async fn content_drift_skips_persistence_and_returns_failed_content_drift() {
     let ScanPersistError::File(file_err) = err else {
         panic!("expected per-file scan error");
     };
-    assert_eq!(file_err.status(), FileScanStatus::FailedContentDrift);
+    assert_eq!(file_err.status(), ScanReportFileStatus::FailedContentDrift);
     assert_eq!(file_err.error_code(), ErrorCode::ArtifactChecksumMismatch);
     assert_eq!(
         file_err.failure_class(),

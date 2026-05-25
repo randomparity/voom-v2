@@ -140,105 +140,103 @@ impl ControlPlane {
             .await
             .map_err(|err| command_error_from_worker(&err, report.clone()))?;
 
-        for candidate in discovered.candidates {
-            let candidate_facts = match hash::observe_candidate_file(&candidate.path).await {
-                Ok(facts) => facts,
-                Err(err) => {
-                    push_scan_error(
-                        &mut report,
-                        candidate.path,
-                        ScanReportFileStatus::Failed,
-                        None,
-                        None,
-                        scan_file_error_from_discovery(&err),
-                    );
-                    worker.shutdown().await;
-                    return Err(command_error_from_report_tail(report));
-                }
-            };
-            let request = match probe_request(&candidate.path, &candidate_facts) {
-                Ok(request) => request,
-                Err(error) => {
-                    push_scan_error(
-                        &mut report,
-                        candidate.path,
-                        ScanReportFileStatus::Failed,
-                        Some(&candidate_facts),
-                        Some(worker.worker_id()),
-                        error,
-                    );
-                    worker.shutdown().await;
-                    return Err(command_error_from_report_tail(report));
-                }
-            };
-            launcher.record_dispatch(worker.worker_id());
-            let probe = match worker.dispatch_probe_file(request).await {
-                Ok(probe) => {
-                    report.summary.probed += 1;
-                    probe
-                }
-                Err(err) => {
-                    push_scan_error(
-                        &mut report,
-                        candidate.path,
-                        ScanReportFileStatus::Failed,
-                        Some(&candidate_facts),
-                        Some(worker.worker_id()),
-                        scan_file_error_from_worker(&err),
-                    );
-                    worker.shutdown().await;
-                    return Err(command_error_from_worker(&err, report));
-                }
-            };
-            match persist::persist_scanned_media_snapshot(
-                self,
-                worker.worker_id(),
-                &candidate.path,
-                &candidate_facts,
-                &probe,
-            )
-            .await
-            {
-                Ok(persisted) => {
-                    report.summary.ingested += 1;
-                    report.summary.snapshots_recorded += 1;
-                    report.files.push(scanned_file_report(
-                        candidate.path,
-                        &candidate_facts,
-                        worker.worker_id(),
-                        &persisted,
-                    ));
-                }
-                Err(persist::ScanPersistError::File(err)) => {
-                    let status = file_status_from_discovery(err.status());
-                    push_scan_error(
-                        &mut report,
-                        candidate.path,
-                        status,
-                        Some(&candidate_facts),
-                        Some(worker.worker_id()),
-                        scan_file_error_from_persist(&err),
-                    );
-                    worker.shutdown().await;
-                    return Err(command_error_from_report_tail(report));
-                }
-                Err(persist::ScanPersistError::Store(err)) => {
-                    push_scan_error(
-                        &mut report,
-                        candidate.path,
-                        ScanReportFileStatus::Failed,
-                        Some(&candidate_facts),
-                        Some(worker.worker_id()),
-                        scan_file_error_from_voom(&err),
-                    );
-                    worker.shutdown().await;
-                    return Err(command_error_from_voom(&err, report));
+        let result = async {
+            for candidate in discovered.candidates {
+                let candidate_facts = match hash::observe_candidate_file(&candidate.path).await {
+                    Ok(facts) => facts,
+                    Err(err) => {
+                        push_scan_error(
+                            &mut report,
+                            candidate.path,
+                            ScanReportFileStatus::Failed,
+                            None,
+                            None,
+                            scan_file_error_from_discovery(&err),
+                        );
+                        return Err(command_error_from_report_tail(report));
+                    }
+                };
+                let request = match probe_request(&candidate.path, &candidate_facts) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        push_scan_error(
+                            &mut report,
+                            candidate.path,
+                            ScanReportFileStatus::Failed,
+                            Some(&candidate_facts),
+                            Some(worker.worker_id()),
+                            error,
+                        );
+                        return Err(command_error_from_report_tail(report));
+                    }
+                };
+                launcher.record_dispatch(worker.worker_id());
+                let probe = match worker.dispatch_probe_file(request).await {
+                    Ok(probe) => {
+                        report.summary.probed += 1;
+                        probe
+                    }
+                    Err(err) => {
+                        push_scan_error(
+                            &mut report,
+                            candidate.path,
+                            ScanReportFileStatus::Failed,
+                            Some(&candidate_facts),
+                            Some(worker.worker_id()),
+                            scan_file_error_from_worker(&err),
+                        );
+                        return Err(command_error_from_worker(&err, report));
+                    }
+                };
+                match persist::persist_scanned_media_snapshot(
+                    self,
+                    worker.worker_id(),
+                    &candidate.path,
+                    &candidate_facts,
+                    &probe,
+                )
+                .await
+                {
+                    Ok(persisted) => {
+                        report.summary.ingested += 1;
+                        report.summary.snapshots_recorded += 1;
+                        report.files.push(scanned_file_report(
+                            candidate.path,
+                            &candidate_facts,
+                            worker.worker_id(),
+                            &persisted,
+                        ));
+                    }
+                    Err(persist::ScanPersistError::File(err)) => {
+                        push_scan_error(
+                            &mut report,
+                            candidate.path,
+                            err.status(),
+                            Some(&candidate_facts),
+                            Some(worker.worker_id()),
+                            scan_file_error_from_persist(&err),
+                        );
+                        return Err(command_error_from_report_tail(report));
+                    }
+                    Err(persist::ScanPersistError::Store(err)) => {
+                        push_scan_error(
+                            &mut report,
+                            candidate.path,
+                            ScanReportFileStatus::Failed,
+                            Some(&candidate_facts),
+                            Some(worker.worker_id()),
+                            scan_file_error_from_voom(&err),
+                        );
+                        return Err(command_error_from_voom(&err, report));
+                    }
                 }
             }
-        }
 
+            Ok(report)
+        }
+        .await;
         worker.shutdown().await;
-        Ok(report)
+        result
     }
 
     async fn ensure_scan_worker(&self) -> Result<WorkerId, VoomError> {
@@ -412,7 +410,6 @@ fn push_scan_error(
 
 fn file_status_from_discovery(status: discovery::FileScanStatus) -> ScanReportFileStatus {
     match status {
-        discovery::FileScanStatus::FailedContentDrift => ScanReportFileStatus::FailedContentDrift,
         discovery::FileScanStatus::SkippedInaccessible => ScanReportFileStatus::SkippedInaccessible,
         discovery::FileScanStatus::SkippedSymlink
         | discovery::FileScanStatus::SkippedUnsupportedExtension => {

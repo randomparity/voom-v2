@@ -212,7 +212,7 @@ async fn probe_file(
 
     let raw = run_ffprobe_json(&path, config).await?;
     let probed_at = Utc::now().to_rfc3339();
-    let snapshot = normalize_ffprobe_json(&raw, config.provider_version(), &probed_at)
+    let snapshot = normalize_ffprobe_json(raw, config.provider_version(), &probed_at)
         .map_err(FfprobeError::from)?;
 
     let post_probe = Box::pin(observe_file_facts(&path))

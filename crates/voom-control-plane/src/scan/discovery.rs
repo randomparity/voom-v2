@@ -17,7 +17,6 @@ pub enum ScanMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileScanStatus {
-    FailedContentDrift,
     SkippedInaccessible,
     SkippedSymlink,
     SkippedUnsupportedExtension,
@@ -69,9 +68,13 @@ impl Error for ScanError {}
 
 #[must_use]
 pub fn is_supported_media_path(path: &Path) -> bool {
-    extension_key(path)
-        .as_deref()
-        .is_some_and(|ext| SUPPORTED_EXTENSIONS.contains(&ext))
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            SUPPORTED_EXTENSIONS
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
 }
 
 pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, ScanError> {
@@ -99,12 +102,6 @@ pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, Sca
         "scan path must be a file or directory: {}",
         path.display()
     )))
-}
-
-fn extension_key(path: &Path) -> Option<String> {
-    path.extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_ascii_lowercase)
 }
 
 async fn discover_file(path: &Path) -> Result<DiscoveredScan, ScanError> {
@@ -176,8 +173,8 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
         }
     }
 
-    candidates.sort_by_key(|candidate| normalized_path(&candidate.path));
-    skipped.sort_by_key(|skipped| normalized_path(&skipped.path));
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    skipped.sort_by(|left, right| left.path.cmp(&right.path));
 
     Ok(DiscoveredScan {
         root,
@@ -191,10 +188,6 @@ async fn canonicalize(path: &Path) -> Result<PathBuf, ScanError> {
     fs::canonicalize(path)
         .await
         .map_err(|err| internal(format!("cannot canonicalize {}: {err}", path.display())))
-}
-
-fn normalized_path(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 fn bad_args(message: String) -> ScanError {

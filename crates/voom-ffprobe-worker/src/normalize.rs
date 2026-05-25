@@ -21,7 +21,7 @@ impl WorkerError {
 }
 
 pub fn normalize_ffprobe_json(
-    raw: &Value,
+    raw: Value,
     provider_version: &str,
     probed_at: &str,
 ) -> Result<Value, WorkerError> {
@@ -48,7 +48,7 @@ pub fn normalize_ffprobe_json(
     }
 
     let mut raw_object = Map::new();
-    raw_object.insert("ffprobe_json".to_owned(), raw.clone());
+    raw_object.insert("ffprobe_json".to_owned(), raw);
     snapshot.insert("raw".to_owned(), Value::Object(raw_object));
 
     Ok(Value::Object(snapshot))

@@ -18,7 +18,7 @@ use voom_worker_protocol::ProbeFileResult;
 
 use crate::ControlPlane;
 use crate::cases::append_event;
-use crate::scan::discovery::FileScanStatus;
+use crate::scan::ScanReportFileStatus;
 
 pub use super::hash::ObservedFileFacts as ObservedCandidateFacts;
 
@@ -34,7 +34,7 @@ pub struct PersistedScan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanFileError {
-    status: FileScanStatus,
+    status: ScanReportFileStatus,
     error_code: ErrorCode,
     failure_class: FailureClass,
     message: String,
@@ -42,7 +42,7 @@ pub struct ScanFileError {
 
 impl ScanFileError {
     #[must_use]
-    pub const fn status(&self) -> FileScanStatus {
+    pub const fn status(&self) -> ScanReportFileStatus {
         self.status
     }
 
@@ -63,7 +63,7 @@ impl ScanFileError {
 
     fn content_drift() -> Self {
         Self {
-            status: FileScanStatus::FailedContentDrift,
+            status: ScanReportFileStatus::FailedContentDrift,
             error_code: ErrorCode::ArtifactChecksumMismatch,
             failure_class: FailureClass::ArtifactChecksumMismatch,
             message: CONTENT_DRIFT_MESSAGE.to_owned(),

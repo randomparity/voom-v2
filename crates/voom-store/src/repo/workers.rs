@@ -217,18 +217,6 @@ pub trait WorkerRepo: Repository {
         worker_id: WorkerId,
         operation: &str,
     ) -> Result<WorkerOperationEligibility, VoomError>;
-    async fn has_capability_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        operation: &str,
-    ) -> Result<bool, VoomError>;
-    async fn has_execute_grant_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        operation: &str,
-    ) -> Result<bool, VoomError>;
 
     async fn node_owned_worker_in_tx<'tx>(
         &self,
@@ -603,48 +591,6 @@ impl WorkerRepo for SqliteWorkerRepo {
             .await
             .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
         Ok(out)
-    }
-
-    async fn has_capability_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        operation: &str,
-    ) -> Result<bool, VoomError> {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM worker_capabilities WHERE worker_id = ? AND operation = ?)",
-        )
-        .bind(i64_from_u64(worker_id.0))
-        .bind(operation)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| VoomError::Database(format!("worker_capabilities exists: {e}")))?;
-        Ok(exists != 0)
-    }
-
-    async fn has_execute_grant_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        operation: &str,
-    ) -> Result<bool, VoomError> {
-        let rows = sqlx::query("SELECT can_execute FROM worker_grants WHERE worker_id = ?")
-            .bind(i64_from_u64(worker_id.0))
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(|e| VoomError::Database(format!("worker_grants execute exists: {e}")))?;
-        for row in &rows {
-            let can_execute: String = row
-                .try_get("can_execute")
-                .map_err(|e| map_row_err("worker_grants execute exists", &e))?;
-            if parse_string_array_json(&can_execute, "can_execute")?
-                .iter()
-                .any(|item| item == operation)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     async fn node_owned_worker_in_tx<'tx>(
