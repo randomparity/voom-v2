@@ -12,6 +12,9 @@ use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
 use voom_store::test_support::sqlite_url_for;
 
+const BASIC_FFPROBE_JSON: &str =
+    include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
+
 #[tokio::test]
 async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
     let seeded = seed().await;
@@ -206,7 +209,8 @@ fn scan_command(url: &str, path: &Path) -> Command {
     command
         .args(["--database-url", url, "scan", "--path"])
         .arg(path)
-        .env("VOOM_FFPROBE_WORKER_BIN", built_worker_binary());
+        .env("VOOM_FFPROBE_WORKER_BIN", built_worker_binary())
+        .env("VOOM_FFPROBE_BIN", success_ffprobe_binary());
     command
 }
 
@@ -217,6 +221,7 @@ fn scan_command_without_worker_env(url: &str, path: &Path) -> Command {
         .args(["--database-url", url, "scan", "--path"])
         .arg(path)
         .env_remove("VOOM_FFPROBE_WORKER_BIN")
+        .env("VOOM_FFPROBE_BIN", success_ffprobe_binary())
         .env("PATH", "/usr/bin:/bin");
     command
 }
@@ -316,12 +321,32 @@ fn tiny_media_fixture() -> PathBuf {
         .unwrap()
 }
 
-fn write_drifting_ffprobe(dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
+fn success_ffprobe_binary() -> &'static PathBuf {
+    static BIN: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+    &BIN.get_or_init(|| {
+        let dir = TempDir::new().unwrap();
+        let path = write_success_ffprobe(dir.path());
+        (dir, path)
+    })
+    .1
+}
 
-    let path = dir.join("ffprobe");
-    std::fs::write(
-        &path,
+fn write_success_ffprobe(dir: &Path) -> PathBuf {
+    let script = format!(
+        "#!/usr/bin/env sh\n\
+         set -eu\n\
+         if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
+         cat <<'JSON'\n\
+         {BASIC_FFPROBE_JSON}\n\
+         JSON\n"
+    );
+    write_executable(dir, "ffprobe", &script)
+}
+
+fn write_drifting_ffprobe(dir: &Path) -> PathBuf {
+    write_executable(
+        dir,
+        "ffprobe",
         "#!/usr/bin/env sh\n\
          set -eu\n\
          if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
@@ -330,7 +355,13 @@ fn write_drifting_ffprobe(dir: &Path) -> PathBuf {
          printf drift >> \"$last\"\n\
          printf '{\"format\":{\"format_name\":\"mov,mp4\",\"duration\":\"1.0\",\"bit_rate\":\"1\"},\"streams\":[]}\\n'\n",
     )
-    .unwrap();
+}
+
+fn write_executable(dir: &Path, name: &str, contents: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = dir.join(name);
+    std::fs::write(&path, contents).unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&path, permissions).unwrap();
@@ -364,6 +395,7 @@ fn redact_common(json: &mut Value) {
 }
 
 fn path_redaction(path: &Path, replacement: &str) -> (String, String) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     (path.display().to_string(), replacement.to_owned())
 }
 
