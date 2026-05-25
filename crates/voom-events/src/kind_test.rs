@@ -33,6 +33,14 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::ArtifactStaged,
+        EventKind::ArtifactVerificationStarted,
+        EventKind::ArtifactVerificationSucceeded,
+        EventKind::ArtifactVerificationFailed,
+        EventKind::ArtifactCommitStarted,
+        EventKind::ArtifactCommitCompleted,
+        EventKind::ArtifactCommitFailedPreMutation,
+        EventKind::ArtifactCommitRecoveryRequired,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -131,6 +139,14 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactLocationRecorded,
         EventKind::ArtifactLocationRetired,
         EventKind::ArtifactLineageRecorded,
+        EventKind::ArtifactStaged,
+        EventKind::ArtifactVerificationStarted,
+        EventKind::ArtifactVerificationSucceeded,
+        EventKind::ArtifactVerificationFailed,
+        EventKind::ArtifactCommitStarted,
+        EventKind::ArtifactCommitCompleted,
+        EventKind::ArtifactCommitFailedPreMutation,
+        EventKind::ArtifactCommitRecoveryRequired,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -157,6 +173,43 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         let s = k.as_str();
         let back = EventKind::from_str(s).expect("from_str accepts as_str output");
         assert_eq!(back, k, "round-trip failed for {k:?} via {s:?}");
+    }
+}
+
+#[test]
+fn staged_artifact_event_kinds_use_exact_sprint_11_wire_strings() {
+    let cases = [
+        (EventKind::ArtifactStaged, "artifact.staged"),
+        (
+            EventKind::ArtifactVerificationStarted,
+            "artifact.verification_started",
+        ),
+        (
+            EventKind::ArtifactVerificationSucceeded,
+            "artifact.verification_succeeded",
+        ),
+        (
+            EventKind::ArtifactVerificationFailed,
+            "artifact.verification_failed",
+        ),
+        (EventKind::ArtifactCommitStarted, "artifact.commit_started"),
+        (
+            EventKind::ArtifactCommitCompleted,
+            "artifact.commit_completed",
+        ),
+        (
+            EventKind::ArtifactCommitFailedPreMutation,
+            "artifact.commit_failed_pre_mutation",
+        ),
+        (
+            EventKind::ArtifactCommitRecoveryRequired,
+            "artifact.commit_recovery_required",
+        ),
+    ];
+
+    for (kind, wire) in cases {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
     }
 }
 

@@ -196,6 +196,182 @@ fn worker_linked_to_node_payload_round_trip() {
 }
 
 #[test]
+fn artifact_staged_payload_round_trip() {
+    let p = ArtifactStagedPayload {
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        source_file_version_id: 12,
+        source_file_location_id: Some(13),
+        staging_path: "/var/lib/voom/staging/10".to_owned(),
+        size_bytes: 4096,
+        checksum: "blake3:abc123".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactStaged(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.staged");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactStaged(q) if q == p));
+    assert_eq!(Event::ArtifactStaged(p).kind(), EventKind::ArtifactStaged);
+}
+
+#[test]
+fn artifact_verification_started_payload_round_trip() {
+    let p = ArtifactVerificationStartedPayload {
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        path: "/var/lib/voom/staging/10".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactVerificationStarted(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.verification_started");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactVerificationStarted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactVerificationStarted(p).kind(),
+        EventKind::ArtifactVerificationStarted
+    );
+}
+
+#[test]
+fn artifact_verification_succeeded_payload_round_trip() {
+    let p = ArtifactVerificationSucceededPayload {
+        verification_id: 20,
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        observed_size_bytes: 4096,
+        observed_checksum: "blake3:abc123".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactVerificationSucceeded(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.verification_succeeded");
+    assert_eq!(json["payload"]["observed_size_bytes"], 4096);
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactVerificationSucceeded(q) if q == p));
+    assert_eq!(
+        Event::ArtifactVerificationSucceeded(p).kind(),
+        EventKind::ArtifactVerificationSucceeded
+    );
+}
+
+#[test]
+fn artifact_verification_failed_payload_round_trip() {
+    let p = ArtifactVerificationFailedPayload {
+        verification_id: 20,
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        error_code: "ARTIFACT_CHECKSUM_MISMATCH".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactVerificationFailed(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.verification_failed");
+    assert_eq!(json["payload"]["error_code"], "ARTIFACT_CHECKSUM_MISMATCH");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactVerificationFailed(q) if q == p));
+    assert_eq!(
+        Event::ArtifactVerificationFailed(p).kind(),
+        EventKind::ArtifactVerificationFailed
+    );
+}
+
+#[test]
+fn artifact_verification_succeeded_rejects_failure_shape() {
+    let raw = serde_json::json!({
+        "kind": "artifact.verification_succeeded",
+        "payload": {
+            "verification_id": 20,
+            "artifact_handle_id": 10,
+            "artifact_location_id": 11,
+            "worker_id": 12,
+            "error_code": "ARTIFACT_CHECKSUM_MISMATCH"
+        }
+    });
+    let err = serde_json::from_value::<Event>(raw).unwrap_err();
+    assert!(
+        err.to_string().contains("observed_size_bytes"),
+        "missing success facts should reject: {err}"
+    );
+}
+
+#[test]
+fn artifact_commit_started_payload_round_trip() {
+    let p = ArtifactCommitStartedPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        source_file_version_id: 12,
+        verification_id: 20,
+        target_path: "/media/final.bin".to_owned(),
+        temp_path: "/media/.final.bin.tmp".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitStarted(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_started");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitStarted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitStarted(p).kind(),
+        EventKind::ArtifactCommitStarted
+    );
+}
+
+#[test]
+fn artifact_commit_completed_payload_round_trip() {
+    let p = ArtifactCommitCompletedPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        result_file_version_id: 31,
+        result_file_location_id: 32,
+        target_path: "/media/final.bin".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitCompleted(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_completed");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitCompleted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitCompleted(p).kind(),
+        EventKind::ArtifactCommitCompleted
+    );
+}
+
+#[test]
+fn artifact_commit_failed_pre_mutation_payload_round_trip() {
+    let p = ArtifactCommitFailedPreMutationPayload {
+        artifact_handle_id: 10,
+        commit_record_id: None,
+        target_path: "/media/final.bin".to_owned(),
+        error_code: "ARTIFACT_NOT_VERIFIED".to_owned(),
+        message: "staged artifact has no successful verification".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitFailedPreMutation(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_failed_pre_mutation");
+    assert_eq!(json["payload"]["commit_record_id"], serde_json::Value::Null);
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitFailedPreMutation(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitFailedPreMutation(p).kind(),
+        EventKind::ArtifactCommitFailedPreMutation
+    );
+}
+
+#[test]
+fn artifact_commit_recovery_required_payload_round_trip() {
+    let p = ArtifactCommitRecoveryRequiredPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        target_path: "/media/final.bin".to_owned(),
+        temp_path: "/media/.final.bin.tmp".to_owned(),
+        recovery_reason: "target_appeared_after_prepare".to_owned(),
+        error_code: "TARGET_EXISTS".to_owned(),
+        message: "target path appeared during promotion".to_owned(),
+    };
+    let json = serde_json::to_value(Event::ArtifactCommitRecoveryRequired(p.clone())).unwrap();
+    assert_eq!(json["kind"], "artifact.commit_recovery_required");
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactCommitRecoveryRequired(q) if q == p));
+    assert_eq!(
+        Event::ArtifactCommitRecoveryRequired(p).kind(),
+        EventKind::ArtifactCommitRecoveryRequired
+    );
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "exhaustive Event list — a new variant must fail to compile here"
@@ -356,6 +532,67 @@ fn event_kind_matches_serde_tag() {
             parent_artifact_id: 1,
             child_artifact_id: 2,
             operation: "transcode".to_owned(),
+        }),
+        Event::ArtifactStaged(ArtifactStagedPayload {
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            source_file_version_id: 1,
+            source_file_location_id: None,
+            staging_path: "/staging/1".to_owned(),
+            size_bytes: 1,
+            checksum: "blake3:1".to_owned(),
+        }),
+        Event::ArtifactVerificationStarted(ArtifactVerificationStartedPayload {
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            worker_id: 1,
+            path: "/staging/1".to_owned(),
+        }),
+        Event::ArtifactVerificationSucceeded(ArtifactVerificationSucceededPayload {
+            verification_id: 1,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            worker_id: 1,
+            observed_size_bytes: 1,
+            observed_checksum: "blake3:1".to_owned(),
+        }),
+        Event::ArtifactVerificationFailed(ArtifactVerificationFailedPayload {
+            verification_id: 2,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            worker_id: 1,
+            error_code: "VERIFY_FAILED".to_owned(),
+        }),
+        Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
+            commit_record_id: 1,
+            artifact_handle_id: 1,
+            source_file_version_id: 1,
+            verification_id: 1,
+            target_path: "/target".to_owned(),
+            temp_path: "/.target.tmp".to_owned(),
+        }),
+        Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
+            commit_record_id: 1,
+            artifact_handle_id: 1,
+            result_file_version_id: 2,
+            result_file_location_id: 2,
+            target_path: "/target".to_owned(),
+        }),
+        Event::ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload {
+            artifact_handle_id: 1,
+            commit_record_id: None,
+            target_path: "/target".to_owned(),
+            error_code: "VERIFY_REQUIRED".to_owned(),
+            message: "verification required".to_owned(),
+        }),
+        Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
+            commit_record_id: 1,
+            artifact_handle_id: 1,
+            target_path: "/target".to_owned(),
+            temp_path: "/.target.tmp".to_owned(),
+            recovery_reason: "promotion_failed".to_owned(),
+            error_code: "PROMOTION_FAILED".to_owned(),
+            message: "promotion failed".to_owned(),
         }),
         Event::IssueOpened(issue_payload("planned")),
         Event::IssueUpdated(issue_payload("open")),
