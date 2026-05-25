@@ -76,6 +76,7 @@ async fn staging_root_may_have_symlink_ancestor() {
     .await
     .unwrap();
 
+    let canonical_real_parent = std::fs::canonicalize(&real_parent).unwrap();
     assert!(path.ends_with("ticket-7/lease-9/Movie.hevc.mkv"));
-    assert!(path.starts_with(real_parent));
+    assert!(path.starts_with(canonical_real_parent));
 }
