@@ -126,6 +126,10 @@ chaos-e2e-ci:
 chaos-e2e-local:
     ./scripts/chaos-e2e-local.sh
 
+# Exercise the local Chaos Librarian shell harness with faked external tools.
+chaos-e2e-local-script-test:
+    ./scripts/test-chaos-e2e-local.sh
+
 # Run an extended local-only Chaos Librarian wall-clock soak.
 chaos-e2e-soak:
     CHAOS_DURATION=${CHAOS_DURATION:-2h} CHAOS_SPEED=${CHAOS_SPEED:-10x} CHAOS_PRESERVE_OUTPUT=1 ./scripts/chaos-e2e-local.sh

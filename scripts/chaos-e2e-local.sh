@@ -41,6 +41,8 @@ run_dir="$workdir/run"
 db="$workdir/voom.db"
 url="sqlite://$db"
 summary="$workdir/summary.jsonl"
+voom_bin="${VOOM_BIN:-$repo_root/target/debug/voom}"
+library_dir="$run_dir/library"
 
 chaos_pid=""
 cleanup_run() {
@@ -57,6 +59,7 @@ cleanup_run() {
   fi
 }
 trap cleanup_run EXIT INT TERM
+mkdir -p "$workdir"
 
 git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 057a4033a3a9ae14fef664ab82f2c31e1a223544 ' >/dev/null
 if [[ -n "$(git -C "$chaos_dir" status --short --untracked-files=no)" ]]; then
@@ -75,12 +78,27 @@ cd "$chaos_dir"
 uv run chaos-librarian run "$scenario_path" --out "$run_dir" --duration "$duration" --speed "$speed" --json > "$workdir/chaos-run.json" &
 chaos_pid=$!
 
+started_at="$(date +%s)"
+while [[ ! -d "$library_dir" ]] || ! find "$library_dir" -type f -print -quit | grep -q .; do
+  if ! kill -0 "$chaos_pid" 2>/dev/null; then
+    wait "$chaos_pid" || true
+    echo "chaos-librarian exited before creating a scannable library at $library_dir" >&2
+    exit 1
+  fi
+  now="$(date +%s)"
+  if (( now - started_at > 30 )); then
+    echo "timed out waiting for a scannable library at $library_dir" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+
 checkpoint=0
 while kill -0 "$chaos_pid" 2>/dev/null; do
   checkpoint=$((checkpoint + 1))
   scan_out="$workdir/scan-$checkpoint.json"
   set +e
-  "$repo_root/target/debug/voom" --database-url "$url" scan --path "$run_dir/library" > "$scan_out"
+  "$voom_bin" --database-url "$url" scan --path "$library_dir" > "$scan_out"
   scan_rc=$?
   set -e
   error_code="$(jq -r '.error.code // empty' "$scan_out")"
