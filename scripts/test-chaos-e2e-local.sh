@@ -42,7 +42,7 @@ if [[ "$1" == "sync" ]]; then
   exit 0
 fi
 if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "capabilities" ]]; then
-  echo '{"ready_for":{"materialize_media_mutations":true}}'
+  echo '{"ready_for":{"materialize_static":true,"materialize_filesystem_mutations":true,"materialize_media_mutations":true}}'
   exit 0
 fi
 if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
@@ -59,8 +59,8 @@ if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
     exit 1
   fi
   sleep 0.25
-  mkdir -p "$out/movies-hd"
-  printf 'media' >"$out/movies-hd/movie.mkv"
+  mkdir -p "$out/library/movies-hd"
+  printf 'media' >"$out/library/movies-hd/movie.mkv"
   sleep 0.25
   echo '{"ok":true}'
   exit 0
@@ -83,6 +83,10 @@ args=("${args[@]}")
 case "${args[*]}" in
   scan\ --path\ *)
     library="${args[$((${#args[@]} - 1))]}"
+    if [[ "${library##*/}" != "library" ]]; then
+      echo '{"status":"error","error":{"code":"WRONG_SCAN_ROOT"}}'
+      exit 2
+    fi
     if ! find "$library" -type f -name '*.mkv' -print -quit | grep -q .; then
       echo '{"status":"error","error":{"code":"MISSING_LIBRARY"}}'
       exit 2

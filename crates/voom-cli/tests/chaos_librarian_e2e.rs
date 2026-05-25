@@ -36,6 +36,11 @@ fn chaos_librarian_submodule_is_pinned_and_ready() {
             .unwrap_or(false)
     );
     assert!(
+        readiness.capabilities["ready_for"]["materialize_filesystem_mutations"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+    assert!(
         readiness.capabilities["ready_for"]["materialize_media_mutations"]
             .as_bool()
             .unwrap_or(false)
@@ -109,21 +114,17 @@ fn observed_state_does_not_infer_mp4_language_when_snapshot_omits_it() {
 }
 
 #[test]
-fn chaos_run_scan_root_follows_materialized_location_prefix() {
+fn chaos_run_scan_root_uses_fixture_library_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let run = support::chaos_librarian::ChaosRun {
         _tmp: tmp,
         run_dir: std::path::PathBuf::from("/tmp/voom-chaos/run"),
-        report: serde_json::json!({
-            "materialized": [
-                {"location_path": "movies-hd/asset_main.mkv"}
-            ]
-        }),
+        report: serde_json::json!({"materialized": []}),
     };
 
     assert_eq!(
-        run.scan_root().unwrap(),
-        std::path::Path::new("/tmp/voom-chaos/run/movies-hd")
+        run.scan_root(),
+        std::path::Path::new("/tmp/voom-chaos/run/library")
     );
 }
 
@@ -263,7 +264,7 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
         .materialize(&chaos.voom_scenario("video-transcode-noop.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
+    let library_path = run.scan_root();
     rewrite_first_mkv_to_hevc(&library_path);
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
@@ -314,7 +315,7 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
         )
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run_dir.clone();
+    let library_path = run_dir.join("library");
     wait_for_file_with_extension(&library_path, "mkv");
     let library_arg = library_path.to_str().unwrap().to_owned();
     let first = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
@@ -434,7 +435,7 @@ fn ready_chaos() -> ChaosLibrarian {
 async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> ScannedChaosRun {
     let run = chaos.materialize(scenario).unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
+    let library_path = run.scan_root();
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
     ScannedChaosRun { run, db, scan }
