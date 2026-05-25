@@ -121,6 +121,28 @@ fn transcode_video_payloads_reject_unknown_fields() {
     assert!(result_err.to_string().contains("unknown field"));
 }
 
+#[test]
+fn transcode_video_contract_helpers_pin_canonical_values_and_aliases() {
+    assert_eq!(TRANSCODE_VIDEO_CONTAINER, "mkv");
+    assert_eq!(TRANSCODE_VIDEO_CODEC, "hevc");
+    assert_eq!(TRANSCODE_VIDEO_PROFILE, "default-hevc");
+
+    assert!(is_supported_transcode_video_container("mkv"));
+    assert!(is_supported_transcode_video_codec("hevc"));
+    assert!(is_supported_transcode_video_codec("h265"));
+    assert!(is_supported_transcode_video_codec("HEVC"));
+    assert!(is_supported_transcode_video_codec("H265"));
+    assert!(!is_supported_transcode_video_container("mp4"));
+    assert!(!is_supported_transcode_video_codec("h264"));
+
+    assert!(is_default_hevc_profile(
+        &TranscodeVideoProfile::default_hevc()
+    ));
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.name = "other".to_owned();
+    assert!(!is_default_hevc_profile(&profile));
+}
+
 fn observed_facts(content_hash: &str) -> TranscodeVideoObservedFacts {
     TranscodeVideoObservedFacts {
         size_bytes: 1234,

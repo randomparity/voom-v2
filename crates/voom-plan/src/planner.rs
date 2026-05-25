@@ -560,7 +560,9 @@ fn transcode_video_shape<'a>(
         return TranscodeVideoShape::InsufficientFacts("snapshot video codec is unknown");
     };
 
-    if container.eq_ignore_ascii_case(target_container) && is_hevc_codec(video_codec) {
+    if container.eq_ignore_ascii_case(target_container)
+        && voom_worker_protocol::is_supported_transcode_video_codec(video_codec)
+    {
         TranscodeVideoShape::Compliant
     } else {
         TranscodeVideoShape::NeedsTranscode
@@ -590,10 +592,6 @@ fn video_stream_count(snapshot: &MediaSnapshotInput) -> Option<u64> {
         .stream_summary
         .get("video_stream_count")
         .and_then(serde_json::Value::as_u64)
-}
-
-fn is_hevc_codec(codec: &str) -> bool {
-    codec.eq_ignore_ascii_case("hevc") || codec.eq_ignore_ascii_case("h265")
 }
 
 fn policy_warnings(policy: &CompiledPolicy) -> Vec<String> {
