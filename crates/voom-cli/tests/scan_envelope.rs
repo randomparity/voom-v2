@@ -395,10 +395,11 @@ fn redact_common(json: &mut Value) {
 }
 
 fn redact_path_set(value: &mut Value, paths: &[(&Path, &str)]) {
-    let replacements = paths
+    let mut replacements = paths
         .iter()
         .flat_map(|(path, replacement)| path_redactions(path, replacement))
         .collect::<Vec<_>>();
+    replacements.sort_by_key(|(needle, _)| std::cmp::Reverse(needle.len()));
     redact_paths(value, &replacements);
 }
 

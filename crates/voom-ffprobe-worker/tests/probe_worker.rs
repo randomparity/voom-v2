@@ -1,6 +1,6 @@
 #![expect(
     clippy::expect_used,
-    reason = "the release-verification ffprobe guard intentionally uses the requested expect message"
+    reason = "integration tests use expect for direct setup and process assertions"
 )]
 
 use std::os::unix::fs::PermissionsExt;
@@ -20,16 +20,7 @@ use voom_worker_protocol::{
     WorkerCredentials,
 };
 
-fn require_ffprobe() {
-    let status = std::process::Command::new("ffprobe")
-        .arg("-version")
-        .status()
-        .expect("release verification requires ffprobe on PATH");
-    assert!(
-        status.success(),
-        "release verification requires working ffprobe"
-    );
-}
+const BASIC_FFPROBE_JSON: &str = include_str!("../fixtures/ffprobe/basic-mp4.json");
 
 #[tokio::test]
 async fn missing_ffprobe_returns_terminal_domain_error_over_http_success() {
@@ -130,15 +121,19 @@ async fn content_drift_returns_terminal_domain_error_over_http_success() {
 }
 
 #[tokio::test]
-async fn real_ffprobe_success_returns_progress_and_probe_result() {
-    require_ffprobe();
+async fn ffprobe_success_returns_progress_and_probe_result() {
     let dir_result = tempfile::tempdir();
     assert!(dir_result.is_ok());
     let Ok(dir) = dir_result else {
         return;
     };
     let media_path = write_wav(dir.path());
-    let running_result = running_server(FfprobeConfig::from_env_pairs::<&str, &str>([])).await;
+    let fake_ffprobe = write_fake_ffprobe(
+        dir.path(),
+        &format!("cat <<'JSON'\n{BASIC_FFPROBE_JSON}\nJSON\nexit 0\n"),
+    );
+    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let running_result = running_server(config).await;
     assert!(running_result.is_ok());
     let Ok((addr, running)) = running_result else {
         return;
@@ -147,7 +142,7 @@ async fn real_ffprobe_success_returns_progress_and_probe_result() {
     let request = Box::pin(probe_request(&media_path, LeaseId(42))).await;
 
     let dispatch_result = client
-        .dispatch(&credentials(), "real-ffprobe-success", request)
+        .dispatch(&credentials(), "ffprobe-success", request)
         .await;
 
     assert!(
