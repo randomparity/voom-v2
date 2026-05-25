@@ -390,6 +390,39 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 }
 
 #[tokio::test]
+async fn policy_transcode_heartbeats_outer_workflow_lease_while_running() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::SlowTranscodeResult,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.heartbeat_interval = Duration::from_millis(10);
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    fixture.run_with_options(options).await.unwrap();
+
+    let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
+    assert!(
+        last_heartbeat_at > acquired_at,
+        "long control-plane transcode must keep the outer workflow lease fresh"
+    );
+}
+
+#[tokio::test]
 async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     let dir = tempfile::tempdir().unwrap();
@@ -722,6 +755,13 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn first_lease_heartbeat_window(&self) -> (String, String) {
+        sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn seed_other_job_ready_ticket(&mut self, priority: i64) {
         let job = self
             .cp
@@ -886,6 +926,7 @@ enum FakeBehavior {
     Crash,
     DispatchError,
     RequireTranscodeProtocolPayload,
+    SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
 }
@@ -951,8 +992,14 @@ async fn write_behavior(
     behavior: FakeBehavior,
 ) {
     match behavior {
-        FakeBehavior::Success | FakeBehavior::RequireTranscodeProtocolPayload => {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        FakeBehavior::Success
+        | FakeBehavior::RequireTranscodeProtocolPayload
+        | FakeBehavior::SlowTranscodeResult => {
+            let delay = match behavior {
+                FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
+                _ => Duration::from_millis(25),
+            };
+            tokio::time::sleep(delay).await;
             let payload = if request.operation == OperationKind::TranscodeVideo {
                 transcode_result_payload_for_request(&request).await
             } else {

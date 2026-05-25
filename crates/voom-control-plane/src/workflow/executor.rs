@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -1092,6 +1093,9 @@ async fn dispatch_ticket_inner(
 
 struct RuntimeTranscodeDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
+    control: &'a ControlPlane,
+    lease_id: LeaseId,
+    options: &'a WorkflowExecutorOptions,
 }
 
 #[async_trait::async_trait]
@@ -1100,10 +1104,15 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
         &self,
         request: TranscodeVideoRequest,
     ) -> Result<TranscodeVideoResult, VoomError> {
-        crate::transcode::dispatch::dispatch_transcode_video_with_client(
-            self.runtime.client.as_ref(),
-            &self.runtime.credentials,
-            request,
+        await_with_lease_heartbeats(
+            self.control,
+            self.lease_id,
+            self.options,
+            crate::transcode::dispatch::dispatch_transcode_video_with_client(
+                self.runtime.client.as_ref(),
+                &self.runtime.credentials,
+                request,
+            ),
         )
         .await
     }
@@ -1137,7 +1146,12 @@ async fn dispatch_control_plane_transcode(
     let report = match execute_transcode_video_with_dispatchers(
         control,
         input,
-        &RuntimeTranscodeDispatcher { runtime },
+        &RuntimeTranscodeDispatcher {
+            runtime,
+            control,
+            lease_id,
+            options,
+        },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
     )
     .await
@@ -1156,6 +1170,31 @@ async fn dispatch_control_plane_transcode(
     let result = serde_json::to_value(report)
         .map_err(|err| VoomError::Internal(format!("encode transcode report: {err}")))?;
     release_lease_with_retry(control, lease_id, result).await
+}
+
+async fn await_with_lease_heartbeats<F, T>(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    options: &WorkflowExecutorOptions,
+    future: F,
+) -> Result<T, VoomError>
+where
+    F: Future<Output = Result<T, VoomError>>,
+{
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + options.heartbeat_interval,
+        options.heartbeat_interval,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(OperationKind::TranscodeVideo) => {
+                heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
+            }
+        }
+    }
 }
 
 async fn consume_dispatch_stream(
