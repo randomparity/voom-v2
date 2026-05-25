@@ -1,0 +1,538 @@
+---
+source: crates/voom-cli/tests/artifact_envelope.rs
+expression: json
+---
+[
+  {
+    "schema_version": "0",
+    "command": "artifact.list",
+    "status": "ok",
+    "data": {
+      "artifacts": [
+        {
+          "artifact_handle_id": 1,
+          "state": "staged",
+          "source_file_version_id": 1,
+          "staging_path": "[artifact-dir]/staged-staged.mp4",
+          "size_bytes": 1545,
+          "checksum": "[hash]"
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.list",
+    "status": "ok",
+    "data": {
+      "artifacts": [
+        {
+          "artifact_handle_id": 2,
+          "state": "verified",
+          "source_file_version_id": 2,
+          "staging_path": "[artifact-dir]/verified-staged.mp4",
+          "size_bytes": 1545,
+          "checksum": "[hash]",
+          "latest_verification": {
+            "id": 1,
+            "artifact_location_id": 2,
+            "path": "[artifact-dir]/verified-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          }
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.list",
+    "status": "ok",
+    "data": {
+      "artifacts": [
+        {
+          "artifact_handle_id": 3,
+          "state": "committed",
+          "source_file_version_id": 3,
+          "target_path": "[artifact-dir]/committed-committed.mp4",
+          "size_bytes": 1545,
+          "checksum": "[hash]",
+          "latest_verification": {
+            "id": 2,
+            "artifact_location_id": 3,
+            "path": "[artifact-dir]/committed-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          },
+          "latest_commit": {
+            "id": 1,
+            "verification_id": 2,
+            "target_path": "[artifact-dir]/committed-committed.mp4",
+            "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
+            "state": "committed",
+            "result_file_version_id": 4,
+            "result_file_location_id": 4
+          }
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.list",
+    "status": "ok",
+    "data": {
+      "artifacts": [
+        {
+          "artifact_handle_id": 4,
+          "state": "failed",
+          "source_file_version_id": 5,
+          "staging_path": "[artifact-dir]/failed-staged.mp4",
+          "size_bytes": 1545,
+          "checksum": "[hash]",
+          "latest_verification": {
+            "id": 3,
+            "artifact_location_id": 4,
+            "path": "[artifact-dir]/failed-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "failed",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "failure_class": "artifact_checksum_mismatch",
+            "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+            "message": "artifact checksum mismatch: observed file facts differ from expected size/hash"
+          }
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.list",
+    "status": "ok",
+    "data": {
+      "artifacts": [
+        {
+          "artifact_handle_id": 5,
+          "state": "recovery_required",
+          "source_file_version_id": 6,
+          "staging_path": "[artifact-dir]/recovery-staged.mp4",
+          "target_path": "[artifact-dir]/recovery-target.mp4",
+          "size_bytes": 1545,
+          "checksum": "[hash]",
+          "latest_verification": {
+            "id": 4,
+            "artifact_location_id": 5,
+            "path": "[artifact-dir]/recovery-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          },
+          "latest_commit": {
+            "id": 2,
+            "verification_id": 4,
+            "target_path": "[artifact-dir]/recovery-target.mp4",
+            "temp_path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+            "state": "recovery_required",
+            "failure_class": "database_unavailable",
+            "error_code": "DB_UNREACHABLE",
+            "message": "injected recovery for CLI inspection",
+            "recovery_reason": "promotion_started",
+            "recovery": {
+              "reason": "promotion_started",
+              "target": {
+                "path": "[artifact-dir]/recovery-target.mp4",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-target.mp4",
+                  "size_bytes": 14,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              },
+              "temp": {
+                "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+                  "size_bytes": 10,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              },
+              "staging": {
+                "path": "[artifact-dir]/recovery-staged.mp4",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-staged.mp4",
+                  "size_bytes": 1545,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 1,
+        "state": "staged",
+        "source_file_version_id": 1,
+        "staging_path": "[artifact-dir]/staged-staged.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [],
+        "commits": []
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 2,
+        "state": "verified",
+        "source_file_version_id": 2,
+        "staging_path": "[artifact-dir]/verified-staged.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 1,
+            "artifact_location_id": 2,
+            "path": "[artifact-dir]/verified-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          }
+        ],
+        "commits": [],
+        "latest_verification": {
+          "id": 1,
+          "artifact_location_id": 2,
+          "path": "[artifact-dir]/verified-staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "succeeded",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "observed_size_bytes": 1545,
+          "observed_checksum": "[hash]"
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 3,
+        "state": "committed",
+        "source_file_version_id": 3,
+        "target_path": "[artifact-dir]/committed-committed.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 2,
+            "artifact_location_id": 3,
+            "path": "[artifact-dir]/committed-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          }
+        ],
+        "commits": [
+          {
+            "id": 1,
+            "verification_id": 2,
+            "target_path": "[artifact-dir]/committed-committed.mp4",
+            "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
+            "state": "committed",
+            "result_file_version_id": 4,
+            "result_file_location_id": 4
+          }
+        ],
+        "latest_verification": {
+          "id": 2,
+          "artifact_location_id": 3,
+          "path": "[artifact-dir]/committed-staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "succeeded",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "observed_size_bytes": 1545,
+          "observed_checksum": "[hash]"
+        },
+        "latest_commit": {
+          "id": 1,
+          "verification_id": 2,
+          "target_path": "[artifact-dir]/committed-committed.mp4",
+          "temp_path": "[artifact-dir]/.voom-tmp.committed-committed.mp4.[temp]",
+          "state": "committed",
+          "result_file_version_id": 4,
+          "result_file_location_id": 4
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 4,
+        "state": "failed",
+        "source_file_version_id": 5,
+        "staging_path": "[artifact-dir]/failed-staged.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 3,
+            "artifact_location_id": 4,
+            "path": "[artifact-dir]/failed-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "failed",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "failure_class": "artifact_checksum_mismatch",
+            "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+            "message": "artifact checksum mismatch: observed file facts differ from expected size/hash"
+          }
+        ],
+        "commits": [],
+        "latest_verification": {
+          "id": 3,
+          "artifact_location_id": 4,
+          "path": "[artifact-dir]/failed-staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "failed",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "failure_class": "artifact_checksum_mismatch",
+          "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+          "message": "artifact checksum mismatch: observed file facts differ from expected size/hash"
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 5,
+        "state": "recovery_required",
+        "source_file_version_id": 6,
+        "staging_path": "[artifact-dir]/recovery-staged.mp4",
+        "target_path": "[artifact-dir]/recovery-target.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 4,
+            "artifact_location_id": 5,
+            "path": "[artifact-dir]/recovery-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          }
+        ],
+        "commits": [
+          {
+            "id": 2,
+            "verification_id": 4,
+            "target_path": "[artifact-dir]/recovery-target.mp4",
+            "temp_path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+            "state": "recovery_required",
+            "failure_class": "database_unavailable",
+            "error_code": "DB_UNREACHABLE",
+            "message": "injected recovery for CLI inspection",
+            "recovery_reason": "promotion_started",
+            "recovery": {
+              "reason": "promotion_started",
+              "target": {
+                "path": "[artifact-dir]/recovery-target.mp4",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-target.mp4",
+                  "size_bytes": 14,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              },
+              "temp": {
+                "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+                  "size_bytes": 10,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              },
+              "staging": {
+                "path": "[artifact-dir]/recovery-staged.mp4",
+                "exists": true,
+                "facts": {
+                  "path": "[artifact-dir]/recovery-staged.mp4",
+                  "size_bytes": 1545,
+                  "checksum": "[hash]",
+                  "local_file_key": "[local-file-key]"
+                }
+              }
+            }
+          }
+        ],
+        "latest_verification": {
+          "id": 4,
+          "artifact_location_id": 5,
+          "path": "[artifact-dir]/recovery-staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "succeeded",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "observed_size_bytes": 1545,
+          "observed_checksum": "[hash]"
+        },
+        "latest_commit": {
+          "id": 2,
+          "verification_id": 4,
+          "target_path": "[artifact-dir]/recovery-target.mp4",
+          "temp_path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+          "state": "recovery_required",
+          "failure_class": "database_unavailable",
+          "error_code": "DB_UNREACHABLE",
+          "message": "injected recovery for CLI inspection",
+          "recovery_reason": "promotion_started",
+          "recovery": {
+            "reason": "promotion_started",
+            "target": {
+              "path": "[artifact-dir]/recovery-target.mp4",
+              "exists": true,
+              "facts": {
+                "path": "[artifact-dir]/recovery-target.mp4",
+                "size_bytes": 14,
+                "checksum": "[hash]",
+                "local_file_key": "[local-file-key]"
+              }
+            },
+            "temp": {
+              "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+              "exists": true,
+              "facts": {
+                "path": "[artifact-dir]/recovery-target.mp4.voom.tmp",
+                "size_bytes": 10,
+                "checksum": "[hash]",
+                "local_file_key": "[local-file-key]"
+              }
+            },
+            "staging": {
+              "path": "[artifact-dir]/recovery-staged.mp4",
+              "exists": true,
+              "facts": {
+                "path": "[artifact-dir]/recovery-staged.mp4",
+                "size_bytes": 1545,
+                "checksum": "[hash]",
+                "local_file_key": "[local-file-key]"
+              }
+            }
+          }
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  }
+]
