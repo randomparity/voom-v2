@@ -992,6 +992,44 @@ Path mappings affect both scheduling and artifact resolution. A worker or
 external system is eligible for a ticket only when it can safely see the required
 artifact location or receive a resolved artifact transfer plan.
 
+## Library Configuration Model
+
+`Library` and `LibraryRoot` records define what a future daemon is allowed to
+observe. They are durable operator configuration, not daemon-private state.
+Explicit CLI scans may operate on an arbitrary supplied path, but watcher and
+scheduled scan behavior reads only enabled library roots configured through the
+pre-daemon CLI/API surface.
+
+A `Library` records:
+
+- stable library ID and display name;
+- default policy version and input-set selection rules;
+- default quality/scoring profile;
+- default scheduling policy and safety policy;
+- expected media kind and optional external-system links;
+- created/updated timestamps and enabled/disabled state.
+
+A `LibraryRoot` records:
+
+- stable root ID and parent library ID;
+- root kind (`local_path`, `shared_mount`, or future storage provider);
+- canonical root URI/path and display path;
+- include and exclude globs;
+- file extension allowlist for media and sidecar discovery;
+- scan mode (`explicit_only`, `manual_recursive`, `watch_enabled`);
+- stability/debounce settings a daemon watcher will later consume;
+- symlink policy, hidden-file policy, and max traversal depth;
+- path-mapping references visible to workers and external systems;
+- default output/staging/backup roots when not supplied by a command;
+- enabled/disabled state, created/updated timestamps, and last scan session ID.
+
+Library root canonicalization is conservative: local roots reject symlinked
+ancestors unless a later design explicitly permits a safe alias model, and scan
+selection stores canonical paths so a watcher cannot escape the configured root
+through path aliases. A daemon may not watch a path that lacks a live
+`LibraryRoot`; if a root is disabled or its safety/scheduling profile is missing
+or stale, the daemon records a blocked issue and does not synthesize defaults.
+
 ## Issue Model
 
 `Issue` records a durable condition that should remain visible until resolved,
@@ -1484,36 +1522,96 @@ V1 security focuses on clear local and home-network boundaries:
   (see `Commit Safety Gate` under `## Runtime Use Lease Model`)
 - every mutation is audited
 
+The pre-daemon safety baseline must be conservative and enforceable from the
+CLI. Before any daemon loop can auto-schedule real media mutation, operators must
+be able to configure and inspect safety policy fields for:
+
+- which operation kinds the daemon may auto-execute;
+- whether backup is required before a mutation;
+- whether approval is required before execution or commit;
+- which commit modes are allowed (`add_only` before replace/delete/archive);
+- what verification level is required before commit;
+- whether failed, partial, or recovery-required records block later automation.
+
+The daemon reads these durable safety policies fail-closed. If a policy is
+missing, too old, or lacks a field required by an operation, the daemon records a
+blocked issue instead of guessing. Destructive replace/delete/archive automation
+remains disabled until the safety model for that operation has explicit CLI/API
+configuration, tests, and recovery evidence. Sprint 28 hardens and broadens
+safety gates; it is not permission for earlier daemon sprints to invent hidden
+safety defaults.
+
 Future plugin distribution can add package signing, marketplace trust metadata,
 and stricter sandboxing. The worker protocol should not require those features
 to be useful.
 
-## CLI MVP Requirements
+## CLI Milestone And Daemon Readiness Requirements
 
-The CLI MVP must support:
+Every control-plane capability that can be driven without a background loop must
+ship through CLI JSON envelopes before daemon development begins. The daemon must
+not become the first interface for creating configuration, mutating durable
+control-plane state, approving or recovering work, or explaining why work is
+blocked. It may automate existing CLI/API-visible workflows, but it must not
+introduce hidden state that an operator cannot create, inspect, and repair from
+the CLI.
 
-- initialize config and database
-- register synthetic workers
-- scan with synthetic provider
-- evaluate a policy
-- show compliance report
-- create an execution plan
-- inspect plan JSON
-- run plan with synthetic providers
-- show events
+The Foundation CLI milestone must support:
+
+- initialize config and database;
+- register synthetic workers;
+- scan with synthetic provider;
+- create and list policy documents and versions;
+- create and list policy input sets;
+- evaluate a policy and show a compliance report;
+- create, inspect, and dry-run execution plans;
+- run plans with synthetic providers;
+- show events;
 - show media work, variant, asset, version, location, and identity evidence
-  history
-- show asset bundles and sidecar assets
-- show issues with severity, priority, and linked evidence
-- show external systems, path mappings, and sync history
-- show quality scores and active scoring profiles
-- show active use leases and blocked operations
-- show workers and capabilities
-- show jobs, tickets, leases, and artifacts
-- emit JSON for every command
+  history;
+- show asset bundles and sidecar assets;
+- show issues with severity, priority, and linked evidence;
+- show external systems, path mappings, and sync history;
+- show quality scores and active scoring profiles;
+- show active use leases and blocked operations;
+- show workers, nodes, capabilities, grants, and scheduler decisions;
+- show jobs, tickets, leases, and artifacts;
+- emit JSON for every command.
+
+The Real Media CLI milestone, complete before any daemon sprint starts, must add:
+
+- real explicit-path scan through bundled out-of-process probe workers;
+- staged artifact copy, verification, commit, recovery inspection, and add-only
+  result reporting;
+- policy-driven real media execution for the fixed V1 operation set:
+  video transcode, container remux, track selection/defaults, audio
+  transcode/extract, artifact verification, and commit;
+- durable named video profile and quality profile management;
+- backup worker execution, backup inspection, and backup evidence in reports;
+- sidecar ingest and bundle/member inspection for generated and external V1
+  asset types;
+- manual use-lease acquire/release/force-release commands for operator locks;
+- issue list/show/update/resolve commands for policy and terminal-failure
+  issues;
+- library root and scan configuration CRUD for the roots a future watcher will
+  observe, without starting a watcher;
+- scheduling policy, safety policy, external-system policy, and path-mapping
+  CRUD sufficient for a future daemon to read rather than invent configuration;
+- external-system registration, health-check execution, path-mapping CRUD,
+  read-only sync execution, and sync report commands; external writes remain
+  policy-gated jobs;
+- node, worker, artifact, scheduler-decision, job, ticket, lease, event, report,
+  bundle, sidecar, backup, issue, policy, profile, and library-root inspection
+  with stable IDs and deterministic pagination;
+- end-to-end golden fixtures proving an agent can scan, compile/evaluate/plan,
+  execute, inspect outputs, preserve backups, inspect sidecars/bundles, and
+  recover or explain failures without daemon-owned behavior.
 
 The CLI must be suitable for agent use: deterministic output, stable schemas,
-dry-run mode, plan-only mode, and machine-readable errors.
+dry-run mode, plan-only mode, idempotency where commands mutate state, stable
+pagination, and machine-readable errors. "Complete" is not satisfied by a
+repository API alone; each durable state family the daemon will consume must have
+an explicit CLI creation or inspection path and golden JSON coverage before the
+daemon uses it.
 
 ## Daemon MVP Requirements
 
@@ -1532,6 +1630,20 @@ The daemon MVP must support:
 - scheduled copy windows
 - crash recovery
 - event streaming for UI/API clients
+
+Daemon behavior must consume durable state already exposed through the Real
+Media CLI milestone: library roots, scan configuration, policies, input sets,
+scheduling policy, safety policy, external-system mappings, node/worker grants,
+manual locks, issues, artifacts, backups, reports, and recovery records. If a
+daemon sprint needs a new durable state family or operator action, that state or
+action must first be added to the CLI/API surface or the daemon sprint is not
+ready to start.
+
+Daemon auto-execution is bounded by the pre-daemon safety baseline. A daemon may
+only schedule operation kinds explicitly allowed by durable safety policy, and it
+must treat destructive replace/delete/archive, missing backup requirements,
+unmet approval requirements, unresolved recovery-required commits, and stale
+policy versions as blocked work rather than as defaults to work around.
 
 ## Web UI MVP Requirements
 
@@ -1580,6 +1692,13 @@ Every future sprint should use the same shape:
 
 Sprint boundaries are not feature buckets. A sprint is complete only
 when its acceptance evidence is present and repeatable.
+
+No daemon sprint may begin until the Real Media CLI milestone is closed. The
+closeout evidence for that milestone must prove that every durable configuration
+or operator action the daemon will automate has a CLI/API path, stable JSON
+contract, tests, and recovery story. If the roadmap discovers another
+daemon-consumed state family after Sprint 17, add it to a pre-daemon CLI sprint
+rather than letting daemon code become the first implementation.
 
 ### Foundation
 
@@ -1973,18 +2092,26 @@ normalized shape expected for Sprint 3 onward.
   daemon or UI ownership.
 - Deliverables: backup worker, sidecar asset ingest for generated and
   external V1 asset types, bundle/sidecar CLI views, backup report,
-  sample real-media policies, full real-media workflow fixtures, and
-  closeout documentation for the CLI milestone.
+  library root and scan configuration CRUD, manual use-lease commands,
+  policy/input-set/profile/scheduling-policy/safety-policy/external-system
+  management commands required by the daemon, external-system health/read-only
+  sync commands, issue action commands, sample real-media policies, full
+  real-media workflow fixtures, and closeout
+  documentation for the CLI milestone.
 - Explicitly out of scope: filesystem watcher, background daemon loop,
-  Web UI, plugin SDK, and production packaging.
+  Web UI, plugin SDK, production packaging, and daemon-only configuration
+  surfaces.
 - Acceptance focus: CLI can scan, evaluate, plan, execute, inspect
-  reports, show bundles/sidecars, preserve backups, and preserve the
-  out-of-process provider boundary for real media.
+  reports, show bundles/sidecars, preserve backups, manage daemon-consumed
+  configuration, manage operator locks/issues, and preserve the out-of-process
+  provider boundary for real media.
 - Verification expectations: full CLI workflow integration tests,
   backup worker conformance tests, sidecar ingest tests, bundle CLI
-  golden tests, sample-policy tests, documentation completeness scan,
-  and `just ci`.
-- Closeout documentation: Sprint 17 real-media CLI closeout matrix.
+  golden tests, daemon-readiness CLI golden tests, safety-policy fail-closed
+  tests, sample-policy tests, documentation completeness scan, and `just ci`.
+- Closeout documentation: Sprint 17 real-media CLI closeout matrix with an
+  explicit daemon-readiness table mapping every Sprint 18-20 daemon input,
+  policy, action, and recovery path to an existing CLI/API command and test.
 
 ### Daemon
 
@@ -1994,11 +2121,14 @@ normalized shape expected for Sprint 3 onward.
   observation.
 - Deliverables: filesystem watcher, file stability/debounce rules, scan
   sessions, reconciliation for adds/modifications/removals/renames, and
-  daemon status API for scan activity.
+  daemon status API for scan activity. The watcher reads only durable library
+  roots and scan configuration created through the Sprint 17 CLI/API surface.
 - Explicitly out of scope: background work scheduling, dynamic
-  throttles, external sync loops, and UI event streaming.
+  throttles, external sync loops, UI event streaming, and new configuration
+  surfaces not already inspectable through CLI/API.
 - Acceptance focus: library changes produce correct durable state after
-  stability windows.
+  stability windows, and every watched root or scan rule is traceable to
+  pre-existing durable configuration.
 - Verification expectations: watcher fixture tests, reconciliation
   integration tests, daemon status tests, documentation completeness
   scan, and `just ci`.
@@ -2011,14 +2141,18 @@ normalized shape expected for Sprint 3 onward.
   constraints.
 - Deliverables: background scheduler loop, scheduling windows, dynamic
   throttles, lease-loop observability, daemon control/status surfaces,
-  and restart-safe loop state.
+  restart-safe loop state, and fail-closed enforcement of Sprint 17 scheduling
+  and safety policy records.
 - Explicitly out of scope: issue lifecycle loops, external sync loops,
-  use lease cleanup loop, Web UI controls, and production metrics.
+  use lease cleanup loop, Web UI controls, production metrics, and any
+  auto-execution mode not already allowed by durable CLI-configured safety
+  policy.
 - Acceptance focus: queued work runs continuously and windows/throttles
-  affect leasing without changing policy results.
+  affect leasing without changing policy results, while disallowed or
+  insufficiently configured work becomes an inspectable blocked issue.
 - Verification expectations: scheduler-loop integration tests, window
-  and throttle tests, restart tests, documentation completeness scan, and
-  `just ci`.
+  and throttle tests, safety-policy blocking tests, restart tests,
+  documentation completeness scan, and `just ci`.
 - Closeout documentation: Sprint 19 closeout matrix for daemon
   scheduling, throttles, and restart-safe leasing.
 
@@ -2153,15 +2287,17 @@ normalized shape expected for Sprint 3 onward.
 
 #### Sprint 28: Safety Gates
 
-- Goal: make destructive or expensive operations explicitly
-  controllable.
-- Deliverables: approval gates, rollback flows, backup policies,
-  destructive-operation controls, richer verification policies, safety
-  audit events, and safety report fixtures.
+- Goal: harden destructive and expensive operations beyond the
+  pre-daemon safety baseline.
+- Deliverables: richer approval workflows, rollback flows, backup-policy
+  expansion, destructive-operation controls beyond add-only real-media
+  commits, richer verification policies, safety audit events, and safety
+  report fixtures.
 - Explicitly out of scope: production packaging, broad observability
   dashboards, public security review, and marketplace trust metadata.
 - Acceptance focus: common destructive operations can require approval
-  and can be rolled back or explained from durable evidence.
+  and can be rolled back or explained from durable evidence without
+  weakening the pre-daemon fail-closed safety policy.
 - Verification expectations: approval-gate tests, rollback tests,
   backup-policy tests, safety report tests, documentation completeness
   scan, and `just ci`.
