@@ -117,3 +117,15 @@ smoke:
 # Remove build artifacts
 clean:
     cargo clean
+
+# Run deterministic Chaos Librarian E2E tests. Not part of default `just ci`.
+chaos-e2e-ci:
+    cargo test -p voom-cli --test chaos_librarian_e2e -- --ignored --nocapture
+
+# Run a short local-only Chaos Librarian wall-clock churn scenario.
+chaos-e2e-local:
+    ./scripts/chaos-e2e-local.sh
+
+# Run an extended local-only Chaos Librarian wall-clock soak.
+chaos-e2e-soak:
+    CHAOS_DURATION=${CHAOS_DURATION:-2h} CHAOS_SPEED=${CHAOS_SPEED:-10x} CHAOS_PRESERVE_OUTPUT=1 ./scripts/chaos-e2e-local.sh
