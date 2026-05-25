@@ -268,6 +268,93 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
     );
 }
 
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn step_mutation_rescan_observes_changed_media_facts() {
+    let chaos = ChaosLibrarian::discover().unwrap();
+    chaos.validate_ready().unwrap();
+    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let run_dir = tmp.path().join("run");
+    let child = std::process::Command::new("uv")
+        .current_dir(&chaos.submodule_dir)
+        .args([
+            "run",
+            "chaos-librarian",
+            "run",
+            chaos
+                .upstream_scenario("reencode-video.yaml")
+                .to_str()
+                .unwrap(),
+            "--out",
+            run_dir.to_str().unwrap(),
+            "--duration",
+            "3s",
+            "--speed",
+            "1x",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run_dir.join("library");
+    wait_for_file_with_extension(&library_path, "mkv");
+    let library_arg = library_path.to_str().unwrap().to_owned();
+    let first = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    assert_eq!(first.status_code, Some(0), "stderr: {}", first.stderr);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "chaos-librarian run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let second = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    assert_eq!(second.status_code, Some(0), "stderr: {}", second.stderr);
+
+    assert!(
+        second.json["data"]["summary"]["snapshots_recorded"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_ne!(
+        first.json["data"]["files"][0]["content_hash"],
+        second.json["data"]["files"][0]["content_hash"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn malformed_media_fails_loudly_without_execution_ticket() {
+    let chaos = ChaosLibrarian::discover().unwrap();
+    chaos.validate_ready().unwrap();
+    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("malformed-container-header.yaml"))
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run.run_dir.join("library");
+    let library_arg = library_path.to_str().unwrap().to_owned();
+    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+
+    assert_eq!(scan.status_code, Some(2), "stderr: {}", scan.stderr);
+    assert_eq!(scan.json["status"], "error");
+    assert_ne!(scan.json["error"]["code"], "INTERNAL");
+
+    let pool = voom_store::connect(&db.url).await.unwrap();
+    let ticket_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ticket_count, 0);
+}
+
 fn rewrite_first_mkv_to_hevc(library_path: &std::path::Path) {
     let path = first_file_with_extension(library_path, "mkv").unwrap();
     let temp = path.with_extension("hevc.tmp.mkv");
@@ -312,4 +399,19 @@ fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<s
         }
     }
     None
+}
+
+fn wait_for_file_with_extension(dir: &std::path::Path, extension: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        if first_file_with_extension(dir, extension).is_some() {
+            return;
+        }
+        assert!(
+            started.elapsed() <= std::time::Duration::from_secs(10),
+            "timed out waiting for .{extension} under {}",
+            dir.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
