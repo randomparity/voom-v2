@@ -384,6 +384,38 @@ async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
     );
 }
 
+#[tokio::test]
+async fn policy_transcode_dispatch_rejects_wrong_output_facts() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::WrongTranscodeOutputFacts,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(
+        fixture.first_ticket_failed_class().await,
+        "malformed_worker_result"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() {
@@ -809,6 +841,7 @@ enum FakeBehavior {
     DispatchError,
     RequireTranscodeProtocolPayload,
     MalformedTranscodeResult,
+    WrongTranscodeOutputFacts,
 }
 
 #[async_trait]
@@ -834,7 +867,10 @@ impl ClientHandle for FakeClient {
                 },
             )?;
         }
-        if matches!(self.behavior, FakeBehavior::MalformedTranscodeResult) {
+        if matches!(
+            self.behavior,
+            FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
+        ) {
             serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
                 |err| ProtocolError::InvalidPayload {
                     detail: format!("transcode payload must match worker protocol: {err}"),
@@ -895,6 +931,13 @@ async fn write_behavior(
         FakeBehavior::MalformedTranscodeResult => {
             tokio::time::sleep(Duration::from_millis(25)).await;
             write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
+        }
+        FakeBehavior::WrongTranscodeOutputFacts => {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut payload = transcode_result_payload();
+            payload["output_container"] = json!("mp4");
+            payload["output_video_codec"] = json!("h264");
+            write_frame(&mut writer, result_frame(&request, payload)).await;
         }
     }
 }

@@ -1458,12 +1458,29 @@ async fn validate_transcode_result_payload(
     lease_id: LeaseId,
     payload: &Value,
 ) -> Result<(), VoomError> {
-    if let Err(err) = serde_json::from_value::<TranscodeVideoResult>(payload.clone()) {
+    let result = match serde_json::from_value::<TranscodeVideoResult>(payload.clone()) {
+        Ok(result) => result,
+        Err(err) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                FailureClass::MalformedWorkerResult,
+                VoomError::MalformedWorkerResult(format!("transcode_video result decode: {err}")),
+            )
+            .await;
+        }
+    };
+    if result.output_container != "mkv"
+        || !matches!(result.output_video_codec.as_str(), "hevc" | "h265")
+    {
         return fail_lease_and_return(
             control,
             lease_id,
             FailureClass::MalformedWorkerResult,
-            VoomError::MalformedWorkerResult(format!("transcode_video result decode: {err}")),
+            VoomError::MalformedWorkerResult(format!(
+                "transcode_video result expected mkv/hevc, got {}/{}",
+                result.output_container, result.output_video_codec
+            )),
         )
         .await;
     }
