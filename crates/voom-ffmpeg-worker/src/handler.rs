@@ -200,15 +200,15 @@ pub async fn handle_transcode_video(
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
-    if request.output.container != "mkv"
-        || !matches!(request.output.video_codec.as_str(), "hevc" | "h265")
+    if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container)
+        || !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec)
     {
         return Err(config_invalid(
             "request",
             "transcode_video output must request hevc video in mkv".to_owned(),
         ));
     }
-    if request.profile != voom_worker_protocol::TranscodeVideoProfile::default_hevc() {
+    if !voom_worker_protocol::is_default_hevc_profile(&request.profile) {
         return Err(config_invalid(
             "request",
             "transcode_video profile must be default-hevc".to_owned(),

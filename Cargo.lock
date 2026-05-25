@@ -2733,6 +2733,7 @@ dependencies = [
  "time",
  "voom-core",
  "voom-policy",
+ "voom-worker-protocol",
 ]
 
 [[package]]

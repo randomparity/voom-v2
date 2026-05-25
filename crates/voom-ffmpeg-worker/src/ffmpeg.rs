@@ -128,15 +128,15 @@ async fn probe_output(config: &FfmpegConfig, path: &Path) -> Result<OutputProbe,
         .unwrap_or_default();
     let video_codec = first_video_codec(&json).unwrap_or_default();
     if !container.split(',').any(|name| name == "matroska")
-        || !matches!(video_codec, "hevc" | "h265")
+        || !voom_worker_protocol::is_supported_transcode_video_codec(video_codec)
     {
         return Err(FfmpegError::OutputFactsMismatch(format!(
             "expected matroska/hevc output, got {container}/{video_codec}"
         )));
     }
     Ok(OutputProbe {
-        container: "mkv".to_owned(),
-        video_codec: "hevc".to_owned(),
+        container: voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER.to_owned(),
+        video_codec: voom_worker_protocol::TRANSCODE_VIDEO_CODEC.to_owned(),
     })
 }
 

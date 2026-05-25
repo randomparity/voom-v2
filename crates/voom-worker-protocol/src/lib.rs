@@ -38,9 +38,11 @@ pub use probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
 pub use transcode_video::{
-    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
-    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
-    TranscodeVideoStatus,
+    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CONTAINER,
+    TRANSCODE_VIDEO_PROFILE, TranscodeVideoExpectedFacts, TranscodeVideoInput,
+    TranscodeVideoObservedFacts, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, is_default_hevc_profile,
+    is_supported_transcode_video_codec, is_supported_transcode_video_container,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use verify_artifact::{

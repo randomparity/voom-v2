@@ -1,5 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+pub const TRANSCODE_VIDEO_CONTAINER: &str = "mkv";
+pub const TRANSCODE_VIDEO_CODEC: &str = "hevc";
+pub const TRANSCODE_VIDEO_CODEC_ALIAS_H265: &str = "h265";
+pub const TRANSCODE_VIDEO_PROFILE: &str = "default-hevc";
+
+#[must_use]
+pub fn is_supported_transcode_video_container(container: &str) -> bool {
+    container == TRANSCODE_VIDEO_CONTAINER
+}
+
+#[must_use]
+pub fn is_supported_transcode_video_codec(codec: &str) -> bool {
+    codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC)
+        || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_ALIAS_H265)
+}
+
+#[must_use]
+pub fn is_default_hevc_profile(profile: &TranscodeVideoProfile) -> bool {
+    profile == &TranscodeVideoProfile::default_hevc()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoExpectedFacts {
@@ -50,7 +71,7 @@ impl TranscodeVideoProfile {
     #[must_use]
     pub fn default_hevc() -> Self {
         Self {
-            name: "default-hevc".to_owned(),
+            name: TRANSCODE_VIDEO_PROFILE.to_owned(),
             encoder: "libx265".to_owned(),
             crf: 23,
             preset: "medium".to_owned(),
