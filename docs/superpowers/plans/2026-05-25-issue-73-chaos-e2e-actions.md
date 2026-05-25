@@ -4,7 +4,7 @@
 
 **Goal:** Add a manual GitHub Actions workflow for `just chaos-e2e-ci` and document when maintainers should run it.
 
-**Architecture:** The workflow is isolated from normal CI by using only `workflow_dispatch`. It checks out the pinned Chaos Librarian submodule, installs the required media/Python tools, verifies versions, then delegates behavior to the existing `just chaos-e2e-ci` recipe.
+**Architecture:** The workflow is isolated from normal CI by using only `workflow_dispatch`. It checks out the pinned Chaos Librarian submodule, installs Python tooling, installs ffmpeg/ffprobe 7.x from a pinned archive, verifies versions, then delegates behavior to the existing `just chaos-e2e-ci` recipe.
 
 **Tech Stack:** GitHub Actions, Ubuntu runner, Rust/Cargo, `just`, `uv`, Python 3.13, ffmpeg/ffprobe, MKVToolNix.
 
@@ -51,12 +51,25 @@ jobs:
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@f0ec1fc3b38f5e7cd731bb6ce540c5af426746bb  # v6.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
 
-      - name: Install media tools
+      - name: Install MKVToolNix
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg mkvtoolnix
+          sudo apt-get install -y mkvtoolnix
+
+      - name: Install ffmpeg 7
+        env:
+          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-05-25-14-02/ffmpeg-n7.1.4-6-g181cfa1008-linux64-gpl-7.1.tar.xz
+          FFMPEG_ARCHIVE_SHA256: ab8fa7effd8e25e28814cea93cc2f1b242beda7db5ffef23610cf88238d9b943
+        run: |
+          archive="$RUNNER_TEMP/ffmpeg.tar.xz"
+          install_dir="$RUNNER_TEMP/ffmpeg"
+          curl -fL "$FFMPEG_ARCHIVE_URL" -o "$archive"
+          echo "$FFMPEG_ARCHIVE_SHA256  $archive" | sha256sum --check -
+          mkdir -p "$install_dir"
+          tar -xJf "$archive" -C "$install_dir" --strip-components=1
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Verify external tools
         run: |
