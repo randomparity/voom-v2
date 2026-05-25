@@ -95,7 +95,7 @@ pub async fn record_result_snapshot(
     let payload = json!({
         "container": result.output_container,
         "video_codec": result.output_video_codec,
-        "stream_summary": {"video": 1, "audio": null, "subtitle": null},
+        "stream_summary": {"video_stream_count": 1},
         "source": "transcode_video_result"
     });
     cp.record_media_snapshot(file_version_id, None, payload, cp.clock().now())
