@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use voom_plan::TargetRef;
+use voom_core::{FileLocationId, FileVersionId};
 use voom_worker_protocol::OperationKind;
 
 use super::ticket_payload::operation_name;
@@ -97,8 +97,14 @@ pub fn render_default_payload_with_fan_out(
     Ok(payload)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyTranscodeSource {
+    pub file_version_id: FileVersionId,
+    pub location_id: Option<FileLocationId>,
+}
+
 pub fn render_policy_transcode_payload(
-    policy_target: &TargetRef,
+    source: PolicyTranscodeSource,
     operation_payload: &Value,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
@@ -116,18 +122,12 @@ pub fn render_policy_transcode_payload(
     let Some(object) = payload.as_object_mut() else {
         return Err(BindingError::new("rendered payload must be a JSON object"));
     };
-    match policy_target {
-        TargetRef::FileVersion { id } => {
-            object.insert("source_file_version_id".to_owned(), json!(id));
-        }
-        TargetRef::FileLocation { id } => {
-            object.insert("source_location_id".to_owned(), json!(id));
-        }
-        other => {
-            return Err(BindingError::new(format!(
-                "transcode_video requires file_version or file_location target, got {other:?}"
-            )));
-        }
+    object.insert(
+        "source_file_version_id".to_owned(),
+        json!(source.file_version_id),
+    );
+    if let Some(location_id) = source.location_id {
+        object.insert("source_location_id".to_owned(), json!(location_id));
     }
     Ok(payload)
 }

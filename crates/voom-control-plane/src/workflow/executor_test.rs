@@ -13,6 +13,7 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
@@ -263,6 +264,33 @@ async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload()
     assert_eq!(workflow_payload.rendered_payload["target_codec"], "hevc");
     assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
     assert_eq!(workflow_payload.rendered_payload["profile"], "default-hevc");
+}
+
+#[tokio::test]
+async fn policy_transcode_file_location_target_carries_source_version_and_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_location_id"],
+        source_location_id.0
+    );
 }
 
 #[test]
@@ -570,6 +598,32 @@ impl ExecutorFixture {
             .as_str()
             .unwrap()
             .to_owned()
+    }
+
+    async fn seed_local_source(&self) -> (FileVersionId, voom_core::FileLocationId) {
+        let outcome = self
+            .cp
+            .record_discovered_file(
+                DiscoveredFile {
+                    location_kind: FileLocationKind::LocalPath,
+                    location_value: "/library/source.mkv".to_owned(),
+                    content_hash: "blake3:source".to_owned(),
+                    size_bytes: 42,
+                    observed_at: T0,
+                    proof: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match outcome {
+            IngestOutcome::NewFileAsset {
+                file_version_id,
+                file_location_id,
+                ..
+            } => (file_version_id, file_location_id),
+            IngestOutcome::AliasAttached { .. } => panic!("seed must create a new file asset"),
+        }
     }
 
     async fn first_ticket_payload(&self) -> Value {

@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use tokio::task::JoinSet;
 use voom_core::{ErrorCode, FailureClass, JobId, LeaseId, TicketId, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
+use voom_store::repo::identity::IdentityRepo;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
@@ -16,8 +17,8 @@ use voom_worker_protocol::{
 };
 
 use super::binding::{
-    BranchContext, render_default_payload, render_default_payload_with_fan_out,
-    render_policy_transcode_payload,
+    BranchContext, PolicyTranscodeSource, render_default_payload,
+    render_default_payload_with_fan_out, render_policy_transcode_payload,
 };
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
@@ -397,9 +398,11 @@ where
                     plan.fan_out.max_files,
                 ),
                 OperationKind::TranscodeVideo => match node.policy_target() {
-                    Some(target) => {
-                        render_policy_transcode_payload(target, node.operation_payload(), timing)
-                    }
+                    Some(target) => render_policy_transcode_payload(
+                        self.resolve_policy_transcode_source(target).await?,
+                        node.operation_payload(),
+                        timing,
+                    ),
                     None => render_default_payload(operation, &branch, timing),
                 },
                 _ => render_default_payload(operation, &branch, timing),
@@ -433,6 +436,36 @@ where
                 .await?;
         }
         Ok(())
+    }
+
+    async fn resolve_policy_transcode_source(
+        &self,
+        target: &voom_plan::TargetRef,
+    ) -> Result<PolicyTranscodeSource, VoomError> {
+        match target {
+            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyTranscodeSource {
+                file_version_id: *id,
+                location_id: None,
+            }),
+            voom_plan::TargetRef::FileLocation { id } => {
+                let location = self
+                    .control_plane
+                    .identity
+                    .get_file_location(*id)
+                    .await?
+                    .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
+                if location.retired_at.is_some() {
+                    return Err(VoomError::Config(format!("file_location {id} is retired")));
+                }
+                Ok(PolicyTranscodeSource {
+                    file_version_id: location.file_version_id,
+                    location_id: Some(*id),
+                })
+            }
+            other => Err(VoomError::Config(format!(
+                "transcode_video requires file_version or file_location target, got {other:?}"
+            ))),
+        }
     }
 
     async fn try_spawn_dispatch(
