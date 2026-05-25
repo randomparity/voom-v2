@@ -11,15 +11,22 @@ pub struct FfmpegConfig {
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
     pub provider_version: String,
+    pub process_timeout: Duration,
 }
 
 impl FfmpegConfig {
     #[must_use]
-    pub fn new(ffmpeg_path: PathBuf, ffprobe_path: PathBuf, provider_version: String) -> Self {
+    pub fn new(
+        ffmpeg_path: PathBuf,
+        ffprobe_path: PathBuf,
+        provider_version: String,
+        process_timeout: Duration,
+    ) -> Self {
         Self {
             ffmpeg_path,
             ffprobe_path,
             provider_version,
+            process_timeout,
         }
     }
 }
@@ -40,7 +47,7 @@ pub struct OutputProbe {
     pub video_codec: String,
 }
 
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 
 pub async fn run_ffmpeg_transcode(
     config: &FfmpegConfig,
@@ -84,7 +91,7 @@ pub async fn run_ffmpeg_transcode(
         .arg(output)
         .kill_on_drop(true);
 
-    let process_output = timeout(PROCESS_TIMEOUT, command.output())
+    let process_output = timeout(config.process_timeout, command.output())
         .await
         .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
         .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
@@ -106,7 +113,7 @@ async fn probe_output(config: &FfmpegConfig, path: &Path) -> Result<OutputProbe,
         .arg("-show_streams")
         .arg(path)
         .kill_on_drop(true);
-    let output = timeout(PROCESS_TIMEOUT, command.output())
+    let output = timeout(config.process_timeout, command.output())
         .await
         .map_err(|_| FfmpegError::FfprobeFailed("ffprobe timed out".to_owned()))?
         .map_err(|err| FfmpegError::FfprobeFailed(err.to_string()))?;

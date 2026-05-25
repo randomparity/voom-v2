@@ -6,7 +6,9 @@
 use std::net::SocketAddr;
 
 use secrecy::SecretString;
-use voom_ffmpeg_worker::{FfmpegConfig, operation_handler, preflight_from_process_env};
+use voom_ffmpeg_worker::{
+    DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler, preflight_from_process_env,
+};
 use voom_worker_protocol::{HttpServer, ServerHandle, WorkerCredentials};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -17,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         preflight.ffmpeg_path,
         preflight.ffprobe_path,
         preflight.ffmpeg_version,
+        DEFAULT_PROCESS_TIMEOUT,
     );
     let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
         .unwrap_or_else(|_| "127.0.0.1:0".to_owned())

@@ -4,6 +4,19 @@ use voom_worker_protocol::TranscodeVideoProfile;
 
 use super::*;
 
+#[test]
+fn ffmpeg_config_uses_explicit_process_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = FfmpegConfig::new(
+        dir.path().join("ffmpeg"),
+        dir.path().join("ffprobe"),
+        "ffmpeg version test".to_owned(),
+        Duration::from_hours(1),
+    );
+
+    assert_eq!(config.process_timeout, Duration::from_hours(1));
+}
+
 #[tokio::test]
 async fn ffmpeg_non_zero_exit_is_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -14,7 +27,12 @@ async fn ffmpeg_non_zero_exit_is_error() {
     tokio::fs::write(&input, b"input").await.unwrap();
 
     let err = run_ffmpeg_transcode(
-        &FfmpegConfig::new(ffmpeg, ffprobe, "ffmpeg version test".to_owned()),
+        &FfmpegConfig::new(
+            ffmpeg,
+            ffprobe,
+            "ffmpeg version test".to_owned(),
+            DEFAULT_PROCESS_TIMEOUT,
+        ),
         &input,
         &output,
         &TranscodeVideoProfile::default_hevc(),
@@ -43,7 +61,12 @@ async fn ffmpeg_success_requires_hevc_matroska_probe() {
     tokio::fs::write(&input, b"input").await.unwrap();
 
     let probe = run_ffmpeg_transcode(
-        &FfmpegConfig::new(ffmpeg, ffprobe, "ffmpeg version test".to_owned()),
+        &FfmpegConfig::new(
+            ffmpeg,
+            ffprobe,
+            "ffmpeg version test".to_owned(),
+            DEFAULT_PROCESS_TIMEOUT,
+        ),
         &input,
         &output,
         &TranscodeVideoProfile::default_hevc(),

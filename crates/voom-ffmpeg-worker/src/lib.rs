@@ -12,7 +12,7 @@ pub mod handler;
 pub mod observe;
 pub mod preflight;
 
-pub use ffmpeg::{FfmpegConfig, FfmpegError, run_ffmpeg_transcode};
+pub use ffmpeg::{DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, FfmpegError, run_ffmpeg_transcode};
 pub use handler::{
     TranscodeVideoError, handle_operation, handle_transcode_video, operation_handler,
 };

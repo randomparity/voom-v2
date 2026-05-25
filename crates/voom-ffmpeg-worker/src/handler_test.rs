@@ -7,6 +7,8 @@ use voom_worker_protocol::{
     TranscodeVideoProfile, TranscodeVideoRequest,
 };
 
+use crate::DEFAULT_PROCESS_TIMEOUT;
+
 use super::*;
 
 #[tokio::test]
@@ -38,6 +40,40 @@ async fn output_path_escape_is_config_invalid() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+#[tokio::test]
+async fn unsupported_output_contract_is_rejected_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.output.container = "mp4".to_owned();
+
+    let err = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("mkv"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.profile.encoder = "libx264".to_owned();
+
+    let err = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("default-hevc"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
 #[tokio::test]
@@ -124,7 +160,12 @@ fn config(root: &Path) -> FfmpegConfig {
         "ffprobe",
         "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\"}]}\nJSON\n",
     );
-    FfmpegConfig::new(ffmpeg, ffprobe, "ffmpeg version test".to_owned())
+    FfmpegConfig::new(
+        ffmpeg,
+        ffprobe,
+        "ffmpeg version test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
 }
 
 fn config_path() -> FfmpegConfig {

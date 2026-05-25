@@ -158,6 +158,7 @@ pub async fn handle_transcode_video(
             "overwrite must be false".to_owned(),
         ));
     }
+    validate_request_contract(request)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
     validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
@@ -196,6 +197,24 @@ pub async fn handle_transcode_video(
         output_container: probe.container,
         output_video_codec: probe.video_codec,
     })
+}
+
+fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
+    if request.output.container != "mkv"
+        || !matches!(request.output.video_codec.as_str(), "hevc" | "h265")
+    {
+        return Err(config_invalid(
+            "request",
+            "transcode_video output must request hevc video in mkv".to_owned(),
+        ));
+    }
+    if request.profile != voom_worker_protocol::TranscodeVideoProfile::default_hevc() {
+        return Err(config_invalid(
+            "request",
+            "transcode_video profile must be default-hevc".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_staging_path(
