@@ -75,6 +75,25 @@ fn observed_state_hash_uses_chaos_librarian_prefix() {
     );
 }
 
+#[test]
+fn chaos_run_scan_root_follows_materialized_location_prefix() {
+    let tmp = tempfile::tempdir().unwrap();
+    let run = support::chaos_librarian::ChaosRun {
+        _tmp: tmp,
+        run_dir: std::path::PathBuf::from("/tmp/voom-chaos/run"),
+        report: serde_json::json!({
+            "materialized": [
+                {"location_path": "movies-hd/asset_main.mkv"}
+            ]
+        }),
+    };
+
+    assert_eq!(
+        run.scan_root().unwrap(),
+        std::path::Path::new("/tmp/voom-chaos/run/movies-hd")
+    );
+}
+
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn static_library_baseline_scans_exports_and_compares() {
@@ -86,7 +105,7 @@ async fn static_library_baseline_scans_exports_and_compares() {
         .materialize(&chaos.upstream_scenario("static-library.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.run_dir.join("library");
+    let library_path = run.scan_root().unwrap();
     let library_arg = library_path.to_str().unwrap().to_owned();
 
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
@@ -121,7 +140,7 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
         .materialize(&chaos.voom_scenario("video-transcode-required.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.run_dir.join("library");
+    let library_path = run.scan_root().unwrap();
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
@@ -148,7 +167,7 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
         .materialize(&chaos.voom_scenario("video-transcode-required.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.run_dir.join("library");
+    let library_path = run.scan_root().unwrap();
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
@@ -233,7 +252,7 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
         .materialize(&chaos.voom_scenario("video-transcode-noop.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.run_dir.join("library");
+    let library_path = run.scan_root().unwrap();
     rewrite_first_mkv_to_hevc(&library_path);
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
@@ -300,7 +319,7 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
         .spawn()
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run_dir.join("library");
+    let library_path = run_dir.clone();
     wait_for_file_with_extension(&library_path, "mkv");
     let library_arg = library_path.to_str().unwrap().to_owned();
     let first = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
@@ -339,7 +358,7 @@ async fn malformed_media_fails_loudly_without_execution_ticket() {
         .materialize(&chaos.upstream_scenario("malformed-container-header.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.run_dir.join("library");
+    let library_path = run.scan_root().unwrap();
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
 

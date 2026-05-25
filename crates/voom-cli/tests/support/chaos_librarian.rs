@@ -4,7 +4,7 @@
 )]
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -27,6 +27,24 @@ pub struct ChaosRun {
     pub _tmp: TempDir,
     pub run_dir: PathBuf,
     pub report: Value,
+}
+
+impl ChaosRun {
+    pub fn scan_root(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let location = self.report["materialized"]
+            .as_array()
+            .and_then(|assets| assets.first())
+            .and_then(|asset| asset["location_path"].as_str())
+            .ok_or_else(|| io::Error::other("materialization report has no location_path"))?;
+        let mut components = Path::new(location).components();
+        let Some(Component::Normal(root)) = components.next() else {
+            return Err(io::Error::other(format!(
+                "materialized location path has no relative root: {location}"
+            ))
+            .into());
+        };
+        Ok(self.run_dir.join(root))
+    }
 }
 
 impl ChaosLibrarian {

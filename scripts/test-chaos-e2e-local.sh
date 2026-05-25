@@ -59,8 +59,8 @@ if [[ "$1" == "run" && "$2" == "chaos-librarian" && "$3" == "run" ]]; then
     exit 1
   fi
   sleep 0.25
-  mkdir -p "$out/library"
-  printf 'media' >"$out/library/movie.mkv"
+  mkdir -p "$out/movies-hd"
+  printf 'media' >"$out/movies-hd/movie.mkv"
   sleep 0.25
   echo '{"ok":true}'
   exit 0
@@ -73,7 +73,7 @@ cat >"$fake_voom" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 library="${@: -1}"
-if [[ ! -d "$library" ]]; then
+if ! find "$library" -type f -name '*.mkv' -print -quit | grep -q .; then
   echo '{"status":"error","error":{"code":"MISSING_LIBRARY"}}'
   exit 2
 fi
