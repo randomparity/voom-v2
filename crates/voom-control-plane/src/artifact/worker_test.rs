@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -161,6 +161,21 @@ async fn malformed_result_payload_is_verify_worker_error() {
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
     let _send = running.shutdown.send(());
     running.joined.await.unwrap();
+}
+
+#[test]
+fn default_verify_worker_command_searches_profile_dir_from_test_deps_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let deps_dir = dir.path().join("deps");
+    std::fs::create_dir(&deps_dir).unwrap();
+    let current_exe = deps_dir.join("artifact_worker_test");
+    let worker = dir.path().join("voom-verify-artifact-worker");
+    std::fs::write(&worker, b"").unwrap();
+
+    let command = bundled_verify_artifact_command_from(None, Ok(current_exe));
+
+    assert_eq!(command.program, worker.as_os_str());
+    assert_eq!(command.env, Vec::<(OsString, OsString)>::new());
 }
 
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {

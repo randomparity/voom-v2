@@ -377,15 +377,26 @@ fn bundled_verify_artifact_command_from(
     if let Ok(current_exe) = current_exe
         && let Some(exe_dir) = current_exe.parent()
     {
-        let sibling = exe_dir.join(format!(
-            "voom-verify-artifact-worker{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-        if sibling.is_file() {
-            return WorkerCommand::new(sibling);
+        for worker_dir in worker_search_dirs(exe_dir) {
+            let sibling = worker_dir.join(format!(
+                "voom-verify-artifact-worker{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            if sibling.is_file() {
+                return WorkerCommand::new(sibling);
+            }
         }
     }
     WorkerCommand::new("voom-verify-artifact-worker")
+}
+
+fn worker_search_dirs(exe_dir: &std::path::Path) -> Vec<PathBuf> {
+    if exe_dir.file_name().is_some_and(|name| name == "deps")
+        && let Some(parent) = exe_dir.parent()
+    {
+        return vec![parent.to_path_buf(), exe_dir.to_path_buf()];
+    }
+    vec![exe_dir.to_path_buf()]
 }
 
 fn spawn_worker(

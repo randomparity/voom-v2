@@ -209,31 +209,23 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, dir: &Path)
 }
 
 fn install_worker_siblings() {
-    copy_worker_beside_test_binary("voom-ffprobe-worker");
-    copy_worker_beside_test_binary("voom-verify-artifact-worker");
-    copy_ffprobe_beside_test_binary();
+    copy_worker_to_profile_dir("voom-ffprobe-worker");
+    copy_worker_to_profile_dir("voom-verify-artifact-worker");
+    copy_ffprobe_to_profile_dir();
 }
 
-fn copy_worker_beside_test_binary(package: &'static str) {
+fn copy_worker_to_profile_dir(package: &'static str) {
     let worker = built_worker_binary(package);
-    let sibling = test_binary_sibling(package);
+    let sibling = target_debug_dir().join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
     if sibling != *worker {
         std::fs::copy(worker, sibling).unwrap();
     }
 }
 
-fn copy_ffprobe_beside_test_binary() {
-    std::fs::copy(success_ffprobe_binary(), test_binary_sibling("ffprobe")).unwrap();
-    make_executable(&test_binary_sibling("ffprobe"));
-}
-
-fn test_binary_sibling(package: &'static str) -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    exe_dir.join(format!("{package}{}", std::env::consts::EXE_SUFFIX))
+fn copy_ffprobe_to_profile_dir() {
+    let ffprobe = target_debug_dir().join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(success_ffprobe_binary(), &ffprobe).unwrap();
+    make_executable(&ffprobe);
 }
 
 fn built_worker_binary(package: &'static str) -> &'static PathBuf {
