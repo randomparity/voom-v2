@@ -1,0 +1,31 @@
+schema_version: 10
+scenario_id: voom-video-transcode-noop
+seed: 1202
+duration_scale: short
+library:
+  roots:
+    - id: root_main
+      path: library
+works:
+  - id: w_movie
+    title: VOOM Transcode Noop
+    variants:
+      - id: va_main
+        label: main
+        bundle:
+          id: b_main
+          assets:
+            - id: a_main
+              role: main
+              container: mkv
+              duration_seconds: 1.0
+              video:
+                source: color_bars
+                codec: h264
+                resolution: sd
+              audio:
+                - source: sine
+                  codec: aac
+                  channels: stereo
+                  language: eng
+timeline: []

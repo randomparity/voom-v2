@@ -2561,10 +2561,12 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
  "insta",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "time",
