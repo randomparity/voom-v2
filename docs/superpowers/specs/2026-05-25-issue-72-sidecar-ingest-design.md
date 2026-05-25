@@ -125,6 +125,9 @@ It will query `asset_bundle_members` for sidecar assets linked to the primary
 asset's bundle and emit nested `sidecars[]` from durable rows. Sidecar
 `content_hash` comes from the sidecar file version's `sha256:` durable hash, so
 the exporter can compare Chaos sidecar bytes without re-reading the filesystem.
+Assets whose only bundle membership role is `external_subtitle` are not emitted
+as top-level observed assets; they appear only inside the primary asset's
+`sidecars[]`.
 
 ## Tests
 
