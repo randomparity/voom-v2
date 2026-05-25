@@ -72,12 +72,34 @@ SH
 cat >"$fake_voom" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-library="${@: -1}"
-if ! find "$library" -type f -name '*.mkv' -print -quit | grep -q .; then
-  echo '{"status":"error","error":{"code":"MISSING_LIBRARY"}}'
-  exit 2
-fi
-echo '{"status":"ok"}'
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "--database-url" ]]; then
+    unset "args[$i]" "args[$((i + 1))]"
+    break
+  fi
+done
+args=("${args[@]}")
+case "${args[*]}" in
+  scan\ --path\ *)
+    library="${args[$((${#args[@]} - 1))]}"
+    if ! find "$library" -type f -name '*.mkv' -print -quit | grep -q .; then
+      echo '{"status":"error","error":{"code":"MISSING_LIBRARY"}}'
+      exit 2
+    fi
+    echo '{"status":"ok","data":{"files":[{"status":"scanned","file_version_id":11,"media_snapshot_id":22}]}}'
+    ;;
+  policy\ input\ create-from-scan\ *)
+    echo '{"status":"ok","data":{"input_set":{"input_set_id":101}}}'
+    ;;
+  compliance\ report\ *)
+    echo '{"status":"ok","data":{"report":{"summary":{"status":"compliant"}}}}'
+    ;;
+  *)
+    echo "unexpected voom invocation: ${args[*]}" >&2
+    exit 1
+    ;;
+esac
 SH
 
 chmod +x "$fake_bin/git" "$fake_bin/cargo" "$fake_bin/uv" "$fake_voom"
@@ -88,6 +110,8 @@ CHAOS_WORKDIR="$chaos_workdir" \
 CHAOS_DURATION="1s" \
 CHAOS_SPEED="1x" \
 CHAOS_CHECKPOINT_INTERVAL="0.1s" \
+CHAOS_EXECUTE_POLICY=1 \
+CHAOS_POLICY_VERSION_ID=7 \
 CHAOS_PRESERVE_OUTPUT=0 \
 CHAOS_CLEANUP=0 \
   "$repo_root/scripts/chaos-e2e-local.sh"
@@ -96,3 +120,10 @@ test -s "$chaos_workdir/summary.jsonl" || {
   echo "expected local chaos script to record at least one checkpoint" >&2
   exit 1
 }
+
+jq -e '
+  select(.policy_status == "reported")
+  | select(.policy_input_set_id == "101")
+  | select(.policy_report_summary_status == "compliant")
+  | select(.policy_ticket_count == 0)
+' "$chaos_workdir/summary.jsonl" >/dev/null
