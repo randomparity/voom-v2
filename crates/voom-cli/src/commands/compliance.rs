@@ -2,7 +2,7 @@ use std::io;
 
 use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::compliance::{
-    ComplianceApplyData, ComplianceExecuteData, ComplianceReportData,
+    ComplianceApplyData, ComplianceExecuteData, ComplianceExecutionOptions, ComplianceReportData,
 };
 use voom_core::{PolicyInputSetId, PolicyVersionId};
 
@@ -73,6 +73,8 @@ pub async fn execute(
     local: Local,
     policy_version_id: u64,
     input_set_id: u64,
+    staging_root: Option<std::path::PathBuf>,
+    output_dir: Option<std::path::PathBuf>,
 ) -> io::Result<i32> {
     let cp = match ControlPlane::open(database_url).await {
         Ok(cp) => cp,
@@ -81,10 +83,18 @@ pub async fn execute(
             return Ok(2);
         }
     };
+    let mut options = ComplianceExecutionOptions::default();
+    if let Some(staging_root) = staging_root {
+        options.transcode_staging_root = staging_root;
+    }
+    if let Some(output_dir) = output_dir {
+        options.transcode_target_dir = output_dir;
+    }
     match cp
-        .execute_compliance_policy(
+        .execute_compliance_policy_with_options(
             PolicyVersionId(policy_version_id),
             PolicyInputSetId(input_set_id),
+            options,
         )
         .await
     {

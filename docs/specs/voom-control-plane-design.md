@@ -597,6 +597,100 @@ policy "english-x265-mkv" {
 }
 ```
 
+### Policy DSL V1 Grammar
+
+The first product-line DSL must be explicit enough to drive the full
+real-media CLI milestone before daemon mode begins. Sprint 4 may ship an
+initial subset, but Sprints 12 through 17 must close the fixed operation
+vocabulary needed for real media mutation workers rather than leaving broad
+policy semantics implicit.
+
+The V1 grammar is block-oriented:
+
+```text
+policy <quoted-name> {
+  metadata {
+    requires_tools: [ffmpeg, ffprobe, mkvtoolnix]
+  }
+
+  config {
+    languages: ["eng", ...]
+    on_error: abort|continue
+  }
+
+  phase <identifier> {
+    depends_on: [<identifier>, ...]
+    run_if completed|modified <identifier>
+    skip when <condition>
+    on_error: abort|continue
+
+    <operation>
+    when <condition> {
+      <operation>
+    }
+    rules first|all {
+      rule <quoted-name> when <condition> {
+        <operation>
+      }
+    }
+  }
+}
+```
+
+The V1 media operations are:
+
+```text
+container mkv
+transcode video to hevc [using profile <quoted-name>]
+transcode audio to aac|opus [where <track-filter>]
+keep audio|subtitle|attachment where <track-filter>
+remove audio|subtitle|attachment where <track-filter>
+order tracks
+defaults audio|subtitle first|best|none|preserve
+extract audio [where <track-filter>]
+verify artifact
+```
+
+The V1 condition and track-filter vocabulary is intentionally finite:
+
+```text
+<condition> =
+    video.codec == <token>
+  | media.container == <token>
+  | media.duration_millis <op> <number>
+  | video.width <op> <number>
+  | video.height <op> <number>
+  | video.bitrate <op> <number>
+  | exists audio|subtitle
+  | count audio|subtitle <op> <number>
+  | not <condition>
+  | <condition> and <condition>
+  | <condition> or <condition>
+
+<track-filter> =
+    language == <quoted-token>
+  | language in [<quoted-token>, ...]
+  | codec in [<quoted-token>, ...]
+  | channels <op> <number>
+  | commentary
+  | forced
+  | default
+  | font
+  | title contains <quoted-string>
+  | not <track-filter>
+  | <track-filter> and <track-filter>
+  | <track-filter> or <track-filter>
+
+<op> = == | != | < | <= | > | >=
+```
+
+Named video profiles are policy references to durable quality/encode settings,
+not free-form FFmpeg argument strings. A V1 profile can select encoder family,
+CRF, preset, tune, profile, level, pixel format, max width, max height, and
+copy/transcode behavior for compatible source tracks. The compiler must reject
+unknown profile names, unsupported codecs, malformed filters, and operation
+combinations that the current worker set cannot execute.
+
 Example scheduling policy shape:
 
 ```text
@@ -897,6 +991,44 @@ about a moved file, or deleting a remote object.
 Path mappings affect both scheduling and artifact resolution. A worker or
 external system is eligible for a ticket only when it can safely see the required
 artifact location or receive a resolved artifact transfer plan.
+
+## Library Configuration Model
+
+`Library` and `LibraryRoot` records define what a future daemon is allowed to
+observe. They are durable operator configuration, not daemon-private state.
+Explicit CLI scans may operate on an arbitrary supplied path, but watcher and
+scheduled scan behavior reads only enabled library roots configured through the
+pre-daemon CLI/API surface.
+
+A `Library` records:
+
+- stable library ID and display name;
+- default policy version and input-set selection rules;
+- default quality/scoring profile;
+- default scheduling policy and safety policy;
+- expected media kind and optional external-system links;
+- created/updated timestamps and enabled/disabled state.
+
+A `LibraryRoot` records:
+
+- stable root ID and parent library ID;
+- root kind (`local_path`, `shared_mount`, or future storage provider);
+- canonical root URI/path and display path;
+- include and exclude globs;
+- file extension allowlist for media and sidecar discovery;
+- scan mode (`explicit_only`, `manual_recursive`, `watch_enabled`);
+- stability/debounce settings a daemon watcher will later consume;
+- symlink policy, hidden-file policy, and max traversal depth;
+- path-mapping references visible to workers and external systems;
+- default output/staging/backup roots when not supplied by a command;
+- enabled/disabled state, created/updated timestamps, and last scan session ID.
+
+Library root canonicalization is conservative: local roots reject symlinked
+ancestors unless a later design explicitly permits a safe alias model, and scan
+selection stores canonical paths so a watcher cannot escape the configured root
+through path aliases. A daemon may not watch a path that lacks a live
+`LibraryRoot`; if a root is disabled or its safety/scheduling profile is missing
+or stale, the daemon records a blocked issue and does not synthesize defaults.
 
 ## Issue Model
 
@@ -1390,36 +1522,96 @@ V1 security focuses on clear local and home-network boundaries:
   (see `Commit Safety Gate` under `## Runtime Use Lease Model`)
 - every mutation is audited
 
+The pre-daemon safety baseline must be conservative and enforceable from the
+CLI. Before any daemon loop can auto-schedule real media mutation, operators must
+be able to configure and inspect safety policy fields for:
+
+- which operation kinds the daemon may auto-execute;
+- whether backup is required before a mutation;
+- whether approval is required before execution or commit;
+- which commit modes are allowed (`add_only` before replace/delete/archive);
+- what verification level is required before commit;
+- whether failed, partial, or recovery-required records block later automation.
+
+The daemon reads these durable safety policies fail-closed. If a policy is
+missing, too old, or lacks a field required by an operation, the daemon records a
+blocked issue instead of guessing. Destructive replace/delete/archive automation
+remains disabled until the safety model for that operation has explicit CLI/API
+configuration, tests, and recovery evidence. Sprint 28 hardens and broadens
+safety gates; it is not permission for earlier daemon sprints to invent hidden
+safety defaults.
+
 Future plugin distribution can add package signing, marketplace trust metadata,
 and stricter sandboxing. The worker protocol should not require those features
 to be useful.
 
-## CLI MVP Requirements
+## CLI Milestone And Daemon Readiness Requirements
 
-The CLI MVP must support:
+Every control-plane capability that can be driven without a background loop must
+ship through CLI JSON envelopes before daemon development begins. The daemon must
+not become the first interface for creating configuration, mutating durable
+control-plane state, approving or recovering work, or explaining why work is
+blocked. It may automate existing CLI/API-visible workflows, but it must not
+introduce hidden state that an operator cannot create, inspect, and repair from
+the CLI.
 
-- initialize config and database
-- register synthetic workers
-- scan with synthetic provider
-- evaluate a policy
-- show compliance report
-- create an execution plan
-- inspect plan JSON
-- run plan with synthetic providers
-- show events
+The Foundation CLI milestone must support:
+
+- initialize config and database;
+- register synthetic workers;
+- scan with synthetic provider;
+- create and list policy documents and versions;
+- create and list policy input sets;
+- evaluate a policy and show a compliance report;
+- create, inspect, and dry-run execution plans;
+- run plans with synthetic providers;
+- show events;
 - show media work, variant, asset, version, location, and identity evidence
-  history
-- show asset bundles and sidecar assets
-- show issues with severity, priority, and linked evidence
-- show external systems, path mappings, and sync history
-- show quality scores and active scoring profiles
-- show active use leases and blocked operations
-- show workers and capabilities
-- show jobs, tickets, leases, and artifacts
-- emit JSON for every command
+  history;
+- show asset bundles and sidecar assets;
+- show issues with severity, priority, and linked evidence;
+- show external systems, path mappings, and sync history;
+- show quality scores and active scoring profiles;
+- show active use leases and blocked operations;
+- show workers, nodes, capabilities, grants, and scheduler decisions;
+- show jobs, tickets, leases, and artifacts;
+- emit JSON for every command.
+
+The Real Media CLI milestone, complete before any daemon sprint starts, must add:
+
+- real explicit-path scan through bundled out-of-process probe workers;
+- staged artifact copy, verification, commit, recovery inspection, and add-only
+  result reporting;
+- policy-driven real media execution for the fixed V1 operation set:
+  video transcode, container remux, track selection/defaults, audio
+  transcode/extract, artifact verification, and commit;
+- durable named video profile and quality profile management;
+- backup worker execution, backup inspection, and backup evidence in reports;
+- sidecar ingest and bundle/member inspection for generated and external V1
+  asset types;
+- manual use-lease acquire/release/force-release commands for operator locks;
+- issue list/show/update/resolve commands for policy and terminal-failure
+  issues;
+- library root and scan configuration CRUD for the roots a future watcher will
+  observe, without starting a watcher;
+- scheduling policy, safety policy, external-system policy, and path-mapping
+  CRUD sufficient for a future daemon to read rather than invent configuration;
+- external-system registration, health-check execution, path-mapping CRUD,
+  read-only sync execution, and sync report commands; external writes remain
+  policy-gated jobs;
+- node, worker, artifact, scheduler-decision, job, ticket, lease, event, report,
+  bundle, sidecar, backup, issue, policy, profile, and library-root inspection
+  with stable IDs and deterministic pagination;
+- end-to-end golden fixtures proving an agent can scan, compile/evaluate/plan,
+  execute, inspect outputs, preserve backups, inspect sidecars/bundles, and
+  recover or explain failures without daemon-owned behavior.
 
 The CLI must be suitable for agent use: deterministic output, stable schemas,
-dry-run mode, plan-only mode, and machine-readable errors.
+dry-run mode, plan-only mode, idempotency where commands mutate state, stable
+pagination, and machine-readable errors. "Complete" is not satisfied by a
+repository API alone; each durable state family the daemon will consume must have
+an explicit CLI creation or inspection path and golden JSON coverage before the
+daemon uses it.
 
 ## Daemon MVP Requirements
 
@@ -1438,6 +1630,20 @@ The daemon MVP must support:
 - scheduled copy windows
 - crash recovery
 - event streaming for UI/API clients
+
+Daemon behavior must consume durable state already exposed through the Real
+Media CLI milestone: library roots, scan configuration, policies, input sets,
+scheduling policy, safety policy, external-system mappings, node/worker grants,
+manual locks, issues, artifacts, backups, reports, and recovery records. If a
+daemon sprint needs a new durable state family or operator action, that state or
+action must first be added to the CLI/API surface or the daemon sprint is not
+ready to start.
+
+Daemon auto-execution is bounded by the pre-daemon safety baseline. A daemon may
+only schedule operation kinds explicitly allowed by durable safety policy, and it
+must treat destructive replace/delete/archive, missing backup requirements,
+unmet approval requirements, unresolved recovery-required commits, and stale
+policy versions as blocked work rather than as defaults to work around.
 
 ## Web UI MVP Requirements
 
@@ -1486,6 +1692,13 @@ Every future sprint should use the same shape:
 
 Sprint boundaries are not feature buckets. A sprint is complete only
 when its acceptance evidence is present and repeatable.
+
+No daemon sprint may begin until the Real Media CLI milestone is closed. The
+closeout evidence for that milestone must prove that every durable configuration
+or operator action the daemon will automate has a CLI/API path, stable JSON
+contract, tests, and recovery story. If the roadmap discovers another
+daemon-consumed state family after Sprint 17, add it to a pre-daemon CLI sprint
+rather than letting daemon code become the first implementation.
 
 ### Foundation
 
@@ -1763,95 +1976,187 @@ normalized shape expected for Sprint 3 onward.
 - Closeout documentation: Sprint 11 acceptance matrix for artifact
   staging, verification, commit, audit, and recovery.
 
-#### Sprint 12: FFmpeg Transcode Worker
+#### Sprint 12: FFmpeg Video Transcode V1
 
-- Goal: run one policy-driven transcode path through the durable media
-  mutation flow.
-- Deliverables: FFmpeg worker for one transcode path, transcode payload
-  schema, progress mapping, output verification hook, staged commit
-  integration, and CLI execution/report fixtures.
-- Explicitly out of scope: multiple codec ladders, remux/track editing,
-  backup, daemon scheduling, and UI media controls.
-- Acceptance focus: one transcode plan runs through the provider
-  protocol and staged artifact commit flow.
-- Verification expectations: worker conformance tests, transcode
-  fixture-media integration tests, staged-commit integration tests, CLI
-  golden-output tests, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 12 closeout matrix for transcode
-  execution, progress, verification, and commit behavior.
+- Goal: run a policy-driven `transcode video to hevc` path through the
+  durable media mutation flow.
+- Deliverables: compiler/planner support for the V1 video-transcode
+  operation, FFmpeg worker for H.265-in-MKV output, typed transcode
+  request/result schema, progress mapping, staged artifact output,
+  verification hook, staged commit integration, and CLI execution/report
+  fixtures.
+- Explicitly out of scope: audio transcode, codec ladders, named video
+  profile settings beyond the default profile, MKVToolNix remux/track
+  editing, backup, daemon scheduling, and UI media controls.
+- Acceptance focus: a real policy plan containing `transcode video to
+  hevc` executes through durable tickets, an out-of-process FFmpeg
+  worker, staged artifact verification, and host-owned commit.
+- Verification expectations: policy/compiler tests, planner tests,
+  worker conformance tests, transcode fixture-media integration tests,
+  staged-commit integration tests, CLI golden-output tests,
+  documentation completeness scan, and `just ci`.
+- Closeout documentation: Sprint 12 closeout matrix for video transcode
+  DSL, planning, execution, progress, verification, and commit behavior.
 
-#### Sprint 13: MKVToolNix Remux / Track-Edit Worker
+#### Sprint 13: Container Remux And Track Selection V1
 
-- Goal: run one remux or track-edit path through the durable media
-  mutation flow.
-- Deliverables: MKVToolNix worker, remux/track-edit payload schema,
-  progress mapping, output verification hook, staged commit integration,
-  and CLI execution/report fixtures.
-- Explicitly out of scope: broad container editing, backup, sidecar
-  ingest, daemon scheduling, and UI media controls.
-- Acceptance focus: one remux or track-edit plan runs through the
-  provider protocol and staged artifact commit flow.
-- Verification expectations: worker conformance tests, remux fixture
-  integration tests, staged-commit integration tests, CLI golden-output
+- Goal: make container and basic track policy operations execute through
+  real media workers.
+- Deliverables: compiler/planner support for `container mkv`,
+  `keep/remove audio|subtitle|attachment where ...`, `order tracks`,
+  and `defaults audio|subtitle ...`; MKVToolNix worker; typed
+  remux/track-edit schemas; progress mapping; staged artifact output;
+  verification hook; staged commit integration; and CLI fixtures.
+- Explicitly out of scope: audio transcoding, video encode profiles,
+  backup, daemon scheduling, broad container editing beyond the V1 DSL,
+  and UI media controls.
+- Acceptance focus: policy-driven remux and track-selection plans run
+  through the provider protocol and staged artifact commit flow.
+- Verification expectations: grammar/diagnostic tests, planner tests,
+  MKVToolNix worker conformance tests, remux/track fixture integration
+  tests, staged-commit integration tests, CLI golden-output tests,
+  documentation completeness scan, and `just ci`.
+- Closeout documentation: Sprint 13 closeout matrix for container,
+  track-selection, default-track, verification, and commit behavior.
+
+#### Sprint 14: Audio Transcode And Extract V1
+
+- Goal: make audio mutation policy operations executable before the
+  real-media CLI milestone closes.
+- Deliverables: compiler/planner support for `transcode audio to
+  aac|opus where ...` and `extract audio where ...`; FFmpeg worker
+  support for audio transcode/extract outputs; typed audio request/result
+  schemas; language/channel preservation rules; staged artifact
+  integration; verification; and CLI fixtures.
+- Explicitly out of scope: multi-output sidecar bundle policy,
+  speech-to-text transcription, backup, daemon scheduling, and UI media
+  controls.
+- Acceptance focus: policy-driven audio transcode and extract operations
+  run through durable tickets, out-of-process workers, staged artifacts,
+  verification, and host-owned commit or bundle registration as
+  appropriate for the operation.
+- Verification expectations: grammar/diagnostic tests, planner tests,
+  FFmpeg audio worker conformance tests, fixture-media integration tests,
+  staged-artifact tests, CLI golden-output tests, documentation
+  completeness scan, and `just ci`.
+- Closeout documentation: Sprint 14 closeout matrix for audio
+  transcode/extract policy, execution, artifact, and verification
+  behavior.
+
+#### Sprint 15: Video Profile Settings And Quality Profiles
+
+- Goal: turn the default video transcode path into named, validated
+  policy profiles suitable for real library use.
+- Deliverables: durable video profile model, compiler references to
+  named profiles, validation for encoder family, CRF, preset, tune,
+  profile, level, pixel format, max width, max height, and copy versus
+  transcode behavior; planner resource/quality estimates; CLI
+  profile-inspection fixtures; and policy examples.
+- Explicitly out of scope: daemon scheduling, UI profile editors,
+  per-title automatic profile selection, hardware-specific tuning
+  databases, and plugin-defined encode schemas.
+- Acceptance focus: policies can reference named video profiles and the
+  planner/worker path rejects unsupported or unsafe profile settings
+  before execution.
+- Verification expectations: profile repository tests, policy compiler
+  tests, planner estimate tests, FFmpeg payload tests, CLI golden-output
   tests, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 13 closeout matrix for remux/track-edit
-  execution, progress, verification, and commit behavior.
+- Closeout documentation: Sprint 15 closeout matrix for named profiles,
+  validation, planning, payload generation, and operator inspection.
 
-#### Sprint 14: Backup, Sidecar Ingest, And Full Real-Media CLI Workflow
+#### Sprint 16: Real-Media Policy Workflow Completion
+
+- Goal: make multi-phase real-media policy execution coherent from CLI
+  scan through report.
+- Deliverables: artifact chaining between real mutation phases,
+  re-probing after mutation phases, bounded replanning at phase
+  boundaries, compliance report updates from produced artifacts, durable
+  workflow summaries for real-media plans, and full CLI
+  scan/evaluate/plan/run/report fixtures.
+- Explicitly out of scope: backup worker, sidecar ingest, daemon loops,
+  Web UI, plugin SDK, and production packaging.
+- Acceptance focus: a multi-phase policy combining video transcode,
+  remux/track selection, audio mutation, verification, and commit can be
+  executed and inspected through CLI JSON envelopes.
+- Verification expectations: end-to-end workflow integration tests,
+  artifact-chain tests, re-probe tests, bounded-replan tests, compliance
+  report tests, CLI golden-output tests, documentation completeness
+  scan, and `just ci`.
+- Closeout documentation: Sprint 16 real-media workflow closeout matrix
+  tying policy phases to tickets, artifacts, snapshots, reports, and
+  CLI outputs.
+
+#### Sprint 17: Backup, Sidecar Ingest, And Real-Media CLI Closeout
 
 - Goal: complete the real-media CLI milestone without introducing
   daemon or UI ownership.
-- Deliverables: backup worker, sidecar asset ingest for one generated or
-  external asset type, full scan/evaluate/plan/run/report workflow for
-  real media, bundle/sidecar CLI views, backup report, and real-media
-  workflow fixtures.
+- Deliverables: backup worker, sidecar asset ingest for generated and
+  external V1 asset types, bundle/sidecar CLI views, backup report,
+  library root and scan configuration CRUD, manual use-lease commands,
+  policy/input-set/profile/scheduling-policy/safety-policy/external-system
+  management commands required by the daemon, external-system health/read-only
+  sync commands, issue action commands, sample real-media policies, full
+  real-media workflow fixtures, and closeout
+  documentation for the CLI milestone.
 - Explicitly out of scope: filesystem watcher, background daemon loop,
-  Web UI, plugin SDK, and production packaging.
+  Web UI, plugin SDK, production packaging, and daemon-only configuration
+  surfaces.
 - Acceptance focus: CLI can scan, evaluate, plan, execute, inspect
-  reports, show bundles/sidecars, and preserve the out-of-process
+  reports, show bundles/sidecars, preserve backups, manage daemon-consumed
+  configuration, manage operator locks/issues, and preserve the out-of-process
   provider boundary for real media.
 - Verification expectations: full CLI workflow integration tests,
-  backup worker conformance tests, sidecar ingest tests, CLI golden
-  tests, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 14 real-media CLI closeout matrix.
+  backup worker conformance tests, sidecar ingest tests, bundle CLI
+  golden tests, daemon-readiness CLI golden tests, safety-policy fail-closed
+  tests, sample-policy tests, documentation completeness scan, and `just ci`.
+- Closeout documentation: Sprint 17 real-media CLI closeout matrix with an
+  explicit daemon-readiness table mapping every Sprint 18-20 daemon input,
+  policy, action, and recovery path to an existing CLI/API command and test.
 
 ### Daemon
 
-#### Sprint 15: Watcher, Stability Rules, Scan Sessions, And Reconciliation
+#### Sprint 18: Watcher, Stability Rules, Scan Sessions, And Reconciliation
 
 - Goal: turn one-shot scan behavior into continuous durable library
   observation.
 - Deliverables: filesystem watcher, file stability/debounce rules, scan
   sessions, reconciliation for adds/modifications/removals/renames, and
-  daemon status API for scan activity.
+  daemon status API for scan activity. The watcher reads only durable library
+  roots and scan configuration created through the Sprint 17 CLI/API surface.
 - Explicitly out of scope: background work scheduling, dynamic
-  throttles, external sync loops, and UI event streaming.
+  throttles, external sync loops, UI event streaming, and new configuration
+  surfaces not already inspectable through CLI/API.
 - Acceptance focus: library changes produce correct durable state after
-  stability windows.
+  stability windows, and every watched root or scan rule is traceable to
+  pre-existing durable configuration.
 - Verification expectations: watcher fixture tests, reconciliation
   integration tests, daemon status tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 15 closeout matrix for watch,
+- Closeout documentation: Sprint 18 closeout matrix for watch,
   debounce, session, and reconciliation behavior.
 
-#### Sprint 16: Background Scheduler Loop, Windows, And Throttles
+#### Sprint 19: Background Scheduler Loop, Windows, And Throttles
 
 - Goal: run queued work continuously under operator scheduling
   constraints.
 - Deliverables: background scheduler loop, scheduling windows, dynamic
   throttles, lease-loop observability, daemon control/status surfaces,
-  and restart-safe loop state.
+  restart-safe loop state, and fail-closed enforcement of Sprint 17 scheduling
+  and safety policy records.
 - Explicitly out of scope: issue lifecycle loops, external sync loops,
-  use lease cleanup loop, Web UI controls, and production metrics.
+  use lease cleanup loop, Web UI controls, production metrics, and any
+  auto-execution mode not already allowed by durable CLI-configured safety
+  policy.
 - Acceptance focus: queued work runs continuously and windows/throttles
-  affect leasing without changing policy results.
+  affect leasing without changing policy results, while disallowed or
+  insufficiently configured work becomes an inspectable blocked issue.
 - Verification expectations: scheduler-loop integration tests, window
-  and throttle tests, restart tests, documentation completeness scan, and
-  `just ci`.
-- Closeout documentation: Sprint 16 closeout matrix for daemon
+  and throttle tests, safety-policy blocking tests, restart tests,
+  documentation completeness scan, and `just ci`.
+- Closeout documentation: Sprint 19 closeout matrix for daemon
   scheduling, throttles, and restart-safe leasing.
 
-#### Sprint 17: Daemon Recovery And Lifecycle Loops
+#### Sprint 20: Daemon Recovery And Lifecycle Loops
 
 - Goal: close the daemon MVP with recovery and lifecycle maintenance.
 - Deliverables: issue lifecycle update loop, external-system health/sync
@@ -1864,11 +2169,11 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: lifecycle-loop integration tests, restart
   recovery tests, event-stream tests, documentation completeness scan, and
   `just ci`.
-- Closeout documentation: Sprint 17 daemon MVP closeout matrix.
+- Closeout documentation: Sprint 20 daemon MVP closeout matrix.
 
 ### Web UI
 
-#### Sprint 18: Read-Only Operations Console
+#### Sprint 21: Read-Only Operations Console
 
 - Goal: make operational state visible without adding UI mutations.
 - Deliverables: activity dashboard, queue/ticket views, job/lease views,
@@ -1881,10 +2186,10 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: API route tests, UI component/route tests,
   accessibility smoke checks, documentation completeness scan, and
   `just ci`.
-- Closeout documentation: Sprint 18 UI operations-console closeout
+- Closeout documentation: Sprint 21 UI operations-console closeout
   matrix.
 
-#### Sprint 19: Library And File Detail Views
+#### Sprint 22: Library And File Detail Views
 
 - Goal: expose durable media identity and artifact history in the UI.
 - Deliverables: library browser, file detail view, media snapshot view,
@@ -1896,9 +2201,9 @@ normalized shape expected for Sprint 3 onward.
   locations, evidence, media work, variants, bundles, and sidecars.
 - Verification expectations: API route tests, UI route/component tests,
   fixture data tests, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 19 UI library/file closeout matrix.
+- Closeout documentation: Sprint 22 UI library/file closeout matrix.
 
-#### Sprint 20: Policy And Reporting Views
+#### Sprint 23: Policy And Reporting Views
 
 - Goal: expose policy and operational reports without adding action
   workflows.
@@ -1911,9 +2216,9 @@ normalized shape expected for Sprint 3 onward.
   external sync, retention, use leases, and blocked operations.
 - Verification expectations: API route tests, UI route/component tests,
   report fixture tests, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 20 UI reporting closeout matrix.
+- Closeout documentation: Sprint 23 UI reporting closeout matrix.
 
-#### Sprint 21: UI Actions And Live Event Streaming
+#### Sprint 24: UI Actions And Live Event Streaming
 
 - Goal: complete the Web UI MVP with actions and live updates.
 - Deliverables: UI action flows backed by existing APIs, live event
@@ -1927,11 +2232,11 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: API route tests, UI end-to-end tests,
   event-stream tests, failed-action tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 21 Web UI MVP closeout matrix.
+- Closeout documentation: Sprint 24 Web UI MVP closeout matrix.
 
 ### Plugin SDK
 
-#### Sprint 22: Plugin Manifest, Layout, And Schema Registration
+#### Sprint 25: Plugin Manifest, Layout, And Schema Registration
 
 - Goal: define the minimum stable plugin package and schema model.
 - Deliverables: plugin package layout, provider manifest, operation
@@ -1945,9 +2250,9 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: manifest parser tests, schema validation
   tests, policy-compiler integration tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 22 plugin schema closeout matrix.
+- Closeout documentation: Sprint 25 plugin schema closeout matrix.
 
-#### Sprint 23: Provider SDK Examples And Conformance Runner
+#### Sprint 26: Provider SDK Examples And Conformance Runner
 
 - Goal: make third-party provider development testable.
 - Deliverables: SDK examples, identity provider example,
@@ -1960,9 +2265,9 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: SDK example tests, plugin conformance
   tests, documentation example checks, documentation completeness scan,
   and `just ci`.
-- Closeout documentation: Sprint 23 provider SDK closeout matrix.
+- Closeout documentation: Sprint 26 provider SDK closeout matrix.
 
-#### Sprint 24: Compatibility, Docs, And Sample Third-Party Provider
+#### Sprint 27: Compatibility, Docs, And Sample Third-Party Provider
 
 - Goal: close the plugin MVP with compatibility and installable example
   behavior.
@@ -1976,27 +2281,29 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: compatibility tests, sample provider
   integration tests, install/validate workflow tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 24 Plugin SDK MVP closeout matrix.
+- Closeout documentation: Sprint 27 Plugin SDK MVP closeout matrix.
 
 ### Hardening And Release
 
-#### Sprint 25: Safety Gates
+#### Sprint 28: Safety Gates
 
-- Goal: make destructive or expensive operations explicitly
-  controllable.
-- Deliverables: approval gates, rollback flows, backup policies,
-  destructive-operation controls, richer verification policies, safety
-  audit events, and safety report fixtures.
+- Goal: harden destructive and expensive operations beyond the
+  pre-daemon safety baseline.
+- Deliverables: richer approval workflows, rollback flows, backup-policy
+  expansion, destructive-operation controls beyond add-only real-media
+  commits, richer verification policies, safety audit events, and safety
+  report fixtures.
 - Explicitly out of scope: production packaging, broad observability
   dashboards, public security review, and marketplace trust metadata.
 - Acceptance focus: common destructive operations can require approval
-  and can be rolled back or explained from durable evidence.
+  and can be rolled back or explained from durable evidence without
+  weakening the pre-daemon fail-closed safety policy.
 - Verification expectations: approval-gate tests, rollback tests,
   backup-policy tests, safety report tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 25 safety closeout matrix.
+- Closeout documentation: Sprint 28 safety closeout matrix.
 
-#### Sprint 26: Observability
+#### Sprint 29: Observability
 
 - Goal: make routing, failure, and lifecycle behavior inspectable.
 - Deliverables: metrics endpoint, trace ID propagation across
@@ -2011,9 +2318,9 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: metrics tests, trace propagation tests,
   report fixture tests, scheduler decision-log tests, documentation completeness
   scan, and `just ci`.
-- Closeout documentation: Sprint 26 observability closeout matrix.
+- Closeout documentation: Sprint 29 observability closeout matrix.
 
-#### Sprint 27: Production Readiness
+#### Sprint 30: Production Readiness
 
 - Goal: prepare VOOM for a production candidate release.
 - Deliverables: installation packaging, upgrade and migration test
@@ -2028,7 +2335,7 @@ normalized shape expected for Sprint 3 onward.
 - Verification expectations: package/install tests, migration upgrade
   tests, benchmark gate runs, documentation checks, release-process dry
   run, documentation completeness scan, and `just ci`.
-- Closeout documentation: Sprint 27 production readiness checklist and
+- Closeout documentation: Sprint 30 production readiness checklist and
   release-candidate acceptance matrix.
 
 ## Intermediate Milestones
@@ -2036,11 +2343,11 @@ normalized shape expected for Sprint 3 onward.
 - Foundation: Sprint 2 complete.
 - Policy and planning MVP: Sprint 6 complete.
 - Remote scheduling MVP: Sprint 9 complete.
-- Real media CLI MVP: Sprint 14 complete.
-- Daemon MVP: Sprint 17 complete.
-- Web UI MVP: Sprint 21 complete.
-- Plugin SDK MVP: Sprint 24 complete.
-- Production candidate: Sprint 27 complete.
+- Real media CLI MVP: Sprint 17 complete.
+- Daemon MVP: Sprint 20 complete.
+- Web UI MVP: Sprint 24 complete.
+- Plugin SDK MVP: Sprint 27 complete.
+- Production candidate: Sprint 30 complete.
 
 ## Spec Review Notes
 

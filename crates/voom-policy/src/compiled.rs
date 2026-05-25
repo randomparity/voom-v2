@@ -97,6 +97,11 @@ pub enum CompiledOperation {
     DeleteTag {
         key: String,
     },
+    TranscodeVideo {
+        target_codec: String,
+        container: String,
+        profile: String,
+    },
     Conditional {
         condition: CompiledCondition,
         operations: Vec<CompiledOperation>,
@@ -319,6 +324,11 @@ fn lower_operation(
         }),
         "delete_tag" => Ok(CompiledOperation::DeleteTag {
             key: quoted_value(text.as_ref()).unwrap_or_default(),
+        }),
+        "transcode" => Ok(CompiledOperation::TranscodeVideo {
+            target_codec: "hevc".to_owned(),
+            container: "mkv".to_owned(),
+            profile: "default-hevc".to_owned(),
         }),
         "when" => Ok(CompiledOperation::Conditional {
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),

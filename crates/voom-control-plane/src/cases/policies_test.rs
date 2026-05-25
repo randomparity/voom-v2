@@ -84,7 +84,7 @@ async fn create_policy_document_returns_compile_diagnostics_without_persisting()
     let err = cp
         .create_policy_document(
             "bad",
-            "policy \"bad\" { phase a { transcode video to hevc {} } }",
+            "policy \"bad\" { phase a { transcode video to av1 {} } }",
         )
         .await
         .unwrap_err();
@@ -93,7 +93,7 @@ async fn create_policy_document_returns_compile_diagnostics_without_persisting()
     assert!(
         err.diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "deferred_execution_operation")
+            .any(|diagnostic| diagnostic.code == "unsupported_transcode_shape")
     );
     assert!(cp.list_policy_documents().await.unwrap().is_empty());
 }
@@ -109,7 +109,7 @@ async fn add_policy_version_returns_compile_diagnostics_without_persisting() {
     let err = cp
         .add_policy_version(
             created.document.id,
-            "policy \"p\" { phase a { transcode video to hevc {} } }",
+            "policy \"p\" { phase a { transcode video to av1 {} } }",
         )
         .await
         .unwrap_err();
@@ -118,7 +118,7 @@ async fn add_policy_version_returns_compile_diagnostics_without_persisting() {
     assert!(
         err.diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "deferred_execution_operation")
+            .any(|diagnostic| diagnostic.code == "unsupported_transcode_shape")
     );
     assert_eq!(
         cp.list_policy_versions(created.document.id)

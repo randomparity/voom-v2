@@ -1,5 +1,6 @@
 ---
 source: crates/voom-cli/tests/compliance_envelope.rs
+assertion_line: 60
 expression: json
 ---
 {
@@ -190,7 +191,21 @@ expression: json
       "per_operation": {
         "remux": 1
       }
-    }
+    },
+    "tickets": [
+      {
+        "ticket_id": 1,
+        "operation": "remux",
+        "state": "succeeded",
+        "result": {
+          "provider": "fake-remuxer",
+          "operation": "remux",
+          "scenario": "default",
+          "output_path": "/library/root.remuxed.mkv",
+          "container": "mkv"
+        }
+      }
+    ]
   },
   "local": {
     "db_url": "[db-url]",

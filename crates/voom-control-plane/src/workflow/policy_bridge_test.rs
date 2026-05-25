@@ -3,6 +3,7 @@ use voom_plan::{
     ArtifactExpectations, CapabilityHints, ExecutionPlan, InputIdentity, NodeStatus, PlanNode,
     PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints,
 };
+use voom_policy::TargetRef;
 use voom_worker_protocol::OperationKind;
 
 use super::*;
@@ -60,6 +61,28 @@ fn bridge_rejects_planned_unsupported_operation_before_job_creation() {
     );
 }
 
+#[test]
+fn bridge_maps_planned_transcode_video() {
+    let plan = plan(vec![node("transcode_video", NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeVideo);
+    assert_eq!(bridged.summary.per_operation["transcode_video"], 1);
+    assert_eq!(
+        workflow.nodes[0].policy_target(),
+        Some(&TargetRef::FileVersion {
+            id: voom_core::FileVersionId(42)
+        })
+    );
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["target_codec"],
+        "hevc"
+    );
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
@@ -92,12 +115,11 @@ fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
         node_id: format!("node_{operation_kind}_{status:?}"),
         phase_name: "normalize".to_owned(),
         ordinal: 0,
-        target: voom_policy::TargetRef::Synthetic {
-            key: "movie-a".to_owned(),
-            kind: voom_policy::TargetKind::MediaWork,
+        target: TargetRef::FileVersion {
+            id: voom_core::FileVersionId(42),
         },
         operation_kind: operation_kind.to_owned(),
-        operation_payload: json!({"container": "mkv"}),
+        operation_payload: operation_payload(operation_kind),
         observed_state: Some(json!({"container": "mp4"})),
         status,
         status_reason: "container mp4 will be changed to mkv".to_owned(),
@@ -106,5 +128,18 @@ fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
         resource_estimates: ResourceEstimates::default(),
         artifact_expectations: ArtifactExpectations::default(),
         safety_hints: SafetyHints::default(),
+    }
+}
+
+fn operation_payload(operation_kind: &str) -> serde_json::Value {
+    if operation_kind == "transcode_video" {
+        json!({
+            "type": "transcode_video",
+            "target_codec": "hevc",
+            "container": "mkv",
+            "profile": "default-hevc"
+        })
+    } else {
+        json!({"container": "mkv"})
     }
 }

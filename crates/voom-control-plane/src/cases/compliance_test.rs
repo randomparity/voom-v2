@@ -341,6 +341,26 @@ async fn compliance_execute_reports_issues_applied_when_runtime_registry_fails()
 }
 
 #[tokio::test]
+async fn policy_runtime_registry_loads_transcode_video_workers() {
+    let (cp, _tmp) = cp().await;
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-transcode",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:9",
+            "secret": "policy-transcode-secret",
+        }),
+    )
+    .await;
+
+    let registry = cp.policy_runtime_registry().await.unwrap();
+
+    let runtime = registry.get(worker_id).unwrap();
+    assert_eq!(runtime.credentials.worker_id, worker_id);
+}
+
+#[tokio::test]
 async fn report_mutates_no_durable_work_or_issue_tables() {
     let (cp, _tmp) = cp().await;
     let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
@@ -417,6 +437,31 @@ async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
     );
 }
 
+#[tokio::test]
+async fn compliance_execute_uses_production_workflow_lease_defaults() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let worker_id = register_policy_remux_worker(&cp).await;
+    let runtimes = success_runtime_registry(worker_id);
+
+    cp.execute_compliance_policy_with_runtime_registry_for_test(
+        policy_version_id,
+        input_set_id,
+        runtimes,
+    )
+    .await
+    .unwrap();
+
+    let ttl_seconds: i64 = sqlx::query_scalar("SELECT ttl_seconds FROM leases ORDER BY id LIMIT 1")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl_seconds, 30,
+        "user-facing compliance execution must not use test lease timing"
+    );
+}
+
 const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "issues",
     "events",
@@ -464,25 +509,41 @@ async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
 }
 
 async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {
-    register_policy_remux_worker_with_extra(cp, serde_json::json!({})).await
+    register_policy_worker_with_extra(
+        cp,
+        OperationKind::Remux,
+        "policy-test-remux",
+        serde_json::json!({}),
+    )
+    .await
 }
 
 async fn register_policy_remux_worker_with_extra(
     cp: &crate::ControlPlane,
     extra: serde_json::Value,
 ) -> voom_core::WorkerId {
+    register_policy_worker_with_extra(cp, OperationKind::Remux, "policy-test-remux", extra).await
+}
+
+async fn register_policy_worker_with_extra(
+    cp: &crate::ControlPlane,
+    operation: OperationKind,
+    name: &str,
+    extra: serde_json::Value,
+) -> voom_core::WorkerId {
     let worker = cp
         .register_worker(NewWorker {
-            name: "policy-test-remux".to_owned(),
+            name: name.to_owned(),
             kind: WorkerKind::Synthetic,
             registered_at: cp.clock().now(),
             node_id: None,
         })
         .await
         .unwrap();
+    let operation_name = operation_name(operation);
     cp.record_capability(NewCapability {
         worker_id: worker.id,
-        operation: operation_name(OperationKind::Remux).to_owned(),
+        operation: operation_name.to_owned(),
         codecs: Vec::new(),
         hardware: Vec::new(),
         artifact_access: Vec::new(),
@@ -492,11 +553,11 @@ async fn register_policy_remux_worker_with_extra(
     .unwrap();
     cp.record_grant(NewGrant {
         worker_id: worker.id,
-        can_execute: vec![operation_name(OperationKind::Remux).to_owned()],
+        can_execute: vec![operation_name.to_owned()],
         can_access_read: Vec::new(),
         can_access_write: Vec::new(),
         denies: Vec::new(),
-        max_parallel: serde_json::json!({ operation_name(OperationKind::Remux): 1 }),
+        max_parallel: serde_json::json!({ operation_name: 1 }),
     })
     .await
     .unwrap();
@@ -518,7 +579,8 @@ fn success_runtime_registry(worker_id: voom_core::WorkerId) -> WorkerRuntimeRegi
 fn operation_name(operation: OperationKind) -> &'static str {
     match operation {
         OperationKind::Remux => "remux",
-        _ => unreachable!("compliance tests only seed remux"),
+        OperationKind::TranscodeVideo => "transcode_video",
+        _ => unreachable!("compliance tests only seed remux/transcode"),
     }
 }
 

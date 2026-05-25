@@ -273,6 +273,42 @@ fn artifact_verification_failed_payload_round_trip() {
 }
 
 #[test]
+fn artifact_transcode_started_payload_serializes_correlation_fields() {
+    let p = ArtifactTranscodeStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    };
+
+    let json = serde_json::to_value(Event::ArtifactTranscodeStarted(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.transcode_started");
+    assert_eq!(json["payload"]["job_id"], 1);
+    assert_eq!(json["payload"]["ticket_id"], 2);
+    assert_eq!(json["payload"]["lease_id"], 3);
+    assert_eq!(json["payload"]["source_file_version_id"], 4);
+    assert_eq!(json["payload"]["source_file_location_id"], 5);
+    assert_eq!(
+        json["payload"]["staging_path"],
+        "/tmp/voom-stage/2/3/out.mkv"
+    );
+    assert_eq!(json["payload"]["provider"], "ffmpeg");
+    assert_eq!(json["payload"]["provider_version"], serde_json::Value::Null);
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactTranscodeStarted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactTranscodeStarted(p).kind(),
+        EventKind::ArtifactTranscodeStarted
+    );
+}
+
+#[test]
 fn artifact_verification_succeeded_rejects_failure_shape() {
     let raw = serde_json::json!({
         "kind": "artifact.verification_succeeded",

@@ -25,6 +25,7 @@ pub enum DiagnosticCode {
     AmbiguousTagOperationConflict,
     DeferredComposition,
     DeferredExecutionOperation,
+    UnsupportedTranscodeShape,
 }
 
 impl DiagnosticCode {
@@ -54,6 +55,7 @@ impl DiagnosticCode {
             Self::AmbiguousTagOperationConflict => "ambiguous_tag_operation_conflict",
             Self::DeferredComposition => "deferred_composition",
             Self::DeferredExecutionOperation => "deferred_execution_operation",
+            Self::UnsupportedTranscodeShape => "unsupported_transcode_shape",
         }
     }
 }

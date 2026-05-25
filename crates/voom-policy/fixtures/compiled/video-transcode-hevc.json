@@ -1,0 +1,34 @@
+{
+  "policy_name": "video transcode hevc",
+  "slug": "video-transcode-hevc",
+  "source_hash": "579fdc693591231c5c51cbaebd6520357b2a646a3a1d3fb61238434bc9233eee",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_video",
+          "target_codec": "hevc",
+          "container": "mkv",
+          "profile": "default-hevc"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

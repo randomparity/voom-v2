@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use serde_json::Value;
+use voom_plan::TargetRef;
 use voom_worker_protocol::OperationKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -21,6 +23,8 @@ pub enum WorkflowNode {
 pub struct OperationNode {
     pub id: String,
     pub operation: OperationKind,
+    pub policy_target: Option<TargetRef>,
+    pub operation_payload: Value,
     pub depends_on: Vec<String>,
     pub depends_on_selected: Vec<String>,
     pub provides_selected: Option<String>,
@@ -183,6 +187,20 @@ impl WorkflowNode {
             Self::Operation(node) => node.provides_selected.as_deref(),
         }
     }
+
+    #[must_use]
+    pub fn policy_target(&self) -> Option<&TargetRef> {
+        match self {
+            Self::Operation(node) => node.policy_target.as_ref(),
+        }
+    }
+
+    #[must_use]
+    pub fn operation_payload(&self) -> &Value {
+        match self {
+            Self::Operation(node) => &node.operation_payload,
+        }
+    }
 }
 
 impl WorkflowPlanError {
@@ -197,6 +215,8 @@ fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> Workflo
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: Value::Null,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: None,
@@ -212,6 +232,8 @@ fn selected_operation(
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: Value::Null,
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: Some(provides_selected.to_owned()),
@@ -226,6 +248,8 @@ fn operation_after_selected(
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: Value::Null,
         depends_on: Vec::new(),
         depends_on_selected: depends_on_selected
             .iter()

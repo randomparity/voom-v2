@@ -41,6 +41,10 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactCommitCompleted,
         EventKind::ArtifactCommitFailedPreMutation,
         EventKind::ArtifactCommitRecoveryRequired,
+        EventKind::ArtifactTranscodeStarted,
+        EventKind::ArtifactTranscodeProgress,
+        EventKind::ArtifactTranscodeSucceeded,
+        EventKind::ArtifactTranscodeFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -147,6 +151,10 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactCommitCompleted,
         EventKind::ArtifactCommitFailedPreMutation,
         EventKind::ArtifactCommitRecoveryRequired,
+        EventKind::ArtifactTranscodeStarted,
+        EventKind::ArtifactTranscodeProgress,
+        EventKind::ArtifactTranscodeSucceeded,
+        EventKind::ArtifactTranscodeFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -173,6 +181,33 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         let s = k.as_str();
         let back = EventKind::from_str(s).expect("from_str accepts as_str output");
         assert_eq!(back, k, "round-trip failed for {k:?} via {s:?}");
+    }
+}
+
+#[test]
+fn transcode_artifact_event_kinds_use_exact_sprint_12_wire_strings() {
+    let cases = [
+        (
+            EventKind::ArtifactTranscodeStarted,
+            "artifact.transcode_started",
+        ),
+        (
+            EventKind::ArtifactTranscodeProgress,
+            "artifact.transcode_progress",
+        ),
+        (
+            EventKind::ArtifactTranscodeSucceeded,
+            "artifact.transcode_succeeded",
+        ),
+        (
+            EventKind::ArtifactTranscodeFailed,
+            "artifact.transcode_failed",
+        ),
+    ];
+
+    for (kind, wire) in cases {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
     }
 }
 

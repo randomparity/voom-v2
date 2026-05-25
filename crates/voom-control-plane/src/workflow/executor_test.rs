@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,14 +12,16 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, JobId, SystemClock, WorkerId};
+use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, TranscodeVideoRequest,
+    WorkerCredentials,
 };
 
 use crate::workflow::executor::{
@@ -28,6 +31,7 @@ use crate::workflow::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, Wor
 use crate::workflow::runtime::WorkerRuntimeRegistry;
 use crate::workflow::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::timing::EffectiveTiming;
+use voom_plan::TargetRef;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -232,6 +236,288 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
 
     assert_eq!(summary.dispatch_count, 1);
     assert_eq!(fixture.other_job_ready_count().await, 1);
+}
+
+#[tokio::test]
+async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::TranscodeVideo);
+    assert_eq!(
+        workflow_payload.rendered_payload["operation"],
+        "transcode_video"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(workflow_payload.rendered_payload["target_codec"], "hevc");
+    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
+    assert_eq!(workflow_payload.rendered_payload["profile"], "default-hevc");
+}
+
+#[tokio::test]
+async fn policy_transcode_file_location_target_carries_source_version_and_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_location_id"],
+        source_location_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = PathBuf::from("/tmp/voom-stage");
+    options.transcode_target_dir = PathBuf::from("/media/normalized");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-stage"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/media/normalized"
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
+}
+
+#[tokio::test]
+async fn policy_transcode_success_result_includes_generated_staging_path() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    fixture.run_with_options(options).await.unwrap();
+
+    let result = fixture.first_ticket_result().await;
+    let staging_path = result["staging_path"].as_str().unwrap();
+    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.hevc.mkv"));
+    assert_eq!(result["staged_artifact_handle_id"], 1);
+    assert_eq!(result["staged_artifact_location_id"], 1);
+    assert_eq!(result["verification_id"], 1);
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert_eq!(result["result_media_snapshot_id"], 1);
+}
+
+#[tokio::test]
+async fn policy_transcode_heartbeats_outer_workflow_lease_while_running() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::SlowTranscodeResult,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.heartbeat_interval = Duration::from_millis(10);
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    fixture.run_with_options(options).await.unwrap();
+
+    let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
+    assert!(
+        last_heartbeat_at > acquired_at,
+        "long control-plane transcode must keep the outer workflow lease fresh"
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::MalformedTranscodeResult,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(
+        fixture.first_ticket_failed_class().await,
+        "malformed_worker_result"
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_dispatch_rejects_wrong_output_facts() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::WrongTranscodeOutputFacts,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(
+        fixture.first_ticket_failed_class().await,
+        "malformed_worker_result"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let outside = dir.path().join("outside");
+    tokio::fs::create_dir(&outside).await.unwrap();
+    let symlink_root = dir.path().join("stage-link");
+    std::os::unix::fs::symlink(&outside, &symlink_root).unwrap();
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = symlink_root;
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
 }
 
 #[test]
@@ -469,6 +755,13 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn first_lease_heartbeat_window(&self) -> (String, String) {
+        sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn seed_other_job_ready_ticket(&mut self, priority: i64) {
         let job = self
             .cp
@@ -540,6 +833,64 @@ impl ExecutorFixture {
             .unwrap()
             .to_owned()
     }
+
+    async fn seed_local_source(&self) -> (FileVersionId, voom_core::FileLocationId) {
+        self.seed_local_source_at_path(PathBuf::from("/library/source.mkv"), b"source")
+            .await
+    }
+
+    async fn seed_local_source_at_path(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        bytes: &[u8],
+    ) -> (FileVersionId, voom_core::FileLocationId) {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(path, bytes).await;
+        let outcome = self
+            .cp
+            .record_discovered_file(
+                DiscoveredFile {
+                    location_kind: FileLocationKind::LocalPath,
+                    location_value: path.to_string_lossy().into_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(bytes).to_hex()),
+                    size_bytes: bytes.len().try_into().unwrap(),
+                    observed_at: T0,
+                    proof: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        match outcome {
+            IngestOutcome::NewFileAsset {
+                file_version_id,
+                file_location_id,
+                ..
+            } => (file_version_id, file_location_id),
+            IngestOutcome::AliasAttached { .. } => panic!("seed must create a new file asset"),
+        }
+    }
+
+    async fn first_ticket_payload(&self) -> Value {
+        let payload: String =
+            sqlx::query_scalar("SELECT payload FROM tickets ORDER BY id ASC LIMIT 1")
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
+        serde_json::from_str(&payload).unwrap()
+    }
+
+    async fn first_ticket_result(&self) -> Value {
+        let result: String =
+            sqlx::query_scalar("SELECT result FROM tickets ORDER BY id ASC LIMIT 1")
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
+        serde_json::from_str(&result).unwrap()
+    }
 }
 
 #[derive(Debug)]
@@ -574,6 +925,10 @@ enum FakeBehavior {
     ProgressFlood,
     Crash,
     DispatchError,
+    RequireTranscodeProtocolPayload,
+    SlowTranscodeResult,
+    MalformedTranscodeResult,
+    WrongTranscodeOutputFacts,
 }
 
 #[async_trait]
@@ -591,6 +946,23 @@ impl ClientHandle for FakeClient {
         assert_eq!(_creds.worker_id, self.worker_id);
         if matches!(self.behavior, FakeBehavior::DispatchError) {
             return Err(ProtocolError::InternalServerError);
+        }
+        if matches!(self.behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
+            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
+                |err| ProtocolError::InvalidPayload {
+                    detail: format!("transcode payload must match worker protocol: {err}"),
+                },
+            )?;
+        }
+        if matches!(
+            self.behavior,
+            FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
+        ) {
+            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
+                |err| ProtocolError::InvalidPayload {
+                    detail: format!("transcode payload must match worker protocol: {err}"),
+                },
+            )?;
         }
         self.enter_active();
         let (reader, writer) = tokio::io::duplex(16 * 1024);
@@ -620,9 +992,20 @@ async fn write_behavior(
     behavior: FakeBehavior,
 ) {
     match behavior {
-        FakeBehavior::Success => {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
+        FakeBehavior::Success
+        | FakeBehavior::RequireTranscodeProtocolPayload
+        | FakeBehavior::SlowTranscodeResult => {
+            let delay = match behavior {
+                FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
+                _ => Duration::from_millis(25),
+            };
+            tokio::time::sleep(delay).await;
+            let payload = if request.operation == OperationKind::TranscodeVideo {
+                transcode_result_payload_for_request(&request).await
+            } else {
+                json!({"ok": true})
+            };
+            write_frame(&mut writer, result_frame(&request, payload)).await;
         }
         FakeBehavior::MalformedFrame => {
             let _ = writer.write_all(b"{not-json}\n").await;
@@ -638,7 +1021,45 @@ async fn write_behavior(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
         FakeBehavior::Crash | FakeBehavior::DispatchError => {}
+        FakeBehavior::MalformedTranscodeResult => {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
+        }
+        FakeBehavior::WrongTranscodeOutputFacts => {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut payload = transcode_result_payload_for_request(&request).await;
+            payload["output_container"] = json!("mp4");
+            payload["output_video_codec"] = json!("h264");
+            write_frame(&mut writer, result_frame(&request, payload)).await;
+        }
     }
+}
+
+async fn transcode_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).unwrap();
+    let output_bytes = b"output!";
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
+    json!({
+        "status": "transcoded",
+        "provider": "ffmpeg",
+        "provider_version": "ffmpeg test",
+        "input_pre": {
+            "size_bytes": request.input.expected.size_bytes,
+            "content_hash": request.input.expected.content_hash
+        },
+        "input_post": {
+            "size_bytes": request.input.expected.size_bytes,
+            "content_hash": request.input.expected.content_hash
+        },
+        "output": {
+            "size_bytes": output_bytes.len(),
+            "content_hash": format!("blake3:{}", blake3::hash(output_bytes).to_hex())
+        },
+        "output_container": "mkv",
+        "output_video_codec": "hevc"
+    })
 }
 
 async fn write_frame(writer: &mut DuplexStream, frame: ProgressFrame) {
@@ -676,6 +1097,8 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
                 WorkflowNode::Operation(OperationNode {
                     id: format!("hash-{index}"),
                     operation: OperationKind::HashFile,
+                    policy_target: None,
+                    operation_payload: Value::Null,
                     depends_on: Vec::new(),
                     depends_on_selected: Vec::new(),
                     provides_selected: None,
@@ -685,6 +1108,35 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
         fan_out: crate::workflow::model::FanOutPolicy { max_files: 3 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 4,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-transcode-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "policy-node_transcode".to_owned(),
+            operation: OperationKind::TranscodeVideo,
+            policy_target: Some(target),
+            operation_payload: json!({
+                "type": "transcode_video",
+                "target_codec": "hevc",
+                "container": "mkv",
+                "profile": "default-hevc",
+            }),
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
         },
         timing: crate::workflow::model::TimingPolicy {
             base_duration_ms: 10,

@@ -332,6 +332,62 @@ pub struct ArtifactCommitRecoveryRequiredPayload {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTranscodeStartedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub staging_path: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTranscodeProgressPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub staging_path: String,
+    pub percent_bps: Option<u16>,
+    pub message: Option<String>,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTranscodeSucceededPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub staging_path: String,
+    pub output_container: String,
+    pub output_video_codec: String,
+    pub provider: String,
+    pub provider_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactTranscodeFailedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: Option<u64>,
+    pub staging_path: Option<String>,
+    pub failure_class: FailureClass,
+    pub error_code: String,
+    pub message: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
 // --- issues ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -943,6 +999,14 @@ pub enum Event {
     ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload),
     #[serde(rename = "artifact.commit_recovery_required")]
     ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload),
+    #[serde(rename = "artifact.transcode_started")]
+    ArtifactTranscodeStarted(ArtifactTranscodeStartedPayload),
+    #[serde(rename = "artifact.transcode_progress")]
+    ArtifactTranscodeProgress(ArtifactTranscodeProgressPayload),
+    #[serde(rename = "artifact.transcode_succeeded")]
+    ArtifactTranscodeSucceeded(ArtifactTranscodeSucceededPayload),
+    #[serde(rename = "artifact.transcode_failed")]
+    ArtifactTranscodeFailed(ArtifactTranscodeFailedPayload),
     #[serde(rename = "issue.opened")]
     IssueOpened(IssueLifecyclePayload),
     #[serde(rename = "issue.updated")]
@@ -1062,6 +1126,10 @@ impl Event {
             Self::ArtifactCommitCompleted(_) => EventKind::ArtifactCommitCompleted,
             Self::ArtifactCommitFailedPreMutation(_) => EventKind::ArtifactCommitFailedPreMutation,
             Self::ArtifactCommitRecoveryRequired(_) => EventKind::ArtifactCommitRecoveryRequired,
+            Self::ArtifactTranscodeStarted(_) => EventKind::ArtifactTranscodeStarted,
+            Self::ArtifactTranscodeProgress(_) => EventKind::ArtifactTranscodeProgress,
+            Self::ArtifactTranscodeSucceeded(_) => EventKind::ArtifactTranscodeSucceeded,
+            Self::ArtifactTranscodeFailed(_) => EventKind::ArtifactTranscodeFailed,
             Self::IssueOpened(_) => EventKind::IssueOpened,
             Self::IssueUpdated(_) => EventKind::IssueUpdated,
             Self::IssueResolved(_) => EventKind::IssueResolved,

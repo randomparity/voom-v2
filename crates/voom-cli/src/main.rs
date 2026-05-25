@@ -199,7 +199,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
                 plan::show(&cfg.database_url, local, policy_version_id, input_set_id).await?,
             ))
         }
-        Command::Compliance(command) => dispatch_compliance(&cli, command).await,
+        Command::Compliance(ref command) => dispatch_compliance(&cli, command.clone()).await,
         Command::Node(ref command) => dispatch_node(&cli, command.clone()).await,
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
@@ -317,7 +317,19 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
         ComplianceCommand::Execute {
             policy_version_id,
             input_set_id,
-        } => compliance::execute(&cfg.database_url, local, policy_version_id, input_set_id).await?,
+            staging_root,
+            output_dir,
+        } => {
+            compliance::execute(
+                &cfg.database_url,
+                local,
+                policy_version_id,
+                input_set_id,
+                staging_root,
+                output_dir,
+            )
+            .await?
+        }
     };
     Ok(Exit::from_run_code(code))
 }

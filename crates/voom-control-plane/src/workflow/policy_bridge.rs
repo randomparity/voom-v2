@@ -50,12 +50,30 @@ pub fn workflow_plan_from_compliance(
                 nodes.push(WorkflowNode::Operation(OperationNode {
                     id: format!("policy-node_{}", node.node_id),
                     operation: OperationKind::Remux,
+                    policy_target: None,
+                    operation_payload: serde_json::Value::Null,
                     depends_on: Vec::new(),
                     depends_on_selected: Vec::new(),
                     provides_selected: None,
                 }));
                 summary.submitted_node_count += 1;
                 *summary.per_operation.entry("remux".to_owned()).or_insert(0) += 1;
+            }
+            NodeStatus::Planned if node.operation_kind == "transcode_video" => {
+                nodes.push(WorkflowNode::Operation(OperationNode {
+                    id: format!("policy-node_{}", node.node_id),
+                    operation: OperationKind::TranscodeVideo,
+                    policy_target: Some(node.target.clone()),
+                    operation_payload: node.operation_payload.clone(),
+                    depends_on: Vec::new(),
+                    depends_on_selected: Vec::new(),
+                    provides_selected: None,
+                }));
+                summary.submitted_node_count += 1;
+                *summary
+                    .per_operation
+                    .entry("transcode_video".to_owned())
+                    .or_insert(0) += 1;
             }
             NodeStatus::Planned => {
                 return Err(VoomError::PolicyExecution(format!(

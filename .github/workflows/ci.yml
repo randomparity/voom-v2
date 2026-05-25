@@ -41,6 +41,16 @@ jobs:
         with:
           tool: ast-grep
 
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+
       - name: just ci
         run: just ci
 
@@ -63,6 +73,11 @@ jobs:
         uses: taiki-e/install-action@3771e22aa892e03fd35585fae288baad1755695c  # v2.78.2
         with:
           tool: cargo-llvm-cov
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Generate lcov
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info

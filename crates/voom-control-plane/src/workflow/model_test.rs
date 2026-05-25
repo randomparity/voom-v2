@@ -126,6 +126,8 @@ fn node<const N: usize>(id: &str, operation: OperationKind, depends_on: [&str; N
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: serde_json::Value::Null,
         depends_on: depends_on.into_iter().map(str::to_owned).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: None,
@@ -140,6 +142,8 @@ fn node_after_selected<const N: usize>(
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: serde_json::Value::Null,
         depends_on: Vec::new(),
         depends_on_selected: depends_on_selected.into_iter().map(str::to_owned).collect(),
         provides_selected: None,
@@ -155,6 +159,8 @@ fn selected_node<const N: usize>(
     WorkflowNode::Operation(OperationNode {
         id: id.to_owned(),
         operation,
+        policy_target: None,
+        operation_payload: serde_json::Value::Null,
         depends_on: depends_on.into_iter().map(str::to_owned).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: Some(provides_selected.to_owned()),

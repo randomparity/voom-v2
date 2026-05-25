@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use secrecy::SecretString;
@@ -48,8 +49,34 @@ pub struct ComplianceExecuteData {
     pub report: voom_plan::ComplianceReport,
     pub issues: IssueApplicationSummary,
     pub execution: PolicyExecutionSummary,
+    pub tickets: Vec<ComplianceExecutedTicket>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_diagnostic: Option<voom_plan::ComplianceDiagnostic>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComplianceExecutedTicket {
+    pub ticket_id: voom_core::TicketId,
+    pub operation: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComplianceExecutionOptions {
+    pub transcode_staging_root: PathBuf,
+    pub transcode_target_dir: PathBuf,
+}
+
+impl Default for ComplianceExecutionOptions {
+    fn default() -> Self {
+        let defaults = WorkflowExecutorOptions::for_tests();
+        Self {
+            transcode_staging_root: defaults.transcode_staging_root,
+            transcode_target_dir: defaults.transcode_target_dir,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -252,6 +279,20 @@ impl ControlPlane {
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        self.execute_compliance_policy_with_options(
+            policy_version_id,
+            input_set_id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_compliance_policy_with_options(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
@@ -274,6 +315,7 @@ impl ControlPlane {
                     report: apply_data.report,
                     issues: apply_data.issues,
                     execution: empty_execution_summary(&report_data.plan, &report_data.report),
+                    tickets: Vec::new(),
                     execution_diagnostic: Some(execution_diagnostic(
                         &source,
                         &report_data.plan.plan_id,
@@ -292,6 +334,7 @@ impl ControlPlane {
                 report: apply_data.report,
                 issues: apply_data.issues,
                 execution: bridge.summary,
+                tickets: Vec::new(),
                 execution_diagnostic: None,
             });
         };
@@ -303,6 +346,7 @@ impl ControlPlane {
                     report: apply_data.report,
                     issues: apply_data.issues,
                     execution: bridge.summary,
+                    tickets: Vec::new(),
                     execution_diagnostic: None,
                 };
                 return Err(ComplianceExecuteError {
@@ -311,7 +355,7 @@ impl ControlPlane {
                 });
             }
         };
-        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes)
+        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes, options)
             .await
     }
 
@@ -361,11 +405,18 @@ impl ControlPlane {
                 report: apply_data.report,
                 issues: apply_data.issues,
                 execution: bridge.summary,
+                tickets: Vec::new(),
                 execution_diagnostic: None,
             });
         };
-        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes)
-            .await
+        self.execute_compliance_workflow(
+            apply_data,
+            bridge.summary,
+            workflow,
+            runtimes,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
     }
 
     async fn execute_compliance_workflow(
@@ -374,12 +425,18 @@ impl ControlPlane {
         mut bridge_summary: PolicyExecutionSummary,
         workflow: crate::workflow::WorkflowPlan,
         runtimes: WorkerRuntimeRegistry,
+        options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        let executor_options = WorkflowExecutorOptions {
+            transcode_staging_root: options.transcode_staging_root,
+            transcode_target_dir: options.transcode_target_dir,
+            ..WorkflowExecutorOptions::default()
+        };
         let executor = WorkflowExecutor::with_options(
             self.clone(),
             SingleWorkerPerKindSelector,
             runtimes,
-            WorkflowExecutorOptions::for_tests(),
+            executor_options,
         );
         let result = executor.submit_and_run(workflow).await;
         let run = match result {
@@ -390,6 +447,7 @@ impl ControlPlane {
                     report: apply_data.report,
                     issues: apply_data.issues,
                     execution: bridge_summary,
+                    tickets: Vec::new(),
                     execution_diagnostic: None,
                 };
                 return Err(ComplianceExecuteError {
@@ -399,12 +457,92 @@ impl ControlPlane {
             }
         };
         merge_run_summary(&mut bridge_summary, &run);
+        let tickets = self
+            .compliance_executed_tickets(run.job_id)
+            .await
+            .map_err(|source| ComplianceExecuteError {
+                source,
+                partial: Some(ComplianceExecuteData {
+                    report: apply_data.report.clone(),
+                    issues: apply_data.issues.clone(),
+                    execution: bridge_summary.clone(),
+                    tickets: Vec::new(),
+                    execution_diagnostic: None,
+                }),
+            })?;
         Ok(ComplianceExecuteData {
             report: apply_data.report,
             issues: apply_data.issues,
             execution: bridge_summary,
+            tickets,
             execution_diagnostic: None,
         })
+    }
+
+    async fn compliance_executed_tickets(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<Vec<ComplianceExecutedTicket>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, kind, state, payload, result FROM tickets WHERE job_id = ? ORDER BY id ASC",
+        )
+        .bind(
+            i64::try_from(job_id.0).map_err(|err| {
+                VoomError::Internal(format!("job id exceeds SQLite integer: {err}"))
+            })?,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("compliance tickets: {e}")))?;
+        rows.into_iter()
+            .map(|row| {
+                let ticket_id = voom_core::TicketId(
+                    row.try_get::<i64, _>("id")
+                        .map_err(|e| VoomError::Database(format!("compliance ticket id: {e}")))
+                        .and_then(|id| {
+                            u64::try_from(id).map_err(|err| {
+                                VoomError::Database(format!("compliance ticket id negative: {err}"))
+                            })
+                        })?,
+                );
+                let kind = row
+                    .try_get::<String, _>("kind")
+                    .map_err(|e| VoomError::Database(format!("compliance ticket kind: {e}")))?;
+                let state = row
+                    .try_get::<String, _>("state")
+                    .map_err(|e| VoomError::Database(format!("compliance ticket state: {e}")))?;
+                let payload_json = row
+                    .try_get::<String, _>("payload")
+                    .map_err(|e| VoomError::Database(format!("compliance ticket payload: {e}")))?;
+                let payload_value = serde_json::from_str::<serde_json::Value>(&payload_json)
+                    .map_err(|e| {
+                        VoomError::Database(format!("compliance ticket payload JSON: {e}"))
+                    })?;
+                let result_json = row
+                    .try_get::<Option<String>, _>("result")
+                    .map_err(|e| VoomError::Database(format!("compliance ticket result: {e}")))?;
+                let result = result_json
+                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+                    .transpose()
+                    .map_err(|e| {
+                        VoomError::Database(format!("compliance ticket result JSON: {e}"))
+                    })?;
+                let payload =
+                    super::super::workflow::ticket_payload::WorkflowTicketPayload::parse_ticket(
+                        &kind,
+                        payload_value,
+                    )
+                    .map_err(|e| {
+                        VoomError::Database(format!("compliance ticket workflow payload: {e}"))
+                    })?;
+                Ok(ComplianceExecutedTicket {
+                    ticket_id,
+                    operation: operation_name(payload.operation).to_owned(),
+                    state,
+                    result,
+                })
+            })
+            .collect()
     }
 
     async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
@@ -414,10 +552,11 @@ impl ControlPlane {
              FROM workers w \
              JOIN worker_capabilities wc ON wc.worker_id = w.id \
              WHERE w.status IN ('registered', 'active') \
-               AND wc.operation = ? \
+               AND wc.operation IN (?, ?) \
              ORDER BY w.id ASC",
         )
         .bind(operation_name(OperationKind::Remux))
+        .bind(operation_name(OperationKind::TranscodeVideo))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;

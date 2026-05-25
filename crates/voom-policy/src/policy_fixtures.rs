@@ -52,6 +52,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         source_path: "fixtures/policies/production-normalize-reduced.voom",
         expected_json_path: "fixtures/compiled/production-normalize-reduced.json",
     },
+    PolicyFixture {
+        source_path: "fixtures/policies/video-transcode-hevc.voom",
+        expected_json_path: "fixtures/compiled/video-transcode-hevc.json",
+    },
 ];
 
 const INVALID_POLICY_FIXTURES: &[PolicyFixture] = &[

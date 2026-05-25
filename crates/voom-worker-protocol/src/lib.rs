@@ -21,6 +21,7 @@ pub mod low_level;
 pub mod ndjson;
 pub mod operation_kind;
 pub mod probe_file;
+pub mod transcode_video;
 pub mod transport;
 pub mod verify_artifact;
 
@@ -35,6 +36,11 @@ pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
 pub use operation_kind::OperationKind;
 pub use probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
+};
+pub use transcode_video::{
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
+    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
+    TranscodeVideoStatus,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use verify_artifact::{
