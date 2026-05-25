@@ -437,6 +437,31 @@ async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
     );
 }
 
+#[tokio::test]
+async fn compliance_execute_uses_production_workflow_lease_defaults() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let worker_id = register_policy_remux_worker(&cp).await;
+    let runtimes = success_runtime_registry(worker_id);
+
+    cp.execute_compliance_policy_with_runtime_registry_for_test(
+        policy_version_id,
+        input_set_id,
+        runtimes,
+    )
+    .await
+    .unwrap();
+
+    let ttl_seconds: i64 = sqlx::query_scalar("SELECT ttl_seconds FROM leases ORDER BY id LIMIT 1")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl_seconds, 30,
+        "user-facing compliance execution must not use test lease timing"
+    );
+}
+
 const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "issues",
     "events",

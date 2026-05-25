@@ -427,9 +427,11 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
         options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let mut executor_options = WorkflowExecutorOptions::for_tests();
-        executor_options.transcode_staging_root = options.transcode_staging_root;
-        executor_options.transcode_target_dir = options.transcode_target_dir;
+        let executor_options = WorkflowExecutorOptions {
+            transcode_staging_root: options.transcode_staging_root,
+            transcode_target_dir: options.transcode_target_dir,
+            ..WorkflowExecutorOptions::default()
+        };
         let executor = WorkflowExecutor::with_options(
             self.clone(),
             SingleWorkerPerKindSelector,
