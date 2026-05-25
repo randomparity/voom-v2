@@ -676,6 +676,8 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
                 WorkflowNode::Operation(OperationNode {
                     id: format!("hash-{index}"),
                     operation: OperationKind::HashFile,
+                    policy_target: None,
+                    operation_payload: Value::Null,
                     depends_on: Vec::new(),
                     depends_on_selected: Vec::new(),
                     provides_selected: None,

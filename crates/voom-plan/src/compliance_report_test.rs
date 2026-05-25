@@ -37,6 +37,23 @@ fn node(
     }
 }
 
+fn transcode_node(status: NodeStatus) -> PlanNode {
+    PlanNode {
+        operation_payload: json!({
+            "type": "transcode_video",
+            "target_codec": "hevc",
+            "container": "mkv",
+            "profile": "default-hevc"
+        }),
+        observed_state: Some(json!({
+            "container": "mp4",
+            "video_codec": "h264",
+            "video_stream_count": 1
+        })),
+        ..node(status, "transcode_video", None)
+    }
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
@@ -134,6 +151,33 @@ fn blocked_node_maps_to_blocked_check() {
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Blocked
     );
+}
+
+#[test]
+fn transcode_video_planned_node_maps_to_supported_check() {
+    let report =
+        generate_compliance_report(&plan(vec![transcode_node(NodeStatus::Planned)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
+    assert_eq!(report.checks[0].compliance_kind, "transcode_video");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Supported
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn transcode_video_blocked_node_maps_to_blocked_check() {
+    let report =
+        generate_compliance_report(&plan(vec![transcode_node(NodeStatus::Blocked)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Blocked);
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Blocked
+    );
+    assert!(report.diagnostics.is_empty());
 }
 
 #[test]
