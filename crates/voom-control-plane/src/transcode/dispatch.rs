@@ -65,7 +65,10 @@ pub fn request_for(
     })
 }
 
-pub fn validate_result(result: &TranscodeVideoResult) -> Result<(), VoomError> {
+pub fn validate_result(
+    selected: &SelectedSource,
+    result: &TranscodeVideoResult,
+) -> Result<(), VoomError> {
     if result.output_container != "mkv"
         || !matches!(result.output_video_codec.as_str(), "hevc" | "h265")
     {
@@ -77,6 +80,13 @@ pub fn validate_result(result: &TranscodeVideoResult) -> Result<(), VoomError> {
     if result.input_pre != result.input_post {
         return Err(VoomError::ArtifactChecksumMismatch(
             "transcode_video source changed during worker execution".to_owned(),
+        ));
+    }
+    if result.input_pre.size_bytes != selected.version.size_bytes
+        || result.input_pre.content_hash != selected.version.content_hash
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(
+            "transcode_video source facts do not match selected file_version".to_owned(),
         ));
     }
     Ok(())

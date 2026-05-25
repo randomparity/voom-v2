@@ -80,6 +80,37 @@ async fn execute_rejects_non_hevc_worker_result_before_commit() {
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
 }
 
+#[tokio::test]
+async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+
+    let err = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+        },
+        &WrongInputFactsTranscodeDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(
+        !dir.path().join("out/Movie.hevc.mkv").exists(),
+        "mismatched input facts must stop before commit"
+    );
+}
+
 #[derive(Debug)]
 struct FakeTranscodeDispatcher;
 
@@ -105,6 +136,23 @@ impl TranscodeVideoDispatcher for WrongCodecTranscodeDispatcher {
     ) -> Result<TranscodeVideoResult, voom_core::VoomError> {
         std::fs::write(&request.output.path, b"hevc bytes").unwrap();
         Ok(transcode_result(request, "h264"))
+    }
+}
+
+#[derive(Debug)]
+struct WrongInputFactsTranscodeDispatcher;
+
+#[async_trait]
+impl TranscodeVideoDispatcher for WrongInputFactsTranscodeDispatcher {
+    async fn dispatch_transcode_video(
+        &self,
+        request: TranscodeVideoRequest,
+    ) -> Result<TranscodeVideoResult, voom_core::VoomError> {
+        std::fs::write(&request.output.path, b"hevc bytes").unwrap();
+        let mut result = transcode_result(request, "hevc");
+        result.input_pre.size_bytes += 1;
+        result.input_post = result.input_pre.clone();
+        Ok(result)
     }
 }
 
