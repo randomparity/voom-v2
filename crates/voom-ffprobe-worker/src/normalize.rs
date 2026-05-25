@@ -121,10 +121,62 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             insert_string(input, &mut output, "avg_frame_rate");
             insert_u64_string(input, &mut output, "sample_rate", "sample_rate")?;
             insert_u64_value(input, &mut output, "channels", "channels")?;
+            insert_stream_language(input, &mut output);
+            insert_disposition(input, &mut output)?;
 
             Ok(Value::Object(output))
         })
         .collect()
+}
+
+fn insert_stream_language(input: &Map<String, Value>, output: &mut Map<String, Value>) {
+    let Some(tags) = input.get("tags").and_then(Value::as_object) else {
+        return;
+    };
+    insert_string_as(tags, output, "language", "language");
+}
+
+fn insert_disposition(
+    input: &Map<String, Value>,
+    output: &mut Map<String, Value>,
+) -> Result<(), WorkerError> {
+    let Some(disposition) = input.get("disposition") else {
+        return Ok(());
+    };
+    let object = disposition
+        .as_object()
+        .ok_or_else(|| malformed("disposition must be a JSON object"))?;
+    let mut normalized = Map::new();
+    for key in ["default", "forced"] {
+        if let Some(value) = object.get(key) {
+            normalized.insert(key.to_owned(), Value::Bool(disposition_bool(value, key)?));
+        }
+    }
+    if !normalized.is_empty() {
+        output.insert("disposition".to_owned(), Value::Object(normalized));
+    }
+    Ok(())
+}
+
+fn disposition_bool(value: &Value, key: &str) -> Result<bool, WorkerError> {
+    if let Some(value) = value.as_bool() {
+        return Ok(value);
+    }
+    if let Some(value) = value.as_u64() {
+        return match value {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(malformed(format!("{key} disposition must be 0 or 1"))),
+        };
+    }
+    if let Some(value) = value.as_str() {
+        return match value {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(malformed(format!("{key} disposition must be 0 or 1"))),
+        };
+    }
+    Err(malformed(format!("{key} disposition must be 0 or 1")))
 }
 
 fn insert_string(input: &Map<String, Value>, output: &mut Map<String, Value>, key: &str) {

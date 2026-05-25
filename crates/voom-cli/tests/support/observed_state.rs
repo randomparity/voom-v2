@@ -186,7 +186,7 @@ fn probed_media(
         .map(|items| {
             items
                 .iter()
-                .filter_map(|stream| probed_stream(stream, container))
+                .filter_map(probed_stream)
                 .collect::<Vec<Value>>()
         })
         .unwrap_or_default();
@@ -198,7 +198,7 @@ fn probed_media(
     })))
 }
 
-fn probed_stream(stream: &Value, container: &str) -> Option<Value> {
+fn probed_stream(stream: &Value) -> Option<Value> {
     let kind = stream.get("kind").and_then(Value::as_str)?;
     let codec = stream.get("codec_name").and_then(Value::as_str)?;
     if !matches!(kind, "video" | "audio" | "subtitle") {
@@ -207,11 +207,7 @@ fn probed_stream(stream: &Value, container: &str) -> Option<Value> {
     let mut out = serde_json::Map::new();
     out.insert("kind".to_owned(), Value::String(kind.to_owned()));
     out.insert("codec".to_owned(), Value::String(codec.to_owned()));
-    if let Some(language) = stream
-        .get("language")
-        .and_then(Value::as_str)
-        .or_else(|| mp4_default_language(container))
-    {
+    if let Some(language) = stream.get("language").and_then(Value::as_str) {
         out.insert("language".to_owned(), Value::String(language.to_owned()));
     }
     for (source, target) in [
@@ -234,15 +230,9 @@ fn probed_stream(stream: &Value, container: &str) -> Option<Value> {
     Some(Value::Object(out))
 }
 
-fn mp4_default_language(container: &str) -> Option<&'static str> {
-    if container
-        .split(',')
-        .any(|part| part == "mp4" || part == "mov")
-    {
-        Some("und")
-    } else {
-        None
-    }
+#[cfg(test)]
+pub fn probed_stream_for_test(stream: &Value) -> Option<Value> {
+    probed_stream(stream)
 }
 
 fn observed_sidecars(

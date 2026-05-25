@@ -57,6 +57,11 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
     assert_eq!(snapshot.file_version_id, persisted.file_version_id);
     assert_eq!(snapshot.probed_by, Some(worker.id));
     assert_eq!(snapshot.payload, result.snapshot);
+    assert_eq!(snapshot.payload["streams"][0]["language"], "eng");
+    assert_eq!(
+        snapshot.payload["streams"][0]["disposition"]["default"],
+        true
+    );
     assert_eq!(
         state_transition_event_kinds(&cp).await,
         vec![
@@ -179,7 +184,18 @@ fn matching_probe_result(
                 "provider_version": "test",
                 "command": "ffprobe",
                 "probed_at": "2026-05-24T00:00:00Z"
-            }
+            },
+            "streams": [
+                {
+                    "index": 0,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "language": "eng",
+                    "disposition": {
+                        "default": true
+                    }
+                }
+            ]
         }),
     }
 }
