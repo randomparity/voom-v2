@@ -1,0 +1,179 @@
+---
+source: crates/voom-cli/tests/artifact_envelope.rs
+expression: json
+---
+[
+  {
+    "schema_version": "0",
+    "command": "scan",
+    "status": "ok",
+    "data": {
+      "path": "[media]/tiny.mp4",
+      "mode": "file",
+      "summary": {
+        "discovered": 1,
+        "ingested": 1,
+        "probed": 1,
+        "snapshots_recorded": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "files": [
+        {
+          "path": "[media]/tiny.mp4",
+          "status": "scanned",
+          "file_asset_id": 1,
+          "file_version_id": 1,
+          "file_location_id": 1,
+          "media_snapshot_id": 1,
+          "content_hash": "[hash]",
+          "size_bytes": 1545,
+          "probe_worker_id": "[worker-id]"
+        }
+      ],
+      "skipped": []
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.stage_copy",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 1,
+        "artifact_location_id": 1,
+        "source_file_version_id": 1,
+        "source_location_id": 1,
+        "source_path": "[media]/tiny.mp4",
+        "staging_path": "[artifact-dir]/staged.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]"
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.verify",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 1,
+        "artifact_location_id": 1,
+        "verification_id": 1,
+        "worker_id": "[worker-id]",
+        "status": "succeeded",
+        "path": "[artifact-dir]/staged.mp4",
+        "expected_size_bytes": 1545,
+        "expected_checksum": "[hash]",
+        "observed_size_bytes": 1545,
+        "observed_checksum": "[hash]"
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.commit",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "commit_record_id": 1,
+        "artifact_handle_id": 1,
+        "verification_id": 1,
+        "target_path": "[artifact-dir]/committed.mp4",
+        "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
+        "state": "committed",
+        "result_file_version_id": 2,
+        "result_file_location_id": 2
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 1,
+        "state": "committed",
+        "source_file_version_id": 1,
+        "target_path": "[artifact-dir]/committed.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 1,
+            "artifact_location_id": 1,
+            "path": "[artifact-dir]/staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "succeeded",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "observed_size_bytes": 1545,
+            "observed_checksum": "[hash]"
+          }
+        ],
+        "commits": [
+          {
+            "id": 1,
+            "verification_id": 1,
+            "target_path": "[artifact-dir]/committed.mp4",
+            "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
+            "state": "committed",
+            "result_file_version_id": 2,
+            "result_file_location_id": 2
+          }
+        ],
+        "latest_verification": {
+          "id": 1,
+          "artifact_location_id": 1,
+          "path": "[artifact-dir]/staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "succeeded",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "observed_size_bytes": 1545,
+          "observed_checksum": "[hash]"
+        },
+        "latest_commit": {
+          "id": 1,
+          "verification_id": 1,
+          "target_path": "[artifact-dir]/committed.mp4",
+          "temp_path": "[artifact-dir]/.voom-tmp.committed.mp4.[temp]",
+          "state": "committed",
+          "result_file_version_id": 2,
+          "result_file_location_id": 2
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  }
+]

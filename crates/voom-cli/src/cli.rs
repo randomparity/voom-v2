@@ -51,6 +51,9 @@ pub enum Command {
     /// Inspect scheduler state.
     #[command(subcommand)]
     Scheduler(SchedulerCommand),
+    /// Stage, verify, commit, or inspect artifacts.
+    #[command(subcommand)]
+    Artifact(ArtifactCommand),
     /// Scan an explicit file or directory path.
     Scan {
         #[arg(long)]
@@ -178,6 +181,53 @@ pub enum SchedulerCommand {
     /// Inspect scheduler decisions.
     #[command(subcommand)]
     Decisions(SchedulerDecisionCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ArtifactCommand {
+    /// Copy a scanned file version into a staging path.
+    StageCopy {
+        #[arg(long)]
+        file_version_id: u64,
+        #[arg(long)]
+        source_location_id: Option<u64>,
+        #[arg(long)]
+        staging_path: PathBuf,
+    },
+    /// Verify the live staging bytes for an artifact handle.
+    Verify {
+        #[arg(long)]
+        artifact_handle_id: u64,
+    },
+    /// Promote a verified staged artifact to an add-only target path.
+    Commit {
+        #[arg(long)]
+        artifact_handle_id: u64,
+        #[arg(long)]
+        target_path: PathBuf,
+    },
+    /// List artifact handles, optionally filtered by inspection state.
+    List {
+        #[arg(long)]
+        state: Option<ArtifactStateArg>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one artifact handle.
+    Show {
+        #[arg(long)]
+        artifact_handle_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum ArtifactStateArg {
+    Staged,
+    Verified,
+    Committed,
+    Failed,
+    RecoveryRequired,
 }
 
 #[derive(Subcommand, Debug, Clone)]

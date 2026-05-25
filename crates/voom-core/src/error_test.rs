@@ -186,3 +186,12 @@ fn every_error_code_has_a_wire_string() {
         );
     }
 }
+
+#[test]
+fn error_code_from_wire_str_round_trips_every_variant() {
+    for &code in ErrorCode::ALL {
+        let parsed = ErrorCode::from_wire_str(code.as_str()).unwrap();
+        assert_eq!(parsed, code);
+    }
+    assert!(ErrorCode::from_wire_str("NOT_A_CODE").is_none());
+}

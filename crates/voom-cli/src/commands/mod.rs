@@ -1,3 +1,4 @@
+pub mod artifact;
 pub(crate) mod common;
 pub mod compliance;
 pub mod health;

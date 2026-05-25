@@ -1,4 +1,4 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -170,6 +170,45 @@ fn default_ffprobe_worker_command_prefers_current_exe_sibling() {
     let command = bundled_ffprobe_command_from(None, Ok(current_exe));
 
     assert_eq!(command.program, worker.as_os_str());
+    assert!(command.env.is_empty());
+}
+
+#[test]
+fn default_ffprobe_worker_command_uses_sibling_ffprobe_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let current_exe = dir.path().join("voom");
+    let worker = dir.path().join("voom-ffprobe-worker");
+    let ffprobe = dir.path().join("ffprobe");
+    std::fs::write(&worker, b"").unwrap();
+    std::fs::write(&ffprobe, b"").unwrap();
+
+    let command = bundled_ffprobe_command_from(None, Ok(current_exe));
+
+    assert_eq!(command.program, worker.as_os_str());
+    assert_eq!(
+        command.env,
+        vec![(OsString::from("VOOM_FFPROBE_BIN"), ffprobe.into_os_string())]
+    );
+}
+
+#[test]
+fn default_ffprobe_worker_command_searches_profile_dir_from_test_deps_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let deps_dir = dir.path().join("deps");
+    std::fs::create_dir(&deps_dir).unwrap();
+    let current_exe = deps_dir.join("scan_worker_test");
+    let worker = dir.path().join("voom-ffprobe-worker");
+    let ffprobe = dir.path().join("ffprobe");
+    std::fs::write(&worker, b"").unwrap();
+    std::fs::write(&ffprobe, b"").unwrap();
+
+    let command = bundled_ffprobe_command_from(None, Ok(current_exe));
+
+    assert_eq!(command.program, worker.as_os_str());
+    assert_eq!(
+        command.env,
+        vec![(OsString::from("VOOM_FFPROBE_BIN"), ffprobe.into_os_string())]
+    );
 }
 
 #[test]

@@ -151,6 +151,57 @@ async fn create_file_version_accepts_ingest_with_null_parent() {
     assert!(got.produced_from_version_id.is_none());
 }
 
+#[tokio::test]
+async fn create_file_version_accepts_staged_commit_with_parent() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let source = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "hash-source".to_owned(),
+            size_bytes: 7,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let committed = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "hash-staged".to_owned(),
+            size_bytes: 7,
+            produced_by: ProducedBy::StagedCommit,
+            produced_from_version_id: Some(source.id),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let got = repo.get_file_version(committed.id).await.unwrap().unwrap();
+    assert_eq!(got.produced_by, ProducedBy::StagedCommit);
+    assert_eq!(got.produced_from_version_id, Some(source.id));
+}
+
+#[tokio::test]
+async fn create_file_version_requires_parent_for_staged_commit() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let err = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "hash-staged".to_owned(),
+            size_bytes: 7,
+            produced_by: ProducedBy::StagedCommit,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
 // ---- identity_evidence ---------------------------------------------------
 
 #[tokio::test]

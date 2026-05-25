@@ -104,6 +104,7 @@ pub enum ProducedBy {
     Remux,
     Restore,
     ExternalObserved,
+    StagedCommit,
 }
 
 impl ProducedBy {
@@ -115,6 +116,7 @@ impl ProducedBy {
             Self::Remux => "remux",
             Self::Restore => "restore",
             Self::ExternalObserved => "external_observed",
+            Self::StagedCommit => "staged_commit",
         }
     }
 
@@ -125,6 +127,7 @@ impl ProducedBy {
             "remux" => Ok(Self::Remux),
             "restore" => Ok(Self::Restore),
             "external_observed" => Ok(Self::ExternalObserved),
+            "staged_commit" => Ok(Self::StagedCommit),
             other => Err(VoomError::Database(format!(
                 "file_versions.produced_by {other:?} not in vocab"
             ))),

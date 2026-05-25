@@ -107,6 +107,50 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Stable inventory for parser and test coverage. Keep this in the same
+    /// order as the enum so public code additions are easy to review.
+    pub const ALL: &'static [Self] = &[
+        Self::DbUnreachable,
+        Self::DbUninitialized,
+        Self::DbPartialSchema,
+        Self::DbDirtyMigration,
+        Self::DbSchemaTooNew,
+        Self::ConfigInvalid,
+        Self::NotFound,
+        Self::Internal,
+        Self::BadArgs,
+        Self::DependencyCycle,
+        Self::Conflict,
+        Self::BlockedByUseLease,
+        Self::BlockedByPendingCommit,
+        Self::BlockedByClosureGrew,
+        Self::StaleIdentityEvidence,
+        Self::ClosureResolutionIncomplete,
+        Self::WorkerTimeout,
+        Self::WorkerCrash,
+        Self::NoEligibleWorker,
+        Self::ArtifactUnavailable,
+        Self::ArtifactChecksumMismatch,
+        Self::ExternalSystemUnavailable,
+        Self::ExternalSystemRateLimited,
+        Self::VerificationFailure,
+        Self::BackupFailure,
+        Self::CommitFailure,
+        Self::PolicyParseError,
+        Self::PolicyValidationError,
+        Self::PlanGenerationError,
+        Self::ComplianceReportError,
+        Self::PolicyExecutionError,
+        Self::MissingCapability,
+        Self::MalformedWorkerResult,
+        Self::UserCancellation,
+        Self::ApprovalRequired,
+        Self::PriorityPolicyConflict,
+        Self::WorkerRetired,
+        Self::WorkerIncarnationStale,
+        Self::AmbiguousWorkerSelection,
+    ];
+
     /// Wire-format string for the JSON envelope's `error.code` field.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -151,6 +195,18 @@ impl ErrorCode {
             Self::WorkerIncarnationStale => "WORKER_INCARNATION_STALE",
             Self::AmbiguousWorkerSelection => "AMBIGUOUS_WORKER_SELECTION",
         }
+    }
+
+    /// Parse a public wire-format error code.
+    ///
+    /// Returns `None` for unknown values so callers can decide whether the
+    /// source is user input, persisted data, or an internal invariant breach.
+    #[must_use]
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == value)
     }
 }
 

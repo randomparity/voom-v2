@@ -1,0 +1,169 @@
+---
+source: crates/voom-cli/tests/artifact_envelope.rs
+expression: json
+---
+[
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "error",
+    "data": null,
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": {
+      "code": "NOT_FOUND",
+      "message": "not found: artifact_handles 999999 missing"
+    }
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.show",
+    "status": "ok",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 4,
+        "state": "failed",
+        "source_file_version_id": 4,
+        "staging_path": "[artifact-dir]/verify-failed-staged.mp4",
+        "size_bytes": 1545,
+        "checksum": "[hash]",
+        "verifications": [
+          {
+            "id": 3,
+            "artifact_location_id": 4,
+            "path": "[artifact-dir]/verify-failed-staged.mp4",
+            "worker_id": "[worker-id]",
+            "status": "failed",
+            "expected_size_bytes": 1545,
+            "expected_checksum": "[hash]",
+            "failure_class": "artifact_checksum_mismatch",
+            "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+            "message": "artifact checksum mismatch: observed file facts differ from expected size/hash"
+          }
+        ],
+        "commits": [],
+        "latest_verification": {
+          "id": 3,
+          "artifact_location_id": 4,
+          "path": "[artifact-dir]/verify-failed-staged.mp4",
+          "worker_id": "[worker-id]",
+          "status": "failed",
+          "expected_size_bytes": 1545,
+          "expected_checksum": "[hash]",
+          "failure_class": "artifact_checksum_mismatch",
+          "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+          "message": "artifact checksum mismatch: observed file facts differ from expected size/hash"
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": null
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.commit",
+    "status": "error",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 1,
+        "target_path": "[artifact-dir]/unverified-target.mp4",
+        "error_code": "CONFIG_INVALID",
+        "message": "config error: artifact_handle 1 has no successful verification for its live staging location"
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": {
+      "code": "CONFIG_INVALID",
+      "message": "config error: artifact_handle 1 has no successful verification for its live staging location"
+    }
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.commit",
+    "status": "error",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 2,
+        "verification_id": 1,
+        "target_path": "[artifact-dir]/drift-target.mp4",
+        "error_code": "ARTIFACT_CHECKSUM_MISMATCH",
+        "message": "artifact checksum mismatch: staged artifact facts no longer match the successful verification"
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": {
+      "code": "ARTIFACT_CHECKSUM_MISMATCH",
+      "message": "artifact checksum mismatch: staged artifact facts no longer match the successful verification"
+    }
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.commit",
+    "status": "error",
+    "data": {
+      "artifact": {
+        "artifact_handle_id": 3,
+        "verification_id": 2,
+        "target_path": "[artifact-dir]/already-exists.mp4",
+        "error_code": "CONFIG_INVALID",
+        "message": "config error: artifact path must not already exist: [artifact-dir]/already-exists.mp4"
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": {
+      "code": "CONFIG_INVALID",
+      "message": "config error: artifact path must not already exist: [artifact-dir]/already-exists.mp4"
+    }
+  },
+  {
+    "schema_version": "0",
+    "command": "artifact.commit",
+    "status": "error",
+    "data": {
+      "artifact": {
+        "commit_record_id": 1,
+        "artifact_handle_id": 5,
+        "verification_id": 4,
+        "target_path": "[artifact-dir]/long-target.mp4",
+        "temp_path": "[artifact-dir]/.voom-tmp.long-target.mp4.[temp]",
+        "state": "recovery_required",
+        "recovery_required": {
+          "recovery_reason": "promotion_failed",
+          "target_path": "[artifact-dir]/long-target.mp4",
+          "target_exists": false,
+          "temp_exists": false,
+          "staging_path": "[artifact-dir]/recovery-failure-staged.mp4",
+          "staging_exists": true
+        }
+      }
+    },
+    "local": {
+      "db_url": "[db-url]",
+      "config_path": "[config-path]"
+    },
+    "warnings": [],
+    "error": {
+      "code": "COMMIT_FAILURE",
+      "message": "commit failure: commit promotion requires recovery"
+    }
+  }
+]

@@ -255,6 +255,83 @@ pub struct ArtifactLineageRecordedPayload {
     pub operation: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactStagedPayload {
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: Option<u64>,
+    pub staging_path: String,
+    pub size_bytes: u64,
+    pub checksum: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVerificationStartedPayload {
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub worker_id: u64,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVerificationSucceededPayload {
+    pub verification_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub worker_id: u64,
+    pub observed_size_bytes: u64,
+    pub observed_checksum: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactVerificationFailedPayload {
+    pub verification_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub worker_id: u64,
+    pub error_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCommitStartedPayload {
+    pub commit_record_id: u64,
+    pub artifact_handle_id: u64,
+    pub source_file_version_id: u64,
+    pub verification_id: u64,
+    pub target_path: String,
+    pub temp_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCommitCompletedPayload {
+    pub commit_record_id: u64,
+    pub artifact_handle_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCommitFailedPreMutationPayload {
+    pub artifact_handle_id: u64,
+    pub commit_record_id: Option<u64>,
+    pub target_path: String,
+    pub error_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactCommitRecoveryRequiredPayload {
+    pub commit_record_id: u64,
+    pub artifact_handle_id: u64,
+    pub target_path: String,
+    pub temp_path: String,
+    pub recovery_reason: String,
+    pub error_code: String,
+    pub message: String,
+}
+
 // --- issues ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -850,6 +927,22 @@ pub enum Event {
     ArtifactLocationRetired(ArtifactLocationRetiredPayload),
     #[serde(rename = "artifact_lineage.recorded")]
     ArtifactLineageRecorded(ArtifactLineageRecordedPayload),
+    #[serde(rename = "artifact.staged")]
+    ArtifactStaged(ArtifactStagedPayload),
+    #[serde(rename = "artifact.verification_started")]
+    ArtifactVerificationStarted(ArtifactVerificationStartedPayload),
+    #[serde(rename = "artifact.verification_succeeded")]
+    ArtifactVerificationSucceeded(ArtifactVerificationSucceededPayload),
+    #[serde(rename = "artifact.verification_failed")]
+    ArtifactVerificationFailed(ArtifactVerificationFailedPayload),
+    #[serde(rename = "artifact.commit_started")]
+    ArtifactCommitStarted(ArtifactCommitStartedPayload),
+    #[serde(rename = "artifact.commit_completed")]
+    ArtifactCommitCompleted(ArtifactCommitCompletedPayload),
+    #[serde(rename = "artifact.commit_failed_pre_mutation")]
+    ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload),
+    #[serde(rename = "artifact.commit_recovery_required")]
+    ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload),
     #[serde(rename = "issue.opened")]
     IssueOpened(IssueLifecyclePayload),
     #[serde(rename = "issue.updated")]
@@ -961,6 +1054,14 @@ impl Event {
             Self::ArtifactLocationRecorded(_) => EventKind::ArtifactLocationRecorded,
             Self::ArtifactLocationRetired(_) => EventKind::ArtifactLocationRetired,
             Self::ArtifactLineageRecorded(_) => EventKind::ArtifactLineageRecorded,
+            Self::ArtifactStaged(_) => EventKind::ArtifactStaged,
+            Self::ArtifactVerificationStarted(_) => EventKind::ArtifactVerificationStarted,
+            Self::ArtifactVerificationSucceeded(_) => EventKind::ArtifactVerificationSucceeded,
+            Self::ArtifactVerificationFailed(_) => EventKind::ArtifactVerificationFailed,
+            Self::ArtifactCommitStarted(_) => EventKind::ArtifactCommitStarted,
+            Self::ArtifactCommitCompleted(_) => EventKind::ArtifactCommitCompleted,
+            Self::ArtifactCommitFailedPreMutation(_) => EventKind::ArtifactCommitFailedPreMutation,
+            Self::ArtifactCommitRecoveryRequired(_) => EventKind::ArtifactCommitRecoveryRequired,
             Self::IssueOpened(_) => EventKind::IssueOpened,
             Self::IssueUpdated(_) => EventKind::IssueUpdated,
             Self::IssueResolved(_) => EventKind::IssueResolved,
