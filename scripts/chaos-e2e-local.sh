@@ -9,6 +9,9 @@ duration="${CHAOS_DURATION:-10m}"
 speed="${CHAOS_SPEED:-5x}"
 checkpoint_interval="${CHAOS_CHECKPOINT_INTERVAL:-30s}"
 execute_policy="${CHAOS_EXECUTE_POLICY:-0}"
+policy_version_id="${CHAOS_POLICY_VERSION_ID:-}"
+policy_container="${CHAOS_POLICY_CONTAINER:-mp4}"
+policy_video_codec="${CHAOS_POLICY_VIDEO_CODEC:-h264}"
 preserve="${CHAOS_PRESERVE_OUTPUT:-1}"
 cleanup="${CHAOS_CLEANUP:-0}"
 
@@ -19,9 +22,8 @@ for tool in git uv jq cargo; do
   fi
 done
 
-if [[ "$execute_policy" != "0" ]]; then
-  echo "CHAOS_EXECUTE_POLICY=1 is intentionally unsupported in the first local churn script" >&2
-  echo "Execution-enabled churn needs a Rust harness path that seeds policy/input rows in the same ephemeral database after each scan." >&2
+if [[ "$execute_policy" != "0" && -z "$policy_version_id" ]]; then
+  echo "CHAOS_POLICY_VERSION_ID is required when CHAOS_EXECUTE_POLICY is nonzero" >&2
   exit 1
 fi
 
@@ -106,14 +108,58 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
     echo "non-allowlisted scan failure at checkpoint $checkpoint: $error_code" >&2
     exit 1
   fi
+  policy_status="skipped"
+  policy_reason=""
+  policy_input_out=""
+  policy_report_out=""
+  if [[ "$execute_policy" != "0" && "$status" = "ok" ]]; then
+    scanned_row="$(jq -c '.data.files[]? | select(.status == "scanned" and .file_version_id and .media_snapshot_id) | {file_version_id, media_snapshot_id}' "$scan_out" | head -n 1)"
+    if [[ -n "$scanned_row" ]]; then
+      file_version_id="$(jq -r '.file_version_id' <<<"$scanned_row")"
+      media_snapshot_id="$(jq -r '.media_snapshot_id' <<<"$scanned_row")"
+      input_slug="chaos-local-$checkpoint"
+      policy_input_out="$workdir/policy-input-$checkpoint.json"
+      "$voom_bin" --database-url "$url" policy input create-from-scan \
+        --slug "$input_slug" \
+        --file-version-id "$file_version_id" \
+        --media-snapshot-id "$media_snapshot_id" \
+        --container "$policy_container" \
+        --video-codec "$policy_video_codec" > "$policy_input_out"
+      input_set_id="$(jq -r '.data.input_set.input_set_id' "$policy_input_out")"
+      policy_report_out="$workdir/policy-report-$checkpoint.json"
+      if [[ "$execute_policy" = "execute" ]]; then
+        mkdir -p "$workdir/staging-$checkpoint" "$workdir/output-$checkpoint"
+        "$voom_bin" --database-url "$url" compliance execute \
+          --policy-version-id "$policy_version_id" \
+          --input-set-id "$input_set_id" \
+          --staging-root "$workdir/staging-$checkpoint" \
+          --output-dir "$workdir/output-$checkpoint" > "$policy_report_out"
+        policy_status="executed"
+      else
+        "$voom_bin" --database-url "$url" compliance report \
+          --policy-version-id "$policy_version_id" \
+          --input-set-id "$input_set_id" > "$policy_report_out"
+        policy_status="reported"
+      fi
+    else
+      policy_status="skipped"
+      policy_reason="scan had no scanned file with file_version_id and media_snapshot_id"
+    fi
+  elif [[ "$execute_policy" = "0" ]]; then
+    policy_reason="CHAOS_EXECUTE_POLICY is unset or zero"
+  else
+    policy_reason="scan status was $status"
+  fi
   jq -n \
     --argjson checkpoint "$checkpoint" \
     --arg status "$status" \
     --arg error_code "$error_code" \
     --arg scan_out "$scan_out" \
-    --arg policy_status "skipped" \
-    --arg policy_reason "first local churn script is scan-only; execution-enabled churn requires same-database policy seeding" \
-    '{checkpoint:$checkpoint,status:$status,error_code:$error_code,scan_out:$scan_out,policy_status:$policy_status,policy_reason:$policy_reason}' >> "$summary"
+    --arg policy_status "$policy_status" \
+    --arg policy_reason "$policy_reason" \
+    --arg policy_input_out "$policy_input_out" \
+    --arg policy_report_out "$policy_report_out" \
+    '{checkpoint:$checkpoint,status:$status,error_code:$error_code,scan_out:$scan_out,policy_status:$policy_status,policy_reason:$policy_reason,policy_input_out:$policy_input_out,policy_report_out:$policy_report_out}' >> "$summary"
   sleep "$checkpoint_interval"
 done
 

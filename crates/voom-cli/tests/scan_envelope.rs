@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
+use voom_policy::load_policy_fixture;
 use voom_store::test_support::sqlite_url_for;
 
 const BASIC_FFPROBE_JSON: &str =
@@ -192,6 +193,128 @@ async fn scan_content_drift_fails_without_snapshot() {
     assert_table_count(&pool, "media_snapshots", 0).await;
 }
 
+#[tokio::test]
+async fn policy_input_create_from_scan_outputs_ids_for_scanned_file() {
+    let seeded = seed().await;
+    let media = tiny_media_fixture();
+    let scan = scan_command(&seeded.url, &media).output().unwrap();
+    assert_status(&scan, Some(0));
+    let scan_json = envelope(scan.stdout);
+    let file = &scan_json["data"]["files"][0];
+    let file_version_id = file["file_version_id"].as_u64().unwrap().to_string();
+    let media_snapshot_id = file["media_snapshot_id"].as_u64().unwrap().to_string();
+
+    let output = policy_input_from_scan_command(
+        &seeded.url,
+        "scan-h264",
+        &file_version_id,
+        &media_snapshot_id,
+        "mp4",
+        "h264",
+    )
+    .output()
+    .unwrap();
+
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "policy");
+    assert_eq!(json["status"], "ok");
+    assert!(json["data"]["input_set"]["input_set_id"].as_u64().unwrap() > 0);
+    assert_eq!(json["data"]["input_set"]["slug"], "scan-h264");
+    assert_eq!(json["data"]["input_set"]["source_kind"], "imported");
+    assert_eq!(
+        json["data"]["input_set"]["file_version_id"],
+        file["file_version_id"]
+    );
+    assert_eq!(
+        json["data"]["input_set"]["media_snapshot_id"],
+        file["media_snapshot_id"]
+    );
+}
+
+#[tokio::test]
+async fn policy_input_create_from_scan_can_feed_plan_show() {
+    let seeded = seed().await;
+    let media = tiny_media_fixture();
+    let scan = scan_command(&seeded.url, &media).output().unwrap();
+    assert_status(&scan, Some(0));
+    let scan_json = envelope(scan.stdout);
+    let file = &scan_json["data"]["files"][0];
+    let file_version_id = file["file_version_id"].as_u64().unwrap().to_string();
+    let media_snapshot_id = file["media_snapshot_id"].as_u64().unwrap().to_string();
+    let cp = voom_control_plane::ControlPlane::open(&seeded.url)
+        .await
+        .unwrap();
+    let policy = cp
+        .create_policy_document(
+            "video-transcode-hevc",
+            &load_policy_fixture("fixtures/policies/video-transcode-hevc.voom").unwrap(),
+        )
+        .await
+        .unwrap();
+    let create = policy_input_from_scan_command(
+        &seeded.url,
+        "scan-h264-plan",
+        &file_version_id,
+        &media_snapshot_id,
+        "mp4",
+        "h264",
+    )
+    .output()
+    .unwrap();
+    assert_status(&create, Some(0));
+    let create_json = envelope(create.stdout);
+    let input_set_id = create_json["data"]["input_set"]["input_set_id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &seeded.url,
+            "plan",
+            "show",
+            "--policy-version-id",
+            &policy.version.id.0.to_string(),
+            "--input-set-id",
+            &input_set_id,
+        ])
+        .output()
+        .unwrap();
+
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "plan");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(
+        json["data"]["plan"]["input"]["input_set_id"],
+        input_set_id.parse::<u64>().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn policy_input_create_from_scan_missing_rows_is_not_found() {
+    let seeded = seed().await;
+
+    let output = policy_input_from_scan_command(
+        &seeded.url,
+        "missing-scan",
+        "999998",
+        "999999",
+        "mp4",
+        "h264",
+    )
+    .output()
+    .unwrap();
+
+    assert_status(&output, Some(2));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "policy");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+}
+
 struct Seeded {
     _tmp: NamedTempFile,
     url: String,
@@ -223,6 +346,35 @@ fn scan_command_without_worker_env(url: &str, path: &Path) -> Command {
         .env_remove("VOOM_FFPROBE_WORKER_BIN")
         .env("VOOM_FFPROBE_BIN", success_ffprobe_binary())
         .env("PATH", "/usr/bin:/bin");
+    command
+}
+
+fn policy_input_from_scan_command(
+    url: &str,
+    slug: &str,
+    file_version_id: &str,
+    media_snapshot_id: &str,
+    container: &str,
+    video_codec: &str,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
+    command.args([
+        "--database-url",
+        url,
+        "policy",
+        "input",
+        "create-from-scan",
+        "--slug",
+        slug,
+        "--file-version-id",
+        file_version_id,
+        "--media-snapshot-id",
+        media_snapshot_id,
+        "--container",
+        container,
+        "--video-codec",
+        video_codec,
+    ]);
     command
 }
 

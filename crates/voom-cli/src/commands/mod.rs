@@ -5,6 +5,7 @@ pub mod health;
 pub mod init;
 pub mod node;
 pub mod plan;
+pub mod policy;
 pub mod scan;
 pub mod scheduler;
 pub mod token_source;
