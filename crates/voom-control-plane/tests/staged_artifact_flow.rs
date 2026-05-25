@@ -209,23 +209,9 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, dir: &Path)
 }
 
 fn install_worker_siblings() {
-    install_ffprobe_worker_beside_test_binary();
+    copy_worker_beside_test_binary("voom-ffprobe-worker");
     copy_worker_beside_test_binary("voom-verify-artifact-worker");
-}
-
-fn install_ffprobe_worker_beside_test_binary() {
-    let worker = built_worker_binary("voom-ffprobe-worker");
-    let sibling = test_binary_sibling("voom-ffprobe-worker");
-    if sibling == *worker {
-        return;
-    }
-    let script = format!(
-        "#!/usr/bin/env sh\nVOOM_FFPROBE_BIN='{}' exec '{}' \"$@\"\n",
-        success_ffprobe_binary().display(),
-        worker.display()
-    );
-    std::fs::write(&sibling, script).unwrap();
-    make_executable(&sibling);
+    copy_ffprobe_beside_test_binary();
 }
 
 fn copy_worker_beside_test_binary(package: &'static str) {
@@ -234,6 +220,11 @@ fn copy_worker_beside_test_binary(package: &'static str) {
     if sibling != *worker {
         std::fs::copy(worker, sibling).unwrap();
     }
+}
+
+fn copy_ffprobe_beside_test_binary() {
+    std::fs::copy(success_ffprobe_binary(), test_binary_sibling("ffprobe")).unwrap();
+    make_executable(&test_binary_sibling("ffprobe"));
 }
 
 fn test_binary_sibling(package: &'static str) -> PathBuf {

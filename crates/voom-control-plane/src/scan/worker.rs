@@ -380,7 +380,12 @@ fn bundled_ffprobe_command_from(
             std::env::consts::EXE_SUFFIX
         ));
         if sibling.is_file() {
-            return WorkerCommand::new(sibling);
+            let ffprobe_sibling = exe_dir.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
+            let command = WorkerCommand::new(sibling);
+            if ffprobe_sibling.is_file() {
+                return command.env("VOOM_FFPROBE_BIN", ffprobe_sibling);
+            }
+            return command;
         }
     }
     WorkerCommand::new("voom-ffprobe-worker")
