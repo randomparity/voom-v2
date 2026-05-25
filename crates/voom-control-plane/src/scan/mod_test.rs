@@ -63,6 +63,97 @@ async fn directory_scan_summarizes_successes_and_skips() {
 }
 
 #[tokio::test]
+async fn directory_scan_persists_matching_srt_sidecar_as_bundle_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = write_file(dir.path(), "Movie.Name.mkv", b"movie");
+    let sidecar = write_file(dir.path(), "Movie.Name.eng.srt", b"subtitle");
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::AllSuccess);
+
+    let report = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.summary.ingested, 2);
+    assert_eq!(report.summary.discovered, 2);
+    assert_eq!(report.summary.snapshots_recorded, 1);
+    assert_eq!(report.files.len(), 1);
+    assert_eq!(report.files[0].path, media);
+    assert!(report.files[0].bundle_id.is_some());
+    assert_eq!(
+        report.files[0].bundle_member_role.as_deref(),
+        Some("primary_video")
+    );
+    assert_eq!(report.files[0].sidecars.len(), 1);
+    assert_eq!(report.files[0].sidecars[0].path, sidecar);
+    assert_eq!(
+        report.files[0].sidecars[0].bundle_id,
+        report.files[0].bundle_id.unwrap()
+    );
+    assert_eq!(
+        report.files[0].sidecars[0].bundle_member_role,
+        "external_subtitle"
+    );
+    assert!(
+        report.files[0].sidecars[0]
+            .content_hash
+            .starts_with("sha256:")
+    );
+    assert_eq!(table_count(&cp, "file_assets").await, 2);
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(table_count(&cp, "media_works").await, 1);
+    assert_eq!(table_count(&cp, "media_variants").await, 1);
+    assert_eq!(table_count(&cp, "asset_bundles").await, 1);
+    assert_eq!(table_count(&cp, "asset_bundle_members").await, 2);
+}
+
+#[tokio::test]
+async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "Movie.Name.mkv", b"movie");
+    write_file(dir.path(), "Movie.Name.eng.srt", b"subtitle");
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+
+    let first = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut FakeLauncher::new(FakePlan::AllSuccess),
+        )
+        .await
+        .unwrap();
+    let second = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut FakeLauncher::new(FakePlan::AllSuccess),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.files[0].sidecars.len(), 1);
+    assert_eq!(second.files[0].sidecars.len(), 1);
+    assert_eq!(
+        first.files[0].sidecars[0].bundle_id,
+        first.files[0].bundle_id.unwrap()
+    );
+    assert_eq!(
+        second.files[0].sidecars[0].bundle_id,
+        second.files[0].bundle_id.unwrap()
+    );
+    assert_eq!(table_count(&cp, "asset_bundles").await, 2);
+    assert_eq!(table_count(&cp, "asset_bundle_members").await, 4);
+}
+
+#[tokio::test]
 async fn scan_report_root_path_is_canonical() {
     let dir = tempfile::tempdir().unwrap();
     let _media = write_file(dir.path(), "movie.mkv", b"movie");

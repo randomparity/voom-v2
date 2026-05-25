@@ -1,8 +1,9 @@
 use serde_json::json;
 use voom_control_plane::scan::{
-    ScanFileErrorReport, ScanFileReport, ScanReport, ScanReportFileStatus, ScanSummary,
+    ScanFileErrorReport, ScanFileReport, ScanReport, ScanReportFileStatus, ScanSidecarReport,
+    ScanSummary,
 };
-use voom_core::{ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId};
+use voom_core::{BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId};
 
 use super::{ScanData, ScanFileData, failure_class_wire};
 
@@ -35,7 +36,21 @@ fn scan_data_serializes_to_spec_shape_with_rows_and_failure_errors() {
                     "media_snapshot_id": 13,
                     "content_hash": "blake3:good",
                     "size_bytes": 123,
-                    "probe_worker_id": 44
+                    "probe_worker_id": 44,
+                    "bundle_id": 20,
+                    "bundle_member_role": "primary_video",
+                    "sidecars": [
+                        {
+                            "path": "/library/good.eng.srt",
+                            "file_asset_id": 30,
+                            "file_version_id": 31,
+                            "file_location_id": 32,
+                            "bundle_id": 20,
+                            "bundle_member_role": "external_subtitle",
+                            "content_hash": "sha256:sidecar",
+                            "size_bytes": 45
+                        }
+                    ]
                 },
                 {
                     "path": "/library/bad.mkv",
@@ -72,6 +87,9 @@ fn scan_file_data_uses_failed_content_drift_status() {
         content_hash: Some("blake3:before".to_owned()),
         size_bytes: Some(789),
         probe_worker_id: Some(voom_core::WorkerId(45)),
+        bundle_id: None,
+        bundle_member_role: None,
+        sidecars: Vec::new(),
         error: Some(ScanFileErrorReport {
             code: ErrorCode::ArtifactChecksumMismatch,
             failure_class: FailureClass::ArtifactChecksumMismatch,
@@ -120,6 +138,9 @@ fn non_utf8_path_serializes_losslessly_as_os_bytes() {
         content_hash: None,
         size_bytes: None,
         probe_worker_id: None,
+        bundle_id: None,
+        bundle_member_role: None,
+        sidecars: Vec::new(),
         error: None,
     });
 
@@ -152,6 +173,18 @@ fn report_fixture() -> ScanReport {
                 content_hash: Some("blake3:good".to_owned()),
                 size_bytes: Some(123),
                 probe_worker_id: Some(voom_core::WorkerId(44)),
+                bundle_id: Some(BundleId(20)),
+                bundle_member_role: Some("primary_video".to_owned()),
+                sidecars: vec![ScanSidecarReport {
+                    path: "/library/good.eng.srt".into(),
+                    file_asset_id: FileAssetId(30),
+                    file_version_id: FileVersionId(31),
+                    file_location_id: FileLocationId(32),
+                    bundle_id: BundleId(20),
+                    bundle_member_role: "external_subtitle".to_owned(),
+                    content_hash: "sha256:sidecar".to_owned(),
+                    size_bytes: 45,
+                }],
                 error: None,
             },
             ScanFileReport {
@@ -164,6 +197,9 @@ fn report_fixture() -> ScanReport {
                 content_hash: Some("blake3:bad".to_owned()),
                 size_bytes: Some(456),
                 probe_worker_id: Some(voom_core::WorkerId(44)),
+                bundle_id: None,
+                bundle_member_role: None,
+                sidecars: Vec::new(),
                 error: Some(ScanFileErrorReport {
                     code: ErrorCode::ExternalSystemUnavailable,
                     failure_class: FailureClass::ExternalSystemUnavailable,
@@ -181,6 +217,9 @@ fn report_fixture() -> ScanReport {
             content_hash: None,
             size_bytes: None,
             probe_worker_id: None,
+            bundle_id: None,
+            bundle_member_role: None,
+            sidecars: Vec::new(),
             error: None,
         }],
     }

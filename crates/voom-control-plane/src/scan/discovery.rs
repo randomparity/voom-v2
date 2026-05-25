@@ -33,6 +33,12 @@ pub struct DiscoveredScan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanCandidate {
     pub path: PathBuf,
+    pub sidecars: Vec<SidecarCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidecarCandidate {
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +83,13 @@ pub fn is_supported_media_path(path: &Path) -> bool {
         })
 }
 
+#[must_use]
+pub fn is_supported_sidecar_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+}
+
 pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, ScanError> {
     let path = path.as_ref();
     let metadata = fs::symlink_metadata(path).await.map_err(|err| {
@@ -115,7 +128,10 @@ async fn discover_file(path: &Path) -> Result<DiscoveredScan, ScanError> {
     Ok(DiscoveredScan {
         root: root.clone(),
         mode: ScanMode::File,
-        candidates: vec![ScanCandidate { path: root }],
+        candidates: vec![ScanCandidate {
+            path: root,
+            sidecars: Vec::new(),
+        }],
         skipped: Vec::new(),
     })
 }
@@ -124,6 +140,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
     let root = canonicalize(path).await?;
     let mut pending = vec![root.clone()];
     let mut candidates = Vec::new();
+    let mut sidecars = Vec::new();
     let mut skipped = Vec::new();
 
     while let Some(dir) = pending.pop() {
@@ -162,7 +179,10 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
             } else if file_type.is_file() && is_supported_media_path(&entry_path) {
                 candidates.push(ScanCandidate {
                     path: canonicalize(&entry_path).await?,
+                    sidecars: Vec::new(),
                 });
+            } else if file_type.is_file() && is_supported_sidecar_path(&entry_path) {
+                sidecars.push(canonicalize(&entry_path).await?);
             } else if file_type.is_file() {
                 let skipped_path = canonicalize(&entry_path).await.unwrap_or(entry_path);
                 skipped.push(SkippedFile {
@@ -174,6 +194,23 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
     }
 
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    for sidecar in sidecars {
+        if let Some(candidate_index) = best_sidecar_candidate(&candidates, &sidecar) {
+            candidates[candidate_index]
+                .sidecars
+                .push(SidecarCandidate { path: sidecar });
+        } else {
+            skipped.push(SkippedFile {
+                path: sidecar,
+                status: FileScanStatus::SkippedUnsupportedExtension,
+            });
+        }
+    }
+    for candidate in &mut candidates {
+        candidate
+            .sidecars
+            .sort_by(|left, right| left.path.cmp(&right.path));
+    }
     skipped.sort_by(|left, right| left.path.cmp(&right.path));
 
     Ok(DiscoveredScan {
@@ -182,6 +219,30 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
         candidates,
         skipped,
     })
+}
+
+fn best_sidecar_candidate(candidates: &[ScanCandidate], sidecar: &Path) -> Option<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            sidecar_matches_media(&candidate.path, sidecar)
+                .map(|stem_len| (index, stem_len, &candidate.path))
+        })
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| right.2.cmp(left.2)))
+        .map(|(index, _, _)| index)
+}
+
+fn sidecar_matches_media(media: &Path, sidecar: &Path) -> Option<usize> {
+    let media_stem = media.file_stem()?.to_str()?;
+    let sidecar_stem = sidecar.file_stem()?.to_str()?;
+    if sidecar_stem == media_stem {
+        return Some(media_stem.len());
+    }
+    sidecar_stem
+        .strip_prefix(media_stem)
+        .filter(|suffix| suffix.starts_with('.'))
+        .map(|_| media_stem.len())
 }
 
 async fn canonicalize(path: &Path) -> Result<PathBuf, ScanError> {

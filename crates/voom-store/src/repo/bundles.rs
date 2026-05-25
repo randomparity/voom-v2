@@ -116,6 +116,11 @@ pub trait BundleRepo: Repository {
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         input: NewBundleMember,
     ) -> Result<BundleMember, VoomError>;
+    async fn get_member_by_file_asset_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        file_asset_id: FileAssetId,
+    ) -> Result<Option<BundleMember>, VoomError>;
     async fn add_member(&self, input: NewBundleMember) -> Result<BundleMember, VoomError>;
     async fn remove_member_in_tx<'tx>(
         &self,
@@ -276,6 +281,22 @@ impl BundleRepo for SqliteBundleRepo {
             .await
             .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
         Ok(out)
+    }
+
+    async fn get_member_by_file_asset_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        file_asset_id: FileAssetId,
+    ) -> Result<Option<BundleMember>, VoomError> {
+        let row = sqlx::query(
+            "SELECT id, bundle_id, file_asset_id, role FROM asset_bundle_members \
+             WHERE file_asset_id = ?",
+        )
+        .bind(i64_from_u64(file_asset_id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("asset_bundle_members get_by_asset: {e}")))?;
+        row.as_ref().map(row_to_bundle_member).transpose()
     }
 
     async fn remove_member_in_tx<'tx>(

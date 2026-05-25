@@ -54,6 +54,59 @@ async fn directory_discovery_returns_supported_media_in_lexicographic_order() {
 }
 
 #[tokio::test]
+async fn directory_discovery_attaches_matching_srt_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = write_file(dir.path(), "Movie.Name.mkv", b"media");
+    let exact = write_file(dir.path(), "Movie.Name.srt", b"subtitle");
+    let sidecar = write_file(dir.path(), "Movie.Name.eng.srt", b"subtitle");
+    let other = write_file(dir.path(), "Other.eng.srt", b"subtitle");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert_eq!(discovered.candidates.len(), 1);
+    assert_eq!(discovered.candidates[0].path, media);
+    assert_eq!(
+        discovered.candidates[0]
+            .sidecars
+            .iter()
+            .map(|sidecar| sidecar.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![sidecar.as_path(), exact.as_path()]
+    );
+    assert_eq!(
+        discovered
+            .skipped
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![other.as_path()]
+    );
+}
+
+#[tokio::test]
+async fn directory_discovery_assigns_sidecar_to_longest_matching_media_stem() {
+    let dir = tempfile::tempdir().unwrap();
+    let shorter = write_file(dir.path(), "Movie.mkv", b"short");
+    let longer = write_file(dir.path(), "Movie.Part1.mkv", b"long");
+    let sidecar = write_file(dir.path(), "Movie.Part1.eng.srt", b"subtitle");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    let shorter = discovered
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path == shorter)
+        .unwrap();
+    let longer = discovered
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path == longer)
+        .unwrap();
+    assert!(shorter.sidecars.is_empty());
+    assert_eq!(longer.sidecars[0].path, sidecar);
+}
+
+#[tokio::test]
 async fn unsupported_file_inside_directory_is_skipped() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("clip.mp4"), b"clip").unwrap();
@@ -67,6 +120,12 @@ async fn unsupported_file_inside_directory_is_skipped() {
         discovered.skipped[0].status,
         FileScanStatus::SkippedUnsupportedExtension
     );
+}
+
+fn write_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    std::fs::canonicalize(path).unwrap()
 }
 
 #[tokio::test]
