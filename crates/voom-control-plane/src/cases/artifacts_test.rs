@@ -15,6 +15,7 @@ fn handle_input() -> NewArtifactHandle {
         allowed_access_modes: vec!["read".to_owned()],
         mutability: "immutable".to_owned(),
         source_lineage: None,
+        file_version_id: None,
         created_at: OffsetDateTime::UNIX_EPOCH,
     }
 }
