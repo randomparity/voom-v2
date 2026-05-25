@@ -147,7 +147,9 @@ pub(crate) fn operation_name(operation: OperationKind) -> &'static str {
     }
 }
 
-fn ticket_operation(ticket_kind: &str) -> Result<OperationKind, WorkflowTicketPayloadError> {
+pub(crate) fn ticket_operation(
+    ticket_kind: &str,
+) -> Result<OperationKind, WorkflowTicketPayloadError> {
     let Some(operation) = ticket_kind.strip_prefix("synthetic.workflow.operation.") else {
         return Err(WorkflowTicketPayloadError::new(format!(
             "workflow ticket kind `{ticket_kind}` must start with synthetic.workflow.operation."

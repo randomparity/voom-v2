@@ -29,6 +29,19 @@ fn compliance_execution_defaults_use_production_transcode_paths() {
     );
 }
 
+#[test]
+fn compliance_ticket_operation_is_derived_from_workflow_ticket_kind() {
+    assert_eq!(
+        super::operation_from_ticket_kind("synthetic.workflow.operation.remux").unwrap(),
+        "remux"
+    );
+    assert_eq!(
+        super::operation_from_ticket_kind("synthetic.workflow.operation.transcode_video").unwrap(),
+        "transcode_video"
+    );
+    assert!(super::operation_from_ticket_kind("synthetic.workflow.operation.unknown").is_err());
+}
+
 async fn seed_noncompliant(
     cp: &crate::ControlPlane,
 ) -> (
@@ -450,6 +463,34 @@ async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
         after.count("artifact_lineage"),
         before.count("artifact_lineage")
     );
+}
+
+#[tokio::test]
+async fn compliance_ticket_reporting_uses_kind_without_parsing_payload() {
+    let (cp, _tmp) = cp().await;
+    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
+    let worker_id = register_policy_remux_worker(&cp).await;
+    let runtimes = success_runtime_registry(worker_id);
+
+    let data = cp
+        .execute_compliance_policy_with_runtime_registry_for_test(
+            policy_version_id,
+            input_set_id,
+            runtimes,
+        )
+        .await
+        .unwrap();
+    let job_id = data.execution.job_id.unwrap();
+
+    sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.operation', 'scan_library') WHERE job_id = ?")
+        .bind(i64::try_from(job_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let tickets = cp.compliance_executed_tickets(job_id).await.unwrap();
+
+    assert_eq!(tickets[0].operation, "remux");
 }
 
 #[tokio::test]
