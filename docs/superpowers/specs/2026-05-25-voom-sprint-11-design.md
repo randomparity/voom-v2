@@ -59,7 +59,7 @@ The Sprint 11 CLI path is:
 voom scan --path <file>
   -> persisted FileAsset / FileVersion / FileLocation / MediaSnapshot
 
-voom artifact stage-copy --file-version-id <id> --staging-path <path>
+voom artifact stage-copy --file-version-id <id> [--source-location-id <id>] --staging-path <path>
   -> host copies current source bytes to staging
   -> host records artifact handle + staging location
 
@@ -101,10 +101,16 @@ CLI, but it should not introduce a parallel artifact identity table.
 `voom artifact stage-copy` must:
 
 - require an existing, unretired source `FileVersion`;
-- require at least one live local source `FileLocation`;
+- choose the source path deterministically: if `--source-location-id` is
+  present, it must name a live `local_path` location for the source version; if
+  it is absent, exactly one live `local_path` location must exist for the source
+  version or the command fails with `CONFIG_INVALID`;
 - copy from a live source location to the requested staging path;
 - reject a staging path that already exists unless a later implementation plan
   explicitly designs an overwrite flag;
+- canonicalize the source path and staging parent directory before copying;
+- reject symlink traversal for source, staging, and target paths in Sprint 11,
+  matching Sprint 10 scan's conservative local-filesystem posture;
 - compute BLAKE3 hash and byte size for the staged file after copy;
 - record an `artifact_handle` with expected size/hash, staging durability, local
   access mode, immutable mutability, and source lineage referencing the source
@@ -172,6 +178,8 @@ were first staged and verified through the Sprint 11 artifact flow.
 
 - `id`
 - `artifact_handle_id`
+- `artifact_location_id`
+- `path`
 - `worker_id`
 - `status`: `succeeded` or `failed`
 - `expected_size_bytes`
@@ -185,9 +193,12 @@ were first staged and verified through the Sprint 11 artifact flow.
 - `started_at`
 - `finished_at`
 
+`artifact_location_id` must point at the staging location whose path was sent to
+the worker, and `path` stores the canonical path value verified by that attempt.
 `report` is JSON and stores the typed verification result or failure payload.
-The latest successful verification is the gate for commit. Failed attempts are
-kept for audit and troubleshooting.
+The latest successful verification for the artifact's current live staging
+location is the gate for commit. Failed attempts are kept for audit and
+troubleshooting.
 
 `artifact_commit_records` records host commit attempts:
 
@@ -203,29 +214,75 @@ kept for audit and troubleshooting.
 - `error_code`
 - `message`
 - `recovery_reason`
+- `temp_path`
+- `report`
 - `started_at`
+- `promotion_started_at`
 - `finished_at`
 
 `failed` is for failures before final filesystem mutation. `recovery_required`
 is for failures after the commit has crossed a point where durable state and
 filesystem state may need operator reconciliation.
 
-The existing destructive commit safety gate remains the preferred host-side
-safety primitive for final promotion. If the implementation needs a narrow
-non-destructive helper for "add a new `FileVersion` and `FileLocation` derived
-from an existing version", it must keep the same fail-loud recovery posture and
-must not bypass active use-lease checks for replace or move behavior.
+The migration must also prevent duplicate commits for the same staged artifact.
+A partial unique index on `artifact_commit_records(artifact_handle_id)` for
+`state IN ('pending','committed','recovery_required')` is required because a
+staged artifact can have only one in-flight, successful, or recovery-required
+commit owner. Failed pre-mutation attempts are excluded so an operator can retry
+after correcting the cause. A second partial unique index on canonical
+`target_path` for `state IN ('pending','committed','recovery_required')`
+prevents two commands from claiming the same final path while a previous commit
+is in flight, successful, or awaiting recovery.
+
+Sprint 11 does not route add-only commits through the existing destructive
+commit-intent table. That table only models delete, replace, and move targets
+today. Instead, Sprint 11 adds a narrow staged-commit gate with explicit
+database/filesystem phase boundaries:
+
+- **Prepare transaction:** acquire SQLite's write lock with the same transaction
+  discipline used by the existing repositories; re-read the artifact handle,
+  source `FileVersion`, live staging location, and latest successful
+  verification for that exact staging location; reject retired source versions,
+  missing staging locations, stale verification rows, verification rows for a
+  different staging location, staged-byte drift, and existing target paths;
+  create the `pending` commit record; emit `artifact.commit_started`; commit the
+  transaction before filesystem promotion.
+- **Filesystem promotion:** copy the staged bytes to a temporary sibling path,
+  fsync, and atomically rename that temporary path to the target path. This
+  phase re-observes the staged file immediately before copying, verifies the
+  temporary file after copy and before rename, and verifies the final target file
+  after rename. All three observations must match the successful verification's
+  size and checksum. The commit record already exists before this phase begins,
+  so a crash or process kill leaves durable evidence that an in-flight commit
+  needs inspection.
+- **Finalize transaction:** after successful promotion, acquire a new write
+  transaction, re-read the pending commit record, record the resulting
+  `FileVersion` and `FileLocation`, retire the staging artifact location, mark
+  the commit `committed`, and emit `artifact.commit_completed`.
+- **Recovery transaction:** if promotion starts but promotion or finalize cannot
+  complete, acquire a new write transaction and mark the existing pending record
+  `recovery_required` with the target path, temporary path, observed filesystem
+  state, and any durable IDs already created. Emit
+  `artifact.commit_recovery_required` in that transaction.
+
+The staged-commit gate is non-destructive: it does not retire source locations
+and therefore does not use the destructive use-lease blocking rule by default.
+If Sprint 11 implementation discovers it needs replace, move, archive, or delete
+semantics, that work is out of scope and must use the existing destructive
+commit safety gate or a follow-on design.
 
 ## 7. Host Commit Semantics
 
 `voom artifact commit` requires:
 
 - one live staging location for the artifact;
-- a latest successful verification for the staged bytes;
+- a latest successful verification for that same live staging location;
 - staged bytes that still match the verified size/hash immediately before
   promotion;
 - a target path that does not already exist unless a later implementation plan
   explicitly designs replace semantics;
+- canonical target path storage; relative paths, symlink aliases, and
+  non-canonical parent paths must not bypass `target_path` uniqueness;
 - an existing source `FileVersion` from the artifact handle link.
 
 Sprint 11 commit is add-only by default: it creates a new target file path and a
@@ -234,33 +291,51 @@ source location or replace the original file by default. This keeps the first
 mutation envelope recoverable and avoids overloading Sprint 11 with destructive
 replace behavior.
 
-The host commit sequence is:
+The host commit sequence follows the staged-commit gate phases:
 
-1. Record `artifact_commit_records.state = 'pending'` and emit
-   `artifact.commit_started`.
-2. Re-observe staged bytes and compare to the successful verification.
-3. Enter the relevant host-side safety check for the source asset/version scope.
-4. Promote bytes from staging to target local path using atomic rename when
-   possible and copy-plus-fsync when rename cannot cross filesystem boundaries.
-5. Record the new `FileVersion` with `produced_by = 'staged_commit'`.
-6. Record the new `FileLocation` at the target path.
-7. Record artifact lineage when there is a committed artifact handle to link,
+1. In the prepare transaction, re-observe staged bytes and compare them to the
+   latest successful verification.
+2. Record `artifact_commit_records.state = 'pending'`, `target_path`, and the
+   planned temporary sibling path; emit `artifact.commit_started`; commit.
+3. Outside the database transaction, re-observe the staged file. If its size or
+   checksum no longer matches the successful verification, transition the commit
+   record to `recovery_required` without copying bytes.
+4. Copy the staged bytes to the temporary sibling path under the target
+   directory, fsync the temporary file, and verify the temporary file's size and
+   checksum before rename.
+5. Atomically rename the temporary path to the requested target path, then
+   verify the target file's size and checksum before finalizing durable identity
+   state. The staging file is not moved; keeping it intact makes retry and
+   recovery inspection deterministic.
+6. In the finalize transaction, record the new `FileVersion` with
+   `produced_by = 'staged_commit'`.
+7. Record the new `FileLocation` at the target path.
+8. Retire the `artifact_locations.kind = 'staging'` row for the staged handle.
+   The staged file may remain on disk until a later cleanup feature removes it;
+   the retired artifact location means Sprint 11 no longer treats it as the live
+   staging source for new commits.
+9. Record artifact lineage when there is a committed artifact handle to link,
    then mark the commit record `committed`.
-8. Emit `artifact.commit_completed`.
+10. Emit `artifact.commit_completed`.
 
-Any failure before step 4 marks the commit record `failed` and emits
-`artifact.commit_failed_pre_mutation`.
-
-Any failure after step 4 begins marks the commit record `recovery_required`,
-emits `artifact.commit_recovery_required`, and returns a runtime error envelope.
-The CLI must never report success while recovery is required.
+Any failure before the prepare transaction commits marks the command as
+`failed_pre_mutation` without creating a durable commit record, or marks the
+pending record `failed` if one was already inserted in the same transaction.
+Any failure after the prepare transaction commits must preserve the existing
+commit record and transition it to `recovery_required`, because the filesystem
+phase may have started or may be impossible to prove did not start. The recovery
+record stores the temporary path, target path, observed filesystem state, and
+any durable IDs already created. The CLI must never report success while
+recovery is required. Recovery inspection must show whether the target path
+exists, whether the temporary path exists, whether the staging path still exists,
+and which durable IDs were created before failure.
 
 ## 8. CLI
 
 Sprint 11 adds an `artifact` command family:
 
 ```text
-voom artifact stage-copy --file-version-id <id> --staging-path <path>
+voom artifact stage-copy --file-version-id <id> [--source-location-id <id>] --staging-path <path>
 voom artifact verify --artifact-handle-id <id>
 voom artifact commit --artifact-handle-id <id> --target-path <path>
 voom artifact list [--state <state>] [--limit <n>]
