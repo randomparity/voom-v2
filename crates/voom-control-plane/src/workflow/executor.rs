@@ -16,7 +16,7 @@ use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest,
+    TranscodeVideoRequest, TranscodeVideoResult,
 };
 
 use super::binding::{
@@ -997,9 +997,9 @@ async fn dispatch_ticket_inner(
 ) -> Result<(), VoomError> {
     let mut payload = workflow_payload.rendered_payload.clone();
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
-    if workflow_payload.operation == OperationKind::TranscodeVideo
-        && payload.get("source_file_version_id").is_some()
-    {
+    let validate_transcode_result = workflow_payload.operation == OperationKind::TranscodeVideo
+        && payload.get("source_file_version_id").is_some();
+    if validate_transcode_result {
         payload = match transcode_worker_payload(control, ticket.id, lease_id, &payload).await {
             Ok(payload) => payload,
             Err(source) => {
@@ -1063,6 +1063,7 @@ async fn dispatch_ticket_inner(
         control,
         lease_id,
         workflow_payload.operation,
+        validate_transcode_result,
         dispatch,
         options,
     )
@@ -1073,6 +1074,7 @@ async fn consume_dispatch_stream(
     control: &ControlPlane,
     lease_id: LeaseId,
     operation: OperationKind,
+    validate_transcode_result: bool,
     mut dispatch: DispatchStream,
     options: WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
@@ -1113,7 +1115,14 @@ async fn consume_dispatch_stream(
                             &options,
                         )
                         .await?;
-                        return handle_terminal_frame(control, lease_id, frame).await;
+                        return handle_terminal_frame(
+                            control,
+                            lease_id,
+                            operation,
+                            validate_transcode_result,
+                            frame,
+                        )
+                        .await;
                     }
                     Ok(NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed) => {
                         return fail_lease_and_return(
@@ -1411,6 +1420,8 @@ async fn fail_if_watchdog_elapsed(
 async fn handle_terminal_frame(
     control: &ControlPlane,
     lease_id: LeaseId,
+    operation: OperationKind,
+    validate_transcode_result: bool,
     frame: ProgressFrame,
 ) -> Result<(), VoomError> {
     match frame {
@@ -1426,6 +1437,9 @@ async fn handle_terminal_frame(
                 )
                 .await;
             }
+            if operation == OperationKind::TranscodeVideo && validate_transcode_result {
+                validate_transcode_result_payload(control, lease_id, &payload).await?;
+            }
             release_lease_with_retry(control, lease_id, payload).await?;
             Ok(())
         }
@@ -1437,6 +1451,23 @@ async fn handle_terminal_frame(
             "progress frame cannot be terminal".to_owned(),
         )),
     }
+}
+
+async fn validate_transcode_result_payload(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    payload: &Value,
+) -> Result<(), VoomError> {
+    if let Err(err) = serde_json::from_value::<TranscodeVideoResult>(payload.clone()) {
+        return fail_lease_and_return(
+            control,
+            lease_id,
+            FailureClass::MalformedWorkerResult,
+            VoomError::MalformedWorkerResult(format!("transcode_video result decode: {err}")),
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn heartbeat_lease(

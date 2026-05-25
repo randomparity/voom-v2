@@ -352,6 +352,38 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
     assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
 }
 
+#[tokio::test]
+async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::MalformedTranscodeResult,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(
+        fixture.first_ticket_failed_class().await,
+        "malformed_worker_result"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() {
@@ -776,6 +808,7 @@ enum FakeBehavior {
     Crash,
     DispatchError,
     RequireTranscodeProtocolPayload,
+    MalformedTranscodeResult,
 }
 
 #[async_trait]
@@ -795,6 +828,13 @@ impl ClientHandle for FakeClient {
             return Err(ProtocolError::InternalServerError);
         }
         if matches!(self.behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
+            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
+                |err| ProtocolError::InvalidPayload {
+                    detail: format!("transcode payload must match worker protocol: {err}"),
+                },
+            )?;
+        }
+        if matches!(self.behavior, FakeBehavior::MalformedTranscodeResult) {
             serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
                 |err| ProtocolError::InvalidPayload {
                     detail: format!("transcode payload must match worker protocol: {err}"),
@@ -831,7 +871,12 @@ async fn write_behavior(
     match behavior {
         FakeBehavior::Success | FakeBehavior::RequireTranscodeProtocolPayload => {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
+            let payload = if request.operation == OperationKind::TranscodeVideo {
+                transcode_result_payload()
+            } else {
+                json!({"ok": true})
+            };
+            write_frame(&mut writer, result_frame(&request, payload)).await;
         }
         FakeBehavior::MalformedFrame => {
             let _ = writer.write_all(b"{not-json}\n").await;
@@ -847,7 +892,33 @@ async fn write_behavior(
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
         FakeBehavior::Crash | FakeBehavior::DispatchError => {}
+        FakeBehavior::MalformedTranscodeResult => {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
+        }
     }
+}
+
+fn transcode_result_payload() -> Value {
+    json!({
+        "status": "transcoded",
+        "provider": "ffmpeg",
+        "provider_version": "ffmpeg test",
+        "input_pre": {
+            "size_bytes": 11,
+            "content_hash": "blake3:input"
+        },
+        "input_post": {
+            "size_bytes": 11,
+            "content_hash": "blake3:input"
+        },
+        "output": {
+            "size_bytes": 7,
+            "content_hash": "blake3:output"
+        },
+        "output_container": "mkv",
+        "output_video_codec": "hevc"
+    })
 }
 
 async fn write_frame(writer: &mut DuplexStream, frame: ProgressFrame) {
