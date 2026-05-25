@@ -26,6 +26,13 @@ if [[ "$execute_policy" != "0" && -z "$policy_version_id" ]]; then
   echo "CHAOS_POLICY_VERSION_ID is required when CHAOS_EXECUTE_POLICY is nonzero" >&2
   exit 1
 fi
+case "$execute_policy" in
+  0|1|report|execute) ;;
+  *)
+    echo "CHAOS_EXECUTE_POLICY must be 0, 1, report, or execute" >&2
+    exit 1
+    ;;
+esac
 
 case "$scenario" in
   */*) scenario_path="$scenario" ;;
@@ -112,6 +119,16 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
   policy_reason=""
   policy_input_out=""
   policy_report_out=""
+  fatal_error=""
+  policy_input_set_id=""
+  policy_report_status=""
+  policy_report_summary_status=""
+  policy_error_code=""
+  policy_execution_job_id=""
+  policy_execution_submitted_node_count=""
+  policy_execution_dispatch_count=""
+  policy_execution_failure_count=""
+  policy_ticket_count=""
   if [[ "$execute_policy" != "0" && "$status" = "ok" ]]; then
     scanned_row="$(jq -c '.data.files[]? | select(.status == "scanned" and .file_version_id and .media_snapshot_id) | {file_version_id, media_snapshot_id}' "$scan_out" | head -n 1)"
     if [[ -n "$scanned_row" ]]; then
@@ -119,27 +136,55 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
       media_snapshot_id="$(jq -r '.media_snapshot_id' <<<"$scanned_row")"
       input_slug="chaos-local-$checkpoint"
       policy_input_out="$workdir/policy-input-$checkpoint.json"
+      set +e
       "$voom_bin" --database-url "$url" policy input create-from-scan \
         --slug "$input_slug" \
         --file-version-id "$file_version_id" \
         --media-snapshot-id "$media_snapshot_id" \
         --container "$policy_container" \
         --video-codec "$policy_video_codec" > "$policy_input_out"
-      input_set_id="$(jq -r '.data.input_set.input_set_id' "$policy_input_out")"
-      policy_report_out="$workdir/policy-report-$checkpoint.json"
-      if [[ "$execute_policy" = "execute" ]]; then
-        mkdir -p "$workdir/staging-$checkpoint" "$workdir/output-$checkpoint"
-        "$voom_bin" --database-url "$url" compliance execute \
-          --policy-version-id "$policy_version_id" \
-          --input-set-id "$input_set_id" \
-          --staging-root "$workdir/staging-$checkpoint" \
-          --output-dir "$workdir/output-$checkpoint" > "$policy_report_out"
-        policy_status="executed"
+      policy_input_rc=$?
+      set -e
+      policy_error_code="$(jq -r '.error.code // empty' "$policy_input_out")"
+      if [[ "$policy_input_rc" -ne 0 ]]; then
+        policy_status="failed"
+        policy_reason="policy input creation failed"
+        fatal_error="policy input creation failed at checkpoint $checkpoint: $policy_error_code"
       else
-        "$voom_bin" --database-url "$url" compliance report \
-          --policy-version-id "$policy_version_id" \
-          --input-set-id "$input_set_id" > "$policy_report_out"
-        policy_status="reported"
+        policy_input_set_id="$(jq -r '.data.input_set.input_set_id // empty' "$policy_input_out")"
+        policy_report_out="$workdir/policy-report-$checkpoint.json"
+        if [[ "$execute_policy" = "execute" ]]; then
+          mkdir -p "$workdir/staging-$checkpoint" "$workdir/output-$checkpoint"
+          set +e
+          "$voom_bin" --database-url "$url" compliance execute \
+            --policy-version-id "$policy_version_id" \
+            --input-set-id "$policy_input_set_id" \
+            --staging-root "$workdir/staging-$checkpoint" \
+            --output-dir "$workdir/output-$checkpoint" > "$policy_report_out"
+          policy_report_rc=$?
+          set -e
+          policy_status="executed"
+        else
+          set +e
+          "$voom_bin" --database-url "$url" compliance report \
+            --policy-version-id "$policy_version_id" \
+            --input-set-id "$policy_input_set_id" > "$policy_report_out"
+          policy_report_rc=$?
+          set -e
+          policy_status="reported"
+        fi
+        policy_report_status="$(jq -r '.status // empty' "$policy_report_out")"
+        policy_report_summary_status="$(jq -r '.data.report.summary.status // empty' "$policy_report_out")"
+        policy_error_code="$(jq -r '.error.code // empty' "$policy_report_out")"
+        policy_execution_job_id="$(jq -r '.data.execution.job_id // empty' "$policy_report_out")"
+        policy_execution_submitted_node_count="$(jq -r '.data.execution.submitted_node_count // empty' "$policy_report_out")"
+        policy_execution_dispatch_count="$(jq -r '.data.execution.dispatch_count // empty' "$policy_report_out")"
+        policy_execution_failure_count="$(jq -r '.data.execution.failure_count // empty' "$policy_report_out")"
+        policy_ticket_count="$(jq -r '(.data.tickets // []) | length' "$policy_report_out")"
+        if [[ "$policy_report_rc" -ne 0 ]]; then
+          policy_reason="policy $policy_status failed"
+          fatal_error="policy $policy_status failed at checkpoint $checkpoint: $policy_error_code"
+        fi
       fi
     else
       policy_status="skipped"
@@ -159,7 +204,40 @@ while kill -0 "$chaos_pid" 2>/dev/null; do
     --arg policy_reason "$policy_reason" \
     --arg policy_input_out "$policy_input_out" \
     --arg policy_report_out "$policy_report_out" \
-    '{checkpoint:$checkpoint,status:$status,error_code:$error_code,scan_out:$scan_out,policy_status:$policy_status,policy_reason:$policy_reason,policy_input_out:$policy_input_out,policy_report_out:$policy_report_out}' >> "$summary"
+    --arg policy_input_set_id "$policy_input_set_id" \
+    --arg policy_report_status "$policy_report_status" \
+    --arg policy_report_summary_status "$policy_report_summary_status" \
+    --arg policy_error_code "$policy_error_code" \
+    --arg policy_execution_job_id "$policy_execution_job_id" \
+    --arg policy_execution_submitted_node_count "$policy_execution_submitted_node_count" \
+    --arg policy_execution_dispatch_count "$policy_execution_dispatch_count" \
+    --arg policy_execution_failure_count "$policy_execution_failure_count" \
+    --arg policy_ticket_count "$policy_ticket_count" \
+    '{
+      checkpoint:$checkpoint,
+      status:$status,
+      error_code:$error_code,
+      scan_status:$status,
+      scan_error_code:$error_code,
+      scan_out:$scan_out,
+      policy_status:$policy_status,
+      policy_reason:$policy_reason,
+      policy_input_out:$policy_input_out,
+      policy_report_out:$policy_report_out,
+      policy_input_set_id:$policy_input_set_id,
+      policy_report_status:$policy_report_status,
+      policy_report_summary_status:$policy_report_summary_status,
+      policy_error_code:$policy_error_code,
+      policy_execution_job_id:$policy_execution_job_id,
+      policy_execution_submitted_node_count:$policy_execution_submitted_node_count,
+      policy_execution_dispatch_count:$policy_execution_dispatch_count,
+      policy_execution_failure_count:$policy_execution_failure_count,
+      policy_ticket_count:($policy_ticket_count | if . == "" then null else tonumber end)
+    }' >> "$summary"
+  if [[ -n "$fatal_error" ]]; then
+    echo "$fatal_error" >&2
+    exit 1
+  fi
   sleep "$checkpoint_interval"
 done
 
