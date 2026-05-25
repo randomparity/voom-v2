@@ -6,7 +6,7 @@ use voom_core::{ErrorCode, VoomError};
 
 #[tokio::test]
 async fn canonical_new_leaf_resolves_existing_parent_and_rejects_existing_leaf() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let nested = dir.path().join("nested");
     std::fs::create_dir(&nested).unwrap();
 
@@ -27,7 +27,7 @@ async fn canonical_new_leaf_resolves_existing_parent_and_rejects_existing_leaf()
 
 #[tokio::test]
 async fn canonical_existing_file_rejects_leaf_symlink_without_following_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let target = dir.path().join("target.bin");
     let link = dir.path().join("link.bin");
     std::fs::write(&target, b"target").unwrap();
@@ -42,7 +42,7 @@ async fn canonical_existing_file_rejects_leaf_symlink_without_following_it() {
 
 #[tokio::test]
 async fn canonical_helpers_reject_symlinked_ancestors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let real_root = dir.path().join("real");
     let real_nested = real_root.join("nested");
     std::fs::create_dir_all(&real_nested).unwrap();
@@ -64,7 +64,7 @@ async fn canonical_helpers_reject_symlinked_ancestors() {
 
 #[tokio::test]
 async fn observe_regular_file_reports_blake3_facts_and_rejects_non_files() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let path = dir.path().join("clip.bin");
     std::fs::write(&path, b"voom").unwrap();
 
@@ -84,7 +84,7 @@ async fn observe_regular_file_reports_blake3_facts_and_rejects_non_files() {
 
 #[tokio::test]
 async fn observe_regular_file_reports_symlink_leaf_as_artifact_unavailable() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let target = dir.path().join("target.bin");
     let link = dir.path().join("link.bin");
     std::fs::write(&target, b"target").unwrap();
@@ -97,7 +97,7 @@ async fn observe_regular_file_reports_symlink_leaf_as_artifact_unavailable() {
 
 #[tokio::test]
 async fn unique_temp_sibling_path_stays_next_to_final_path() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let final_path = dir.path().join("movie.mp4");
 
     let first = unique_temp_sibling_path(&final_path).unwrap();
@@ -117,7 +117,7 @@ async fn unique_temp_sibling_path_stays_next_to_final_path() {
 
 #[tokio::test]
 async fn copy_regular_file_checked_copies_to_new_leaf_and_verifies_hash() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let source = dir.path().join("source.bin");
     let destination = dir.path().join("copy.bin");
     std::fs::write(&source, b"copy me").unwrap();
@@ -137,7 +137,7 @@ async fn copy_regular_file_checked_copies_to_new_leaf_and_verifies_hash() {
 
 #[tokio::test]
 async fn copy_error_before_destination_ownership_does_not_remove_concurrent_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let source = dir.path().join("source.bin");
     let destination = dir.path().join("copy.bin");
     std::fs::write(&source, b"copy me").unwrap();
@@ -153,7 +153,7 @@ async fn copy_error_before_destination_ownership_does_not_remove_concurrent_file
 
 #[tokio::test]
 async fn copy_to_unique_temp_then_install_no_replace_installs_without_temp_leftover() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let source = dir.path().join("source.bin");
     let final_path = dir.path().join("final.bin");
     std::fs::write(&source, b"installed").unwrap();
@@ -169,7 +169,7 @@ async fn copy_to_unique_temp_then_install_no_replace_installs_without_temp_lefto
 
 #[tokio::test]
 async fn promote_staged_add_only_cleans_temp_after_caller_visible_failure() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let staging = dir.path().join("staged.bin");
     let target = dir.path().join("target.bin");
     std::fs::write(&staging, b"staged bytes").unwrap();
@@ -186,7 +186,7 @@ async fn promote_staged_add_only_cleans_temp_after_caller_visible_failure() {
 
 #[tokio::test]
 async fn promote_staged_add_only_uses_no_replace_install_when_target_appears_after_preflight() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let staging = dir.path().join("staged.bin");
     let target = dir.path().join("target.bin");
     std::fs::write(&staging, b"staged bytes").unwrap();
@@ -210,7 +210,7 @@ async fn promote_staged_add_only_uses_no_replace_install_when_target_appears_aft
 
 #[tokio::test]
 async fn promote_staged_add_only_rejects_changed_staging_facts() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let staging = dir.path().join("staged.bin");
     let target = dir.path().join("target.bin");
     std::fs::write(&staging, b"original").unwrap();
@@ -228,7 +228,7 @@ async fn promote_staged_add_only_rejects_changed_staging_facts() {
 
 #[tokio::test]
 async fn promote_staged_add_only_returns_target_facts_after_add_only_install() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = artifact_tempdir();
     let staging = dir.path().join("staged.bin");
     let target = dir.path().join("target.bin");
     std::fs::write(&staging, b"final bytes").unwrap();
@@ -272,6 +272,10 @@ fn assert_no_temp_siblings(dir: &Path) {
         .filter(|name| name.contains(".voom-tmp."))
         .collect::<Vec<_>>();
     assert_eq!(temp_siblings, Vec::<String>::new());
+}
+
+fn artifact_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 #[cfg(unix)]

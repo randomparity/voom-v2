@@ -277,7 +277,11 @@ async fn fixture() -> (ControlPlane, tempfile::NamedTempFile, tempfile::TempDir)
     )
     .await
     .unwrap();
-    (cp, db, tempfile::tempdir().unwrap())
+    (cp, db, artifact_tempdir())
+}
+
+fn artifact_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 async fn listed_ids(

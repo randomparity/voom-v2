@@ -17,6 +17,9 @@ use voom_control_plane::scan::ScanPathInput;
 use voom_core::ErrorCode;
 use voom_store::repo::artifacts::ArtifactCommitState;
 
+const BASIC_FFPROBE_JSON: &str =
+    include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
+
 #[tokio::test]
 async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     install_worker_siblings();
@@ -135,7 +138,11 @@ async fn fixture() -> (ControlPlane, Db, TempDir) {
     let url = format!("sqlite://{}", tmp.path().display());
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
-    (cp, Db { _tmp: tmp, url }, TempDir::new().unwrap())
+    (cp, Db { _tmp: tmp, url }, artifact_tempdir())
+}
+
+fn artifact_tempdir() -> TempDir {
+    TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 async fn stage_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixture {
@@ -202,21 +209,40 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, dir: &Path)
 }
 
 fn install_worker_siblings() {
-    copy_worker_beside_test_binary("voom-ffprobe-worker");
+    install_ffprobe_worker_beside_test_binary();
     copy_worker_beside_test_binary("voom-verify-artifact-worker");
+}
+
+fn install_ffprobe_worker_beside_test_binary() {
+    let worker = built_worker_binary("voom-ffprobe-worker");
+    let sibling = test_binary_sibling("voom-ffprobe-worker");
+    if sibling == *worker {
+        return;
+    }
+    let script = format!(
+        "#!/usr/bin/env sh\nVOOM_FFPROBE_BIN='{}' exec '{}' \"$@\"\n",
+        success_ffprobe_binary().display(),
+        worker.display()
+    );
+    std::fs::write(&sibling, script).unwrap();
+    make_executable(&sibling);
 }
 
 fn copy_worker_beside_test_binary(package: &'static str) {
     let worker = built_worker_binary(package);
+    let sibling = test_binary_sibling(package);
+    if sibling != *worker {
+        std::fs::copy(worker, sibling).unwrap();
+    }
+}
+
+fn test_binary_sibling(package: &'static str) -> PathBuf {
     let exe_dir = std::env::current_exe()
         .unwrap()
         .parent()
         .unwrap()
         .to_path_buf();
-    let sibling = exe_dir.join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
-    if sibling != *worker {
-        std::fs::copy(worker, sibling).unwrap();
-    }
+    exe_dir.join(format!("{package}{}", std::env::consts::EXE_SUFFIX))
 }
 
 fn built_worker_binary(package: &'static str) -> &'static PathBuf {
@@ -302,4 +328,39 @@ fn tiny_media_fixture() -> PathBuf {
         .join("crates/voom-ffprobe-worker/fixtures/media/tiny.mp4")
         .canonicalize()
         .unwrap()
+}
+
+fn success_ffprobe_binary() -> &'static PathBuf {
+    static BIN: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
+    &BIN.get_or_init(|| {
+        let dir = TempDir::new().unwrap();
+        let script = format!(
+            "#!/usr/bin/env sh\n\
+             set -eu\n\
+             if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper Copyright\\n'; exit 0; fi\n\
+             cat <<'JSON'\n\
+             {BASIC_FFPROBE_JSON}\n\
+             JSON\n"
+        );
+        let path = dir.path().join("ffprobe");
+        std::fs::write(&path, script).unwrap();
+        make_executable(&path);
+        (dir, path)
+    })
+    .1
+}
+
+fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 }
