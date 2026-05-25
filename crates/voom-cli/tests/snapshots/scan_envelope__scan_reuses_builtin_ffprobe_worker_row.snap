@@ -1,0 +1,41 @@
+---
+source: crates/voom-cli/tests/scan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scan",
+  "status": "ok",
+  "data": {
+    "path": "[media]/tiny.mp4",
+    "mode": "file",
+    "summary": {
+      "discovered": 1,
+      "ingested": 1,
+      "probed": 1,
+      "snapshots_recorded": 1,
+      "skipped": 0,
+      "failed": 0
+    },
+    "files": [
+      {
+        "path": "[media]/tiny.mp4",
+        "status": "scanned",
+        "file_asset_id": 2,
+        "file_version_id": 2,
+        "file_location_id": 2,
+        "media_snapshot_id": 2,
+        "content_hash": "[content-hash]",
+        "size_bytes": 1545,
+        "probe_worker_id": 1
+      }
+    ],
+    "skipped": []
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

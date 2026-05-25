@@ -43,6 +43,31 @@ async fn register_with_duplicate_name_fails() {
 }
 
 #[tokio::test]
+async fn get_by_name_returns_seeded_worker() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let worker = repo
+        .register(sample_new_worker("builtin.ffprobe"))
+        .await
+        .unwrap();
+
+    let found = repo.get_by_name("builtin.ffprobe").await.unwrap().unwrap();
+
+    assert_eq!(found.id, worker.id);
+    assert_eq!(found.name, "builtin.ffprobe");
+}
+
+#[tokio::test]
+async fn get_by_name_returns_none_for_missing_name() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+
+    let found = repo.get_by_name("missing.worker").await.unwrap();
+
+    assert!(found.is_none());
+}
+
+#[tokio::test]
 async fn record_capability_stores_arrays_as_json() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());

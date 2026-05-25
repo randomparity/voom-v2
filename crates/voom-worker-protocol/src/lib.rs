@@ -20,6 +20,7 @@ pub mod http;
 pub mod low_level;
 pub mod ndjson;
 pub mod operation_kind;
+pub mod probe_file;
 pub mod transport;
 
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
@@ -31,4 +32,7 @@ pub use http::{
 };
 pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
 pub use operation_kind::OperationKind;
+pub use probe_file::{
+    ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
+};
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};

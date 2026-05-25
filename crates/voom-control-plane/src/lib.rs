@@ -45,6 +45,7 @@ use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod cases;
 pub mod node_auth;
+pub mod scan;
 pub mod workflow;
 
 pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};

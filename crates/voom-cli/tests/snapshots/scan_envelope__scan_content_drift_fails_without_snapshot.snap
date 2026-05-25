@@ -1,0 +1,45 @@
+---
+source: crates/voom-cli/tests/scan_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scan",
+  "status": "error",
+  "data": {
+    "path": "[scan-dir]/drift.mp4",
+    "mode": "file",
+    "summary": {
+      "discovered": 1,
+      "ingested": 0,
+      "probed": 0,
+      "snapshots_recorded": 0,
+      "skipped": 0,
+      "failed": 1
+    },
+    "files": [
+      {
+        "path": "[scan-dir]/drift.mp4",
+        "status": "failed",
+        "content_hash": "[content-hash]",
+        "size_bytes": 18,
+        "probe_worker_id": 1,
+        "error": {
+          "code": "ARTIFACT_CHECKSUM_MISMATCH",
+          "failure_class": "artifact_checksum_mismatch",
+          "message": "artifact checksum mismatch: post_probe: observed file facts differ from expected size/hash"
+        }
+      }
+    ],
+    "skipped": []
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "ARTIFACT_CHECKSUM_MISMATCH",
+    "message": "artifact checksum mismatch: post_probe: observed file facts differ from expected size/hash"
+  }
+}

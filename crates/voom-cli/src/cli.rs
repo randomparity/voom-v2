@@ -51,6 +51,11 @@ pub enum Command {
     /// Inspect scheduler state.
     #[command(subcommand)]
     Scheduler(SchedulerCommand),
+    /// Scan an explicit file or directory path.
+    Scan {
+        #[arg(long)]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]

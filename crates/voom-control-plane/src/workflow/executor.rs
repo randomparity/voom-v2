@@ -71,8 +71,8 @@ impl WorkflowExecutorOptions {
         Self {
             lease_ttl: Duration::from_secs(5),
             heartbeat_interval: Duration::from_millis(10),
-            heartbeat_timeout: Duration::from_millis(250),
-            progress_idle_timeout: Duration::from_millis(250),
+            heartbeat_timeout: Duration::from_secs(5),
+            progress_idle_timeout: Duration::from_secs(5),
             ready_batch_size: 64,
             max_attempts: 1,
             chaos: WorkflowChaosOptions::default(),

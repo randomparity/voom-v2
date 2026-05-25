@@ -225,6 +225,8 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
     fixture.seed_other_job_ready_ticket(100).await;
     let mut options = WorkflowExecutorOptions::for_tests();
     options.ready_batch_size = 1;
+    options.progress_idle_timeout = Duration::from_secs(5);
+    options.heartbeat_timeout = Duration::from_secs(5);
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
