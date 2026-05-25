@@ -5,7 +5,7 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -84,11 +84,6 @@ impl ChaosLibrarian {
             .ok_or_else(|| io::Error::other("missing submodule revision"))?
             .to_owned();
 
-        command_output(
-            Command::new("uv")
-                .current_dir(&self.submodule_dir)
-                .args(["sync", "--locked"]),
-        )?;
         let capabilities = self.uv_json(["run", "chaos-librarian", "capabilities", "--json"])?;
         Ok(ChaosReadiness {
             revision,
@@ -119,18 +114,35 @@ impl ChaosLibrarian {
         })
     }
 
-    pub fn step_next(&self, run_dir: &Path) -> Result<Value, Box<dyn std::error::Error>> {
-        self.uv_json_with_args([
-            "run",
-            "chaos-librarian",
-            "step",
-            run_dir
-                .to_str()
-                .ok_or_else(|| io::Error::other("run dir path is not UTF-8"))?,
-            "--next",
-            "1",
-            "--json",
-        ])
+    pub fn run_for_duration(
+        &self,
+        scenario: &Path,
+        run_dir: &Path,
+        duration: &str,
+        speed: &str,
+    ) -> Result<Child, Box<dyn std::error::Error>> {
+        Ok(Command::new("uv")
+            .current_dir(&self.submodule_dir)
+            .args([
+                "run",
+                "chaos-librarian",
+                "run",
+                scenario
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("scenario path is not UTF-8"))?,
+                "--out",
+                run_dir
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("run dir path is not UTF-8"))?,
+                "--duration",
+                duration,
+                "--speed",
+                speed,
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?)
     }
 
     pub fn compare_final_state(
@@ -138,33 +150,20 @@ impl ChaosLibrarian {
         run_dir: &Path,
         observed_state: &Path,
     ) -> Result<Value, Box<dyn std::error::Error>> {
-        let output = Command::new("uv")
-            .current_dir(&self.submodule_dir)
-            .args([
-                "run",
-                "chaos-librarian",
-                "compare",
-                run_dir
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("run dir path is not UTF-8"))?,
-                observed_state
-                    .to_str()
-                    .ok_or_else(|| io::Error::other("observed-state path is not UTF-8"))?,
-                "--mode",
-                "final-state",
-                "--json",
-            ])
-            .output()?;
-        if output.status.code() != Some(0) {
-            return Err(io::Error::other(format!(
-                "chaos-librarian compare failed with {:?}\nstdout:\n{}\nstderr:\n{}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .into());
-        }
-        Ok(serde_json::from_slice(&output.stdout)?)
+        self.uv_json_with_args([
+            "run",
+            "chaos-librarian",
+            "compare",
+            run_dir
+                .to_str()
+                .ok_or_else(|| io::Error::other("run dir path is not UTF-8"))?,
+            observed_state
+                .to_str()
+                .ok_or_else(|| io::Error::other("observed-state path is not UTF-8"))?,
+            "--mode",
+            "final-state",
+            "--json",
+        ])
     }
 
     pub fn upstream_scenario(&self, name: &str) -> PathBuf {

@@ -120,6 +120,8 @@ clean:
 
 # Run deterministic Chaos Librarian E2E tests. Not part of default `just ci`.
 chaos-e2e-ci:
+    cd third_party/chaos-librarian && uv sync --locked
+    cargo build -p voom-cli -p voom-ffprobe-worker -p voom-verify-artifact-worker -p voom-ffmpeg-worker
     cargo test -p voom-cli --test chaos_librarian_e2e -- --ignored --nocapture
 
 # Run a short local-only Chaos Librarian wall-clock churn scenario.

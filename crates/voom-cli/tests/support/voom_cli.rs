@@ -82,18 +82,6 @@ pub fn output_to_envelope(output: Output) -> Result<VoomOutput, Box<dyn std::err
     })
 }
 
-pub fn build_worker_binary(package: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("cargo")
-        .current_dir(workspace_root())
-        .args(["build", "-p", package])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("failed to build {package}: {status}")).into())
-    }
-}
-
 pub fn worker_binary(name: &str) -> PathBuf {
     workspace_root()
         .join("target")
@@ -103,7 +91,6 @@ pub fn worker_binary(name: &str) -> PathBuf {
 
 impl TranscodeWorkerLaunch {
     pub async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
-        build_worker_binary("voom-ffmpeg-worker")?;
         let secret = "chaos-librarian-transcode-e2e-secret";
         let worker = cp
             .register_worker(NewWorker {
@@ -149,6 +136,13 @@ impl TranscodeWorkerLaunch {
     }
 
     pub fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.shutdown_with_timeout(Duration::from_secs(5))
+    }
+
+    fn shutdown_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         drop(self.stdin.take());
         let started = std::time::Instant::now();
         loop {
@@ -160,11 +154,19 @@ impl TranscodeWorkerLaunch {
                     io::Error::other(format!("voom-ffmpeg-worker exited with {status}")).into(),
                 );
             }
-            if started.elapsed() > Duration::from_secs(5) {
+            if started.elapsed() > timeout {
                 let _ = self.child.kill();
                 return Err(io::Error::other("voom-ffmpeg-worker cleanup timed out").into());
             }
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for TranscodeWorkerLaunch {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.shutdown_with_timeout(Duration::from_secs(1));
         }
     }
 }

@@ -5,12 +5,20 @@
 
 mod support;
 
-use support::chaos_librarian::ChaosLibrarian;
+use std::path::Path;
+
+use support::chaos_librarian::{ChaosLibrarian, ChaosRun};
 use support::observed_state::{
     export_observed_state, library_relative_path, sha256_to_observed_hash,
 };
 use support::policy_seed::seed_transcode_policy_from_scan;
-use support::voom_cli::{VoomTestDb, run_voom};
+use support::voom_cli::{VoomOutput, VoomTestDb, run_voom};
+
+struct ScannedChaosRun {
+    run: ChaosRun,
+    db: VoomTestDb,
+    scan: VoomOutput,
+}
 
 #[test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
@@ -97,18 +105,9 @@ fn chaos_run_scan_root_follows_materialized_location_prefix() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn static_library_baseline_scans_exports_and_compares() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
-
-    let run = chaos
-        .materialize(&chaos.upstream_scenario("static-library.yaml"))
-        .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let chaos = ready_chaos();
+    let ScannedChaosRun { run, db, scan } =
+        scan_materialized_scenario(&chaos, &chaos.upstream_scenario("static-library.yaml")).await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
     assert_eq!(scan.json["status"], "ok");
     assert!(scan.json["data"]["summary"]["ingested"].as_u64().unwrap() > 0);
@@ -133,16 +132,12 @@ async fn static_library_baseline_scans_exports_and_compares() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn policy_seed_creates_durable_ids_from_scan_envelope() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
-    let run = chaos
-        .materialize(&chaos.voom_scenario("video-transcode-required.yaml"))
-        .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let chaos = ready_chaos();
+    let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
+        &chaos,
+        &chaos.voom_scenario("video-transcode-required.yaml"),
+    )
+    .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
     let cp = db.control_plane().await.unwrap();
@@ -157,19 +152,12 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
-    support::voom_cli::build_worker_binary("voom-verify-artifact-worker").unwrap();
-    support::voom_cli::build_worker_binary("voom-ffmpeg-worker").unwrap();
-
-    let run = chaos
-        .materialize(&chaos.voom_scenario("video-transcode-required.yaml"))
-        .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let chaos = ready_chaos();
+    let ScannedChaosRun { run, db, scan } = scan_materialized_scenario(
+        &chaos,
+        &chaos.voom_scenario("video-transcode-required.yaml"),
+    )
+    .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
     let cp = db.control_plane().await.unwrap();
@@ -244,9 +232,7 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn transcode_noop_does_not_schedule_worker_mutation() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+    let chaos = ready_chaos();
 
     let run = chaos
         .materialize(&chaos.voom_scenario("video-transcode-noop.yaml"))
@@ -290,33 +276,17 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn step_mutation_rescan_observes_changed_media_facts() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+    let chaos = ready_chaos();
 
     let tmp = tempfile::tempdir().unwrap();
     let run_dir = tmp.path().join("run");
-    let child = std::process::Command::new("uv")
-        .current_dir(&chaos.submodule_dir)
-        .args([
-            "run",
-            "chaos-librarian",
-            "run",
-            chaos
-                .upstream_scenario("reencode-video.yaml")
-                .to_str()
-                .unwrap(),
-            "--out",
-            run_dir.to_str().unwrap(),
-            "--duration",
+    let child = chaos
+        .run_for_duration(
+            &chaos.upstream_scenario("reencode-video.yaml"),
+            &run_dir,
             "3s",
-            "--speed",
             "1x",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        )
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run_dir.clone();
@@ -350,17 +320,12 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
 async fn malformed_media_fails_loudly_without_execution_ticket() {
-    let chaos = ChaosLibrarian::discover().unwrap();
-    chaos.validate_ready().unwrap();
-    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
-
-    let run = chaos
-        .materialize(&chaos.upstream_scenario("malformed-container-header.yaml"))
-        .unwrap();
-    let db = VoomTestDb::init().await.unwrap();
-    let library_path = run.scan_root().unwrap();
-    let library_arg = library_path.to_str().unwrap().to_owned();
-    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    let chaos = ready_chaos();
+    let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
+        &chaos,
+        &chaos.upstream_scenario("malformed-container-header.yaml"),
+    )
+    .await;
 
     assert_eq!(scan.status_code, Some(2), "stderr: {}", scan.stderr);
     assert_eq!(scan.json["status"], "error");
@@ -433,4 +398,19 @@ fn wait_for_file_with_extension(dir: &std::path::Path, extension: &str) {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+fn ready_chaos() -> ChaosLibrarian {
+    let chaos = ChaosLibrarian::discover().unwrap();
+    chaos.validate_ready().unwrap();
+    chaos
+}
+
+async fn scan_materialized_scenario(chaos: &ChaosLibrarian, scenario: &Path) -> ScannedChaosRun {
+    let run = chaos.materialize(scenario).unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run.scan_root().unwrap();
+    let library_arg = library_path.to_str().unwrap().to_owned();
+    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    ScannedChaosRun { run, db, scan }
 }
