@@ -7,6 +7,7 @@ use std::io;
 use std::path::{Component, Path};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
 pub async fn export_observed_state(
@@ -56,6 +57,10 @@ pub async fn export_observed_state(
         }
         if let Some(probed) = probed_media(snapshot_payload.as_ref(), size_bytes)? {
             asset.insert("probed".to_owned(), probed);
+        }
+        let sidecars = observed_sidecars(&library_root, Path::new(&location_value))?;
+        if !sidecars.is_empty() {
+            asset.insert("sidecars".to_owned(), Value::Array(sidecars));
         }
         assets.push(Value::Object(asset));
     }
@@ -181,7 +186,7 @@ fn probed_media(
         .map(|items| {
             items
                 .iter()
-                .filter_map(probed_stream)
+                .filter_map(|stream| probed_stream(stream, container))
                 .collect::<Vec<Value>>()
         })
         .unwrap_or_default();
@@ -193,7 +198,7 @@ fn probed_media(
     })))
 }
 
-fn probed_stream(stream: &Value) -> Option<Value> {
+fn probed_stream(stream: &Value, container: &str) -> Option<Value> {
     let kind = stream.get("kind").and_then(Value::as_str)?;
     let codec = stream.get("codec_name").and_then(Value::as_str)?;
     if !matches!(kind, "video" | "audio" | "subtitle") {
@@ -202,6 +207,13 @@ fn probed_stream(stream: &Value) -> Option<Value> {
     let mut out = serde_json::Map::new();
     out.insert("kind".to_owned(), Value::String(kind.to_owned()));
     out.insert("codec".to_owned(), Value::String(codec.to_owned()));
+    if let Some(language) = stream
+        .get("language")
+        .and_then(Value::as_str)
+        .or_else(|| mp4_default_language(container))
+    {
+        out.insert("language".to_owned(), Value::String(language.to_owned()));
+    }
     for (source, target) in [
         ("width", "width"),
         ("height", "height"),
@@ -220,6 +232,81 @@ fn probed_stream(stream: &Value) -> Option<Value> {
         out.insert("fps".to_owned(), serde_json::Number::from_f64(fps)?.into());
     }
     Some(Value::Object(out))
+}
+
+fn mp4_default_language(container: &str) -> Option<&'static str> {
+    if container
+        .split(',')
+        .any(|part| part == "mp4" || part == "mov")
+    {
+        Some("und")
+    } else {
+        None
+    }
+}
+
+fn observed_sidecars(
+    library_root: &Path,
+    asset_path: &Path,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let canonical = asset_path.canonicalize()?;
+    let Some(stem) = canonical.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let mut candidates = Vec::new();
+    collect_sidecar_candidates(
+        library_root,
+        stem,
+        canonical.parent().unwrap_or(library_root),
+        &mut candidates,
+    )?;
+    if canonical.parent() != Some(library_root) {
+        collect_sidecar_candidates(library_root, stem, library_root, &mut candidates)?;
+    }
+    candidates.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+    });
+    Ok(candidates)
+}
+
+fn collect_sidecar_candidates(
+    library_root: &Path,
+    asset_stem: &str,
+    dir: &Path,
+    candidates: &mut Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("srt") {
+            continue;
+        }
+        let Some(sidecar_stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !sidecar_stem
+            .strip_prefix(asset_stem)
+            .is_some_and(|suffix| suffix.starts_with('.'))
+        {
+            continue;
+        }
+        let relative_path = library_relative_path(library_root, &path)?;
+        candidates.push(json!({
+            "observed_ref": format!("sidecar:{relative_path}"),
+            "kind": "subtitle",
+            "path": relative_path,
+            "content_hash": sha256_file(&path)?,
+        }));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let mut hasher = Sha256::new();
+    hasher.update(std::fs::read(path)?);
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 fn parse_ratio(text: &str) -> Option<f64> {

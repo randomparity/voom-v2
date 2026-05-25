@@ -6,7 +6,9 @@
 mod support;
 
 use support::chaos_librarian::ChaosLibrarian;
-use support::observed_state::{library_relative_path, sha256_to_observed_hash};
+use support::observed_state::{
+    export_observed_state, library_relative_path, sha256_to_observed_hash,
+};
 use support::voom_cli::{VoomTestDb, run_voom};
 
 #[test]
@@ -70,4 +72,40 @@ fn observed_state_hash_uses_chaos_librarian_prefix() {
         hash,
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     );
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn static_library_baseline_scans_exports_and_compares() {
+    let chaos = ChaosLibrarian::discover().unwrap();
+    chaos.validate_ready().unwrap();
+    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+
+    let run = chaos
+        .materialize(&chaos.upstream_scenario("static-library.yaml"))
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run.run_dir.join("library");
+    let library_arg = library_path.to_str().unwrap().to_owned();
+
+    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+    assert_eq!(scan.json["status"], "ok");
+    assert!(scan.json["data"]["summary"]["ingested"].as_u64().unwrap() > 0);
+    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
+
+    let observed_path = run.run_dir.join("observed-state.json");
+    export_observed_state(
+        &db.url,
+        &run.run_dir,
+        &observed_path,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    .unwrap();
+    let compare = chaos
+        .compare_final_state(&run.run_dir, &observed_path)
+        .unwrap();
+
+    assert_eq!(compare["ok"], true);
 }
