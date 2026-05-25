@@ -22,6 +22,7 @@ pub mod ndjson;
 pub mod operation_kind;
 pub mod probe_file;
 pub mod transport;
+pub mod verify_artifact;
 
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
@@ -36,3 +37,7 @@ pub use probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
+pub use verify_artifact::{
+    VerifyArtifactExpectedFacts, VerifyArtifactObservedFacts, VerifyArtifactRequest,
+    VerifyArtifactResult, VerifyArtifactStatus,
+};
