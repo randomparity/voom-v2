@@ -9,6 +9,7 @@ use support::chaos_librarian::ChaosLibrarian;
 use support::observed_state::{
     export_observed_state, library_relative_path, sha256_to_observed_hash,
 };
+use support::policy_seed::seed_transcode_policy_from_scan;
 use support::voom_cli::{VoomTestDb, run_voom};
 
 #[test]
@@ -108,4 +109,28 @@ async fn static_library_baseline_scans_exports_and_compares() {
         .unwrap();
 
     assert_eq!(compare["ok"], true);
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn policy_seed_creates_durable_ids_from_scan_envelope() {
+    let chaos = ChaosLibrarian::discover().unwrap();
+    chaos.validate_ready().unwrap();
+    support::voom_cli::build_worker_binary("voom-ffprobe-worker").unwrap();
+    let run = chaos
+        .materialize(&chaos.voom_scenario("video-transcode-required.yaml"))
+        .unwrap();
+    let db = VoomTestDb::init().await.unwrap();
+    let library_path = run.run_dir.join("library");
+    let library_arg = library_path.to_str().unwrap().to_owned();
+    let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
+    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+
+    let cp = db.control_plane().await.unwrap();
+    let ids = seed_transcode_policy_from_scan(&cp, &scan.json, "seed-test", "mp4", "h264")
+        .await
+        .unwrap();
+
+    assert!(ids.policy_version_id > 0);
+    assert!(ids.input_set_id > 0);
 }
