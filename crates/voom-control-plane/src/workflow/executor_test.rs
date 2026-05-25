@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -290,6 +291,35 @@ async fn policy_transcode_file_location_target_carries_source_version_and_locati
     assert_eq!(
         workflow_payload.rendered_payload["source_location_id"],
         source_location_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = PathBuf::from("/tmp/voom-stage");
+    options.transcode_target_dir = PathBuf::from("/media/normalized");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-stage"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/media/normalized"
     );
 }
 

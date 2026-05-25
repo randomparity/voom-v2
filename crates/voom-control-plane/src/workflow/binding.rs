@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use std::path::Path;
 use voom_core::{FileLocationId, FileVersionId};
 use voom_worker_protocol::OperationKind;
 
@@ -106,6 +107,8 @@ pub struct PolicyTranscodeSource {
 pub fn render_policy_transcode_payload(
     source: PolicyTranscodeSource,
     operation_payload: &Value,
+    staging_root: &Path,
+    target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
     let target_codec = required_string(operation_payload, "target_codec")?;
@@ -116,6 +119,8 @@ pub fn render_policy_transcode_payload(
         "target_codec": target_codec,
         "container": container,
         "profile": profile,
+        "staging_root": staging_root,
+        "target_dir": target_dir,
         "duration_ms": timing.duration_ms,
         "progress_interval_ms": timing.progress_interval_ms,
     });

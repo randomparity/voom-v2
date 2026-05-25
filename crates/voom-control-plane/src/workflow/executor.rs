@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,8 @@ pub struct WorkflowExecutorOptions {
     pub progress_idle_timeout: Duration,
     pub ready_batch_size: u32,
     pub max_attempts: u32,
+    pub transcode_staging_root: PathBuf,
+    pub transcode_target_dir: PathBuf,
     pub chaos: WorkflowChaosOptions,
 }
 
@@ -64,6 +67,8 @@ impl Default for WorkflowExecutorOptions {
             progress_idle_timeout: DEFAULT_PROGRESS_IDLE_TIMEOUT,
             ready_batch_size: 64,
             max_attempts: 1,
+            transcode_staging_root: PathBuf::from("/tmp/voom/transcode/staging"),
+            transcode_target_dir: PathBuf::from("/tmp/voom/transcode/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -79,6 +84,8 @@ impl WorkflowExecutorOptions {
             progress_idle_timeout: Duration::from_secs(5),
             ready_batch_size: 64,
             max_attempts: 1,
+            transcode_staging_root: PathBuf::from("/tmp/voom-test/transcode/staging"),
+            transcode_target_dir: PathBuf::from("/tmp/voom-test/transcode/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -401,6 +408,8 @@ where
                     Some(target) => render_policy_transcode_payload(
                         self.resolve_policy_transcode_source(target).await?,
                         node.operation_payload(),
+                        &self.options.transcode_staging_root,
+                        &self.options.transcode_target_dir,
                         timing,
                     ),
                     None => render_default_payload(operation, &branch, timing),
