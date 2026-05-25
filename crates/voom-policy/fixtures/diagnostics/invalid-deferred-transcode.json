@@ -1,17 +1,17 @@
 [
   {
-    "code": "deferred_execution_operation",
+    "code": "unsupported_transcode_shape",
     "severity": "error",
     "stage": "validate",
     "span": {
       "start": 62,
-      "end": 88
+      "end": 87
     },
     "location": {
       "line": 3,
       "column": 5
     },
-    "message": "execution operation is deferred to a later sprint",
+    "message": "only `transcode video to hevc {}` is supported in Sprint 12",
     "suggestion": null,
     "related": []
   }

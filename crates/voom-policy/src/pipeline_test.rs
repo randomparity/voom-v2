@@ -3,17 +3,16 @@ use crate::{CompiledCondition, CompiledOperation, TrackFilter};
 use super::*;
 
 #[test]
-fn compile_policy_returns_validation_error_diagnostics() {
-    let err =
-        compile_policy("policy \"p\" { phase a { transcode video to hevc {} } }").unwrap_err();
+fn compile_policy_preserves_sprint12_video_hevc_transcode() {
+    let out = compile_policy("policy \"p\" { phase a { transcode video to hevc {} } }").unwrap();
+
     assert_eq!(
-        err.code(),
-        voom_core::VoomError::PolicyValidationError("x".to_owned()).code()
-    );
-    assert!(
-        err.diagnostics
-            .iter()
-            .any(|d| d.code == "deferred_execution_operation")
+        out.policy.phases[0].operations[0],
+        CompiledOperation::TranscodeVideo {
+            target_codec: "hevc".to_owned(),
+            container: "mkv".to_owned(),
+            profile: "default-hevc".to_owned(),
+        }
     );
 }
 

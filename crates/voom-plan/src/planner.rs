@@ -833,6 +833,7 @@ fn operation_kind(operation: &CompiledOperation) -> &'static str {
         CompiledOperation::ClearTags => "clear_tags",
         CompiledOperation::SetTag { .. } => "set_tag",
         CompiledOperation::DeleteTag { .. } => "delete_tag",
+        CompiledOperation::TranscodeVideo { .. } => "transcode_video",
         CompiledOperation::Conditional { .. } => "conditional",
         CompiledOperation::Rules { .. } => "rules",
     }

@@ -139,7 +139,7 @@ fn validation_error_emits_plan_error_envelope() {
     let policy_path = dir.path().join("invalid-operation.voom");
     std::fs::write(
         &policy_path,
-        "policy \"container-metadata\" { phase normalize { transcode video to hevc {} } }",
+        "policy \"container-metadata\" { phase normalize { transcode video to av1 {} } }",
     )
     .unwrap();
 

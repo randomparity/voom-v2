@@ -1,4 +1,4 @@
-use crate::parse_policy_source;
+use crate::{compile_policy, parse_policy_source};
 
 use super::*;
 
@@ -44,10 +44,24 @@ fn rejects_depends_on_with_extra_tokens_after_list() {
 }
 
 #[test]
-fn rejects_deferred_execution_operations() {
+fn accepts_sprint12_video_hevc_transcode() {
+    assert!(compile_policy("policy \"p\" { phase a { transcode video to hevc {} } }").is_ok());
+    assert!(compile_policy("policy \"p\" { phase a { transcode video to hevc } }").is_ok());
+}
+
+#[test]
+fn rejects_sprint12_unsupported_transcode_shapes() {
     assert!(
-        codes("policy \"p\" { phase a { transcode video to hevc {} } }")
-            .contains(&"deferred_execution_operation".to_owned())
+        codes("policy \"p\" { phase a { transcode audio to opus {} } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
+    );
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to av1 {} } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
+    );
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to hevc using profile \"small\" {} } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 
@@ -275,24 +289,24 @@ fn rejects_on_error_with_extra_tokens() {
 }
 
 #[test]
-fn rejects_deferred_execution_inside_rule_block() {
+fn rejects_unsupported_transcode_inside_rule_block() {
     assert!(
         codes(
-            "policy \"p\" { phase a { rules first { rule \"r\" { transcode video to hevc {} } } } }"
+            "policy \"p\" { phase a { rules first { rule \"r\" { transcode video to av1 {} } } } }"
         )
-        .contains(&"deferred_execution_operation".to_owned())
+        .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 
 #[test]
 fn reports_nested_when_diagnostic_once() {
     let diagnostics =
-        codes("policy \"p\" { phase a { when exists audio { transcode video to hevc {} } } }");
+        codes("policy \"p\" { phase a { when exists audio { transcode video to av1 {} } } }");
 
     assert_eq!(
         diagnostics
             .iter()
-            .filter(|code| *code == "deferred_execution_operation")
+            .filter(|code| *code == "unsupported_transcode_shape")
             .count(),
         1
     );

@@ -305,7 +305,8 @@ impl<'a> Validator<'a> {
                     operation.span(),
                     "phase inheritance through extend is deferred",
                 ),
-                "transcode" | "synthesize" | "verify" => self.error(
+                "transcode" => self.validate_transcode_statement(operation),
+                "synthesize" | "verify" => self.error(
                     DiagnosticCode::DeferredExecutionOperation,
                     operation.span(),
                     "execution operation is deferred to a later sprint",
@@ -379,7 +380,8 @@ impl<'a> Validator<'a> {
                 let text = statement_text(statement);
                 self.validate_condition(statement, text.as_ref(), tag_effects);
             }
-            "transcode" | "synthesize" | "verify" => self.error(
+            "transcode" => self.validate_transcode_statement(statement),
+            "synthesize" | "verify" => self.error(
                 DiagnosticCode::DeferredExecutionOperation,
                 statement.span(),
                 "execution operation is deferred to a later sprint",
@@ -595,6 +597,19 @@ impl<'a> Validator<'a> {
                 "clear_tags does not accept extra arguments",
             );
         }
+    }
+
+    fn validate_transcode_statement(&mut self, statement: &StatementAst) {
+        let text = statement_text(statement);
+        let tokens = words(text.as_ref());
+        if tokens.as_slice() == ["transcode", "video", "to", "hevc"] {
+            return;
+        }
+        self.error(
+            DiagnosticCode::UnsupportedTranscodeShape,
+            statement.span(),
+            "only `transcode video to hevc {}` is supported in Sprint 12",
+        );
     }
 
     fn validate_rules(

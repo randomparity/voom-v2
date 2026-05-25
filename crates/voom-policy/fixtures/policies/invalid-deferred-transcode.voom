@@ -1,5 +1,5 @@
 policy "invalid-deferred-transcode" {
   phase normalize {
-    transcode video to hevc {}
+    transcode video to av1 {}
   }
 }
