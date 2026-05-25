@@ -57,3 +57,25 @@ async fn staging_root_symlink_is_rejected() {
 
     assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_root_may_have_symlink_ancestor() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let real_parent = dir.path().join("real-parent");
+    let link_parent = dir.path().join("link-parent");
+    std::fs::create_dir(&real_parent).unwrap();
+    std::os::unix::fs::symlink(&real_parent, &link_parent).unwrap();
+
+    let path = staging_path(
+        &link_parent.join("stage"),
+        TicketId(7),
+        LeaseId(9),
+        "Movie.mkv",
+    )
+    .await
+    .unwrap();
+
+    assert!(path.ends_with("ticket-7/lease-9/Movie.hevc.mkv"));
+    assert!(path.starts_with(real_parent));
+}
