@@ -593,7 +593,7 @@ fn video_stream_count(snapshot: &MediaSnapshotInput) -> Option<u64> {
 }
 
 fn is_hevc_codec(codec: &str) -> bool {
-    matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265")
+    codec.eq_ignore_ascii_case("hevc") || codec.eq_ignore_ascii_case("h265")
 }
 
 fn policy_warnings(policy: &CompiledPolicy) -> Vec<String> {
