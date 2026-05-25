@@ -2578,6 +2578,7 @@ dependencies = [
  "voom-plan",
  "voom-policy",
  "voom-store",
+ "voom-test-support",
 ]
 
 [[package]]
@@ -2629,6 +2630,7 @@ dependencies = [
  "voom-policy",
  "voom-scheduler",
  "voom-store",
+ "voom-test-support",
  "voom-worker-protocol",
 ]
 
@@ -2776,6 +2778,15 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-policy",
+]
+
+[[package]]
+name = "voom-test-support"
+version = "0.1.0-dev"
+dependencies = [
+ "serde_json",
+ "voom-control-plane",
+ "voom-store",
 ]
 
 [[package]]

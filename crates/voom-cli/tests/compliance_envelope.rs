@@ -4,16 +4,13 @@
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
-use std::io::BufRead;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::time::Duration;
+use std::process::Command;
 
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
 
 #[tokio::test]
 async fn report_outputs_compliance_report_envelope() {
@@ -205,8 +202,7 @@ fn redact_job_id(json: &mut Value) {
 }
 
 struct RemuxProviderLaunch {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    inner: TestWorkerLaunch,
 }
 
 impl RemuxProviderLaunch {
@@ -217,113 +213,21 @@ impl RemuxProviderLaunch {
             std::sync::Arc::new(voom_core::SystemClock),
         )
         .await?;
-        let secret = "cli-compliance-remux-secret";
-        let worker = cp
-            .register_worker(NewWorker {
-                name: "cli-compliance-remux".to_owned(),
-                kind: WorkerKind::Synthetic,
-                registered_at: cp.clock().now(),
-                node_id: None,
-            })
-            .await?;
-        let mut child = Command::new(provider_binary("fake-remuxer")?)
-            .env("VOOM_WORKER_SECRET", secret)
-            .env("VOOM_WORKER_ID", worker.id.0.to_string())
-            .env("VOOM_WORKER_EPOCH", "0")
-            .env("VOOM_WORKER_BIND", "127.0.0.1:0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let stdin = child.stdin.take();
-        let bound = read_bound_addr(&mut child)?;
-        cp.record_capability(NewCapability {
-            worker_id: worker.id,
-            operation: "remux".to_owned(),
-            codecs: Vec::new(),
-            hardware: Vec::new(),
-            artifact_access: Vec::new(),
-            extra: json!({
-                "endpoint": bound.to_string(),
-                "secret": secret,
-            }),
+        Ok(Self {
+            inner: TestWorkerLaunch::start(
+                &cp,
+                TestWorkerConfig::synthetic(
+                    cargo_bin_or_build("voom-fakes", "fake-remuxer")?,
+                    "cli-compliance-remux",
+                    "cli-compliance-remux-secret",
+                    "remux",
+                ),
+            )
+            .await?,
         })
-        .await?;
-        cp.record_grant(NewGrant {
-            worker_id: worker.id,
-            can_execute: vec!["remux".to_owned()],
-            can_access_read: Vec::new(),
-            can_access_write: Vec::new(),
-            denies: Vec::new(),
-            max_parallel: json!({ "remux": 1 }),
-        })
-        .await?;
-        Ok(Self { child, stdin })
     }
 
     fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        drop(self.stdin.take());
-        let started = std::time::Instant::now();
-        loop {
-            if let Some(status) = self.child.try_wait()? {
-                if status.success() {
-                    return Ok(());
-                }
-                return Err(Box::new(std::io::Error::other(format!(
-                    "fake-remuxer exited with {status}"
-                ))));
-            }
-            if started.elapsed() > Duration::from_secs(5) {
-                let _ = self.child.kill();
-                return Err(Box::new(std::io::Error::other(
-                    "fake-remuxer cleanup timed out",
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        self.inner.shutdown()
     }
-}
-
-fn read_bound_addr(child: &mut Child) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("fake-remuxer stdout missing"))?;
-    let mut lines = std::io::BufReader::new(stdout).lines();
-    let line = lines
-        .next()
-        .transpose()?
-        .ok_or_else(|| std::io::Error::other("fake-remuxer exited before bind line"))?;
-    Ok(line
-        .strip_prefix("BOUND addr=")
-        .ok_or_else(|| std::io::Error::other(format!("malformed fake-remuxer bind line: {line}")))?
-        .parse::<std::net::SocketAddr>()?)
-}
-
-fn provider_binary(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let env_name = format!("CARGO_BIN_EXE_{name}");
-    if let Some(path) = std::env::var_os(env_name) {
-        return Ok(PathBuf::from(path));
-    }
-    let status = Command::new("cargo")
-        .args(["build", "-p", "voom-fakes", "--bin", name])
-        .current_dir(workspace_root())
-        .status()?;
-    if !status.success() {
-        return Err(Box::new(std::io::Error::other(format!(
-            "fake provider build exited with {status}"
-        ))));
-    }
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Ok(workspace_root()
-        .join("target")
-        .join("debug")
-        .join(format!("{name}{suffix}")))
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }

@@ -3,10 +3,8 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::io::BufRead;
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::time::Duration;
+use std::path::Path;
+use std::process::Command;
 
 use serde_json::json;
 use tempfile::NamedTempFile;
@@ -18,13 +16,15 @@ use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+use voom_test_support::worker::{
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+};
 
 #[tokio::test]
 async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
-    build_worker_binary("voom-ffprobe-worker");
-    build_worker_binary("voom-verify-artifact-worker");
-    build_worker_binary("voom-ffmpeg-worker");
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let source = tmp.path().join("Movie.mp4");
@@ -240,115 +240,26 @@ fn generate_h264_fixture(path: &Path) {
 }
 
 struct TranscodeWorkerLaunch {
-    child: Child,
-    stdin: Option<ChildStdin>,
+    inner: TestWorkerLaunch,
 }
 
 impl TranscodeWorkerLaunch {
     async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
-        let secret = "control-plane-transcode-e2e-secret";
-        let worker = cp
-            .register_worker(NewWorker {
-                name: "e2e-ffmpeg-transcode".to_owned(),
-                kind: WorkerKind::Synthetic,
-                registered_at: cp.clock().now(),
-                node_id: None,
-            })
-            .await?;
-        let mut child = Command::new(worker_binary("voom-ffmpeg-worker"))
-            .env("VOOM_WORKER_SECRET", secret)
-            .env("VOOM_WORKER_ID", worker.id.0.to_string())
-            .env("VOOM_WORKER_EPOCH", "0")
-            .env("VOOM_WORKER_BIND", "127.0.0.1:0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-        let stdin = child.stdin.take();
-        let bound = read_bound_addr(&mut child)?;
-        cp.record_capability(NewCapability {
-            worker_id: worker.id,
-            operation: "transcode_video".to_owned(),
-            codecs: Vec::new(),
-            hardware: Vec::new(),
-            artifact_access: Vec::new(),
-            extra: json!({
-                "endpoint": bound.to_string(),
-                "secret": secret,
-            }),
+        Ok(Self {
+            inner: TestWorkerLaunch::start(
+                cp,
+                TestWorkerConfig::synthetic(
+                    target_debug_binary("voom-ffmpeg-worker"),
+                    "e2e-ffmpeg-transcode",
+                    "control-plane-transcode-e2e-secret",
+                    "transcode_video",
+                ),
+            )
+            .await?,
         })
-        .await?;
-        cp.record_grant(NewGrant {
-            worker_id: worker.id,
-            can_execute: vec!["transcode_video".to_owned()],
-            can_access_read: Vec::new(),
-            can_access_write: Vec::new(),
-            denies: Vec::new(),
-            max_parallel: json!({ "transcode_video": 1 }),
-        })
-        .await?;
-        Ok(Self { child, stdin })
     }
 
     fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        drop(self.stdin.take());
-        let started = std::time::Instant::now();
-        loop {
-            if let Some(status) = self.child.try_wait()? {
-                if status.success() {
-                    return Ok(());
-                }
-                return Err(Box::new(std::io::Error::other(format!(
-                    "voom-ffmpeg-worker exited with {status}"
-                ))));
-            }
-            if started.elapsed() > Duration::from_secs(5) {
-                let _ = self.child.kill();
-                return Err(Box::new(std::io::Error::other(
-                    "voom-ffmpeg-worker cleanup timed out",
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        self.inner.shutdown()
     }
-}
-
-fn read_bound_addr(child: &mut Child) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("worker stdout missing"))?;
-    let mut lines = std::io::BufReader::new(stdout).lines();
-    let line = lines
-        .next()
-        .transpose()?
-        .ok_or_else(|| std::io::Error::other("worker exited before bind line"))?;
-    Ok(line
-        .strip_prefix("BOUND addr=")
-        .ok_or_else(|| std::io::Error::other(format!("malformed bind line: {line}")))?
-        .parse::<std::net::SocketAddr>()?)
-}
-
-fn build_worker_binary(package: &str) {
-    let status = Command::new("cargo")
-        .args(["build", "-p", package])
-        .current_dir(workspace_root())
-        .status()
-        .unwrap();
-    assert!(status.success(), "failed to build {package}: {status}");
-}
-
-fn worker_binary(name: &str) -> PathBuf {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(format!("{name}{suffix}"))
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
