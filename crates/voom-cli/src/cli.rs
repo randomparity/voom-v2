@@ -79,7 +79,7 @@ pub enum PlanCommand {
     },
 }
 
-#[derive(Subcommand, Debug, Clone, Copy)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum ComplianceCommand {
     /// Generate a compliance report from durable policy and input rows.
     Report {
@@ -101,6 +101,10 @@ pub enum ComplianceCommand {
         policy_version_id: u64,
         #[arg(long)]
         input_set_id: u64,
+        #[arg(long)]
+        staging_root: Option<std::path::PathBuf>,
+        #[arg(long)]
+        output_dir: Option<std::path::PathBuf>,
     },
 }
 
