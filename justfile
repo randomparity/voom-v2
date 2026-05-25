@@ -48,11 +48,11 @@ deny:
 
 # Generate workspace coverage in lcov format (consumed by SonarCloud and other readers)
 coverage:
-    cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+    cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info -- --test-threads=1
 
 # Generate workspace coverage as a browsable HTML report
 coverage-html:
-    cargo llvm-cov --workspace --all-features --html
+    cargo llvm-cov --workspace --all-features --html -- --test-threads=1
 
 # Enforce the sibling-test layout: no inline tests in src/, every *_test.rs is linked
 check-test-layout:

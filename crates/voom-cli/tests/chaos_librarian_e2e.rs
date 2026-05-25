@@ -84,6 +84,31 @@ fn observed_state_hash_uses_chaos_librarian_prefix() {
 }
 
 #[test]
+fn observed_state_uses_stream_language_from_snapshot() {
+    let stream = serde_json::json!({
+        "kind": "audio",
+        "codec_name": "aac",
+        "language": "und"
+    });
+
+    let observed = support::observed_state::probed_stream_for_test(&stream).unwrap();
+
+    assert_eq!(observed["language"], "und");
+}
+
+#[test]
+fn observed_state_does_not_infer_mp4_language_when_snapshot_omits_it() {
+    let stream = serde_json::json!({
+        "kind": "audio",
+        "codec_name": "aac"
+    });
+
+    let observed = support::observed_state::probed_stream_for_test(&stream).unwrap();
+
+    assert!(observed.get("language").is_none());
+}
+
+#[test]
 fn chaos_run_scan_root_follows_materialized_location_prefix() {
     let tmp = tempfile::tempdir().unwrap();
     let run = support::chaos_librarian::ChaosRun {
