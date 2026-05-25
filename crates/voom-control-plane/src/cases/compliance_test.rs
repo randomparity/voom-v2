@@ -12,7 +12,22 @@ use voom_worker_protocol::{
 };
 
 use crate::cases::{count, cp};
-use crate::workflow::WorkerRuntimeRegistry;
+use crate::workflow::{WorkerRuntimeRegistry, executor::WorkflowExecutorOptions};
+
+#[test]
+fn compliance_execution_defaults_use_production_transcode_paths() {
+    let workflow_defaults = WorkflowExecutorOptions::default();
+    let compliance_defaults = super::ComplianceExecutionOptions::default();
+
+    assert_eq!(
+        compliance_defaults.transcode_staging_root,
+        workflow_defaults.transcode_staging_root
+    );
+    assert_eq!(
+        compliance_defaults.transcode_target_dir,
+        workflow_defaults.transcode_target_dir
+    );
+}
 
 async fn seed_noncompliant(
     cp: &crate::ControlPlane,

@@ -71,7 +71,7 @@ pub struct ComplianceExecutionOptions {
 
 impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
-        let defaults = WorkflowExecutorOptions::for_tests();
+        let defaults = WorkflowExecutorOptions::default();
         Self {
             transcode_staging_root: defaults.transcode_staging_root,
             transcode_target_dir: defaults.transcode_target_dir,
