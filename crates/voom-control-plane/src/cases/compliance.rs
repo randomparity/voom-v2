@@ -414,10 +414,11 @@ impl ControlPlane {
              FROM workers w \
              JOIN worker_capabilities wc ON wc.worker_id = w.id \
              WHERE w.status IN ('registered', 'active') \
-               AND wc.operation = ? \
+               AND wc.operation IN (?, ?) \
              ORDER BY w.id ASC",
         )
         .bind(operation_name(OperationKind::Remux))
+        .bind(operation_name(OperationKind::TranscodeVideo))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;
