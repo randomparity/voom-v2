@@ -199,6 +199,17 @@ impl<'a> PlanBuilder<'a> {
             CompiledOperation::SetContainer { container } => {
                 self.expand_set_container_for_snapshot(phase_name, snapshot, container);
             }
+            CompiledOperation::TranscodeVideo {
+                target_codec,
+                container,
+                profile,
+            } => self.expand_transcode_video_for_snapshot(
+                phase_name,
+                snapshot,
+                target_codec,
+                container,
+                profile,
+            ),
             CompiledOperation::Conditional {
                 condition,
                 operations,
@@ -331,6 +342,80 @@ impl<'a> PlanBuilder<'a> {
         ));
     }
 
+    fn expand_transcode_video_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        target_codec: &str,
+        container: &str,
+        profile: &str,
+    ) {
+        let payload = json!({
+            "type": "transcode_video",
+            "target_codec": target_codec,
+            "container": container,
+            "profile": profile,
+        });
+        let observed_state = transcode_video_observed_state(snapshot);
+        let (status, status_reason, capability) = match transcode_video_shape(snapshot, container) {
+            TranscodeVideoShape::Compliant => (
+                NodeStatus::NoOp,
+                format!("video is already {target_codec} in {container}"),
+                None,
+            ),
+            TranscodeVideoShape::NeedsTranscode => (
+                NodeStatus::Planned,
+                format!("video will be transcoded to {target_codec} in {container}"),
+                Some("transcode_video".to_owned()),
+            ),
+            TranscodeVideoShape::InsufficientFacts(message) => {
+                self.push_transcode_video_diagnostic(
+                    PlanningDiagnosticCode::InsufficientSnapshotFacts,
+                    phase_name,
+                    snapshot,
+                    message,
+                );
+                (NodeStatus::Blocked, message.to_owned(), None)
+            }
+            TranscodeVideoShape::UnsupportedShape(message) => {
+                self.push_transcode_video_diagnostic(
+                    PlanningDiagnosticCode::UnsupportedMediaShape,
+                    phase_name,
+                    snapshot,
+                    message,
+                );
+                (NodeStatus::Blocked, message.to_owned(), None)
+            }
+        };
+
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            "transcode_video",
+            payload,
+            observed_state,
+            status,
+            status_reason,
+            capability,
+        ));
+    }
+
+    fn push_transcode_video_diagnostic(
+        &mut self,
+        code: PlanningDiagnosticCode,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        message: &str,
+    ) {
+        self.diagnostics.push(
+            PlanningDiagnostic::error(code, message)
+                .with_phase(phase_name)
+                .with_operation_kind("transcode_video")
+                .with_target(snapshot.target.clone()),
+        );
+    }
+
     fn expand_blocked_insufficient_facts_for_snapshot(
         &mut self,
         phase_name: &str,
@@ -445,6 +530,70 @@ impl<'a> PlanBuilder<'a> {
         });
         plan_id(&preimage).map_err(|error| serialization_error(&error))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscodeVideoShape<'a> {
+    Compliant,
+    NeedsTranscode,
+    InsufficientFacts(&'a str),
+    UnsupportedShape(&'a str),
+}
+
+fn transcode_video_shape<'a>(
+    snapshot: &MediaSnapshotInput,
+    target_container: &str,
+) -> TranscodeVideoShape<'a> {
+    let Some(video_stream_count) = video_stream_count(snapshot) else {
+        return TranscodeVideoShape::InsufficientFacts("snapshot video stream count is unknown");
+    };
+    if video_stream_count != 1 {
+        return TranscodeVideoShape::UnsupportedShape(
+            "transcode_video requires exactly one video stream",
+        );
+    }
+
+    let Some(container) = snapshot.container.as_deref() else {
+        return TranscodeVideoShape::InsufficientFacts("snapshot container is unknown");
+    };
+    let Some(video_codec) = snapshot.video_codec.as_deref() else {
+        return TranscodeVideoShape::InsufficientFacts("snapshot video codec is unknown");
+    };
+
+    if container.eq_ignore_ascii_case(target_container) && is_hevc_codec(video_codec) {
+        TranscodeVideoShape::Compliant
+    } else {
+        TranscodeVideoShape::NeedsTranscode
+    }
+}
+
+fn transcode_video_observed_state(snapshot: &MediaSnapshotInput) -> Option<serde_json::Value> {
+    let mut observed = serde_json::Map::new();
+    if let Some(container) = &snapshot.container {
+        observed.insert("container".to_owned(), json!(container));
+    }
+    if let Some(video_codec) = &snapshot.video_codec {
+        observed.insert("video_codec".to_owned(), json!(video_codec));
+    }
+    if let Some(video_stream_count) = video_stream_count(snapshot) {
+        observed.insert("video_stream_count".to_owned(), json!(video_stream_count));
+    }
+    if observed.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(observed))
+    }
+}
+
+fn video_stream_count(snapshot: &MediaSnapshotInput) -> Option<u64> {
+    snapshot
+        .stream_summary
+        .get("video_stream_count")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn is_hevc_codec(codec: &str) -> bool {
+    matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265")
 }
 
 fn policy_warnings(policy: &CompiledPolicy) -> Vec<String> {

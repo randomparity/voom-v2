@@ -32,6 +32,10 @@ fn policy(operation: CompiledOperation) -> CompiledPolicy {
 }
 
 fn input(container: Option<&str>) -> PolicyInputSetDraft {
+    input_with_snapshot(snapshot_with(container, None, None))
+}
+
+fn input_with_snapshot(snapshot: MediaSnapshotInput) -> PolicyInputSetDraft {
     PolicyInputSetDraft {
         slug: "synthetic-input".to_owned(),
         display_name: "Synthetic Input".to_owned(),
@@ -45,29 +49,52 @@ fn input(container: Option<&str>) -> PolicyInputSetDraft {
             target_kind: TargetKind::MediaVariant,
             display_name: None,
         }],
-        media_snapshots: vec![MediaSnapshotInput {
-            ordinal: 0,
-            target: TargetRef::Synthetic {
-                key: "variant-1".to_owned(),
-                kind: TargetKind::MediaVariant,
-            },
-            container: container.map(str::to_owned),
-            stream_summary: serde_json::json!({"streams": []}),
-            video_codec: None,
-            width: None,
-            height: None,
-            hdr: None,
-            bitrate: None,
-            duration_millis: None,
-            audio_languages: Vec::new(),
-            subtitle_languages: Vec::new(),
-            health_flags: Vec::new(),
-            existing_media_snapshot_id: None,
-        }],
+        media_snapshots: vec![snapshot],
         identity_evidence: Vec::new(),
         bundle_targets: Vec::new(),
         quality_profiles: Vec::new(),
         issues: Vec::new(),
+    }
+}
+
+fn snapshot_with(
+    container: Option<&str>,
+    video_codec: Option<&str>,
+    video_stream_count: Option<u64>,
+) -> MediaSnapshotInput {
+    MediaSnapshotInput {
+        ordinal: 0,
+        target: TargetRef::Synthetic {
+            key: "variant-1".to_owned(),
+            kind: TargetKind::MediaVariant,
+        },
+        container: container.map(str::to_owned),
+        stream_summary: video_stream_count.map_or_else(
+            || serde_json::json!({}),
+            |count| serde_json::json!({"video_stream_count": count}),
+        ),
+        video_codec: video_codec.map(str::to_owned),
+        width: None,
+        height: None,
+        hdr: None,
+        bitrate: None,
+        duration_millis: None,
+        audio_languages: Vec::new(),
+        subtitle_languages: Vec::new(),
+        health_flags: Vec::new(),
+        existing_media_snapshot_id: None,
+    }
+}
+
+fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
+    PlanningRequest {
+        policy: policy(CompiledOperation::TranscodeVideo {
+            target_codec: "hevc".to_owned(),
+            container: "mkv".to_owned(),
+            profile: "default-hevc".to_owned(),
+        }),
+        input: input_with_snapshot(snapshot),
+        context: PlanningContext::default(),
     }
 }
 
@@ -180,6 +207,73 @@ fn set_container_blocks_unknown_container_snapshot() {
         "insufficient_snapshot_facts"
     );
     assert_eq!(plan.diagnostics[0].message, "snapshot container is unknown");
+}
+
+#[test]
+fn transcode_video_plans_non_hevc_or_non_mkv_single_video_snapshot() {
+    let plan = generate_plan(request_with_transcode(snapshot_with(
+        Some("mp4"),
+        Some("h264"),
+        Some(1),
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].operation_payload["target_codec"], "hevc");
+    assert_eq!(plan.nodes[0].operation_payload["container"], "mkv");
+    assert_eq!(
+        plan.nodes[0].observed_state,
+        Some(serde_json::json!({
+            "container": "mp4",
+            "video_codec": "h264",
+            "video_stream_count": 1
+        }))
+    );
+}
+
+#[test]
+fn transcode_video_no_ops_hevc_mkv_single_video_snapshot() {
+    let plan = generate_plan(request_with_transcode(snapshot_with(
+        Some("mkv"),
+        Some("hevc"),
+        Some(1),
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
+fn transcode_video_no_ops_h265_mkv_single_video_snapshot() {
+    let plan = generate_plan(request_with_transcode(snapshot_with(
+        Some("mkv"),
+        Some("h265"),
+        Some(1),
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
+fn transcode_video_blocks_unknown_or_multi_video_snapshots() {
+    assert_transcode_blocked(snapshot_with(None, Some("h264"), Some(1)));
+    assert_transcode_blocked(snapshot_with(Some("mkv"), None, Some(1)));
+    assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), None));
+    assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(0)));
+    assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(2)));
+}
+
+fn assert_transcode_blocked(snapshot: MediaSnapshotInput) {
+    let plan = generate_plan(request_with_transcode(snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.summary.blocked_node_count, 1);
+    assert_eq!(plan.diagnostics.len(), 1);
 }
 
 #[test]
