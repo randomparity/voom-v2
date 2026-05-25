@@ -43,3 +43,4 @@ tempfile = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 voom-store = { workspace = true, features = ["test-support"] }
+voom-test-support = { workspace = true }

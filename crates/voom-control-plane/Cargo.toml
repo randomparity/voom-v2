@@ -49,3 +49,4 @@ tokio = { workspace = true, features = ["io-util", "process", "time"] }
 # case tests to pin the backoff jitter.
 voom-core = { workspace = true, features = ["test-support"] }
 voom-fake-support = { workspace = true }
+voom-test-support = { workspace = true }
