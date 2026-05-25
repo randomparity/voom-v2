@@ -129,6 +129,37 @@ async fn add_member_rejects_duplicate_file_asset_membership() {
 }
 
 #[tokio::test]
+async fn get_member_by_file_asset_in_tx_returns_existing_membership() {
+    let (bun, _id, mv_id, a, _b, _tmp) = fresh().await;
+    let bundle = bun
+        .create(NewAssetBundle {
+            media_variant_id: mv_id,
+            display_name: "primary".to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    bun.add_member(NewBundleMember {
+        bundle_id: bundle.id,
+        file_asset_id: a,
+        role: BundleMemberRole::PrimaryVideo,
+    })
+    .await
+    .unwrap();
+
+    let mut tx = bun.pool.begin().await.unwrap();
+    let found = bun
+        .get_member_by_file_asset_in_tx(&mut tx, a)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(found.bundle_id, bundle.id);
+    assert_eq!(found.file_asset_id, a);
+    assert_eq!(found.role, BundleMemberRole::PrimaryVideo);
+}
+
+#[tokio::test]
 async fn remove_member_for_unknown_pair_returns_not_found() {
     let (bun, _id, mv_id, a, _b, _tmp) = fresh().await;
     let bundle = bun

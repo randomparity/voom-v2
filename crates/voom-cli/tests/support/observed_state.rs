@@ -3,11 +3,11 @@
     reason = "E2E support helpers are shared across ignored cases"
 )]
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Component, Path};
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 
 pub async fn export_observed_state(
@@ -19,21 +19,25 @@ pub async fn export_observed_state(
     let pool = voom_store::connect(database_url).await?;
     let library_root = run_dir.join("library").canonicalize()?;
     let run_id = fixture_run_id(run_dir)?;
-    let rows = sqlx::query_as::<_, (i64, i64, String, i64, String, Option<String>)>(
+    let rows = sqlx::query_as::<_, (i64, i64, String, i64, String, Option<String>, Option<i64>)>(
         "SELECT fa.id AS file_asset_id, fv.id AS file_version_id, fv.content_hash, \
-                fv.size_bytes, fl.value AS location_value, ms.payload AS snapshot_payload \
+                fv.size_bytes, fl.value AS location_value, ms.payload AS snapshot_payload, \
+                bm.bundle_id AS bundle_id \
          FROM file_assets fa \
          JOIN file_versions fv ON fv.file_asset_id = fa.id AND fv.retired_at IS NULL \
          JOIN file_locations fl ON fl.file_version_id = fv.id \
               AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+         LEFT JOIN asset_bundle_members bm ON bm.file_asset_id = fa.id \
          LEFT JOIN media_snapshots ms ON ms.id = ( \
              SELECT max(ms2.id) FROM media_snapshots ms2 WHERE ms2.file_version_id = fv.id \
          ) \
          WHERE fa.retired_at IS NULL \
+           AND (bm.role IS NULL OR bm.role <> 'external_subtitle') \
          ORDER BY fa.id ASC, fv.id ASC, fl.id ASC",
     )
     .fetch_all(&pool)
     .await?;
+    let sidecars_by_bundle = durable_sidecars_by_bundle(&pool, &library_root).await?;
 
     let mut assets = Vec::with_capacity(rows.len());
     for (
@@ -43,6 +47,7 @@ pub async fn export_observed_state(
         size_bytes,
         location_value,
         snapshot_payload,
+        bundle_id,
     ) in rows
     {
         let current_path = library_relative_path(&library_root, Path::new(&location_value))?;
@@ -58,9 +63,8 @@ pub async fn export_observed_state(
         if let Some(probed) = probed_media(snapshot_payload.as_ref(), size_bytes)? {
             asset.insert("probed".to_owned(), probed);
         }
-        let sidecars = observed_sidecars(&library_root, Path::new(&location_value))?;
-        if !sidecars.is_empty() {
-            asset.insert("sidecars".to_owned(), Value::Array(sidecars));
+        if let Some(sidecars) = bundle_id.and_then(|id| sidecars_by_bundle.get(&id)) {
+            asset.insert("sidecars".to_owned(), Value::Array(sidecars.clone()));
         }
         assets.push(Value::Object(asset));
     }
@@ -235,68 +239,36 @@ pub fn probed_stream_for_test(stream: &Value) -> Option<Value> {
     probed_stream(stream)
 }
 
-fn observed_sidecars(
+async fn durable_sidecars_by_bundle(
+    pool: &sqlx::SqlitePool,
     library_root: &Path,
-    asset_path: &Path,
-) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let canonical = asset_path.canonicalize()?;
-    let Some(stem) = canonical.file_stem().and_then(|value| value.to_str()) else {
-        return Ok(Vec::new());
-    };
-    let mut candidates = Vec::new();
-    collect_sidecar_candidates(
-        library_root,
-        stem,
-        canonical.parent().unwrap_or(library_root),
-        &mut candidates,
-    )?;
-    if canonical.parent() != Some(library_root) {
-        collect_sidecar_candidates(library_root, stem, library_root, &mut candidates)?;
-    }
-    candidates.sort_by(|left, right| {
-        left["path"]
-            .as_str()
-            .unwrap_or_default()
-            .cmp(right["path"].as_str().unwrap_or_default())
-    });
-    Ok(candidates)
-}
+) -> Result<BTreeMap<i64, Vec<Value>>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query_as::<_, (i64, i64, i64, String, i64, String)>(
+        "SELECT bm.bundle_id, fa.id, fv.id, fv.content_hash, fv.size_bytes, fl.value \
+         FROM asset_bundle_members bm \
+         JOIN file_assets fa ON fa.id = bm.file_asset_id AND fa.retired_at IS NULL \
+         JOIN file_versions fv ON fv.file_asset_id = fa.id AND fv.retired_at IS NULL \
+         JOIN file_locations fl ON fl.file_version_id = fv.id \
+              AND fl.retired_at IS NULL AND fl.kind = 'local_path' \
+         WHERE bm.role = 'external_subtitle' \
+         ORDER BY bm.bundle_id ASC, fl.value ASC",
+    )
+    .fetch_all(pool)
+    .await?;
 
-fn collect_sidecar_candidates(
-    library_root: &Path,
-    asset_stem: &str,
-    dir: &Path,
-    candidates: &mut Vec<Value>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("srt") {
-            continue;
-        }
-        let Some(sidecar_stem) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !sidecar_stem
-            .strip_prefix(asset_stem)
-            .is_some_and(|suffix| suffix.starts_with('.'))
-        {
-            continue;
-        }
-        let relative_path = library_relative_path(library_root, &path)?;
-        candidates.push(json!({
-            "observed_ref": format!("sidecar:{relative_path}"),
+    let mut by_bundle = BTreeMap::<i64, Vec<Value>>::new();
+    for (bundle_id, file_asset_id, _file_version_id, content_hash, _size_bytes, location_value) in
+        rows
+    {
+        let relative_path = library_relative_path(library_root, Path::new(&location_value))?;
+        by_bundle.entry(bundle_id).or_default().push(json!({
+            "observed_ref": format!("file_asset_{file_asset_id}"),
             "kind": "subtitle",
             "path": relative_path,
-            "content_hash": sha256_file(&path)?,
+            "content_hash": sha256_to_observed_hash(&content_hash)?,
         }));
     }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut hasher = Sha256::new();
-    hasher.update(std::fs::read(path)?);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(by_bundle)
 }
 
 fn parse_ratio(text: &str) -> Option<f64> {

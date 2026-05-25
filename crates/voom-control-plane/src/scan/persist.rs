@@ -1,24 +1,31 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use sha2::Digest as _;
 use voom_core::{
-    ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
+    BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
     VoomError, WorkerId,
 };
 use voom_events::payload::{
-    FileAssetCreatedPayload, FileLocationAliasedPayload, FileLocationRecordedPayload,
-    FileVersionCreatedPayload, IdentityEvidenceRecordedPayload, MediaSnapshotRecordedPayload,
+    AssetBundleCreatedPayload, AssetBundleMemberAddedPayload, FileAssetCreatedPayload,
+    FileLocationAliasedPayload, FileLocationRecordedPayload, FileVersionCreatedPayload,
+    IdentityEvidenceRecordedPayload, MediaSnapshotRecordedPayload, MediaVariantCreatedPayload,
+    MediaWorkCreatedPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::identity::{
-    DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewMediaSnapshot,
+use voom_store::repo::{
+    bundles::{BundleMemberRole, BundleRepo, NewAssetBundle, NewBundleMember},
+    identity::{
+        DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind,
+        NewMediaSnapshot, NewMediaVariant, NewMediaWork,
+    },
 };
 use voom_worker_protocol::ProbeFileResult;
 
 use crate::ControlPlane;
 use crate::cases::append_event;
-use crate::scan::ScanReportFileStatus;
+use crate::scan::{ScanReportFileStatus, discovery::SidecarCandidate};
 
 pub use super::hash::ObservedFileFacts as ObservedCandidateFacts;
 
@@ -30,6 +37,29 @@ pub struct PersistedScan {
     pub file_version_id: FileVersionId,
     pub file_location_id: FileLocationId,
     pub media_snapshot_id: MediaSnapshotId,
+    pub bundle_id: Option<BundleId>,
+    pub bundle_member_role: Option<String>,
+    pub sidecars: Vec<PersistedSidecar>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedSidecar {
+    pub path: PathBuf,
+    pub file_asset_id: FileAssetId,
+    pub file_version_id: FileVersionId,
+    pub file_location_id: FileLocationId,
+    pub bundle_id: BundleId,
+    pub bundle_member_role: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservedSidecar {
+    path: PathBuf,
+    location_value: String,
+    content_hash: String,
+    size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,11 +166,13 @@ pub async fn persist_scanned_media_snapshot(
     control_plane: &ControlPlane,
     worker_id: WorkerId,
     canonical_path: &Path,
+    sidecars: &[SidecarCandidate],
     candidate: &ObservedCandidateFacts,
     result: &ProbeFileResult,
 ) -> Result<PersistedScan, ScanPersistError> {
     verify_probe_facts(candidate, result)?;
     let location_value = canonical_path_value(canonical_path)?;
+    let observed_sidecars = observe_sidecars(sidecars).await?;
 
     let now = control_plane.clock().now();
     let mut tx = control_plane
@@ -195,6 +227,24 @@ pub async fn persist_scanned_media_snapshot(
     )
     .await?;
 
+    let (bundle_id, bundle_member_role, persisted_sidecars) = if observed_sidecars.is_empty() {
+        (None, None, Vec::new())
+    } else {
+        let bundle_id =
+            ensure_primary_bundle(control_plane, &mut tx, file_asset_id, canonical_path, now)
+                .await?;
+        let mut persisted_sidecars = Vec::with_capacity(observed_sidecars.len());
+        for sidecar in observed_sidecars {
+            persisted_sidecars
+                .push(persist_sidecar(control_plane, &mut tx, bundle_id, sidecar, now).await?);
+        }
+        (
+            Some(bundle_id),
+            Some(BundleMemberRole::PrimaryVideo.as_str().to_owned()),
+            persisted_sidecars,
+        )
+    };
+
     tx.commit()
         .await
         .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
@@ -204,7 +254,270 @@ pub async fn persist_scanned_media_snapshot(
         file_version_id,
         file_location_id,
         media_snapshot_id: snapshot.id,
+        bundle_id,
+        bundle_member_role,
+        sidecars: persisted_sidecars,
     })
+}
+
+async fn observe_sidecars(
+    sidecars: &[SidecarCandidate],
+) -> Result<Vec<ObservedSidecar>, VoomError> {
+    let mut observed = Vec::with_capacity(sidecars.len());
+    for sidecar in sidecars {
+        let bytes = tokio::fs::read(&sidecar.path).await.map_err(|err| {
+            VoomError::Config(format!("sidecar read {}: {err}", sidecar.path.display()))
+        })?;
+        let size_bytes = u64::try_from(bytes.len()).map_err(|_| {
+            VoomError::Internal(format!("sidecar too large: {}", sidecar.path.display()))
+        })?;
+        let content_hash = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        observed.push(ObservedSidecar {
+            path: sidecar.path.clone(),
+            location_value: canonical_path_value(&sidecar.path)?,
+            content_hash,
+            size_bytes,
+        });
+    }
+    Ok(observed)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps provisional work, variant, bundle, and primary-member event writes in one readable transaction step"
+)]
+async fn ensure_primary_bundle(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    file_asset_id: FileAssetId,
+    canonical_path: &Path,
+    observed_at: time::OffsetDateTime,
+) -> Result<BundleId, VoomError> {
+    if let Some(member) = control_plane
+        .bundles
+        .get_member_by_file_asset_in_tx(tx, file_asset_id)
+        .await?
+    {
+        if member.role != BundleMemberRole::PrimaryVideo {
+            return Err(VoomError::Conflict(format!(
+                "scan primary asset {file_asset_id} is already a {:?} bundle member",
+                member.role
+            )));
+        }
+        return Ok(member.bundle_id);
+    }
+
+    let display_name = display_name_from_path(canonical_path);
+    let work = control_plane
+        .identity
+        .create_media_work_in_tx(
+            tx,
+            NewMediaWork {
+                kind: MediaWorkKind::Unknown,
+                display_title: display_name.clone(),
+                provisional: true,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaWork,
+        Some(work.id.0),
+        observed_at,
+        Event::MediaWorkCreated(MediaWorkCreatedPayload {
+            media_work_id: work.id.0,
+            kind: work.kind.as_str().to_owned(),
+            display_title: work.display_title.clone(),
+            provisional: work.provisional,
+        }),
+    )
+    .await?;
+
+    let variant = control_plane
+        .identity
+        .create_media_variant_in_tx(
+            tx,
+            NewMediaVariant {
+                media_work_id: work.id,
+                label: "scan".to_owned(),
+                provisional: true,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaVariant,
+        Some(variant.id.0),
+        observed_at,
+        Event::MediaVariantCreated(MediaVariantCreatedPayload {
+            media_variant_id: variant.id.0,
+            media_work_id: variant.media_work_id.0,
+            label: variant.label.clone(),
+            provisional: variant.provisional,
+        }),
+    )
+    .await?;
+
+    let bundle = control_plane
+        .bundles
+        .create_in_tx(
+            tx,
+            NewAssetBundle {
+                media_variant_id: variant.id,
+                display_name,
+                created_at: observed_at,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::AssetBundle,
+        Some(bundle.id.0),
+        observed_at,
+        Event::AssetBundleCreated(AssetBundleCreatedPayload {
+            bundle_id: bundle.id.0,
+            media_variant_id: bundle.media_variant_id.0,
+            display_name: bundle.display_name.clone(),
+        }),
+    )
+    .await?;
+    add_bundle_member_event(
+        control_plane,
+        tx,
+        bundle.id,
+        file_asset_id,
+        BundleMemberRole::PrimaryVideo,
+        observed_at,
+    )
+    .await?;
+    Ok(bundle.id)
+}
+
+async fn persist_sidecar(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: BundleId,
+    sidecar: ObservedSidecar,
+    observed_at: time::OffsetDateTime,
+) -> Result<PersistedSidecar, VoomError> {
+    let outcome = control_plane
+        .identity
+        .record_discovered_file_in_tx(
+            tx,
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: sidecar.location_value.clone(),
+                content_hash: sidecar.content_hash.clone(),
+                size_bytes: sidecar.size_bytes,
+                observed_at,
+                proof: None,
+            },
+            None,
+        )
+        .await?;
+    let IngestedIds(file_asset_id, file_version_id, file_location_id) =
+        emit_ingest_events(control_plane, tx, &outcome, observed_at).await?;
+    if let Some(member) = control_plane
+        .bundles
+        .get_member_by_file_asset_in_tx(tx, file_asset_id)
+        .await?
+    {
+        if member.bundle_id == bundle_id && member.role == BundleMemberRole::ExternalSubtitle {
+            return Ok(persisted_sidecar_report(
+                sidecar,
+                file_asset_id,
+                file_version_id,
+                file_location_id,
+                bundle_id,
+            ));
+        }
+        return Err(VoomError::Conflict(format!(
+            "scan sidecar asset {file_asset_id} is already in bundle {} as {:?}",
+            member.bundle_id, member.role
+        )));
+    }
+
+    add_bundle_member_event(
+        control_plane,
+        tx,
+        bundle_id,
+        file_asset_id,
+        BundleMemberRole::ExternalSubtitle,
+        observed_at,
+    )
+    .await?;
+    Ok(persisted_sidecar_report(
+        sidecar,
+        file_asset_id,
+        file_version_id,
+        file_location_id,
+        bundle_id,
+    ))
+}
+
+fn persisted_sidecar_report(
+    sidecar: ObservedSidecar,
+    file_asset_id: FileAssetId,
+    file_version_id: FileVersionId,
+    file_location_id: FileLocationId,
+    bundle_id: BundleId,
+) -> PersistedSidecar {
+    PersistedSidecar {
+        path: sidecar.path,
+        file_asset_id,
+        file_version_id,
+        file_location_id,
+        bundle_id,
+        bundle_member_role: BundleMemberRole::ExternalSubtitle.as_str().to_owned(),
+        content_hash: sidecar.content_hash,
+        size_bytes: sidecar.size_bytes,
+    }
+}
+
+async fn add_bundle_member_event(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    bundle_id: BundleId,
+    file_asset_id: FileAssetId,
+    role: BundleMemberRole,
+    observed_at: time::OffsetDateTime,
+) -> Result<(), VoomError> {
+    control_plane
+        .bundles
+        .add_member_in_tx(
+            tx,
+            NewBundleMember {
+                bundle_id,
+                file_asset_id,
+                role,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::AssetBundle,
+        Some(bundle_id.0),
+        observed_at,
+        Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
+            bundle_id: bundle_id.0,
+            file_asset_id: file_asset_id.0,
+            role: role.as_str().to_owned(),
+        }),
+    )
+    .await
+}
+
+fn display_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map_or_else(|| path.display().to_string(), str::to_owned)
 }
 
 struct IngestedIds(FileAssetId, FileVersionId, FileLocationId);

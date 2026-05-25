@@ -118,6 +118,16 @@ Duplicate scans should be idempotent enough for local workflows:
 - an already-member sidecar in the same bundle is treated as already linked;
 - an already-member sidecar in a different bundle is a conflict and fails loud.
 
+Because scan identity is currently provisional and has no physical proof row,
+repeated scans may create a fresh file asset and provisional bundle instead of
+finding the previous scan's asset. The required behavior in that case is still
+no membership conflict and no partial write. When identity resolution returns an
+already-member asset, the reuse rules above apply.
+
+The scan summary counts matched sidecars as discovered and ingested. Matched
+sidecars do not increment probed or snapshots-recorded because they are not sent
+to ffprobe and do not produce media snapshots.
+
 ## Observed-State Export
 
 The Chaos test exporter will stop discovering `.srt` files from the filesystem.
@@ -138,8 +148,8 @@ Focused tests will cover:
 - control-plane scan persists a media file plus `Movie.eng.srt` as two file
   assets, one media snapshot, one provisional work/variant/bundle, and two
   bundle members with the expected roles;
-- repeated scan reuses the existing bundle relationship without duplicate
-  membership failure;
+- repeated scan links sidecars without duplicate membership failure, including
+  the current no-proof identity case that creates a fresh provisional bundle;
 - CLI scan envelope includes the durable sidecar IDs;
 - Chaos observed-state export derives `sidecars[]` from bundle membership rather
   than filesystem probing.

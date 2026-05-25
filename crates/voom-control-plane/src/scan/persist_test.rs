@@ -27,6 +27,7 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
         &cp,
         worker.id,
         Path::new("/library/movie.mkv"),
+        &[],
         &candidate,
         &result,
     )
@@ -85,6 +86,7 @@ async fn content_drift_skips_persistence_and_returns_failed_content_drift() {
         &cp,
         worker.id,
         Path::new("/library/movie.mkv"),
+        &[],
         &candidate,
         &result,
     )
@@ -122,6 +124,7 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
         &cp,
         WorkerId(999),
         Path::new("/library/movie.mkv"),
+        &[],
         &candidate,
         &result,
     )
@@ -142,6 +145,7 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
         &cp,
         worker.id,
         Path::new("/library/movie.mkv"),
+        &[],
         &candidate,
         &result,
     )

@@ -100,6 +100,55 @@ async fn scan_directory_reports_unsupported_entries_as_skipped() {
 }
 
 #[tokio::test]
+async fn scan_directory_outputs_durable_sidecar_links() {
+    let seeded = seed().await;
+    let dir = TempDir::new().unwrap();
+    let media = dir.path().join("Movie.Name.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let sidecar = dir.path().join("Movie.Name.eng.srt");
+    std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
+
+    let output = scan_command(&seeded.url, dir.path()).output().unwrap();
+
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "scan");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["summary"]["discovered"], 2);
+    assert_eq!(json["data"]["summary"]["ingested"], 2);
+    assert_eq!(json["data"]["summary"]["snapshots_recorded"], 1);
+    assert_eq!(json["data"]["summary"]["skipped"], 0);
+    let file = &json["data"]["files"][0];
+    assert_eq!(
+        file["path"],
+        media.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(file["bundle_member_role"], "primary_video");
+    assert!(file["bundle_id"].as_u64().unwrap() > 0);
+    assert_eq!(file["sidecars"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        file["sidecars"][0]["path"],
+        sidecar.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(file["sidecars"][0]["bundle_id"], file["bundle_id"]);
+    assert_eq!(
+        file["sidecars"][0]["bundle_member_role"],
+        "external_subtitle"
+    );
+    assert!(
+        file["sidecars"][0]["content_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    let pool = voom_store::connect(&seeded.url).await.unwrap();
+    assert_table_count(&pool, "file_assets", 2).await;
+    assert_table_count(&pool, "media_snapshots", 1).await;
+    assert_table_count(&pool, "asset_bundle_members", 2).await;
+}
+
+#[tokio::test]
 async fn scan_unsupported_explicit_file_is_bad_args() {
     let seeded = seed().await;
     let dir = TempDir::new().unwrap();

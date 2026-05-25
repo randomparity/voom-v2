@@ -254,6 +254,7 @@ async fn directory_scan_persists_matching_srt_sidecar_as_bundle_member() {
         .unwrap();
 
     assert_eq!(report.summary.ingested, 2);
+    assert_eq!(report.summary.discovered, 2);
     assert_eq!(report.summary.snapshots_recorded, 1);
     assert_eq!(report.files.len(), 1);
     assert_eq!(report.files[0].path, media);
@@ -271,27 +272,37 @@ async fn directory_scan_persists_matching_srt_sidecar_as_bundle_member() {
 }
 
 #[tokio::test]
-async fn repeated_directory_scan_reuses_existing_sidecar_bundle() {
+async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
     let dir = tempfile::tempdir().unwrap();
     write_file(dir.path(), "Movie.Name.mkv", b"movie");
     write_file(dir.path(), "Movie.Name.eng.srt", b"subtitle");
     let (cp, _db) = cp_with_manual_clock(T0).await;
 
-    cp.scan_path_with_launcher(
+    let first = cp.scan_path_with_launcher(
         ScanPathInput { path: dir.path().to_path_buf() },
         &mut FakeLauncher::new(FakePlan::AllSuccess),
     )
     .await
     .unwrap();
-    cp.scan_path_with_launcher(
+    let second = cp.scan_path_with_launcher(
         ScanPathInput { path: dir.path().to_path_buf() },
         &mut FakeLauncher::new(FakePlan::AllSuccess),
     )
     .await
     .unwrap();
 
-    assert_eq!(table_count(&cp, "asset_bundles").await, 1);
-    assert_eq!(table_count(&cp, "asset_bundle_members").await, 2);
+    assert_eq!(first.files[0].sidecars.len(), 1);
+    assert_eq!(second.files[0].sidecars.len(), 1);
+    assert_eq!(
+        first.files[0].sidecars[0].bundle_id,
+        first.files[0].bundle_id.unwrap()
+    );
+    assert_eq!(
+        second.files[0].sidecars[0].bundle_id,
+        second.files[0].bundle_id.unwrap()
+    );
+    assert_eq!(table_count(&cp, "asset_bundles").await, 2);
+    assert_eq!(table_count(&cp, "asset_bundle_members").await, 4);
 }
 ```
 
@@ -300,14 +311,14 @@ async fn repeated_directory_scan_reuses_existing_sidecar_bundle() {
 Run:
 
 ```bash
-cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_reuses_existing_sidecar_bundle -- --nocapture
+cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_links_sidecar_without_membership_conflict -- --nocapture
 ```
 
 Use two separate commands if needed:
 
 ```bash
 cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member -- --nocapture
-cargo test -p voom-control-plane scan::mod_test::repeated_directory_scan_reuses_existing_sidecar_bundle -- --nocapture
+cargo test -p voom-control-plane scan::mod_test::repeated_directory_scan_links_sidecar_without_membership_conflict -- --nocapture
 ```
 
 Expected: compile failures for missing report fields.
@@ -408,14 +419,14 @@ In `scan/mod.rs`, pass `&candidate.sidecars` into
 Run:
 
 ```bash
-cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_reuses_existing_sidecar_bundle -- --nocapture
+cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_links_sidecar_without_membership_conflict -- --nocapture
 ```
 
 Use two separate commands if needed:
 
 ```bash
 cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member -- --nocapture
-cargo test -p voom-control-plane scan::mod_test::repeated_directory_scan_reuses_existing_sidecar_bundle -- --nocapture
+cargo test -p voom-control-plane scan::mod_test::repeated_directory_scan_links_sidecar_without_membership_conflict -- --nocapture
 ```
 
 Expected: pass.
@@ -563,7 +574,7 @@ Run:
 
 ```bash
 cargo test -p voom-control-plane scan::discovery -- --nocapture
-cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_reuses_existing_sidecar_bundle -- --nocapture
+cargo test -p voom-control-plane scan::mod_test::directory_scan_persists_matching_srt_sidecar_as_bundle_member scan::mod_test::repeated_directory_scan_links_sidecar_without_membership_conflict -- --nocapture
 cargo test -p voom-cli --test scan_envelope scan_directory_outputs_durable_sidecar_links -- --nocapture
 cargo test -p voom-cli --test chaos_librarian_e2e static_library_baseline_scans_exports_and_compares -- --ignored --nocapture
 git diff --check

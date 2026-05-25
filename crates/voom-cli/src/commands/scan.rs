@@ -5,6 +5,7 @@ use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::{
     ScanFileErrorReport, ScanFileReport, ScanPathInput, ScanReport, ScanReportFileStatus,
+    ScanSidecarReport,
 };
 use voom_core::{ErrorCode, FailureClass};
 
@@ -49,7 +50,25 @@ pub struct ScanFileData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_worker_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_member_role: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sidecars: Vec<ScanSidecarData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ScanFileErrorData>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScanSidecarData {
+    pub path: String,
+    pub file_asset_id: u64,
+    pub file_version_id: u64,
+    pub file_location_id: u64,
+    pub bundle_id: u64,
+    pub bundle_member_role: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,7 +178,29 @@ impl From<ScanFileReport> for ScanFileData {
             content_hash: file.content_hash,
             size_bytes: file.size_bytes,
             probe_worker_id: file.probe_worker_id.map(|id| id.0),
+            bundle_id: file.bundle_id.map(|id| id.0),
+            bundle_member_role: file.bundle_member_role,
+            sidecars: file
+                .sidecars
+                .into_iter()
+                .map(ScanSidecarData::from)
+                .collect(),
             error: file.error.map(ScanFileErrorData::from),
+        }
+    }
+}
+
+impl From<ScanSidecarReport> for ScanSidecarData {
+    fn from(sidecar: ScanSidecarReport) -> Self {
+        Self {
+            path: path_wire(&sidecar.path),
+            file_asset_id: sidecar.file_asset_id.0,
+            file_version_id: sidecar.file_version_id.0,
+            file_location_id: sidecar.file_location_id.0,
+            bundle_id: sidecar.bundle_id.0,
+            bundle_member_role: sidecar.bundle_member_role,
+            content_hash: sidecar.content_hash,
+            size_bytes: sidecar.size_bytes,
         }
     }
 }

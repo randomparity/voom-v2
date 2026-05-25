@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use voom_core::{
-    ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
+    BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
     VoomError, WorkerId,
 };
 use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult};
@@ -52,7 +52,22 @@ pub struct ScanFileReport {
     pub content_hash: Option<String>,
     pub size_bytes: Option<u64>,
     pub probe_worker_id: Option<WorkerId>,
+    pub bundle_id: Option<BundleId>,
+    pub bundle_member_role: Option<String>,
+    pub sidecars: Vec<ScanSidecarReport>,
     pub error: Option<ScanFileErrorReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanSidecarReport {
+    pub path: PathBuf,
+    pub file_asset_id: FileAssetId,
+    pub file_version_id: FileVersionId,
+    pub file_location_id: FileLocationId,
+    pub bundle_id: BundleId,
+    pub bundle_member_role: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +207,7 @@ impl ControlPlane {
                     self,
                     worker.worker_id(),
                     &candidate.path,
+                    &candidate.sidecars,
                     &candidate_facts,
                     &probe,
                 )
@@ -199,6 +215,8 @@ impl ControlPlane {
                 {
                     Ok(persisted) => {
                         report.summary.ingested += 1;
+                        report.summary.ingested +=
+                            u64::try_from(persisted.sidecars.len()).unwrap_or(u64::MAX);
                         report.summary.snapshots_recorded += 1;
                         report.files.push(scanned_file_report(
                             candidate.path,
@@ -321,11 +339,20 @@ impl ScanReport {
                 content_hash: None,
                 size_bytes: None,
                 probe_worker_id: None,
+                bundle_id: None,
+                bundle_member_role: None,
+                sidecars: Vec::new(),
                 error: None,
             })
             .collect::<Vec<_>>();
+        let sidecar_count = discovered
+            .candidates
+            .iter()
+            .map(|candidate| candidate.sidecars.len())
+            .sum::<usize>();
         let discovered_count =
-            u64::try_from(discovered.candidates.len() + skipped.len()).unwrap_or(u64::MAX);
+            u64::try_from(discovered.candidates.len() + sidecar_count + skipped.len())
+                .unwrap_or(u64::MAX);
         Self {
             path: discovered.root.clone(),
             mode: discovered.mode,
@@ -381,6 +408,22 @@ fn scanned_file_report(
         content_hash: Some(facts.content_hash.clone()),
         size_bytes: Some(facts.size_bytes),
         probe_worker_id: Some(worker_id),
+        bundle_id: persisted.bundle_id,
+        bundle_member_role: persisted.bundle_member_role.clone(),
+        sidecars: persisted
+            .sidecars
+            .iter()
+            .map(|sidecar| ScanSidecarReport {
+                path: sidecar.path.clone(),
+                file_asset_id: sidecar.file_asset_id,
+                file_version_id: sidecar.file_version_id,
+                file_location_id: sidecar.file_location_id,
+                bundle_id: sidecar.bundle_id,
+                bundle_member_role: sidecar.bundle_member_role.clone(),
+                content_hash: sidecar.content_hash.clone(),
+                size_bytes: sidecar.size_bytes,
+            })
+            .collect(),
         error: None,
     }
 }
@@ -404,6 +447,9 @@ fn push_scan_error(
         content_hash: facts.map(|facts| facts.content_hash.clone()),
         size_bytes: facts.map(|facts| facts.size_bytes),
         probe_worker_id: worker_id,
+        bundle_id: None,
+        bundle_member_role: None,
+        sidecars: Vec::new(),
         error: Some(error),
     });
 }
