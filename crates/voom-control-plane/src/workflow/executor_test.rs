@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, JobId, SystemClock, WorkerId};
+use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::NewTicket;
@@ -28,6 +28,7 @@ use crate::workflow::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, Wor
 use crate::workflow::runtime::WorkerRuntimeRegistry;
 use crate::workflow::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::timing::EffectiveTiming;
+use voom_plan::TargetRef;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -232,6 +233,36 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
 
     assert_eq!(summary.dispatch_count, 1);
     assert_eq!(fixture.other_job_ready_count().await, 1);
+}
+
+#[tokio::test]
+async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_video",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::TranscodeVideo);
+    assert_eq!(
+        workflow_payload.rendered_payload["operation"],
+        "transcode_video"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(workflow_payload.rendered_payload["target_codec"], "hevc");
+    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
+    assert_eq!(workflow_payload.rendered_payload["profile"], "default-hevc");
 }
 
 #[test]
@@ -540,6 +571,15 @@ impl ExecutorFixture {
             .unwrap()
             .to_owned()
     }
+
+    async fn first_ticket_payload(&self) -> Value {
+        let payload: String =
+            sqlx::query_scalar("SELECT payload FROM tickets ORDER BY id ASC LIMIT 1")
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
+        serde_json::from_str(&payload).unwrap()
+    }
 }
 
 #[derive(Debug)]
@@ -687,6 +727,35 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
         fan_out: crate::workflow::model::FanOutPolicy { max_files: 3 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 4,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-transcode-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "policy-node_transcode".to_owned(),
+            operation: OperationKind::TranscodeVideo,
+            policy_target: Some(target),
+            operation_payload: json!({
+                "type": "transcode_video",
+                "target_codec": "hevc",
+                "container": "mkv",
+                "profile": "default-hevc",
+            }),
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
         },
         timing: crate::workflow::model::TimingPolicy {
             base_duration_ms: 10,

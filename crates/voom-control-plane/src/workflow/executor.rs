@@ -15,7 +15,10 @@ use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
 
-use super::binding::{BranchContext, render_default_payload, render_default_payload_with_fan_out};
+use super::binding::{
+    BranchContext, render_default_payload, render_default_payload_with_fan_out,
+    render_policy_transcode_payload,
+};
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
@@ -386,15 +389,20 @@ where
                 plan.timing.base_duration_ms,
                 plan.timing.jitter_ms,
             );
-            let rendered_payload = if operation == OperationKind::ScanLibrary {
-                render_default_payload_with_fan_out(
+            let rendered_payload = match operation {
+                OperationKind::ScanLibrary => render_default_payload_with_fan_out(
                     operation,
                     &branch,
                     timing,
                     plan.fan_out.max_files,
-                )
-            } else {
-                render_default_payload(operation, &branch, timing)
+                ),
+                OperationKind::TranscodeVideo => match node.policy_target() {
+                    Some(target) => {
+                        render_policy_transcode_payload(target, node.operation_payload(), timing)
+                    }
+                    None => render_default_payload(operation, &branch, timing),
+                },
+                _ => render_default_payload(operation, &branch, timing),
             }
             .map_err(|e| VoomError::Config(format!("workflow root payload binding: {e}")))?;
             let payload = WorkflowTicketPayload {

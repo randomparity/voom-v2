@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use voom_plan::TargetRef;
 use voom_worker_protocol::OperationKind;
 
 use super::ticket_payload::operation_name;
@@ -96,6 +97,41 @@ pub fn render_default_payload_with_fan_out(
     Ok(payload)
 }
 
+pub fn render_policy_transcode_payload(
+    policy_target: &TargetRef,
+    operation_payload: &Value,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    let target_codec = required_string(operation_payload, "target_codec")?;
+    let container = required_string(operation_payload, "container")?;
+    let profile = required_string(operation_payload, "profile")?;
+    let mut payload = json!({
+        "operation": "transcode_video",
+        "target_codec": target_codec,
+        "container": container,
+        "profile": profile,
+        "duration_ms": timing.duration_ms,
+        "progress_interval_ms": timing.progress_interval_ms,
+    });
+    let Some(object) = payload.as_object_mut() else {
+        return Err(BindingError::new("rendered payload must be a JSON object"));
+    };
+    match policy_target {
+        TargetRef::FileVersion { id } => {
+            object.insert("source_file_version_id".to_owned(), json!(id));
+        }
+        TargetRef::FileLocation { id } => {
+            object.insert("source_location_id".to_owned(), json!(id));
+        }
+        other => {
+            return Err(BindingError::new(format!(
+                "transcode_video requires file_version or file_location target, got {other:?}"
+            )));
+        }
+    }
+    Ok(payload)
+}
+
 #[must_use]
 pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
     BranchContext {
@@ -104,6 +140,13 @@ pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchCo
         probe_codec: Some(codec.to_owned()),
         source_file: None,
     }
+}
+
+fn required_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str, BindingError> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| BindingError::new(format!("transcode_video payload missing `{field}`")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
