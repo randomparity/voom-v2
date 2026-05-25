@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use voom_core::ids::ArtifactCommitRecordId;
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
@@ -33,7 +34,7 @@ pub struct ExecuteTranscodeVideoInput {
     pub target_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExecuteTranscodeVideoReport {
     pub job_id: JobId,
     pub ticket_id: TicketId,

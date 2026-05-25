@@ -98,7 +98,7 @@ pub async fn require_output_file_matches_result(
     Ok(())
 }
 
-async fn dispatch_transcode_video_with_client<C>(
+pub(crate) async fn dispatch_transcode_video_with_client<C>(
     client: &C,
     credentials: &WorkerCredentials,
     transcode: TranscodeVideoRequest,

@@ -32,6 +32,9 @@ use super::runtime::WorkerRuntimeRegistry;
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use super::timing::seeded_timing;
 use crate::ControlPlane;
+use crate::transcode::{
+    ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
+};
 
 const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
@@ -1001,6 +1004,18 @@ async fn dispatch_ticket_inner(
     let validate_transcode_result = workflow_payload.operation == OperationKind::TranscodeVideo
         && payload.get("source_file_version_id").is_some();
     if validate_transcode_result {
+        return dispatch_control_plane_transcode(
+            control,
+            runtime,
+            ticket,
+            workflow_payload,
+            lease_id,
+            &payload,
+            &options,
+        )
+        .await;
+    }
+    if validate_transcode_result {
         let worker_payload =
             match transcode_worker_payload(control, ticket.id, lease_id, &payload).await {
                 Ok(payload) => payload,
@@ -1073,6 +1088,74 @@ async fn dispatch_ticket_inner(
         options,
     )
     .await
+}
+
+struct RuntimeTranscodeDispatcher<'a> {
+    runtime: &'a super::runtime::WorkerRuntime,
+}
+
+#[async_trait::async_trait]
+impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
+    async fn dispatch_transcode_video(
+        &self,
+        request: TranscodeVideoRequest,
+    ) -> Result<TranscodeVideoResult, VoomError> {
+        crate::transcode::dispatch::dispatch_transcode_video_with_client(
+            self.runtime.client.as_ref(),
+            &self.runtime.credentials,
+            request,
+        )
+        .await
+    }
+}
+
+async fn dispatch_control_plane_transcode(
+    control: &ControlPlane,
+    runtime: &super::runtime::WorkerRuntime,
+    ticket: &Ticket,
+    workflow_payload: &WorkflowTicketPayload,
+    lease_id: LeaseId,
+    payload: &Value,
+    options: &WorkflowExecutorOptions,
+) -> Result<(), VoomError> {
+    let _ = workflow_payload;
+    let input = ExecuteTranscodeVideoInput {
+        job_id: ticket.job_id.ok_or_else(|| {
+            VoomError::Config(format!("transcode ticket {} missing job_id", ticket.id))
+        })?,
+        ticket_id: ticket.id,
+        lease_id,
+        source_file_version_id: voom_core::FileVersionId(required_u64(
+            payload,
+            "source_file_version_id",
+        )?),
+        source_location_id: optional_u64(payload, "source_location_id")
+            .map(voom_core::FileLocationId),
+        staging_root: options.transcode_staging_root.clone(),
+        target_dir: options.transcode_target_dir.clone(),
+    };
+    let report = match execute_transcode_video_with_dispatchers(
+        control,
+        input,
+        &RuntimeTranscodeDispatcher { runtime },
+        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(source) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                failure_class_for_error(&source),
+                source,
+            )
+            .await;
+        }
+    };
+    let result = serde_json::to_value(report)
+        .map_err(|err| VoomError::Internal(format!("encode transcode report: {err}")))?;
+    release_lease_with_retry(control, lease_id, result).await
 }
 
 async fn consume_dispatch_stream(

@@ -380,6 +380,13 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
     let result = fixture.first_ticket_result().await;
     let staging_path = result["staging_path"].as_str().unwrap();
     assert!(staging_path.ends_with("ticket-1/lease-1/Movie.hevc.mkv"));
+    assert_eq!(result["staged_artifact_handle_id"], 1);
+    assert_eq!(result["staged_artifact_location_id"], 1);
+    assert_eq!(result["verification_id"], 1);
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert_eq!(result["result_media_snapshot_id"], 1);
 }
 
 #[tokio::test]
@@ -947,7 +954,7 @@ async fn write_behavior(
         FakeBehavior::Success | FakeBehavior::RequireTranscodeProtocolPayload => {
             tokio::time::sleep(Duration::from_millis(25)).await;
             let payload = if request.operation == OperationKind::TranscodeVideo {
-                transcode_result_payload()
+                transcode_result_payload_for_request(&request).await
             } else {
                 json!({"ok": true})
             };
@@ -973,7 +980,7 @@ async fn write_behavior(
         }
         FakeBehavior::WrongTranscodeOutputFacts => {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            let mut payload = transcode_result_payload();
+            let mut payload = transcode_result_payload_for_request(&request).await;
             payload["output_container"] = json!("mp4");
             payload["output_video_codec"] = json!("h264");
             write_frame(&mut writer, result_frame(&request, payload)).await;
@@ -981,22 +988,27 @@ async fn write_behavior(
     }
 }
 
-fn transcode_result_payload() -> Value {
+async fn transcode_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).unwrap();
+    let output_bytes = b"output!";
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
     json!({
         "status": "transcoded",
         "provider": "ffmpeg",
         "provider_version": "ffmpeg test",
         "input_pre": {
-            "size_bytes": 11,
-            "content_hash": "blake3:input"
+            "size_bytes": request.input.expected.size_bytes,
+            "content_hash": request.input.expected.content_hash
         },
         "input_post": {
-            "size_bytes": 11,
-            "content_hash": "blake3:input"
+            "size_bytes": request.input.expected.size_bytes,
+            "content_hash": request.input.expected.content_hash
         },
         "output": {
-            "size_bytes": 7,
-            "content_hash": "blake3:output"
+            "size_bytes": output_bytes.len(),
+            "content_hash": format!("blake3:{}", blake3::hash(output_bytes).to_hex())
         },
         "output_container": "mkv",
         "output_video_codec": "hevc"
