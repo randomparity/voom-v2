@@ -20,7 +20,8 @@ use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, TranscodeVideoRequest,
+    WorkerCredentials,
 };
 
 use crate::workflow::executor::{
@@ -321,6 +322,34 @@ async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options()
         workflow_payload.rendered_payload["target_dir"],
         "/media/normalized"
     );
+}
+
+#[tokio::test]
+async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
+        id: source_file_version_id,
+    });
+    fixture
+        .register_worker(
+            "transcode-worker",
+            OperationKind::TranscodeVideo,
+            1,
+            FakeBehavior::RequireTranscodeProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.transcode_staging_root = dir.path().join("stage");
+    options.transcode_target_dir = dir.path().join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
 }
 
 #[test]
@@ -631,14 +660,28 @@ impl ExecutorFixture {
     }
 
     async fn seed_local_source(&self) -> (FileVersionId, voom_core::FileLocationId) {
+        self.seed_local_source_at_path(PathBuf::from("/library/source.mkv"), b"source")
+            .await
+    }
+
+    async fn seed_local_source_at_path(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        bytes: &[u8],
+    ) -> (FileVersionId, voom_core::FileLocationId) {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(path, bytes).await;
         let outcome = self
             .cp
             .record_discovered_file(
                 DiscoveredFile {
                     location_kind: FileLocationKind::LocalPath,
-                    location_value: "/library/source.mkv".to_owned(),
-                    content_hash: "blake3:source".to_owned(),
-                    size_bytes: 42,
+                    location_value: path.to_string_lossy().into_owned(),
+                    content_hash: format!("blake3:{}", blake3::hash(bytes).to_hex()),
+                    size_bytes: bytes.len().try_into().unwrap(),
                     observed_at: T0,
                     proof: None,
                 },
@@ -698,6 +741,7 @@ enum FakeBehavior {
     ProgressFlood,
     Crash,
     DispatchError,
+    RequireTranscodeProtocolPayload,
 }
 
 #[async_trait]
@@ -715,6 +759,13 @@ impl ClientHandle for FakeClient {
         assert_eq!(_creds.worker_id, self.worker_id);
         if matches!(self.behavior, FakeBehavior::DispatchError) {
             return Err(ProtocolError::InternalServerError);
+        }
+        if matches!(self.behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
+            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
+                |err| ProtocolError::InvalidPayload {
+                    detail: format!("transcode payload must match worker protocol: {err}"),
+                },
+            )?;
         }
         self.enter_active();
         let (reader, writer) = tokio::io::duplex(16 * 1024);
@@ -744,7 +795,7 @@ async fn write_behavior(
     behavior: FakeBehavior,
 ) {
     match behavior {
-        FakeBehavior::Success => {
+        FakeBehavior::Success | FakeBehavior::RequireTranscodeProtocolPayload => {
             tokio::time::sleep(Duration::from_millis(25)).await;
             write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
         }

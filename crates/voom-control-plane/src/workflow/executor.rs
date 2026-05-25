@@ -15,6 +15,8 @@ use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest,
 };
 
 use super::binding::{
@@ -995,6 +997,11 @@ async fn dispatch_ticket_inner(
 ) -> Result<(), VoomError> {
     let mut payload = workflow_payload.rendered_payload.clone();
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
+    if workflow_payload.operation == OperationKind::TranscodeVideo
+        && payload.get("source_file_version_id").is_some()
+    {
+        payload = transcode_worker_payload(control, ticket.id, lease_id, &payload).await?;
+    }
     let request = OperationRequest {
         operation: workflow_payload.operation,
         lease_id,
@@ -1136,6 +1143,157 @@ async fn consume_dispatch_stream(
             }
         }
     }
+}
+
+async fn transcode_worker_payload(
+    control: &ControlPlane,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+    payload: &Value,
+) -> Result<Value, VoomError> {
+    let source_file_version_id =
+        voom_core::FileVersionId(required_u64(payload, "source_file_version_id")?);
+    let source_location_id =
+        optional_u64(payload, "source_location_id").map(voom_core::FileLocationId);
+    let source_version = control
+        .identity
+        .get_file_version(source_file_version_id)
+        .await?
+        .ok_or_else(|| VoomError::NotFound(format!("file_version {source_file_version_id}")))?;
+    if source_version.retired_at.is_some() {
+        return Err(VoomError::NotFound(format!(
+            "file_version {source_file_version_id} is retired"
+        )));
+    }
+    let source_location =
+        select_transcode_source_location(control, source_file_version_id, source_location_id)
+            .await?;
+    let staging_root = required_str(payload, "staging_root")?;
+    let target_codec = required_str(payload, "target_codec")?;
+    let container = required_str(payload, "container")?;
+    let profile = required_str(payload, "profile")?;
+    if target_codec != "hevc" || container != "mkv" || profile != "default-hevc" {
+        return Err(VoomError::Config(
+            "transcode_video worker payload requires hevc/mkv/default-hevc".to_owned(),
+        ));
+    }
+
+    let staging_parent = PathBuf::from(staging_root)
+        .join(format!("ticket-{}", ticket_id.0))
+        .join(format!("lease-{}", lease_id.0));
+    tokio::fs::create_dir_all(&staging_parent)
+        .await
+        .map_err(|err| {
+            VoomError::Config(format!(
+                "create transcode staging parent {}: {err}",
+                staging_parent.display()
+            ))
+        })?;
+    let output_path = staging_parent.join(transcode_output_file_name(&source_location.value));
+    let request = TranscodeVideoRequest {
+        input: TranscodeVideoInput {
+            path: source_location.value,
+            expected: TranscodeVideoExpectedFacts {
+                size_bytes: source_version.size_bytes,
+                content_hash: source_version.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: TranscodeVideoOutput {
+            staging_root: staging_root.to_owned(),
+            path: output_path.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+            overwrite: false,
+        },
+        profile: TranscodeVideoProfile::default_hevc(),
+    };
+    serde_json::to_value(request)
+        .map_err(|err| VoomError::Internal(format!("encode transcode worker payload: {err}")))
+}
+
+async fn select_transcode_source_location(
+    control: &ControlPlane,
+    file_version_id: voom_core::FileVersionId,
+    source_location_id: Option<voom_core::FileLocationId>,
+) -> Result<voom_store::repo::identity::FileLocation, VoomError> {
+    if let Some(id) = source_location_id {
+        let location = control
+            .identity
+            .get_file_location(id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
+        require_transcode_local_location(&location, file_version_id)?;
+        return Ok(location);
+    }
+    let locations = control
+        .identity
+        .list_live_file_locations_by_version(file_version_id)
+        .await?
+        .into_iter()
+        .filter(|location| location.kind == voom_store::repo::identity::FileLocationKind::LocalPath)
+        .collect::<Vec<_>>();
+    let [location] = locations.as_slice() else {
+        return Err(VoomError::Config(format!(
+            "file_version {file_version_id} must have exactly one live local_path source location; found {}",
+            locations.len()
+        )));
+    };
+    Ok(location.clone())
+}
+
+fn require_transcode_local_location(
+    location: &voom_store::repo::identity::FileLocation,
+    file_version_id: voom_core::FileVersionId,
+) -> Result<(), VoomError> {
+    if location.file_version_id != file_version_id {
+        return Err(VoomError::Config(format!(
+            "file_location {} belongs to file_version {}, expected {file_version_id}",
+            location.id, location.file_version_id
+        )));
+    }
+    if location.retired_at.is_some() {
+        return Err(VoomError::NotFound(format!(
+            "file_location {} is retired",
+            location.id
+        )));
+    }
+    if location.kind != voom_store::repo::identity::FileLocationKind::LocalPath {
+        return Err(VoomError::Config(format!(
+            "file_location {} must be local_path",
+            location.id
+        )));
+    }
+    Ok(())
+}
+
+fn transcode_output_file_name(source: &str) -> String {
+    let path = std::path::Path::new(source);
+    let stem = path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("output");
+    format!("{stem}.hevc.mkv")
+}
+
+fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {
+    payload
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| VoomError::Config(format!("transcode payload missing `{field}`")))
+}
+
+fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
+    payload.get(field).and_then(Value::as_u64)
+}
+
+fn required_str<'a>(payload: &'a Value, field: &str) -> Result<&'a str, VoomError> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| VoomError::Config(format!("transcode payload missing `{field}`")))
 }
 
 async fn fail_if_watchdog_elapsed(
