@@ -44,11 +44,13 @@ Sprint 12 delivers:
   protocol.
 - A bundled out-of-process FFmpeg worker that reads a local input path and
   writes a new local staging path.
+- Runtime discovery/preflight for the local FFmpeg and ffprobe binaries required
+  by that worker, including HEVC encoder support.
 - Control-plane orchestration that chooses the source file version/location,
-  creates a deterministic staging target, dispatches the worker through the
-  worker protocol, records an artifact handle/location for the produced bytes,
-  verifies the artifact with the Sprint 11 verification worker, and commits it
-  to an add-only target path.
+  creates a deterministic per-ticket staging target, dispatches the worker
+  through the worker protocol, records an artifact handle/location for the
+  produced bytes, verifies the artifact with the Sprint 11 verification worker,
+  and commits it to an add-only target path.
 - Events and durable records that make each stage inspectable.
 - CLI golden fixtures for policy compile/plan/execute/report behavior.
 - Closeout evidence tying policy, planning, worker execution, staging,
@@ -64,6 +66,9 @@ Sprint 12 explicitly does not deliver:
 - Backup policy or rollback UX.
 - Daemon scheduling loops, remote media transfer, object storage, or UI
   controls.
+- Multi-video-file decisions, attachment/subtitle retention guarantees, or
+  audio-track transformation. Sprint 12 preserves or lets FFmpeg copy
+  non-video streams only when that is part of the fixed command shape below.
 
 ## 3. Architecture
 
@@ -82,6 +87,7 @@ accepted policy with `transcode video to hevc {}`
   -> control plane records artifact_handle + staging artifact_location
   -> verify_artifact worker verifies staged bytes
   -> host commit creates add-only FileVersion + FileLocation
+  -> scan/probe records MediaSnapshot for committed result
 ```
 
 The FFmpeg worker never writes SQLite and never commits output into managed
@@ -111,6 +117,8 @@ Unsupported variants fail validation with stable diagnostics:
 - `using profile "<name>"` remains deferred to Sprint 15 except for an
   implementation-internal default profile.
 - Free-form FFmpeg arguments are never accepted by policy text.
+- Policy text cannot opt into overwrite, replace, stream-selection, or FFmpeg
+  argument behavior in Sprint 12.
 
 The compiled operation should preserve typed intent, not an FFmpeg command
 line:
@@ -126,10 +134,13 @@ line:
 
 The planner maps that compiled operation to `operation_kind =
 "transcode_video"`. A snapshot is no-op only when the normalized container is
-`mkv` and the normalized video codec is `hevc` or `h265`. Otherwise the node is
-planned. Unknown codec or container facts should produce a blocked node with an
-insufficient-facts diagnostic; Sprint 12 must not transcode bytes whose source
-snapshot cannot identify the current video codec and container.
+`mkv` and exactly one normalized video stream has codec `hevc` or `h265`.
+Otherwise the node is planned only when the snapshot identifies exactly one
+video stream and the current container. Unknown codec/container facts, no video
+stream, or multiple video streams produce a blocked node with a stable
+insufficient-facts or unsupported-media-shape diagnostic; Sprint 12 must not
+transcode bytes whose source snapshot cannot identify the current video codec,
+video stream cardinality, and container.
 
 ## 5. Worker Protocol
 
@@ -147,6 +158,7 @@ Sprint 12 adds typed protocol structs:
     }
   },
   "output": {
+    "staging_root": "/tmp/voom-stage",
     "path": "/tmp/voom-stage/input.hevc.mkv",
     "container": "mkv",
     "video_codec": "hevc",
@@ -181,8 +193,13 @@ The worker must:
 - reject unknown operations through the protocol route policy;
 - reject malformed payloads before invoking FFmpeg;
 - reject an existing output path because Sprint 12 has no overwrite semantics;
+- reject missing or non-canonical `output.staging_root` values and reject output
+  paths whose canonical parent is outside that root;
 - observe and verify input bytes before and after FFmpeg;
-- invoke FFmpeg out of process with a deterministic command shape;
+- invoke FFmpeg out of process with a deterministic command shape that maps the
+  single video stream to HEVC, writes MKV, and uses only the fixed default
+  profile settings. Any stream-copy behavior for audio, subtitles, attachments,
+  or metadata must be explicit in that command shape and covered by tests;
 - emit progress frames derived from FFmpeg progress output when available;
 - observe output bytes after FFmpeg exits;
 - fail loudly for content drift, unavailable input/output, FFmpeg spawn/exit
@@ -193,6 +210,14 @@ The worker may use `ffprobe` internally only to validate the produced output
 file's codec/container facts. That internal validation is worker-local
 provider behavior; durable media snapshots are still owned by the control-plane
 scan/probe path.
+
+Worker startup or first use must fail loudly if the configured or discovered
+`ffmpeg`/`ffprobe` binaries are missing, not executable, or cannot satisfy the
+fixed default profile. The preflight records the resolved binary paths,
+provider versions, and HEVC encoder availability in worker metadata or the
+failure payload. FFmpeg-dependent tests are not silently skipped in Sprint 12:
+the CI environment must provide the required binaries, and absence is a setup
+failure with explicit diagnostics.
 
 ## 6. Control-Plane Execution
 
@@ -206,23 +231,50 @@ For each transcode ticket, the control plane must:
 2. Require an existing, unretired source `FileVersion`.
 3. Require exactly one live local source `FileLocation`, unless the payload
    carries a specific source location ID.
-4. Re-observe source bytes and compare them to the source version facts before
+4. Re-read the source media snapshot and require the same Sprint 12 media-shape
+   preconditions used by the planner: known container, exactly one video stream,
+   and known video codec.
+5. Re-observe source bytes and compare them to the source version facts before
    dispatch.
-5. Choose a canonical new staging path under the configured or command-scoped
+6. Choose a canonical new staging path under the configured or command-scoped
    staging directory.
-6. Dispatch `TranscodeVideoRequest` to the bundled FFmpeg worker.
-7. Reject worker success if input pre/post facts drift or output facts are
-   missing.
-8. Record a staged artifact handle linked to the source `FileVersion`, with one
+7. Dispatch `TranscodeVideoRequest` to the bundled FFmpeg worker.
+8. Reject worker success if input pre/post facts drift, output facts are missing,
+   or output codec/container facts do not satisfy HEVC-in-MKV.
+9. Record a staged artifact handle linked to the source `FileVersion`, with one
    live `artifact_locations.kind = 'staging'` row.
-9. Verify the staged artifact through the Sprint 11 verification path.
-10. Commit the verified staged artifact to an add-only target path.
-11. Record lineage and events.
+10. Verify the staged artifact through the Sprint 11 verification path.
+11. Commit the verified staged artifact to an add-only target path.
+12. Probe the committed result through the durable scan/probe path and record a
+    `MediaSnapshot` for the result `FileVersion`.
+13. Record lineage and events.
+
+Staging path selection must be deterministic for a ticket and attempt, not just
+for the source file name. The path includes the workflow ticket ID and attempt or
+lease identity under a canonical staging root so a retry cannot confuse a stale
+partial output with the current attempt. If the selected staging path already
+exists before dispatch, the control plane fails loudly and includes enough ticket
+and path information for cleanup; it must not silently reuse, delete, truncate,
+or overwrite the file in Sprint 12.
+
+The control plane applies the same local path hardening as Sprint 11 staged
+commit: canonicalize the source path, staging parent, and target parent; reject
+symlink traversal for source, staging, and target paths; and store canonical path
+values in durable records and CLI output. These checks happen before dispatch so
+the worker never receives a path that is outside the selected source/staging
+boundary.
 
 The first target path should be add-only and deterministic, for example
 `<source-stem>.hevc.mkv` in a caller-provided output directory or policy
 execution output root. If the target exists, the operation fails with
 `CONFIG_INVALID`; replace semantics remain deferred.
+
+Worker-local `ffprobe` output is not a durable compliance snapshot. A successful
+Sprint 12 execution must either record a committed-result `MediaSnapshot` through
+the normal scan/probe persistence path or fail visibly after commit with the
+result IDs and recovery/inspection context. The next policy plan for the result
+must be able to prove HEVC-in-MKV compliance from durable snapshot state, not
+from the transient worker result payload.
 
 ## 7. Events And Reporting
 
@@ -237,6 +289,14 @@ These events are audit facts only. Artifact handles, artifact locations,
 verification rows, commit records, file versions, file locations, jobs, tickets,
 and leases remain the source of truth.
 
+Every transcode event payload must include enough correlation data to reconstruct
+the ticket attempt without reading provider logs: job ID, ticket ID, lease or
+attempt identity, source file version/location IDs, staging path or staged
+artifact IDs when known, provider name/version when known, and the failure class
+and public error code on failure. Progress events must be best-effort and
+monotonic for a single worker attempt; missing progress frames must not hide a
+final success or failure event.
+
 CLI reports must expose stable IDs for:
 
 - policy version and input set;
@@ -246,7 +306,8 @@ CLI reports must expose stable IDs for:
 - staged artifact handle/location;
 - verification row;
 - commit record;
-- result file version/location.
+- result file version/location;
+- committed-result media snapshot, when commit reached that phase.
 
 The command output must continue to emit exactly one JSON envelope on stdout.
 
@@ -261,6 +322,9 @@ Stable Sprint 12 behavior:
 - Source drift before or during worker execution:
   `ARTIFACT_CHECKSUM_MISMATCH`.
 - Existing staging or target path: `CONFIG_INVALID`.
+- Unsupported media shape, including no video stream or multiple video streams:
+  policy planning or execution diagnostic, reported as `CONFIG_INVALID` at
+  execution time.
 - FFmpeg spawn/exit failure: `EXTERNAL_SYSTEM_UNAVAILABLE`.
 - Worker crash, timeout, malformed result, and protocol errors use the existing
   worker failure taxonomy.
@@ -268,6 +332,9 @@ Stable Sprint 12 behavior:
   `ARTIFACT_CHECKSUM_MISMATCH` or `CONFIG_INVALID` as appropriate.
 - Commit failure after filesystem promotion begins must preserve Sprint 11
   `recovery_required` visibility.
+- Result media snapshot probe failure after commit must not hide the committed
+  result; the error envelope includes result `FileVersion`, `FileLocation`, and
+  commit record IDs so an agent can inspect or re-probe.
 
 Silent skips are not allowed. If the control plane records partial durable
 state, the error envelope must include enough IDs for an agent to inspect it.
@@ -283,10 +350,15 @@ Required tests:
   workflow tickets instead of unsupported-execution errors.
 - Worker protocol serialization tests for transcode request/result payloads.
 - FFmpeg worker conformance tests for success, missing input, input drift,
-  existing output, bad payload, FFmpeg failure, and timeout.
+  existing output, bad payload, FFmpeg failure, timeout, output path escape, and
+  non-HEVC or non-MKV output facts.
+- FFmpeg/ffprobe preflight tests for missing binaries, non-executable binaries,
+  and missing HEVC encoder support.
 - Control-plane unit tests for source selection, staging path selection,
-  artifact recording, verification integration, commit integration, and event
-  emission.
+  retry-safe staging path uniqueness, path canonicalization/symlink rejection,
+  unsupported media shapes, artifact recording, verification integration, commit
+  integration, committed-result media snapshot recording, and event payload
+  correlation.
 - Integration tests for scan -> policy plan -> execute -> transcode -> verify
   -> commit using small fixture media.
 - CLI insta snapshots for successful execution and representative failures.
@@ -308,9 +380,16 @@ Sprint 12 is complete when:
   an out-of-process FFmpeg worker.
 - The worker writes only a staged output and never commits managed media state.
 - The control plane records the staged artifact, verifies it, commits it
-  add-only, and records the resulting `FileVersion` and `FileLocation`.
+  add-only, and records the resulting `FileVersion`, `FileLocation`, and
+  committed-result `MediaSnapshot`.
 - Source drift, output verification failure, and commit failure are visible and
   do not report success.
+- Missing FFmpeg/ffprobe binaries or missing HEVC encoder support fail during
+  worker discovery/preflight with explicit diagnostics; required CI tests are not
+  skipped.
+- Existing staging output, retried leases, symlink/path escape attempts, unknown
+  media facts, no-video sources, and multi-video sources fail before destructive
+  or ambiguous mutation.
 - CLI golden tests lock the agent-facing envelope shape.
 - The Sprint 12 closeout matrix records repeatable evidence for DSL, planning,
   execution, progress, verification, commit, and reporting behavior.
