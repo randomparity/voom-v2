@@ -25,6 +25,8 @@ define_id!(JobId);
 define_id!(EventId);
 define_id!(ArtifactHandleId);
 define_id!(ArtifactLocationId);
+define_id!(ArtifactVerificationId);
+define_id!(ArtifactCommitRecordId);
 
 // Identity layer (M2).
 //

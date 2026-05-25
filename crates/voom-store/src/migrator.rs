@@ -43,6 +43,11 @@ const MIGRATION_0010_SQL: &str = include_str!("../../../migrations/0010_remote_e
 /// at compile time.
 const MIGRATION_0011_SQL: &str = include_str!("../../../migrations/0011_scheduler_decisions.sql");
 
+/// SQL for migration 0012 (Sprint 11 staged artifact commit), embedded at
+/// compile time.
+const MIGRATION_0012_SQL: &str =
+    include_str!("../../../migrations/0012_staged_artifact_commit.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -133,6 +138,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("scheduler_decisions"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0011_SQL),
+            false,
+        ),
+        Migration::new(
+            12,
+            Cow::Borrowed("staged_artifact_commit"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0012_SQL),
             false,
         ),
     ]),
