@@ -283,14 +283,25 @@ async fn persist_verification_outcome(
 ) -> Result<VerifyArtifactReport, VoomError> {
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
-    revalidate_selected_live_staging_location(
+    let outcome = validate_success_facts(&expected, outcome);
+    let outcome = match revalidate_selected_live_staging_location(
         &mut tx,
         context.artifact_handle_id,
         context.artifact_location_id,
         context.path,
     )
-    .await?;
-    let outcome = validate_success_facts(&expected, outcome);
+    .await
+    {
+        Ok(()) => outcome,
+        Err(err) if is_stale_location_revalidation(&err) => {
+            VerifyOutcome::Failed(VerifyWorkerError::terminal_error(
+                FailureClass::ArtifactUnavailable,
+                ErrorCode::ArtifactUnavailable,
+                format!("verification result rejected because live staging changed: {err}"),
+            ))
+        }
+        Err(err) => return Err(err),
+    };
     let input = new_verification_input(
         context.artifact_handle_id,
         context.artifact_location_id,
@@ -385,6 +396,10 @@ async fn revalidate_selected_live_staging_location(
         )));
     }
     Ok(())
+}
+
+fn is_stale_location_revalidation(err: &VoomError) -> bool {
+    matches!(err, VoomError::Config(_) | VoomError::Conflict(_))
 }
 
 fn validate_success_facts(

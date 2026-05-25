@@ -280,14 +280,14 @@ async fn malformed_worker_result_persists_failed_verification() {
 }
 
 #[tokio::test]
-async fn retired_staging_location_before_persist_rejects_verification_row() {
+async fn retired_staging_location_before_persist_records_failed_verification() {
     let (cp, _db, dir) = fixture().await;
     let source = dir.path().join("source.bin");
     let staging = dir.path().join("staged.bin");
     std::fs::write(&source, b"source bytes").unwrap();
     let staged = stage_source(&cp, &source, &staging, b"source bytes").await;
 
-    let err = verify_artifact_with_dispatcher(
+    let report = verify_artifact_with_dispatcher(
         &cp,
         VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
@@ -298,14 +298,15 @@ async fn retired_staging_location_before_persist_rejects_verification_row() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert_eq!(count_verifications(&cp, staged.artifact_handle_id).await, 0);
+    assert_eq!(report.status, ArtifactVerificationStatus::Failed);
+    assert_eq!(report.error_code, Some(ErrorCode::ArtifactUnavailable));
+    assert_eq!(count_verifications(&cp, staged.artifact_handle_id).await, 1);
 }
 
 #[tokio::test]
-async fn second_staging_location_before_persist_rejects_verification_row() {
+async fn second_staging_location_before_persist_records_failed_verification() {
     let (cp, _db, dir) = fixture().await;
     let source = dir.path().join("source.bin");
     let staging = dir.path().join("staged.bin");
@@ -313,7 +314,7 @@ async fn second_staging_location_before_persist_rejects_verification_row() {
     let staged = stage_source(&cp, &source, &staging, b"source bytes").await;
     let second = dir.path().join("second-staging.bin");
 
-    let err = verify_artifact_with_dispatcher(
+    let report = verify_artifact_with_dispatcher(
         &cp,
         VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
@@ -324,10 +325,11 @@ async fn second_staging_location_before_persist_rejects_verification_row() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert_eq!(count_verifications(&cp, staged.artifact_handle_id).await, 0);
+    assert_eq!(report.status, ArtifactVerificationStatus::Failed);
+    assert_eq!(report.error_code, Some(ErrorCode::ArtifactUnavailable));
+    assert_eq!(count_verifications(&cp, staged.artifact_handle_id).await, 1);
 }
 
 #[tokio::test]
