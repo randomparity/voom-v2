@@ -6,6 +6,7 @@
 mod support;
 
 use support::chaos_librarian::ChaosLibrarian;
+use support::voom_cli::{VoomTestDb, run_voom};
 
 #[test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
@@ -27,4 +28,15 @@ fn chaos_librarian_submodule_is_pinned_and_ready() {
             .as_bool()
             .unwrap_or(false)
     );
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn voom_e2e_support_runs_version_envelope() {
+    let db = VoomTestDb::init().await.unwrap();
+    let version = run_voom(&db.url, ["version"]).unwrap();
+
+    assert_eq!(version.status_code, Some(0));
+    assert_eq!(version.json["command"], "version");
+    assert_eq!(version.json["status"], "ok");
 }
