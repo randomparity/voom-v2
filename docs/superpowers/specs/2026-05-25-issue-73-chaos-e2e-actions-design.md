@@ -33,8 +33,15 @@ default CI contract or product behavior.
 Create `.github/workflows/chaos-e2e.yml` with a single Ubuntu job triggered by
 `workflow_dispatch`. The workflow checks out the repository with submodules,
 installs Rust cache support and `just`, installs `uv`, installs Python 3.13 via
-`uv python install 3.13`, installs ffmpeg and MKVToolNix with `apt`, verifies
-the key tool versions, then runs `just chaos-e2e-ci`.
+`uv python install 3.13`, installs ffmpeg/ffprobe 7.x from a pinned Linux
+archive, installs MKVToolNix with `apt`, verifies the key tool versions, then
+runs `just chaos-e2e-ci`.
+
+Ubuntu runner packages are not sufficient for ffmpeg/ffprobe because the
+`ubuntu-latest` apt package resolved to 6.1.1 during post-merge validation, below
+Chaos Librarian's documented 7.0+ minimum. The workflow should download a pinned
+BtbN FFmpeg build, verify its SHA-256, expose its `bin` directory through
+`GITHUB_PATH`, and only then verify `ffmpeg -version` and `ffprobe -version`.
 
 Use pinned action revisions to match the existing CI style. Keep permissions to
 `contents: read` because the job only reads source and dependencies.
@@ -56,8 +63,10 @@ Chaos-specific validation and test failure output.
 - `git diff --check`
 - Review workflow syntax and trigger shape in `.github/workflows/chaos-e2e.yml`.
 - `just fmt-check`
+- `actionlint .github/workflows/chaos-e2e.yml`
 - `just chaos-e2e-local-script-test` to keep the existing Chaos shell harness
   smoke coverage intact.
+- Dispatch the manual `chaos-e2e` workflow on `main` after merge.
 
 The full `just chaos-e2e-ci` command is expected to run in GitHub Actions after
 push because it depends on the same external media tooling this workflow
