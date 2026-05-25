@@ -6,6 +6,7 @@
 mod support;
 
 use support::chaos_librarian::ChaosLibrarian;
+use support::observed_state::{library_relative_path, sha256_to_observed_hash};
 use support::voom_cli::{VoomTestDb, run_voom};
 
 #[test]
@@ -39,4 +40,34 @@ async fn voom_e2e_support_runs_version_envelope() {
     assert_eq!(version.status_code, Some(0));
     assert_eq!(version.json["command"], "version");
     assert_eq!(version.json["status"], "ok");
+}
+
+#[test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+fn observed_state_rejects_paths_outside_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let library = tmp.path().join("chaos-run/library");
+    let outside_dir = tmp.path().join("other");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside = outside_dir.join("Movie.mkv");
+    std::fs::write(&outside, b"not real media").unwrap();
+
+    let err = library_relative_path(&library.canonicalize().unwrap(), &outside).unwrap_err();
+
+    assert!(err.to_string().contains("outside library root"));
+}
+
+#[test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+fn observed_state_hash_uses_chaos_librarian_prefix() {
+    let hash = sha256_to_observed_hash(
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+
+    assert_eq!(
+        hash,
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
 }
