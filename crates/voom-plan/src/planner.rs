@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::json;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
-    CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
-    RuleMatchMode,
+    CompiledValue, DefaultStrategy, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic,
+    PolicyInputSetDraft, RuleMatchMode, TrackFilter, TrackTarget,
 };
 
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext, PlanningDiagnostic,
     PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
     SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
+    remux::{RemuxPlanningBlock, evaluate_filter, stream_facts},
 };
 
 #[derive(Debug)]
@@ -129,8 +130,8 @@ impl<'a> PlanBuilder<'a> {
     ) {
         match (run_if, skip_if) {
             (None, None) => {
-                for operation in operations {
-                    self.expand_operation_for_all_snapshots(phase_name, operation);
+                for snapshot in &self.input.media_snapshots {
+                    self.expand_operations_for_snapshot(phase_name, snapshot, operations);
                 }
             }
             _ => {
@@ -157,16 +158,6 @@ impl<'a> PlanBuilder<'a> {
         }
     }
 
-    fn expand_operation_for_all_snapshots(
-        &mut self,
-        phase_name: &str,
-        operation: &CompiledOperation,
-    ) {
-        for snapshot in &self.input.media_snapshots {
-            self.expand_operation_for_snapshot(phase_name, snapshot, operation);
-        }
-    }
-
     fn expand_blocked_insufficient_facts_for_operations(
         &mut self,
         phase_name: &str,
@@ -184,8 +175,79 @@ impl<'a> PlanBuilder<'a> {
         snapshot: &MediaSnapshotInput,
         operations: &[CompiledOperation],
     ) {
-        for operation in operations {
-            self.expand_operation_for_snapshot(phase_name, snapshot, operation);
+        let operations = snapshot_operations(snapshot, operations);
+        let mut remux_operations = Vec::new();
+        let mut remux_source_index = None;
+        let mut items = Vec::new();
+
+        for (source_index, operation) in operations.into_iter().enumerate() {
+            match operation {
+                SnapshotOperation::Operation(operation) => {
+                    if remux_candidate_kind(operation).is_some() {
+                        match remux_candidate_support(operation) {
+                            RemuxCandidateSupport::Supported => {
+                                remux_source_index.get_or_insert(source_index);
+                                remux_operations.push(operation);
+                            }
+                            RemuxCandidateSupport::Unsupported(message) => {
+                                items.push(PhaseItem::BlockedUnsupportedRemux {
+                                    source_index,
+                                    operation,
+                                    message,
+                                });
+                            }
+                        }
+                    } else {
+                        items.push(PhaseItem::Operation {
+                            source_index,
+                            operation,
+                        });
+                    }
+                }
+                SnapshotOperation::BlockedInsufficient(operation) => {
+                    items.push(PhaseItem::BlockedInsufficient {
+                        source_index,
+                        operation,
+                    });
+                }
+            }
+        }
+
+        if let Some(source_index) = remux_source_index {
+            items.push(PhaseItem::RemuxGroup {
+                source_index,
+                operations: remux_operations,
+            });
+        }
+
+        items.sort_by_key(PhaseItem::source_index);
+
+        for item in items {
+            match item {
+                PhaseItem::Operation { operation, .. } => {
+                    self.expand_operation_for_snapshot(phase_name, snapshot, operation);
+                }
+                PhaseItem::BlockedInsufficient { operation, .. } => {
+                    self.expand_blocked_insufficient_facts_for_snapshot(
+                        phase_name, snapshot, operation,
+                    );
+                }
+                PhaseItem::BlockedUnsupportedRemux {
+                    operation, message, ..
+                } => {
+                    let operation_kind = operation_kind(operation);
+                    self.expand_blocked_remux_shape_for_snapshot(
+                        phase_name,
+                        snapshot,
+                        operation_kind,
+                        operation_payload(operation),
+                        message,
+                    );
+                }
+                PhaseItem::RemuxGroup { operations, .. } => {
+                    self.expand_remux_group_for_snapshot(phase_name, snapshot, &operations);
+                }
+            }
         }
     }
 
@@ -291,6 +353,88 @@ impl<'a> PlanBuilder<'a> {
                 }
             }
         }
+    }
+
+    fn expand_remux_group_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operations: &[&CompiledOperation],
+    ) {
+        let payload = remux_payload(operations);
+        let observed_state = snapshot
+            .container
+            .as_ref()
+            .map(|container| json!({ "container": container }));
+        let target_container = payload
+            .get("container")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("mkv");
+        let (status, status_reason, capability) =
+            match remux_group_shape(snapshot, operations, target_container) {
+                RemuxGroupShape::NoOp => (
+                    NodeStatus::NoOp,
+                    format!(
+                        "container is already {target_container} and track selection is unchanged"
+                    ),
+                    None,
+                ),
+                RemuxGroupShape::ContainerChange { current } => (
+                    NodeStatus::Planned,
+                    format!("container {current} will be changed to {target_container}"),
+                    Some("remux_container".to_owned()),
+                ),
+                RemuxGroupShape::TrackSelectionChange => (
+                    NodeStatus::Planned,
+                    "track selection will be changed".to_owned(),
+                    Some("remux".to_owned()),
+                ),
+                RemuxGroupShape::InsufficientFacts(message) => {
+                    self.push_remux_diagnostic(
+                        PlanningDiagnosticCode::InsufficientSnapshotFacts,
+                        phase_name,
+                        snapshot,
+                        message,
+                    );
+                    (NodeStatus::Blocked, message.to_owned(), None)
+                }
+                RemuxGroupShape::UnsupportedShape(message) => {
+                    self.push_remux_diagnostic(
+                        PlanningDiagnosticCode::UnsupportedMediaShape,
+                        phase_name,
+                        snapshot,
+                        message,
+                    );
+                    (NodeStatus::Blocked, message.to_owned(), None)
+                }
+            };
+
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            "remux",
+            payload,
+            observed_state,
+            status,
+            status_reason,
+            capability,
+        ));
+    }
+
+    fn push_remux_diagnostic(
+        &mut self,
+        code: PlanningDiagnosticCode,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        message: &str,
+    ) {
+        self.diagnostics.push(
+            PlanningDiagnostic::error(code, message)
+                .with_phase(phase_name)
+                .with_operation_kind("remux")
+                .with_target(snapshot.target.clone()),
+        );
     }
 
     fn expand_set_container_for_snapshot(
@@ -473,6 +617,33 @@ impl<'a> PlanBuilder<'a> {
         ));
     }
 
+    fn expand_blocked_remux_shape_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operation_kind: &str,
+        payload: serde_json::Value,
+        message: &str,
+    ) {
+        self.diagnostics.push(
+            PlanningDiagnostic::error(PlanningDiagnosticCode::UnsupportedMediaShape, message)
+                .with_phase(phase_name)
+                .with_operation_kind(operation_kind)
+                .with_target(snapshot.target.clone()),
+        );
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            operation_kind,
+            payload,
+            None,
+            NodeStatus::Blocked,
+            message.to_owned(),
+            None,
+        ));
+    }
+
     fn finish(self) -> Result<ExecutionPlan, PlanGenerationError> {
         let policy = PolicyIdentity {
             slug: self.policy.slug.clone(),
@@ -538,6 +709,365 @@ enum TranscodeVideoShape<'a> {
     NeedsTranscode,
     InsufficientFacts(&'a str),
     UnsupportedShape(&'a str),
+}
+
+enum SnapshotOperation<'a> {
+    Operation(&'a CompiledOperation),
+    BlockedInsufficient(&'a CompiledOperation),
+}
+
+enum PhaseItem<'a> {
+    Operation {
+        source_index: usize,
+        operation: &'a CompiledOperation,
+    },
+    BlockedInsufficient {
+        source_index: usize,
+        operation: &'a CompiledOperation,
+    },
+    BlockedUnsupportedRemux {
+        source_index: usize,
+        operation: &'a CompiledOperation,
+        message: &'static str,
+    },
+    RemuxGroup {
+        source_index: usize,
+        operations: Vec<&'a CompiledOperation>,
+    },
+}
+
+impl PhaseItem<'_> {
+    const fn source_index(&self) -> usize {
+        match self {
+            Self::Operation { source_index, .. }
+            | Self::BlockedInsufficient { source_index, .. }
+            | Self::BlockedUnsupportedRemux { source_index, .. }
+            | Self::RemuxGroup { source_index, .. } => *source_index,
+        }
+    }
+}
+
+enum RemuxCandidateSupport {
+    Supported,
+    Unsupported(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemuxGroupShape {
+    NoOp,
+    ContainerChange { current: String },
+    TrackSelectionChange,
+    InsufficientFacts(&'static str),
+    UnsupportedShape(&'static str),
+}
+
+fn snapshot_operations<'a>(
+    snapshot: &MediaSnapshotInput,
+    operations: &'a [CompiledOperation],
+) -> Vec<SnapshotOperation<'a>> {
+    let mut flattened = Vec::new();
+    append_snapshot_operations(snapshot, operations, &mut flattened);
+    flattened
+}
+
+fn append_snapshot_operations<'a>(
+    snapshot: &MediaSnapshotInput,
+    operations: &'a [CompiledOperation],
+    flattened: &mut Vec<SnapshotOperation<'a>>,
+) {
+    for operation in operations {
+        match operation {
+            CompiledOperation::Conditional {
+                condition,
+                operations,
+            } => match evaluate_condition(condition, snapshot) {
+                ConditionEval::Matched => {
+                    append_snapshot_operations(snapshot, operations, flattened);
+                }
+                ConditionEval::NotMatched => {}
+                ConditionEval::Unknown => {
+                    append_blocked_insufficient_operations(operations, flattened);
+                }
+            },
+            CompiledOperation::Rules { mode, rules } => {
+                append_rule_operations(snapshot, *mode, rules, flattened);
+            }
+            operation => flattened.push(SnapshotOperation::Operation(operation)),
+        }
+    }
+}
+
+fn append_rule_operations<'a>(
+    snapshot: &MediaSnapshotInput,
+    mode: RuleMatchMode,
+    rules: &'a [CompiledRule],
+    flattened: &mut Vec<SnapshotOperation<'a>>,
+) {
+    match mode {
+        RuleMatchMode::First => {
+            for rule in rules {
+                match rule_condition_matches(rule, snapshot) {
+                    ConditionEval::Matched => {
+                        append_snapshot_operations(snapshot, &rule.operations, flattened);
+                        break;
+                    }
+                    ConditionEval::NotMatched => {}
+                    ConditionEval::Unknown => {
+                        append_blocked_insufficient_operations(&rule.operations, flattened);
+                        break;
+                    }
+                }
+            }
+        }
+        RuleMatchMode::All => {
+            for rule in rules {
+                match rule_condition_matches(rule, snapshot) {
+                    ConditionEval::Matched => {
+                        append_snapshot_operations(snapshot, &rule.operations, flattened);
+                    }
+                    ConditionEval::NotMatched => {}
+                    ConditionEval::Unknown => {
+                        append_blocked_insufficient_operations(&rule.operations, flattened);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn append_blocked_insufficient_operations<'a>(
+    operations: &'a [CompiledOperation],
+    flattened: &mut Vec<SnapshotOperation<'a>>,
+) {
+    for operation in operations {
+        flattened.push(SnapshotOperation::BlockedInsufficient(operation));
+    }
+}
+
+fn remux_candidate_kind(operation: &CompiledOperation) -> Option<&'static str> {
+    match operation {
+        CompiledOperation::SetContainer { .. } => Some("set_container"),
+        CompiledOperation::KeepTracks { .. } => Some("keep_tracks"),
+        CompiledOperation::RemoveTracks { .. } => Some("remove_tracks"),
+        CompiledOperation::ReorderTracks { .. } => Some("reorder_tracks"),
+        CompiledOperation::SetDefaults { .. } => Some("set_defaults"),
+        _ => None,
+    }
+}
+
+fn remux_candidate_support(operation: &CompiledOperation) -> RemuxCandidateSupport {
+    match operation {
+        CompiledOperation::SetContainer { container } if container.eq_ignore_ascii_case("mkv") => {
+            RemuxCandidateSupport::Supported
+        }
+        CompiledOperation::SetContainer { .. } => {
+            RemuxCandidateSupport::Unsupported("only mkv remux containers are supported")
+        }
+        CompiledOperation::KeepTracks { target, filter }
+        | CompiledOperation::RemoveTracks { target, filter } => {
+            if *target == TrackTarget::Video {
+                return RemuxCandidateSupport::Unsupported(
+                    "video track selection is not supported by remux planning",
+                );
+            }
+            if filter.as_ref().is_some_and(filter_has_unsupported_shape) {
+                RemuxCandidateSupport::Unsupported(
+                    "track filter is not supported by remux planning",
+                )
+            } else {
+                RemuxCandidateSupport::Supported
+            }
+        }
+        CompiledOperation::SetDefaults {
+            strategy: DefaultStrategy::Best,
+            ..
+        } => RemuxCandidateSupport::Unsupported(
+            "default strategy best is not supported by remux planning",
+        ),
+        CompiledOperation::ReorderTracks { .. } | CompiledOperation::SetDefaults { .. } => {
+            RemuxCandidateSupport::Supported
+        }
+        _ => RemuxCandidateSupport::Unsupported("operation is not supported by remux planning"),
+    }
+}
+
+fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
+    match filter {
+        TrackFilter::Commentary | TrackFilter::TitleMatches { .. } => true,
+        TrackFilter::Not { inner } => filter_has_unsupported_shape(inner),
+        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+            filters.iter().any(filter_has_unsupported_shape)
+        }
+        TrackFilter::LanguageIn { .. }
+        | TrackFilter::CodecIn { .. }
+        | TrackFilter::Channels { .. }
+        | TrackFilter::Forced
+        | TrackFilter::Default
+        | TrackFilter::Font
+        | TrackFilter::TitleContains { .. } => false,
+    }
+}
+
+fn remux_payload(operations: &[&CompiledOperation]) -> serde_json::Value {
+    let container = operations
+        .iter()
+        .find_map(|operation| match operation {
+            CompiledOperation::SetContainer { container } => Some(container.as_str()),
+            _ => None,
+        })
+        .unwrap_or("mkv");
+    let track_actions = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            CompiledOperation::KeepTracks { target, filter } => Some(track_action_payload(
+                "keep_tracks",
+                *target,
+                filter.as_ref(),
+            )),
+            CompiledOperation::RemoveTracks { target, filter } => Some(track_action_payload(
+                "remove_tracks",
+                *target,
+                filter.as_ref(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let track_order = operations
+        .iter()
+        .find_map(|operation| match operation {
+            CompiledOperation::ReorderTracks { targets } => Some(
+                targets
+                    .iter()
+                    .map(|target| track_target_payload(*target))
+                    .collect::<Vec<serde_json::Value>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_else(default_track_order);
+    let defaults = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            CompiledOperation::SetDefaults { target, strategy } => Some(json!({
+                "target": track_target_payload(*target),
+                "strategy": default_strategy_payload(*strategy),
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "type": "remux",
+        "container": container,
+        "track_actions": track_actions,
+        "track_order": track_order,
+        "defaults": defaults,
+    })
+}
+
+fn track_action_payload(
+    action_type: &str,
+    target: TrackTarget,
+    filter: Option<&TrackFilter>,
+) -> serde_json::Value {
+    let mut action = serde_json::Map::new();
+    action.insert("type".to_owned(), json!(action_type));
+    action.insert("target".to_owned(), track_target_payload(target));
+    if let Some(filter) = filter {
+        action.insert(
+            "filter".to_owned(),
+            serde_json::to_value(filter).unwrap_or_else(|_| json!({})),
+        );
+    }
+    serde_json::Value::Object(action)
+}
+
+fn default_track_order() -> Vec<serde_json::Value> {
+    vec![json!("video"), json!("audio"), json!("subtitle")]
+}
+
+fn track_target_payload(target: TrackTarget) -> serde_json::Value {
+    serde_json::to_value(target).unwrap_or_else(|_| json!("unknown"))
+}
+
+fn default_strategy_payload(strategy: DefaultStrategy) -> serde_json::Value {
+    serde_json::to_value(strategy).unwrap_or_else(|_| json!("unknown"))
+}
+
+fn remux_group_shape(
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+    target_container: &str,
+) -> RemuxGroupShape {
+    if let Err(block) = evaluate_remux_track_operations(snapshot, operations) {
+        return remux_block_shape(block);
+    }
+
+    let has_track_change = operations
+        .iter()
+        .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
+    let Some(current_container) = snapshot.container.as_deref() else {
+        return RemuxGroupShape::InsufficientFacts("snapshot container is unknown");
+    };
+    if current_container.eq_ignore_ascii_case(target_container) && !has_track_change {
+        RemuxGroupShape::NoOp
+    } else if current_container.eq_ignore_ascii_case(target_container) {
+        RemuxGroupShape::TrackSelectionChange
+    } else {
+        RemuxGroupShape::ContainerChange {
+            current: current_container.to_owned(),
+        }
+    }
+}
+
+fn evaluate_remux_track_operations(
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+) -> Result<(), RemuxPlanningBlock> {
+    let has_track_operation = operations
+        .iter()
+        .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
+    if !has_track_operation {
+        return Ok(());
+    }
+
+    let facts = stream_facts(snapshot)?;
+    for operation in operations {
+        match operation {
+            CompiledOperation::KeepTracks { target, filter }
+            | CompiledOperation::RemoveTracks { target, filter } => {
+                for stream in facts.iter().filter(|stream| stream.kind == *target) {
+                    if let Some(filter) = filter {
+                        evaluate_filter(filter, stream)?;
+                    }
+                }
+            }
+            CompiledOperation::SetDefaults { target, .. } => {
+                if !facts.iter().any(|stream| stream.kind == *target) {
+                    return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
+                }
+            }
+            CompiledOperation::ReorderTracks { targets } => {
+                if targets.is_empty() {
+                    return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+                }
+            }
+            CompiledOperation::SetContainer { .. } => {}
+            _ => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
+        }
+    }
+
+    Ok(())
+}
+
+fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {
+    match block {
+        RemuxPlanningBlock::InsufficientSnapshotFacts => RemuxGroupShape::InsufficientFacts(
+            "snapshot stream facts are insufficient for remux planning",
+        ),
+        RemuxPlanningBlock::UnsupportedMediaShape => {
+            RemuxGroupShape::UnsupportedShape("media shape is not supported by remux planning")
+        }
+    }
 }
 
 fn transcode_video_shape<'a>(

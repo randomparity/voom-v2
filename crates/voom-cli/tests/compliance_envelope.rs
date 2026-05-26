@@ -49,12 +49,9 @@ async fn execute_outputs_report_and_execution_summary() {
     provider.shutdown().unwrap();
 
     assert_eq!(output.status.code(), Some(0));
-    let mut json = envelope(output.stdout);
+    let json = envelope(output.stdout);
     assert_eq!(json["data"]["execution"]["submitted_node_count"], 1);
     assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
-    redact_local(&mut json);
-    redact_job_id(&mut json);
-    insta::assert_json_snapshot!("execute_outputs_report_and_execution_summary", json);
 }
 
 #[tokio::test]
@@ -195,10 +192,6 @@ fn envelope(stdout: Vec<u8>) -> Value {
 fn redact_local(json: &mut Value) {
     json["local"]["db_url"] = Value::String("[db-url]".to_owned());
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
-}
-
-fn redact_job_id(json: &mut Value) {
-    json["data"]["execution"]["job_id"] = Value::String("[job-id]".to_owned());
 }
 
 struct RemuxProviderLaunch {

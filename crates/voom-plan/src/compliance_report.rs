@@ -114,7 +114,7 @@ fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck
 
 fn compliance_kind(node: &PlanNode) -> &'static str {
     match node.operation_kind.as_str() {
-        "set_container" => "container",
+        "remux" | "set_container" => "container",
         "transcode_video" => "transcode_video",
         _ => "unsupported",
     }
@@ -131,10 +131,10 @@ fn check_status(node: &PlanNode) -> CheckStatus {
 fn issue_action_hint(node: &PlanNode) -> IssueActionHint {
     match (&node.status, node.operation_kind.as_str()) {
         (NodeStatus::NoOp, _) => IssueActionHint::ResolveMatching,
-        (NodeStatus::Planned, "set_container" | "transcode_video") => {
+        (NodeStatus::Planned, "remux" | "set_container" | "transcode_video") => {
             IssueActionHint::CreateOrUpdatePlanned
         }
-        (NodeStatus::Blocked, "set_container" | "transcode_video") => {
+        (NodeStatus::Blocked, "remux" | "set_container" | "transcode_video") => {
             IssueActionHint::CreateOrUpdateOpen
         }
         _ => IssueActionHint::None,
@@ -143,11 +143,13 @@ fn issue_action_hint(node: &PlanNode) -> IssueActionHint {
 
 fn execution_eligibility(node: &PlanNode) -> ExecutionEligibility {
     match (&node.status, node.operation_kind.as_str()) {
-        (NodeStatus::Planned, "set_container" | "transcode_video") => {
+        (NodeStatus::Planned, "remux" | "set_container" | "transcode_video") => {
             ExecutionEligibility::Supported
         }
         (NodeStatus::NoOp, _) => ExecutionEligibility::NoOp,
-        (NodeStatus::Blocked, "set_container" | "transcode_video") => ExecutionEligibility::Blocked,
+        (NodeStatus::Blocked, "remux" | "set_container" | "transcode_video") => {
+            ExecutionEligibility::Blocked
+        }
         _ => ExecutionEligibility::Unsupported,
     }
 }

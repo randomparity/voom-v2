@@ -46,12 +46,12 @@ pub fn workflow_plan_from_compliance(
 
     for node in &plan.nodes {
         match node.status {
-            NodeStatus::Planned if node.operation_kind == "set_container" => {
+            NodeStatus::Planned if node.operation_kind == "remux" => {
                 nodes.push(WorkflowNode::Operation(OperationNode {
                     id: format!("policy-node_{}", node.node_id),
                     operation: OperationKind::Remux,
-                    policy_target: None,
-                    operation_payload: serde_json::Value::Null,
+                    policy_target: Some(node.target.clone()),
+                    operation_payload: node.operation_payload.clone(),
                     depends_on: Vec::new(),
                     depends_on_selected: Vec::new(),
                     provides_selected: None,

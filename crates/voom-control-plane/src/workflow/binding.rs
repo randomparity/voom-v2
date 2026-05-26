@@ -137,6 +137,43 @@ pub fn render_policy_transcode_payload(
     Ok(payload)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolicyRemuxSource {
+    pub file_version_id: FileVersionId,
+    pub location_id: Option<FileLocationId>,
+}
+
+pub fn render_policy_remux_payload(
+    source: PolicyRemuxSource,
+    operation_payload: &Value,
+    staging_root: &Path,
+    target_dir: &Path,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    if operation_payload.get("type").and_then(Value::as_str) != Some("remux") {
+        return Err(BindingError::new("remux payload missing `type: remux`"));
+    }
+    let mut payload = json!({
+        "operation": "remux",
+        "remux": operation_payload,
+        "staging_root": staging_root,
+        "target_dir": target_dir,
+        "duration_ms": timing.duration_ms,
+        "progress_interval_ms": timing.progress_interval_ms,
+    });
+    let Some(object) = payload.as_object_mut() else {
+        return Err(BindingError::new("rendered payload must be a JSON object"));
+    };
+    object.insert(
+        "source_file_version_id".to_owned(),
+        json!(source.file_version_id),
+    );
+    if let Some(location_id) = source.location_id {
+        object.insert("source_location_id".to_owned(), json!(location_id));
+    }
+    Ok(payload)
+}
+
 #[must_use]
 pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
     BranchContext {

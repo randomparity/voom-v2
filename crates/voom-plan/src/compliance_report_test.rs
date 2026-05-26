@@ -54,6 +54,20 @@ fn transcode_node(status: NodeStatus) -> PlanNode {
     }
 }
 
+fn remux_node(status: NodeStatus) -> PlanNode {
+    PlanNode {
+        operation_payload: json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        observed_state: Some(json!({"container": "mp4"})),
+        ..node(status, "remux", None)
+    }
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
@@ -176,6 +190,43 @@ fn transcode_video_blocked_node_maps_to_blocked_check() {
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Blocked
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn remux_planned_node_maps_to_supported_check() {
+    let report = generate_compliance_report(&plan(vec![remux_node(NodeStatus::Planned)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
+    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Supported
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdatePlanned
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn remux_blocked_node_maps_to_blocked_check() {
+    let mut node = remux_node(NodeStatus::Blocked);
+    node.status_reason = "snapshot container is unknown".to_owned();
+    let report = generate_compliance_report(&plan(vec![node])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Blocked);
+    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(report.checks[0].reason, "snapshot container is unknown");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Blocked
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdateOpen
     );
     assert!(report.diagnostics.is_empty());
 }

@@ -9,12 +9,8 @@ use voom_worker_protocol::OperationKind;
 use super::*;
 
 #[test]
-fn bridge_maps_only_planned_set_container_to_remux() {
-    let plan = plan(vec![
-        node("set_container", NodeStatus::Planned),
-        node("set_container", NodeStatus::NoOp),
-        node("set_container", NodeStatus::Blocked),
-    ]);
+fn bridge_maps_planned_remux_with_policy_target_and_payload() {
+    let plan = plan(vec![node("remux", NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
@@ -22,12 +18,46 @@ fn bridge_maps_only_planned_set_container_to_remux() {
 
     assert_eq!(workflow.id, format!("policy-{}", report.report_id));
     assert_eq!(workflow.nodes.len(), 1);
-    assert_eq!(
-        workflow.nodes[0].id(),
-        "policy-node_node_set_container_Planned"
-    );
+    assert_eq!(workflow.nodes[0].id(), "policy-node_node_remux_Planned");
     assert_eq!(workflow.nodes[0].operation(), OperationKind::Remux);
+    assert_eq!(
+        workflow.nodes[0].policy_target(),
+        Some(&TargetRef::FileVersion {
+            id: voom_core::FileVersionId(42)
+        })
+    );
+    assert_eq!(workflow.nodes[0].operation_payload()["type"], "remux");
+    assert_eq!(workflow.nodes[0].operation_payload()["container"], "mkv");
     assert_eq!(execution.summary.submitted_node_count, 1);
+    assert_eq!(execution.summary.per_operation["remux"], 1);
+}
+
+#[test]
+fn bridge_rejects_legacy_planned_set_container() {
+    let plan = plan(vec![node("set_container", NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
+    assert_eq!(
+        err.to_string(),
+        "policy execution error: unsupported execution operation set_container"
+    );
+}
+
+#[test]
+fn bridge_counts_non_planned_remux_nodes_without_submission() {
+    let plan = plan(vec![
+        node("remux", NodeStatus::NoOp),
+        node("remux", NodeStatus::Blocked),
+    ]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
+
+    assert!(execution.workflow.is_none());
+    assert_eq!(execution.summary.submitted_node_count, 0);
     assert_eq!(execution.summary.skipped_no_op_count, 1);
     assert_eq!(execution.summary.blocked_count, 1);
 }
@@ -132,14 +162,20 @@ fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
 }
 
 fn operation_payload(operation_kind: &str) -> serde_json::Value {
-    if operation_kind == "transcode_video" {
-        json!({
+    match operation_kind {
+        "remux" => json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        "transcode_video" => json!({
             "type": "transcode_video",
             "target_codec": "hevc",
             "container": "mkv",
             "profile": "default-hevc"
-        })
-    } else {
-        json!({"container": "mkv"})
+        }),
+        _ => json!({"container": "mkv"}),
     }
 }

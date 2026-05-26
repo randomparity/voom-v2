@@ -1,5 +1,6 @@
 ---
 source: crates/voom-cli/tests/plan_envelope.rs
+assertion_line: 107
 expression: json
 ---
 {
@@ -9,8 +10,8 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_1b86dfd9b176c61c",
-      "plan_hash": "blake3:1b86dfd9b176c61ce54e2eb8e4fffccd0b7940449446fd0894a6ece39b1d0cff",
+      "plan_id": "plan_f8690c76cc62bd8c",
+      "plan_hash": "blake3:f8690c76cc62bd8cb59d2ef54933d3c557bf20927e8318b686163e44e7b9ed34",
       "policy": {
         "slug": "container-metadata",
         "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
@@ -33,13 +34,13 @@ expression: json
         "operation_counts_by_kind": {
           "clear_tags": 1,
           "delete_tag": 1,
-          "set_container": 1,
+          "remux": 1,
           "set_tag": 1
         }
       },
       "nodes": [
         {
-          "node_id": "node_9dff79b44d89c9f9",
+          "node_id": "node_a2985ff8ff45d281",
           "phase_name": "normalize",
           "ordinal": 0,
           "target": {
@@ -47,9 +48,17 @@ expression: json
             "key": "variant-1",
             "kind": "media_variant"
           },
-          "operation_kind": "set_container",
+          "operation_kind": "remux",
           "operation_payload": {
-            "container": "mkv"
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": [
+              "video",
+              "audio",
+              "subtitle"
+            ],
+            "defaults": []
           },
           "observed_state": {
             "container": "mp4"
