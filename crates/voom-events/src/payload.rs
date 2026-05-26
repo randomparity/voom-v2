@@ -389,12 +389,14 @@ pub struct ArtifactTranscodeFailedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRemuxStreamPayload {
     pub snapshot_stream_id: String,
     pub provider_stream_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRemuxStartedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -411,6 +413,7 @@ pub struct ArtifactRemuxStartedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRemuxProgressPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -428,6 +431,7 @@ pub struct ArtifactRemuxProgressPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRemuxSucceededPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -448,12 +452,15 @@ pub struct ArtifactRemuxSucceededPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactRemuxFailedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
     pub lease_id: Option<u64>,
     pub source_file_version_id: u64,
     pub source_file_location_id: Option<u64>,
+    pub artifact_handle_id: Option<u64>,
+    pub artifact_location_id: Option<u64>,
     pub staging_path: Option<String>,
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,

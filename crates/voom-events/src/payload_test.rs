@@ -378,6 +378,8 @@ fn artifact_remux_failed_payload_serializes_public_error_code() {
         lease_id: Some(3),
         source_file_version_id: 4,
         source_file_location_id: Some(5),
+        artifact_handle_id: Some(6),
+        artifact_location_id: Some(7),
         staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
         selected_streams: Vec::new(),
         default_streams: Vec::new(),
@@ -392,6 +394,8 @@ fn artifact_remux_failed_payload_serializes_public_error_code() {
     let json = serde_json::to_value(Event::ArtifactRemuxFailed(p.clone())).unwrap();
 
     assert_eq!(json["kind"], "artifact.remux_failed");
+    assert_eq!(json["payload"]["artifact_handle_id"], 6);
+    assert_eq!(json["payload"]["artifact_location_id"], 7);
     assert_eq!(json["payload"]["failure_class"], "malformed_worker_result");
     assert_eq!(json["payload"]["error_code"], "MALFORMED_WORKER_RESULT");
 
@@ -400,6 +404,40 @@ fn artifact_remux_failed_payload_serializes_public_error_code() {
     assert_eq!(
         Event::ArtifactRemuxFailed(p).kind(),
         EventKind::ArtifactRemuxFailed
+    );
+}
+
+#[test]
+fn artifact_remux_payloads_reject_unknown_fields() {
+    let raw = serde_json::json!({
+        "kind": "artifact.remux_started",
+        "payload": {
+            "job_id": 1,
+            "ticket_id": 2,
+            "lease_id": 3,
+            "source_file_version_id": 4,
+            "source_file_location_id": 5,
+            "staging_path": "/tmp/voom-stage/2/3/out.mkv",
+            "selected_streams": [
+                {
+                    "snapshot_stream_id": "stream-0",
+                    "provider_stream_index": 0,
+                    "unexpected": true
+                }
+            ],
+            "default_streams": [],
+            "clear_default_streams": [],
+            "track_order": ["video"],
+            "provider": null,
+            "provider_version": null
+        }
+    });
+
+    let err = serde_json::from_value::<Event>(raw).unwrap_err();
+
+    assert!(
+        err.to_string().contains("unknown field"),
+        "unknown remux payload fields should reject: {err}"
     );
 }
 

@@ -1231,6 +1231,16 @@ struct RuntimeRemuxDispatcher<'a> {
 #[async_trait::async_trait]
 impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
     async fn dispatch_remux(&self, request: RemuxRequest) -> Result<RemuxResult, VoomError> {
+        let mut progress = crate::remux::dispatch::NoopRemuxProgressSink;
+        self.dispatch_remux_with_progress(request, &mut progress)
+            .await
+    }
+
+    async fn dispatch_remux_with_progress(
+        &self,
+        request: RemuxRequest,
+        progress: &mut dyn crate::remux::dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError> {
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1242,6 +1252,7 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
                 &format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0),
                 self.lease_id,
                 request,
+                progress,
             ),
         )
         .await

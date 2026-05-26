@@ -62,6 +62,14 @@ pub trait RemuxDispatcher: Send + Sync {
         &self,
         request: voom_worker_protocol::RemuxRequest,
     ) -> Result<RemuxResult, VoomError>;
+
+    async fn dispatch_remux_with_progress(
+        &self,
+        request: voom_worker_protocol::RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError> {
+        self.dispatch_remux(request).await
+    }
 }
 
 impl ControlPlane {
@@ -93,25 +101,103 @@ pub(crate) async fn execute_remux_with_dispatchers(
     verify: &dyn VerifyArtifactDispatcher,
 ) -> Result<ExecuteRemuxReport, VoomError> {
     let selected =
-        source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
-    let snapshot =
-        source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
+        match source::select_source(cp, input.source_file_version_id, input.source_location_id)
+            .await
+        {
+            Ok(selected) => selected,
+            Err(err) => {
+                record_partial_failure(cp, &input, &err).await?;
+                return Err(err);
+            }
+        };
+    let snapshot = match source::read_media_snapshot(
+        cp,
+        input.source_file_version_id,
+        &input.operation_payload,
+    )
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            record_failure(
+                cp,
+                &input,
+                selected.location.id,
+                None,
+                None,
+                None,
+                None,
+                &err,
+            )
             .await?;
+            return Err(err);
+        }
+    };
     let selection =
-        selection::selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)?;
-    let staging = stage::prepare_staging_path(
+        match selection::selection_from_payload_and_snapshot(&input.operation_payload, &snapshot) {
+            Ok(selection) => selection,
+            Err(err) => {
+                record_failure(
+                    cp,
+                    &input,
+                    selected.location.id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &err,
+                )
+                .await?;
+                return Err(err);
+            }
+        };
+    let staging = match stage::prepare_staging_path(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
         std::path::Path::new(&selected.location.value),
     )
-    .await?;
+    .await
+    {
+        Ok(staging) => staging,
+        Err(err) => {
+            record_failure(
+                cp,
+                &input,
+                selected.location.id,
+                Some(&selection),
+                None,
+                None,
+                None,
+                &err,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
     let staging_path = staging.path.clone();
-    let target_path = stage::target_path(
+    let target_path = match stage::target_path(
         &input.target_dir,
         std::path::Path::new(&selected.location.value),
     )
-    .await?;
+    .await
+    {
+        Ok(path) => path,
+        Err(err) => {
+            record_failure(
+                cp,
+                &input,
+                selected.location.id,
+                Some(&selection),
+                Some(&staging_path),
+                None,
+                None,
+                &err,
+            )
+            .await?;
+            return Err(err);
+        }
+    };
 
     events::record_started(cp, &input, selected.location.id, &selection, &staging_path).await?;
     if let Err(err) = dispatch::revalidate_source_file(&selected).await {
@@ -119,8 +205,9 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
+            None,
             None,
             &err,
         )
@@ -139,8 +226,9 @@ pub(crate) async fn execute_remux_with_dispatchers(
                 cp,
                 &input,
                 selected.location.id,
-                &selection,
-                &staging_path,
+                Some(&selection),
+                Some(&staging_path),
+                None,
                 None,
                 &err,
             )
@@ -148,15 +236,26 @@ pub(crate) async fn execute_remux_with_dispatchers(
             return Err(err);
         }
     };
-    let result = match remux.dispatch_remux(request).await {
+    let mut progress = EventRemuxProgressSink {
+        cp,
+        input: &input,
+        source_location_id: selected.location.id,
+        selection: &selection,
+        staging_path: &staging_path,
+    };
+    let result = match remux
+        .dispatch_remux_with_progress(request, &mut progress)
+        .await
+    {
         Ok(result) => result,
         Err(err) => {
             record_failure(
                 cp,
                 &input,
                 selected.location.id,
-                &selection,
-                &staging_path,
+                Some(&selection),
+                Some(&staging_path),
+                None,
                 None,
                 &err,
             )
@@ -169,9 +268,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
             Some(&result),
+            None,
             &err,
         )
         .await?;
@@ -182,9 +282,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
             Some(&result),
+            None,
             &err,
         )
         .await?;
@@ -201,9 +302,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
                     cp,
                     &input,
                     selected.location.id,
-                    &selection,
-                    &staging_path,
+                    Some(&selection),
+                    Some(&staging_path),
                     Some(&result),
+                    None,
                     &err,
                 )
                 .await?;
@@ -226,9 +328,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
                 cp,
                 &input,
                 selected.location.id,
-                &selection,
-                &staging_path,
+                Some(&selection),
+                Some(&staging_path),
                 Some(&result),
+                Some(&staged),
                 &err,
             )
             .await?;
@@ -244,9 +347,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
             Some(&result),
+            Some(&staged),
             &err,
         )
         .await?;
@@ -266,9 +370,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
                 cp,
                 &input,
                 selected.location.id,
-                &selection,
-                &staging_path,
+                Some(&selection),
+                Some(&staging_path),
                 Some(&result),
+                Some(&staged),
                 &err,
             )
             .await?;
@@ -281,9 +386,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
             Some(&result),
+            Some(&staged),
             &err,
         )
         .await?;
@@ -295,9 +401,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
             cp,
             &input,
             selected.location.id,
-            &selection,
-            &staging_path,
+            Some(&selection),
+            Some(&staging_path),
             Some(&result),
+            Some(&staged),
             &err,
         )
         .await?;
@@ -314,16 +421,17 @@ pub(crate) async fn execute_remux_with_dispatchers(
                 cp,
                 &input,
                 selected.location.id,
-                &selection,
-                &staging_path,
+                Some(&selection),
+                Some(&staging_path),
                 Some(&result),
+                Some(&staged),
                 &err,
             )
             .await?;
             return Err(err);
         }
     };
-    events::record_succeeded(
+    let _success_event = events::record_succeeded(
         cp,
         events::RemuxSucceededEventInput {
             input: &input,
@@ -335,7 +443,7 @@ pub(crate) async fn execute_remux_with_dispatchers(
             result: &result,
         },
     )
-    .await?;
+    .await;
 
     Ok(ExecuteRemuxReport {
         job_id: input.job_id,
@@ -355,25 +463,85 @@ pub(crate) async fn execute_remux_with_dispatchers(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "remux failure events intentionally record the facts known at each workflow step"
+)]
 async fn record_failure(
     cp: &ControlPlane,
     input: &ExecuteRemuxInput,
     source_location_id: FileLocationId,
-    selection: &RemuxSelection,
-    staging_path: &Path,
+    selection: Option<&RemuxSelection>,
+    staging_path: Option<&Path>,
     result: Option<&RemuxResult>,
+    staged: Option<&commit::StagedRemuxArtifact>,
     err: &VoomError,
 ) -> Result<(), VoomError> {
     events::record_failed(
         cp,
-        input,
-        source_location_id,
-        selection,
-        staging_path,
-        result,
-        err,
+        events::RemuxFailedEventInput {
+            input,
+            source_location_id: Some(source_location_id),
+            selection,
+            staging_path,
+            artifact_handle_id: staged.map(|staged| staged.artifact_handle_id),
+            artifact_location_id: staged.map(|staged| staged.artifact_location_id),
+            result,
+            error: err,
+        },
     )
     .await
+}
+
+async fn record_partial_failure(
+    cp: &ControlPlane,
+    input: &ExecuteRemuxInput,
+    err: &VoomError,
+) -> Result<(), VoomError> {
+    events::record_failed(
+        cp,
+        events::RemuxFailedEventInput {
+            input,
+            source_location_id: None,
+            selection: None,
+            staging_path: None,
+            artifact_handle_id: None,
+            artifact_location_id: None,
+            result: None,
+            error: err,
+        },
+    )
+    .await
+}
+
+struct EventRemuxProgressSink<'a> {
+    cp: &'a ControlPlane,
+    input: &'a ExecuteRemuxInput,
+    source_location_id: FileLocationId,
+    selection: &'a RemuxSelection,
+    staging_path: &'a Path,
+}
+
+#[async_trait]
+impl dispatch::RemuxProgressSink for EventRemuxProgressSink<'_> {
+    async fn record_remux_progress(
+        &mut self,
+        percent: Option<voom_worker_protocol::PercentBps>,
+        message: Option<String>,
+    ) -> Result<(), VoomError> {
+        events::record_progress(
+            self.cp,
+            events::RemuxProgressEventInput {
+                input: self.input,
+                source_location_id: self.source_location_id,
+                selection: self.selection,
+                staging_path: self.staging_path,
+                percent,
+                message,
+            },
+        )
+        .await
+    }
 }
 
 fn remux_commit_failure(err: &CommitArtifactCommandError) -> VoomError {

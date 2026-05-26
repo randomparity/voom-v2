@@ -44,6 +44,9 @@ async fn execute_records_verified_committed_remux_result() {
         count_events(&cp, EventKind::ArtifactRemuxSucceeded).await,
         1
     );
+    let started = single_started_remux_payload(&cp).await;
+    assert_eq!(started.provider, None);
+    assert_eq!(started.provider_version, None);
     assert_eq!(count_events(&cp, EventKind::MediaSnapshotRecorded).await, 2);
 }
 
@@ -130,6 +133,11 @@ async fn execute_rejects_source_media_snapshot_for_other_file_version() {
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(err.to_string().contains("does not belong"));
+    let failed = single_failed_remux_payload(&cp).await;
+    assert_eq!(failed.error_code, "CONFIG_INVALID");
+    assert_eq!(failed.source_file_location_id, Some(seeded.1.0));
+    assert_eq!(failed.staging_path, None);
+    assert!(failed.selected_streams.is_empty());
 }
 
 #[tokio::test]
@@ -160,6 +168,83 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
         failed_remux_error_code(&cp).await.as_deref(),
         Some("ARTIFACT_CHECKSUM_MISMATCH")
     );
+}
+
+#[tokio::test]
+async fn verification_failure_event_includes_staged_artifact_ids() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded, source_media_snapshot_id),
+        &FakeRemuxDispatcher,
+        &FailedVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::VerificationFailure);
+    let failed = single_failed_remux_payload(&cp).await;
+    assert_eq!(failed.error_code, "VERIFICATION_FAILURE");
+    assert_eq!(failed.artifact_handle_id, Some(1));
+    assert_eq!(failed.artifact_location_id, Some(1));
+}
+
+#[tokio::test]
+async fn worker_progress_frames_record_remux_progress_events() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+
+    execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded, source_media_snapshot_id),
+        &ProgressingRemuxDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxProgress).await, 1);
+}
+
+#[tokio::test]
+async fn success_event_append_failure_does_not_fail_completed_remux() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+    sqlx::query(
+        "CREATE TRIGGER fail_remux_success_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'artifact.remux_succeeded' \
+         BEGIN SELECT RAISE(ABORT, 'event log unavailable'); END",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let report = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded, source_media_snapshot_id),
+        &FakeRemuxDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.target_path.exists());
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactRemuxSucceeded).await,
+        0
+    );
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxFailed).await, 0);
 }
 
 #[tokio::test]
@@ -346,6 +431,34 @@ impl RemuxDispatcher for WrongInputFactsRemuxDispatcher {
 }
 
 #[derive(Debug)]
+struct ProgressingRemuxDispatcher;
+
+#[async_trait]
+impl RemuxDispatcher for ProgressingRemuxDispatcher {
+    async fn dispatch_remux(
+        &self,
+        request: RemuxRequest,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
+    }
+
+    async fn dispatch_remux_with_progress(
+        &self,
+        request: RemuxRequest,
+        progress: &mut dyn dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        progress
+            .record_remux_progress(
+                Some(voom_worker_protocol::PercentBps::try_from(2500).unwrap()),
+                None,
+            )
+            .await?;
+        self.dispatch_remux(request).await
+    }
+}
+
+#[derive(Debug)]
 struct ExpectKeepStreamsRemuxDispatcher {
     expected: Vec<&'static str>,
 }
@@ -433,6 +546,30 @@ impl crate::artifact::verify::VerifyArtifactDispatcher for FakeVerifyDispatcher 
             observed: VerifyArtifactObservedFacts {
                 size_bytes: request.expected.size_bytes,
                 content_hash: request.expected.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FailedVerifyDispatcher;
+
+#[async_trait]
+impl crate::artifact::verify::VerifyArtifactDispatcher for FailedVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        _request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "fake-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: 0,
+                content_hash: "blake3:bad".to_owned(),
                 modified_at: None,
                 local_file_key: None,
             },
@@ -674,4 +811,47 @@ async fn failed_remux_error_code(cp: &crate::ControlPlane) -> Option<String> {
         voom_events::Event::ArtifactRemuxFailed(payload) => Some(payload.error_code),
         other => panic!("expected remux failed payload, got {other:?}"),
     }
+}
+
+async fn single_started_remux_payload(
+    cp: &crate::ControlPlane,
+) -> voom_events::payload::ArtifactRemuxStartedPayload {
+    let event = single_event(cp, EventKind::ArtifactRemuxStarted).await;
+    match event.envelope.payload {
+        voom_events::Event::ArtifactRemuxStarted(payload) => payload,
+        other => panic!("expected remux started payload, got {other:?}"),
+    }
+}
+
+async fn single_failed_remux_payload(
+    cp: &crate::ControlPlane,
+) -> voom_events::payload::ArtifactRemuxFailedPayload {
+    let event = single_event(cp, EventKind::ArtifactRemuxFailed).await;
+    match event.envelope.payload {
+        voom_events::Event::ArtifactRemuxFailed(payload) => payload,
+        other => panic!("expected remux failed payload, got {other:?}"),
+    }
+}
+
+async fn single_event(
+    cp: &crate::ControlPlane,
+    kind: EventKind,
+) -> voom_store::repo::events::EventRow {
+    cp.events()
+        .list(
+            EventFilter {
+                kind: Some(kind),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap()
 }

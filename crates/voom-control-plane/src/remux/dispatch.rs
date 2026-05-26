@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
+    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, PercentBps, ProgressFrame,
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxResult,
     RemuxSelection, WorkerCredentials, is_supported_remux_container,
 };
@@ -18,6 +18,29 @@ const MKVTOOLNIX_WORKER_BIN_ENV: &str = "VOOM_MKVTOOLNIX_WORKER_BIN";
 const DISPATCH_IDLE_DEADLINE_MS: u32 = 30_000;
 const HEARTBEAT_DEADLINE_MS: u32 = 30_000;
 
+#[async_trait]
+pub trait RemuxProgressSink: Send {
+    async fn record_remux_progress(
+        &mut self,
+        percent: Option<PercentBps>,
+        message: Option<String>,
+    ) -> Result<(), VoomError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NoopRemuxProgressSink;
+
+#[async_trait]
+impl RemuxProgressSink for NoopRemuxProgressSink {
+    async fn record_remux_progress(
+        &mut self,
+        _percent: Option<PercentBps>,
+        _message: Option<String>,
+    ) -> Result<(), VoomError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BundledRemuxDispatcher;
 
@@ -29,6 +52,28 @@ impl RemuxDispatcher for BundledRemuxDispatcher {
             .await
             .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
         let result = dispatch_remux_with_client(&worker.client, &worker.credentials, request).await;
+        let _status = worker.shutdown(Duration::from_secs(5)).await;
+        result
+    }
+
+    async fn dispatch_remux_with_progress(
+        &self,
+        request: RemuxRequest,
+        progress: &mut dyn RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError> {
+        let command = bundled_mkvtoolnix_worker_command();
+        let worker = BundledWorkerProcess::launch(WorkerId(0), command)
+            .await
+            .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
+        let result = dispatch_remux_with_client_context_and_progress(
+            &worker.client,
+            &worker.credentials,
+            "remux-control-plane",
+            LeaseId(0),
+            request,
+            progress,
+        )
+        .await;
         let _status = worker.shutdown(Duration::from_secs(5)).await;
         result
     }
@@ -153,12 +198,14 @@ pub(crate) async fn dispatch_remux_with_client<C>(
 where
     C: ClientHandle + ?Sized,
 {
+    let mut progress = NoopRemuxProgressSink;
     dispatch_remux_with_client_context(
         client,
         credentials,
         "remux-control-plane",
         LeaseId(0),
         remux,
+        &mut progress,
     )
     .await
 }
@@ -169,6 +216,29 @@ pub(crate) async fn dispatch_remux_with_client_context<C>(
     idempotency_key: &str,
     lease_id: LeaseId,
     remux: RemuxRequest,
+    progress: &mut dyn RemuxProgressSink,
+) -> Result<RemuxResult, VoomError>
+where
+    C: ClientHandle + ?Sized,
+{
+    dispatch_remux_with_client_context_and_progress(
+        client,
+        credentials,
+        idempotency_key,
+        lease_id,
+        remux,
+        progress,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_remux_with_client_context_and_progress<C>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    idempotency_key: &str,
+    lease_id: LeaseId,
+    remux: RemuxRequest,
+    progress: &mut dyn RemuxProgressSink,
 ) -> Result<RemuxResult, VoomError>
 where
     C: ClientHandle + ?Sized,
@@ -186,11 +256,12 @@ where
         .dispatch(credentials, idempotency_key, request)
         .await
         .map_err(|err| VoomError::WorkerCrash(format!("remux dispatch failed: {err}")))?;
-    consume_remux_stream(dispatch).await
+    consume_remux_stream(dispatch, progress).await
 }
 
 async fn consume_remux_stream(
     mut dispatch: voom_worker_protocol::DispatchStream,
+    progress: &mut dyn RemuxProgressSink,
 ) -> Result<RemuxResult, VoomError> {
     loop {
         let outcome = tokio::time::timeout(
@@ -201,7 +272,11 @@ async fn consume_remux_stream(
         .map_err(|_| VoomError::WorkerTimeout("remux worker progress idle timeout".to_owned()))?
         .map_err(|err| VoomError::MalformedWorkerResult(format!("remux stream: {err}")))?;
         match outcome {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {}
+            NdjsonOutcome::Frame(ProgressFrame::Progress {
+                percent, message, ..
+            }) => {
+                progress.record_remux_progress(percent, message).await?;
+            }
             NdjsonOutcome::Frame(_) => {
                 return Err(VoomError::MalformedWorkerResult(
                     "remux worker sent terminal frame as non-terminal progress".to_owned(),

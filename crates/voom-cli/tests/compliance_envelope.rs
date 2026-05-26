@@ -116,6 +116,45 @@ async fn execute_scanned_remux_outputs_ticket_result_ids() {
 }
 
 #[tokio::test]
+async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
+    let seeded = seed_scanned_remux().await;
+    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
+
+    let staging_root = seeded.dir.path().join("stage");
+    let output_dir = seeded.dir.path().join("out");
+    std::fs::create_dir_all(&output_dir).unwrap();
+    std::fs::write(output_dir.join("Movie.remux.mkv"), b"existing").unwrap();
+
+    let output = compliance_execute_command_with_dirs(
+        &seeded.url,
+        seeded.version_id,
+        seeded.input_id,
+        &staging_root,
+        &output_dir,
+    );
+    provider.shutdown().unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let mut json = envelope(output.stdout);
+    assert_eq!(json["command"], "compliance");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| { message.contains("remux target path already exists") })
+    );
+    assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
+    assert_eq!(json["data"]["execution"]["failure_count"], 1);
+    redact_local(&mut json);
+    redact_temp_path_values(&mut json, seeded.dir.path());
+    insta::assert_json_snapshot!(
+        "execute_scanned_remux_existing_target_outputs_failure_envelope",
+        json
+    );
+}
+
+#[tokio::test]
 async fn report_missing_input_set_uses_not_found() {
     let seeded = seed(FixtureName::SyntheticNoncompliantTranscodeNeeded).await;
 
@@ -388,6 +427,25 @@ fn redact_remux_ticket_paths(json: &mut Value) {
     }
     if result["target_path"].is_string() {
         result["target_path"] = Value::String("[target-path]".to_owned());
+    }
+}
+
+fn redact_temp_path_values(json: &mut Value, temp_dir: &Path) {
+    match json {
+        Value::String(value) => {
+            *value = value.replace(&temp_dir.display().to_string(), "[tmp-dir]");
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_temp_path_values(value, temp_dir);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_temp_path_values(value, temp_dir);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
