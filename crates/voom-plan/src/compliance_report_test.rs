@@ -54,6 +54,20 @@ fn transcode_node(status: NodeStatus) -> PlanNode {
     }
 }
 
+fn remux_node(status: NodeStatus) -> PlanNode {
+    PlanNode {
+        operation_payload: json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        observed_state: Some(json!({"container": "mp4"})),
+        ..node(status, "remux", None)
+    }
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
@@ -103,7 +117,7 @@ fn no_op_node_maps_to_compliant_check_and_report() {
 }
 
 #[test]
-fn planned_node_maps_to_noncompliant_supported_check() {
+fn legacy_set_container_planned_node_maps_to_unsupported_check() {
     let report = generate_compliance_report(&plan(vec![node(
         NodeStatus::Planned,
         "set_container",
@@ -116,24 +130,30 @@ fn planned_node_maps_to_noncompliant_supported_check() {
         report.checks[0].check_status,
         crate::CheckStatus::Noncompliant
     );
-    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(report.checks[0].compliance_kind, "unsupported");
     assert_eq!(
         report.checks[0].execution_eligibility,
-        crate::ExecutionEligibility::Supported
+        crate::ExecutionEligibility::Unsupported
     );
     assert_eq!(
         report.checks[0].issue_action_hint,
-        crate::IssueActionHint::CreateOrUpdatePlanned
+        crate::IssueActionHint::None
     );
     assert_eq!(report.checks[0].desired_state, json!({"container": "mkv"}));
     assert_eq!(
         report.checks[0].observed_state,
         Some(json!({"container": "mp4"}))
     );
+    assert_eq!(report.summary.executable_check_count, 0);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(
+        report.diagnostics[0].code,
+        crate::ComplianceDiagnosticCode::UnsupportedComplianceOperation
+    );
 }
 
 #[test]
-fn blocked_node_maps_to_blocked_check() {
+fn legacy_set_container_blocked_node_maps_to_unsupported_check() {
     let report = generate_compliance_report(&plan(vec![node(
         NodeStatus::Blocked,
         "set_container",
@@ -144,13 +164,15 @@ fn blocked_node_maps_to_blocked_check() {
     assert_eq!(report.summary.status, crate::ReportStatus::Blocked);
     assert_eq!(report.checks[0].check_status, crate::CheckStatus::Blocked);
     assert_eq!(
-        report.checks[0].issue_action_hint,
-        crate::IssueActionHint::CreateOrUpdateOpen
-    );
-    assert_eq!(
         report.checks[0].execution_eligibility,
-        crate::ExecutionEligibility::Blocked
+        crate::ExecutionEligibility::Unsupported
     );
+    assert_eq!(report.checks[0].compliance_kind, "unsupported");
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::None
+    );
+    assert_eq!(report.diagnostics.len(), 1);
 }
 
 #[test]
@@ -176,6 +198,43 @@ fn transcode_video_blocked_node_maps_to_blocked_check() {
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Blocked
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn remux_planned_node_maps_to_supported_check() {
+    let report = generate_compliance_report(&plan(vec![remux_node(NodeStatus::Planned)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
+    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Supported
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdatePlanned
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn remux_blocked_node_maps_to_blocked_check() {
+    let mut node = remux_node(NodeStatus::Blocked);
+    node.status_reason = "snapshot container is unknown".to_owned();
+    let report = generate_compliance_report(&plan(vec![node])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Blocked);
+    assert_eq!(report.checks[0].compliance_kind, "container");
+    assert_eq!(report.checks[0].reason, "snapshot container is unknown");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Blocked
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdateOpen
     );
     assert!(report.diagnostics.is_empty());
 }

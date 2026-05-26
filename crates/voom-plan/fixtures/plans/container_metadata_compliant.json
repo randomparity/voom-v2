@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "plan_id": "plan_7f1fd52284ab7cc7",
-  "plan_hash": "blake3:7f1fd52284ab7cc74a12bc32bcccde77fed0f0354948cf3c562b0a2138ed0980",
+  "plan_id": "plan_e3b8273af88abb9f",
+  "plan_hash": "blake3:e3b8273af88abb9f7257d8018ef59707c445168a5c521991679723ed7612d0eb",
   "policy": {
     "slug": "container-metadata",
     "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
@@ -22,13 +22,13 @@
     "operation_counts_by_kind": {
       "clear_tags": 1,
       "delete_tag": 1,
-      "set_container": 1,
+      "remux": 1,
       "set_tag": 1
     }
   },
   "nodes": [
     {
-      "node_id": "node_9dff79b44d89c9f9",
+      "node_id": "node_a2985ff8ff45d281",
       "phase_name": "normalize",
       "ordinal": 0,
       "target": {
@@ -36,15 +36,23 @@
         "key": "variant-1",
         "kind": "media_variant"
       },
-      "operation_kind": "set_container",
+      "operation_kind": "remux",
       "operation_payload": {
-        "container": "mkv"
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [],
+        "track_order": [
+          "video",
+          "audio",
+          "subtitle"
+        ],
+        "defaults": []
       },
       "observed_state": {
         "container": "mkv"
       },
       "status": "no_op",
-      "status_reason": "container is already mkv",
+      "status_reason": "container is already mkv and track selection is unchanged",
       "capability_hints": {
         "operation_capability": null
       },

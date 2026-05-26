@@ -1,15 +1,23 @@
 use std::collections::BTreeMap;
 
+use voom_core::MediaSnapshotId;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
-    CompiledValue, DiagnosticCode, DiagnosticStage, MediaSnapshotInput, PolicyDiagnostic,
-    PolicyInputSetDraft, PolicyInputSourceKind, SourceLocation, SourceSpan, TargetKind, TargetRef,
-    TrackTarget,
+    CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage, MediaSnapshotInput,
+    PolicyDiagnostic, PolicyInputSetDraft, PolicyInputSourceKind, SourceLocation, SourceSpan,
+    TargetKind, TargetRef, TrackFilter, TrackTarget,
 };
 
-use crate::{DependencyKind, NodeStatus, PlanningContext, PlanningRequest, generate_plan};
+use crate::{
+    DependencyKind, NodeStatus, PlanningContext, PlanningDiagnosticCode, PlanningRequest,
+    generate_plan,
+};
 
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
+    compiled_policy_with_ops(vec![operation])
+}
+
+fn compiled_policy_with_ops(operations: Vec<CompiledOperation>) -> CompiledPolicy {
     CompiledPolicy {
         policy_name: "container metadata".to_owned(),
         slug: "container-metadata".to_owned(),
@@ -23,9 +31,42 @@ fn policy(operation: CompiledOperation) -> CompiledPolicy {
             run_if: None,
             skip_if: None,
             on_error: None,
-            operations: vec![operation],
+            operations,
         }],
         phase_order: vec!["normalize".to_owned()],
+        warnings: Vec::new(),
+        provenance: voom_policy::PolicyProvenance::default(),
+    }
+}
+
+fn compiled_policy_with_phases(phases: &[(&str, Vec<CompiledOperation>)]) -> CompiledPolicy {
+    CompiledPolicy {
+        policy_name: "container metadata".to_owned(),
+        slug: "container-metadata".to_owned(),
+        source_hash: "source-hash".to_owned(),
+        schema_version: 2,
+        metadata: BTreeMap::new(),
+        config: BTreeMap::new(),
+        phases: phases
+            .iter()
+            .enumerate()
+            .map(|(index, (name, operations))| CompiledPhase {
+                name: (*name).to_owned(),
+                depends_on: index
+                    .checked_sub(1)
+                    .map(|previous| phases[previous].0.to_owned())
+                    .into_iter()
+                    .collect(),
+                run_if: None,
+                skip_if: None,
+                on_error: None,
+                operations: operations.clone(),
+            })
+            .collect(),
+        phase_order: phases
+            .iter()
+            .map(|(name, _operations)| (*name).to_owned())
+            .collect(),
         warnings: Vec::new(),
         provenance: voom_policy::PolicyProvenance::default(),
     }
@@ -86,6 +127,105 @@ fn snapshot_with(
     }
 }
 
+fn snapshot_with_streams(container: Option<&str>) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(container, None, Some(1));
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": [
+            {"id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"},
+            {"id": "stream-1", "index": 1, "kind": "audio", "codec_name": "aac", "language": "eng"},
+            {"id": "stream-2", "index": 2, "kind": "audio", "codec_name": "aac", "language": "und"},
+            {"id": "stream-3", "index": 3, "kind": "subtitle", "codec_name": "subrip", "language": "spa"}
+        ]
+    });
+    snapshot
+}
+
+fn snapshot_with_attachment_stream(container: Option<&str>) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with_streams(container);
+    let streams = snapshot
+        .stream_summary
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+        .unwrap();
+    streams.push(serde_json::json!({
+        "id": "stream-4",
+        "index": 4,
+        "kind": "attachment",
+        "codec_name": "mjpeg",
+        "filename": "cover.jpg"
+    }));
+    snapshot
+}
+
+fn snapshot_mkv_with_audio_languages_and_defaults(
+    languages_and_defaults: &[(&str, bool)],
+) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mkv"), None, Some(1));
+    let audio_streams = languages_and_defaults
+        .iter()
+        .enumerate()
+        .map(|(offset, (language, is_default))| {
+            let index = offset + 1;
+            serde_json::json!({
+                "id": format!("stream-{index}"),
+                "index": index,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": language,
+                "disposition": {
+                    "default": is_default
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut streams = vec![serde_json::json!({
+        "id": "stream-0",
+        "index": 0,
+        "kind": "video",
+        "codec_name": "h264"
+    })];
+    streams.extend(audio_streams);
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": streams
+    });
+    snapshot
+}
+
+fn snapshot_mp4_with_audio_only_stream_facts() -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mp4"), None, Some(0));
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 0,
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng"
+            }
+        ]
+    });
+    snapshot
+}
+
+fn snapshot_mp4_with_video_audio_subtitle() -> MediaSnapshotInput {
+    snapshot_with_streams(Some("mp4"))
+}
+
+fn snapshot_mkv_with_video_audio_subtitle() -> MediaSnapshotInput {
+    snapshot_with_streams(Some("mkv"))
+}
+
+fn request(policy: CompiledPolicy, snapshot: MediaSnapshotInput) -> PlanningRequest {
+    PlanningRequest {
+        policy,
+        input: input_with_snapshot(snapshot),
+        context: PlanningContext::default(),
+    }
+}
+
 fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
     PlanningRequest {
         policy: policy(CompiledOperation::TranscodeVideo {
@@ -96,6 +236,506 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
     }
+}
+
+#[test]
+fn groups_container_and_track_operations_into_one_remux_node() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        },
+        CompiledOperation::KeepTracks {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned(), "und".to_owned()],
+            }),
+        },
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::First,
+        },
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].operation_payload["type"], "remux");
+    assert_eq!(plan.nodes[0].operation_payload["container"], "mkv");
+    assert_eq!(
+        plan.nodes[0].operation_payload["track_actions"],
+        serde_json::json!([
+            {
+                "type": "keep_tracks",
+                "target": "audio",
+                "filter": {
+                    "type": "language_in",
+                    "values": ["eng", "und"]
+                }
+            }
+        ])
+    );
+    assert_eq!(
+        plan.nodes[0].operation_payload["track_order"],
+        serde_json::json!(["video", "audio", "subtitle"])
+    );
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"],
+        serde_json::json!([
+            {
+                "target": "audio",
+                "strategy": "first"
+            }
+        ])
+    );
+}
+
+#[test]
+fn remux_payload_includes_existing_media_snapshot_id_when_available() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+    let mut snapshot = snapshot_with_streams(Some("mp4"));
+    snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(99));
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(
+        plan.nodes[0].operation_payload["source_media_snapshot_id"],
+        99
+    );
+}
+
+#[test]
+fn container_mkv_alone_is_no_op_when_snapshot_is_already_mkv() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn container_mkv_alone_plans_when_snapshot_container_is_not_mkv() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container mp4 will be changed to mkv"
+    );
+}
+
+#[test]
+fn container_mkv_alone_blocks_when_snapshot_container_is_unknown() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+    let mut snapshot = snapshot_mp4_with_video_audio_subtitle();
+    snapshot.container = None;
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::InsufficientSnapshotFacts
+    );
+}
+
+#[test]
+fn intervening_non_remux_operation_does_not_split_same_phase_remux_group() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        },
+        CompiledOperation::SetTag {
+            key: "title".to_owned(),
+            value: CompiledValue::String {
+                value: "Movie".to_owned(),
+            },
+        },
+        CompiledOperation::KeepTracks {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        },
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
+
+    let remux_nodes = plan
+        .nodes
+        .iter()
+        .filter(|node| node.operation_kind == "remux")
+        .collect::<Vec<_>>();
+    assert_eq!(remux_nodes.len(), 1);
+    assert_eq!(
+        remux_nodes[0].operation_payload["track_actions"][0]["type"],
+        "keep_tracks"
+    );
+    assert!(
+        plan.nodes
+            .iter()
+            .any(|node| node.operation_kind == "set_tag" && node.status == NodeStatus::Blocked)
+    );
+}
+
+#[test]
+fn remux_operations_in_different_phases_remain_separate_nodes() {
+    let policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        (
+            "tracks",
+            vec![CompiledOperation::KeepTracks {
+                target: TrackTarget::Audio,
+                filter: Some(TrackFilter::LanguageIn {
+                    values: vec!["eng".to_owned()],
+                }),
+            }],
+        ),
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
+
+    let remux_nodes = plan
+        .nodes
+        .iter()
+        .filter(|node| node.operation_kind == "remux")
+        .collect::<Vec<_>>();
+    assert_eq!(remux_nodes.len(), 2);
+    assert_eq!(remux_nodes[0].phase_name, "normalize");
+    assert_eq!(remux_nodes[1].phase_name, "tracks");
+    assert!(plan.edges.iter().any(|edge| {
+        edge.from_node_id == remux_nodes[0].node_id && edge.to_node_id == remux_nodes[1].node_id
+    }));
+}
+
+#[test]
+fn defaults_best_blocks_instead_of_joining_executable_group() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        },
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+        },
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
+
+    assert!(
+        plan.nodes
+            .iter()
+            .any(|node| node.operation_kind == "remux" && node.status == NodeStatus::Planned)
+    );
+    assert!(plan.nodes.iter().any(
+        |node| node.operation_kind == "set_defaults" && node.status == NodeStatus::Blocked
+    ));
+}
+
+#[test]
+fn attachment_target_track_selection_blocks_before_remux_planning() {
+    for operation in [
+        CompiledOperation::KeepTracks {
+            target: TrackTarget::Attachment,
+            filter: Some(TrackFilter::Font),
+        },
+        CompiledOperation::RemoveTracks {
+            target: TrackTarget::Attachment,
+            filter: Some(TrackFilter::Font),
+        },
+    ] {
+        let plan = generate_plan(request(
+            compiled_policy_with_ops(vec![operation]),
+            snapshot_mp4_with_video_audio_subtitle(),
+        ))
+        .unwrap();
+
+        assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+        assert_eq!(
+            plan.diagnostics[0].code,
+            PlanningDiagnosticCode::UnsupportedMediaShape
+        );
+        assert_eq!(
+            plan.diagnostics[0].message,
+            "attachment track selection is not supported by remux planning"
+        );
+    }
+}
+
+#[test]
+fn container_remux_blocks_when_source_snapshot_has_attachment_streams() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_with_attachment_stream(Some("mp4")),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+    assert_eq!(
+        plan.diagnostics[0].message,
+        "media shape is not supported by remux planning"
+    );
+}
+
+#[test]
+fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
+        target: TrackTarget::Audio,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned(), "spa".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::First,
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![
+            TrackTarget::Video,
+            TrackTarget::Audio,
+            TrackTarget::Subtitle,
+        ],
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![
+            TrackTarget::Video,
+            TrackTarget::Audio,
+            TrackTarget::Subtitle,
+        ],
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Preserve,
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_defaults_none_no_ops_when_target_track_kind_is_absent() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Subtitle,
+        strategy: DefaultStrategy::None,
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_defaults_preserve_no_ops_when_target_track_kind_is_absent() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Subtitle,
+        strategy: DefaultStrategy::Preserve,
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![
+            TrackTarget::Audio,
+            TrackTarget::Video,
+            TrackTarget::Subtitle,
+        ],
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "track selection will be changed"
+    );
+}
+
+#[test]
+fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::ReorderTracks {
+            targets: vec![
+                TrackTarget::Audio,
+                TrackTarget::Video,
+                TrackTarget::Subtitle,
+            ],
+        },
+        CompiledOperation::ReorderTracks {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+        },
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+}
+
+#[test]
+fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![TrackTarget::Video, TrackTarget::Audio, TrackTarget::Audio],
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "reorder_tracks");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+}
+
+#[test]
+fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_audio_only_stream_facts())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
 }
 
 #[test]
@@ -110,6 +750,7 @@ fn set_container_plans_non_mkv_snapshot() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -124,10 +765,16 @@ fn set_container_plans_non_mkv_snapshot() {
     );
     assert_eq!(
         plan.nodes[0].operation_payload,
-        serde_json::json!({"container": "mkv"})
+        serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        })
     );
     assert_eq!(plan.summary.executable_node_count, 1);
-    assert_eq!(plan.summary.operation_counts_by_kind["set_container"], 1);
+    assert_eq!(plan.summary.operation_counts_by_kind["remux"], 1);
 }
 
 #[test]
@@ -143,7 +790,7 @@ fn set_container_plan_nodes_carry_structured_observed_container_when_known() {
     let node = plan
         .nodes
         .iter()
-        .find(|node| node.operation_kind == "set_container")
+        .find(|node| node.operation_kind == "remux")
         .unwrap();
 
     assert_eq!(
@@ -165,7 +812,7 @@ fn set_container_plan_nodes_leave_observed_state_absent_when_unknown() {
     let node = plan
         .nodes
         .iter()
-        .find(|node| node.operation_kind == "set_container")
+        .find(|node| node.operation_kind == "remux")
         .unwrap();
 
     assert_eq!(node.status, NodeStatus::Blocked);
@@ -184,7 +831,10 @@ fn set_container_no_ops_already_mkv_snapshot() {
     .unwrap();
 
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
-    assert_eq!(plan.nodes[0].status_reason, "container is already mkv");
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
     assert_eq!(plan.summary.no_op_node_count, 1);
 }
 
@@ -408,7 +1058,7 @@ fn unresolved_condition_emits_blocked_node_for_nested_operation() {
 }
 
 #[test]
-fn track_operations_emit_blocked_nodes_instead_of_disappearing() {
+fn track_operations_block_when_snapshot_stream_facts_are_missing() {
     let plan = generate_plan(PlanningRequest {
         policy: policy(CompiledOperation::KeepTracks {
             target: TrackTarget::Audio,
@@ -421,9 +1071,13 @@ fn track_operations_emit_blocked_nodes_instead_of_disappearing() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "keep_tracks");
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
     assert_eq!(plan.summary.blocked_node_count, 1);
     assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::InsufficientSnapshotFacts
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
 use sha2::Digest as _;
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
@@ -171,6 +172,7 @@ pub async fn persist_scanned_media_snapshot(
     result: &ProbeFileResult,
 ) -> Result<PersistedScan, ScanPersistError> {
     verify_probe_facts(candidate, result)?;
+    let snapshot_payload = snapshot_with_stream_ids(&result.snapshot)?;
     let location_value = canonical_path_value(canonical_path)?;
     let observed_sidecars = observe_sidecars(sidecars).await?;
 
@@ -208,7 +210,7 @@ pub async fn persist_scanned_media_snapshot(
                 file_version_id,
                 probed_by: Some(worker_id),
                 probed_at: now,
-                payload: result.snapshot.clone(),
+                payload: snapshot_payload,
             },
         )
         .await?;
@@ -258,6 +260,33 @@ pub async fn persist_scanned_media_snapshot(
         bundle_member_role,
         sidecars: persisted_sidecars,
     })
+}
+
+pub(crate) fn snapshot_with_stream_ids(snapshot: &Value) -> Result<Value, VoomError> {
+    let mut normalized = snapshot.clone();
+    let Some(streams) = normalized.get_mut("streams") else {
+        return Ok(normalized);
+    };
+    let Some(streams) = streams.as_array_mut() else {
+        return Ok(normalized);
+    };
+    for stream in streams {
+        let Some(stream) = stream.as_object_mut() else {
+            return Err(VoomError::Config(
+                "snapshot stream entries must be objects".to_owned(),
+            ));
+        };
+        if stream.contains_key("id") {
+            continue;
+        }
+        let Some(index) = stream.get("index").and_then(Value::as_u64) else {
+            return Err(VoomError::Config(
+                "snapshot stream without id must include numeric index".to_owned(),
+            ));
+        };
+        stream.insert("id".to_owned(), Value::String(format!("stream-{index}")));
+    }
+    Ok(normalized)
 }
 
 async fn observe_sidecars(

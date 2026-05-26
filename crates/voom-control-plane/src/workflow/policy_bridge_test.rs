@@ -1,7 +1,8 @@
 use serde_json::json;
 use voom_plan::{
-    ArtifactExpectations, CapabilityHints, ExecutionPlan, InputIdentity, NodeStatus, PlanNode,
-    PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints,
+    ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
+    NodeStatus, PlanNode, PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates,
+    SafetyHints, SchedulingHints,
 };
 use voom_policy::TargetRef;
 use voom_worker_protocol::OperationKind;
@@ -9,12 +10,8 @@ use voom_worker_protocol::OperationKind;
 use super::*;
 
 #[test]
-fn bridge_maps_only_planned_set_container_to_remux() {
-    let plan = plan(vec![
-        node("set_container", NodeStatus::Planned),
-        node("set_container", NodeStatus::NoOp),
-        node("set_container", NodeStatus::Blocked),
-    ]);
+fn bridge_maps_planned_remux_with_policy_target_and_payload() {
+    let plan = plan(vec![node("remux", NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
@@ -22,12 +19,46 @@ fn bridge_maps_only_planned_set_container_to_remux() {
 
     assert_eq!(workflow.id, format!("policy-{}", report.report_id));
     assert_eq!(workflow.nodes.len(), 1);
-    assert_eq!(
-        workflow.nodes[0].id(),
-        "policy-node_node_set_container_Planned"
-    );
+    assert_eq!(workflow.nodes[0].id(), "policy-node_node_remux_Planned");
     assert_eq!(workflow.nodes[0].operation(), OperationKind::Remux);
+    assert_eq!(
+        workflow.nodes[0].policy_target(),
+        Some(&TargetRef::FileVersion {
+            id: voom_core::FileVersionId(42)
+        })
+    );
+    assert_eq!(workflow.nodes[0].operation_payload()["type"], "remux");
+    assert_eq!(workflow.nodes[0].operation_payload()["container"], "mkv");
     assert_eq!(execution.summary.submitted_node_count, 1);
+    assert_eq!(execution.summary.per_operation["remux"], 1);
+}
+
+#[test]
+fn bridge_rejects_legacy_planned_set_container() {
+    let plan = plan(vec![node("set_container", NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
+
+    assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
+    assert_eq!(
+        err.to_string(),
+        "policy execution error: unsupported execution operation set_container"
+    );
+}
+
+#[test]
+fn bridge_counts_non_planned_remux_nodes_without_submission() {
+    let plan = plan(vec![
+        node("remux", NodeStatus::NoOp),
+        node("remux", NodeStatus::Blocked),
+    ]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
+
+    assert!(execution.workflow.is_none());
+    assert_eq!(execution.summary.submitted_node_count, 0);
     assert_eq!(execution.summary.skipped_no_op_count, 1);
     assert_eq!(execution.summary.blocked_count, 1);
 }
@@ -83,7 +114,64 @@ fn bridge_maps_planned_transcode_video() {
     );
 }
 
+#[test]
+fn bridge_preserves_plan_edges_between_included_planned_nodes() {
+    let first = node_with_id(
+        "node_remux_first",
+        "normalize",
+        "remux",
+        NodeStatus::Planned,
+    );
+    let second = node_with_id("node_remux_second", "tracks", "remux", NodeStatus::Planned);
+    let plan = plan_with_edges(
+        vec![first, second],
+        vec![Edge {
+            edge_id: "edge_first_second".to_owned(),
+            from_node_id: "node_remux_first".to_owned(),
+            to_node_id: "node_remux_second".to_owned(),
+            dependency_kind: DependencyKind::PhaseDependsOn,
+        }],
+    );
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes[0].id(), "policy-node_node_remux_first");
+    assert_eq!(workflow.nodes[1].id(), "policy-node_node_remux_second");
+    assert_eq!(
+        workflow.nodes[1].depends_on(),
+        ["policy-node_node_remux_first".to_owned()]
+    );
+}
+
+#[test]
+fn bridge_omits_dependencies_to_skipped_nodes() {
+    let skipped = node_with_id("node_remux_noop", "normalize", "remux", NodeStatus::NoOp);
+    let planned = node_with_id("node_remux_planned", "tracks", "remux", NodeStatus::Planned);
+    let plan = plan_with_edges(
+        vec![skipped, planned],
+        vec![Edge {
+            edge_id: "edge_skipped_planned".to_owned(),
+            from_node_id: "node_remux_noop".to_owned(),
+            to_node_id: "node_remux_planned".to_owned(),
+            dependency_kind: DependencyKind::PhaseDependsOn,
+        }],
+    );
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes.len(), 1);
+    assert!(workflow.nodes[0].depends_on().is_empty());
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
+    plan_with_edges(nodes, Vec::new())
+}
+
+fn plan_with_edges(nodes: Vec<PlanNode>, edges: Vec<Edge>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
         plan_id: "plan_test".to_owned(),
@@ -103,7 +191,7 @@ fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
         generated_at: None,
         summary: PlanSummary::default(),
         nodes,
-        edges: Vec::new(),
+        edges,
         warnings: Vec::new(),
         diagnostics: Vec::new(),
         provenance: PlanProvenance::default(),
@@ -111,9 +199,23 @@ fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
 }
 
 fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
+    node_with_id(
+        &format!("node_{operation_kind}_{status:?}"),
+        "normalize",
+        operation_kind,
+        status,
+    )
+}
+
+fn node_with_id(
+    node_id: &str,
+    phase_name: &str,
+    operation_kind: &str,
+    status: NodeStatus,
+) -> PlanNode {
     PlanNode {
-        node_id: format!("node_{operation_kind}_{status:?}"),
-        phase_name: "normalize".to_owned(),
+        node_id: node_id.to_owned(),
+        phase_name: phase_name.to_owned(),
         ordinal: 0,
         target: TargetRef::FileVersion {
             id: voom_core::FileVersionId(42),
@@ -132,14 +234,20 @@ fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
 }
 
 fn operation_payload(operation_kind: &str) -> serde_json::Value {
-    if operation_kind == "transcode_video" {
-        json!({
+    match operation_kind {
+        "remux" => json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        "transcode_video" => json!({
             "type": "transcode_video",
             "target_codec": "hevc",
             "container": "mkv",
             "profile": "default-hevc"
-        })
-    } else {
-        json!({"container": "mkv"})
+        }),
+        _ => json!({"container": "mkv"}),
     }
 }

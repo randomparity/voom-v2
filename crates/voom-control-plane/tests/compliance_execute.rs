@@ -9,7 +9,7 @@ use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or
 use voom_worker_protocol::OperationKind;
 
 #[tokio::test]
-async fn compliance_execute_runs_set_container_as_remux_through_workflow_executor()
+async fn compliance_execute_rejects_synthetic_policy_remux_before_ticket_fallback()
 -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::NamedTempFile::new()?;
     let url = format!("sqlite://{}", tmp.path().display());
@@ -31,23 +31,25 @@ async fn compliance_execute_runs_set_container_as_remux_through_workflow_executo
     let result = async {
         cp.execute_compliance_policy(created_policy.version.id, input.id)
             .await
-            .map_err(|err| std::io::Error::other(err.source.to_string()))
+            .map_err(|err| err.source.to_string())
     }
     .await;
-    let data = combine_result_and_cleanup(result, provider.shutdown())?;
+    let Err(err) = combine_result_and_cleanup(result, provider.shutdown()) else {
+        return Err(std::io::Error::other(
+            "synthetic policy remux unexpectedly created workflow tickets",
+        )
+        .into());
+    };
 
-    assert!(data.execution.job_id.is_some());
-    assert_eq!(data.execution.submitted_node_count, 1);
-    assert_eq!(data.execution.dispatch_count, 1);
-    assert_eq!(data.execution.failure_count, 0);
-    assert_eq!(data.execution.per_operation.get("remux"), Some(&1));
+    assert!(err.contains("workflow root payload binding"));
+    assert!(err.contains("remux requires file_version or file_location target"));
 
     let ticket_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tickets WHERE kind = 'synthetic.workflow.operation.remux'",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(ticket_count, 1);
+    assert_eq!(ticket_count, 0);
 
     let lease_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM leases WHERE worker_id IN (SELECT worker_id FROM worker_capabilities WHERE operation = ?)",
@@ -55,7 +57,7 @@ async fn compliance_execute_runs_set_container_as_remux_through_workflow_executo
     .bind(operation_name(OperationKind::Remux))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(lease_count, 1);
+    assert_eq!(lease_count, 0);
     Ok(())
 }
 
@@ -85,16 +87,16 @@ impl RemuxProviderLaunch {
 }
 
 fn combine_result_and_cleanup<T>(
-    result: Result<T, std::io::Error>,
+    result: Result<T, String>,
     cleanup: Result<(), Box<dyn std::error::Error>>,
-) -> Result<T, Box<dyn std::error::Error>> {
+) -> Result<T, String> {
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
-        (Err(err), Ok(())) => Err(Box::new(err)),
-        (Ok(_), Err(err)) => Err(err),
-        (Err(err), Err(cleanup_err)) => Err(Box::new(std::io::Error::other(format!(
-            "{err}; provider cleanup failed: {cleanup_err}"
-        )))),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(err)) => Err(format!("provider cleanup failed: {err}")),
+        (Err(err), Err(cleanup_err)) => {
+            Err(format!("{err}; provider cleanup failed: {cleanup_err}"))
+        }
     }
 }
 

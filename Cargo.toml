@@ -18,6 +18,7 @@ members = [
     "crates/voom-fakes",
     "crates/voom-ffprobe-worker",
     "crates/voom-ffmpeg-worker",
+    "crates/voom-mkvtoolnix-worker",
     "crates/voom-verify-artifact-worker",
 ]
 
@@ -46,6 +47,7 @@ voom-conformance = { version = "0.1.0-dev", path = "crates/voom-conformance" }
 voom-test-support = { version = "0.1.0-dev", path = "crates/voom-test-support" }
 voom-fake-support = { version = "0.1.0-dev", path = "crates/voom-fake-support" }
 voom-ffmpeg-worker = { version = "0.1.0-dev", path = "crates/voom-ffmpeg-worker" }
+voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix-worker" }
 
 # Shared third-party crates. Workspace declarations carry the union of
 # features common to every consumer; member crates add crate-specific

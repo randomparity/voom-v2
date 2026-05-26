@@ -1,7 +1,10 @@
 use std::{
     ffi::{OsStr, OsString},
+    io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
+    thread,
+    time::Duration,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,24 +46,27 @@ pub fn preflight_with_paths(
 
     let ffmpeg_version = first_output_line(
         "ffmpeg -hide_banner -version",
-        Command::new(ffmpeg_path)
-            .arg("-hide_banner")
-            .arg("-version")
-            .output(),
+        command_output(
+            Command::new(ffmpeg_path)
+                .arg("-hide_banner")
+                .arg("-version"),
+        ),
     )?;
     let ffprobe_version = first_output_line(
         "ffprobe -hide_banner -version",
-        Command::new(ffprobe_path)
-            .arg("-hide_banner")
-            .arg("-version")
-            .output(),
+        command_output(
+            Command::new(ffprobe_path)
+                .arg("-hide_banner")
+                .arg("-version"),
+        ),
     )?;
     let encoders = command_text(
         "ffmpeg -hide_banner -encoders",
-        Command::new(ffmpeg_path)
-            .arg("-hide_banner")
-            .arg("-encoders")
-            .output(),
+        command_output(
+            Command::new(ffmpeg_path)
+                .arg("-hide_banner")
+                .arg("-encoders"),
+        ),
     )?;
     let hevc_encoder = parse_libx265_encoder(&encoders).ok_or_else(|| {
         FFmpegPreflightError::Failed(
@@ -160,6 +166,22 @@ fn command_text(
             text.trim()
         )))
     }
+}
+
+fn command_output(command: &mut Command) -> io::Result<Output> {
+    for attempt in 0..3 {
+        match command.output() {
+            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    command.output()
+}
+
+fn is_text_file_busy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(26)
 }
 
 fn parse_libx265_encoder(encoders: &str) -> Option<String> {

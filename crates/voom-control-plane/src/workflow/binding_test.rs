@@ -1,8 +1,10 @@
 use crate::workflow::binding::{
-    branch_context_with_probe_codec, render_default_payload, render_default_payload_with_fan_out,
+    PolicyRemuxSource, branch_context_with_probe_codec, render_default_payload,
+    render_default_payload_with_fan_out, render_policy_remux_payload,
 };
 use crate::workflow::model::WorkflowPlan;
 use crate::workflow::timing::EffectiveTiming;
+use voom_core::{FileLocationId, FileVersionId};
 use voom_worker_protocol::OperationKind;
 
 #[test]
@@ -57,6 +59,300 @@ fn scan_payload_uses_effective_fan_out() {
     .unwrap();
 
     assert_eq!(rendered["fan_out_count"], 7);
+}
+
+#[test]
+fn policy_remux_payload_renders_source_target_and_operation_payload() {
+    let operation_payload = serde_json::json!({
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [],
+        "track_order": ["video", "audio", "subtitle"],
+        "defaults": [],
+        "source_media_snapshot_id": 99
+    });
+
+    let rendered = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: Some(FileLocationId(7)),
+        },
+        &operation_payload,
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["operation"], "remux");
+    assert_eq!(rendered["remux"], operation_payload);
+    assert_eq!(rendered["remux"]["source_media_snapshot_id"], 99);
+    assert_eq!(rendered["staging_root"], "/tmp/voom-stage");
+    assert_eq!(rendered["target_dir"], "/library/remux");
+    assert_eq!(rendered["duration_ms"], 25);
+    assert_eq!(rendered["progress_interval_ms"], 10);
+    assert_eq!(rendered["source_file_version_id"], 42);
+    assert_eq!(rendered["source_location_id"], 7);
+}
+
+#[test]
+fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+            "source_media_snapshot_id": "99"
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux payload `source_media_snapshot_id` must be a positive integer"
+    );
+}
+
+#[test]
+fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux payload `source_media_snapshot_id` must be a positive integer"
+    );
+}
+
+#[test]
+fn policy_remux_payload_omits_absent_source_location() {
+    let rendered = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+            "source_media_snapshot_id": 99
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert!(rendered.get("source_location_id").is_none());
+}
+
+#[test]
+fn policy_remux_payload_rejects_non_remux_payload() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({"type": "set_container", "container": "mkv"}),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux payload missing `type: remux`");
+}
+
+#[test]
+fn policy_remux_payload_rejects_incomplete_typed_payload() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({"type": "remux"}),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux payload missing `container`");
+}
+
+#[test]
+fn policy_remux_payload_rejects_malformed_track_action_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [{"type": "keep_tracks"}],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux track_actions[0] missing `target`");
+}
+
+#[test]
+fn policy_remux_payload_rejects_attachment_track_action_target() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [{"type": "remove_tracks", "target": "attachment"}],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+            "source_media_snapshot_id": 99
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux track_actions[0] target `attachment` is unsupported"
+    );
+}
+
+#[test]
+fn policy_remux_payload_rejects_malformed_track_order_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", 42, "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux track_order[1] must be a string");
+}
+
+#[test]
+fn policy_remux_payload_rejects_attachment_track_order_group() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "attachment"],
+            "defaults": [],
+            "source_media_snapshot_id": 99
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux track_order[1] target `attachment` is unsupported"
+    );
+}
+
+#[test]
+fn policy_remux_payload_rejects_duplicate_track_order_group() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "audio"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux track_order[2] duplicates target `audio`"
+    );
+}
+
+#[test]
+fn policy_remux_payload_rejects_malformed_defaults_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [{"target": "audio"}]
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux defaults[0] missing `strategy`");
 }
 
 fn operation_name_value(operation: OperationKind) -> serde_json::Value {

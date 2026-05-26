@@ -12,16 +12,19 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
+use voom_core::{
+    ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock, WorkerId,
+};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
+use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, TranscodeVideoRequest,
-    WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest,
+    RemuxResult, RemuxStatus, TranscodeVideoRequest, WorkerCredentials,
 };
 
 use crate::workflow::executor::{
@@ -322,6 +325,608 @@ async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options()
         workflow_payload.rendered_payload["target_dir"],
         "/media/normalized"
     );
+}
+
+#[tokio::test]
+async fn policy_remux_root_ticket_carries_source_ids_and_operation_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::Remux);
+    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(workflow_payload.rendered_payload["remux"]["type"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["remux"]["container"],
+        "mkv"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["remux"]["track_order"],
+        json!(["video", "audio", "subtitle"])
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_file_location_target_carries_source_version_and_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.plan = policy_remux_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_location_id"],
+        source_location_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_carries_staging_and_target_roots_from_options() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.remux_staging_root = PathBuf::from("/tmp/voom-remux-stage");
+    options.remux_target_dir = PathBuf::from("/media/remuxed");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-remux-stage"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/media/remuxed"
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_uses_default_remux_roots() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-test/remux/staging"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/tmp/voom-test/remux/output"
+    );
+}
+
+#[tokio::test]
+async fn malformed_policy_remux_payload_is_rejected_before_default_fallback() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan_with_payload(
+        TargetRef::FileVersion {
+            id: FileVersionId(11),
+        },
+        json!({"type": "remux"}),
+    );
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.source.to_string().contains("missing `container`"));
+    assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
+async fn policy_remux_without_snapshot_pin_is_rejected_before_ticket_creation() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan_with_payload(
+        TargetRef::FileVersion {
+            id: FileVersionId(11),
+        },
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+        }),
+    );
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.source.to_string().contains("source_media_snapshot_id"));
+    assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
+async fn non_policy_remux_root_ticket_uses_default_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = non_policy_remux_plan();
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["path"],
+        "/library/root.mkv"
+    );
+    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
+    assert!(workflow_payload.rendered_payload.get("remux").is_none());
+}
+
+#[tokio::test]
+async fn unsupported_policy_remux_target_is_rejected_before_default_fallback() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::Synthetic {
+        key: "variant-1".to_owned(),
+        kind: voom_policy::TargetKind::MediaVariant,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.source
+            .to_string()
+            .contains("remux requires file_version or file_location target")
+    );
+    assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_runs_real_remux_path() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.dispatch_count, 1);
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert!(
+        err.source.to_string().contains("mkvtoolnix"),
+        "policy remux with source ids must use remux protocol dispatch, got: {}",
+        err.source
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_with_source_ids_requires_registered_runtime() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker_without_runtime("remux-worker", OperationKind::Remux, 1)
+        .await;
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.source
+            .to_string()
+            .contains("missing runtime for worker"),
+        "policy remux with source ids must require the real remux runtime, got: {}",
+        err.source
+    );
+    assert_eq!(err.summary.dispatch_count, 0);
+    assert_eq!(fixture.lease_count().await, 0);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::Remux);
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::Remux), 1);
+    assert_eq!(summary.failure_count, 0);
+}
+
+#[tokio::test]
+async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    let worker_id = fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let (ticket, workflow_payload, lease) = fixture
+        .acquire_policy_remux_ticket(
+            worker_id,
+            source_file_version_id,
+            source_location_id,
+            snapshot_id,
+            1,
+        )
+        .await;
+    sqlx::query(
+        "CREATE TRIGGER fail_workflow_remux_success_event \
+         BEFORE INSERT ON events WHEN NEW.kind = 'artifact.remux_succeeded' \
+         BEGIN SELECT RAISE(ABORT, 'event log unavailable'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let runtime = fixture.registry.get(worker_id).unwrap();
+    let mut options = WorkflowExecutorOptions::for_tests();
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
+
+    super::dispatch_control_plane_remux(
+        &fixture.cp,
+        &runtime,
+        &ticket,
+        &workflow_payload,
+        lease.id,
+        &workflow_payload.rendered_payload,
+        &options,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        fixture.event_count("artifact.remux_succeeded").await,
+        0,
+        "failed success-event append must not be reported as normal remux success"
+    );
+    assert_eq!(fixture.event_count("ticket.succeeded").await, 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["status"], "committed_success_event_failed");
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert_eq!(result["result_media_snapshot_id"], 2);
+    assert_eq!(result["error"]["code"], "DB_UNREACHABLE");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("event log unavailable")
+    );
+
+    let expiry = fixture
+        .cp
+        .expire_due(T0 + time::Duration::seconds(60))
+        .await
+        .unwrap();
+    assert!(expiry.expired_leases.is_empty());
+    assert!(expiry.requeued_tickets.is_empty());
+    assert!(expiry.failed_expiries.is_empty());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(
+        fixture
+            .event_count("ticket.requeued_after_lease_expiry")
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failure() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    let worker_id = fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let (ticket, workflow_payload, lease) = fixture
+        .acquire_policy_remux_ticket(
+            worker_id,
+            source_file_version_id,
+            source_location_id,
+            snapshot_id,
+            2,
+        )
+        .await;
+    sqlx::query(
+        "CREATE TRIGGER fail_workflow_remux_result_snapshot \
+         BEFORE INSERT ON media_snapshots \
+         BEGIN SELECT RAISE(ABORT, 'probe unavailable'); END",
+    )
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let runtime = fixture.registry.get(worker_id).unwrap();
+    let mut options = WorkflowExecutorOptions::for_tests();
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
+
+    super::dispatch_control_plane_remux(
+        &fixture.cp,
+        &runtime,
+        &ticket,
+        &workflow_payload,
+        lease.id,
+        &workflow_payload.rendered_payload,
+        &options,
+    )
+    .await
+    .unwrap();
+
+    assert!(dir.path().join("out/Movie.remux.mkv").exists());
+    assert_eq!(fixture.event_count("artifact.remux_failed").await, 0);
+    assert_eq!(fixture.event_count("ticket.failed_retriable").await, 0);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["status"], "committed_snapshot_failed");
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert!(
+        result["target_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Movie.remux.mkv")
+    );
+    assert!(
+        result["staging_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("ticket-1/lease-1/Movie.remux.mkv")
+    );
+    assert_eq!(result["error"]["code"], "EXTERNAL_SYSTEM_UNAVAILABLE");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("result_file_version_id=2")
+    );
+
+    let expiry = fixture
+        .cp
+        .expire_due(T0 + time::Duration::seconds(60))
+        .await
+        .unwrap();
+    assert!(expiry.expired_leases.is_empty());
+    assert!(expiry.requeued_tickets.is_empty());
+    assert!(expiry.failed_expiries.is_empty());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(
+        fixture
+            .event_count("ticket.requeued_after_lease_expiry")
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_dispatch_uses_workflow_lease_and_idempotency_key() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireCorrelatedRemuxDispatch,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::Remux), 1);
+    assert_eq!(summary.failure_count, 0);
+}
+
+#[tokio::test]
+async fn invalid_policy_remux_payload_fails_acquired_lease() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let worker_id = fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let job = fixture
+        .cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let workflow_payload = WorkflowTicketPayload::new_for_test(
+        "workflow-1",
+        "plan-1",
+        "policy-node_remux",
+        "root",
+        OperationKind::Remux,
+        json!({
+            "operation": "remux",
+            "source_file_version_id": 11
+        }),
+    );
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: "synthetic.workflow.operation.remux".to_owned(),
+            priority: 0,
+            payload: workflow_payload.to_ticket_payload().unwrap(),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    let lease = fixture
+        .cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id,
+            ttl: time::Duration::seconds(5),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let runtime = fixture.registry.get(worker_id).unwrap();
+
+    let err = super::dispatch_control_plane_remux(
+        &fixture.cp,
+        &runtime,
+        &ticket,
+        &workflow_payload,
+        lease.id,
+        &workflow_payload.rendered_payload,
+        &WorkflowExecutorOptions::for_tests(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
 }
 
 #[tokio::test]
@@ -755,6 +1360,13 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn ticket_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn first_lease_heartbeat_window(&self) -> (String, String) {
         sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1")
             .fetch_one(&self.cp.pool)
@@ -849,12 +1461,17 @@ impl ExecutorFixture {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let _ = tokio::fs::write(path, bytes).await;
+        let location_value = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
         let outcome = self
             .cp
             .record_discovered_file(
                 DiscoveredFile {
                     location_kind: FileLocationKind::LocalPath,
-                    location_value: path.to_string_lossy().into_owned(),
+                    location_value,
                     content_hash: format!("blake3:{}", blake3::hash(bytes).to_hex()),
                     size_bytes: bytes.len().try_into().unwrap(),
                     observed_at: T0,
@@ -874,6 +1491,38 @@ impl ExecutorFixture {
         }
     }
 
+    async fn record_source_snapshot(&self, file_version_id: FileVersionId) -> MediaSnapshotId {
+        self.cp
+            .record_media_snapshot(
+                file_version_id,
+                None,
+                json!({
+                    "streams": [
+                        {
+                            "id": "stream-0",
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "h264",
+                            "disposition": {"default": true}
+                        },
+                        {
+                            "id": "stream-1",
+                            "index": 1,
+                            "kind": "audio",
+                            "codec_name": "aac",
+                            "language": "eng",
+                            "channels": 2,
+                            "disposition": {"default": false}
+                        }
+                    ]
+                }),
+                T0,
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
     async fn first_ticket_payload(&self) -> Value {
         let payload: String =
             sqlx::query_scalar("SELECT payload FROM tickets ORDER BY id ASC LIMIT 1")
@@ -890,6 +1539,92 @@ impl ExecutorFixture {
                 .await
                 .unwrap();
         serde_json::from_str(&result).unwrap()
+    }
+
+    async fn acquire_policy_remux_ticket(
+        &self,
+        worker_id: WorkerId,
+        source_file_version_id: FileVersionId,
+        source_location_id: voom_core::FileLocationId,
+        source_media_snapshot_id: MediaSnapshotId,
+        max_attempts: u32,
+    ) -> (
+        voom_store::repo::tickets::Ticket,
+        WorkflowTicketPayload,
+        voom_store::repo::leases::Lease,
+    ) {
+        let job = self
+            .cp
+            .open_job(NewJob {
+                kind: "synthetic.workflow".to_owned(),
+                priority: 0,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        let workflow_payload = WorkflowTicketPayload::new_for_test(
+            "workflow-1",
+            "plan-1",
+            "policy-node_remux",
+            "root",
+            OperationKind::Remux,
+            json!({
+                "operation": "remux",
+                "source_file_version_id": source_file_version_id.0,
+                "source_location_id": source_location_id.0,
+                "remux": {
+                    "type": "remux",
+                    "container": "mkv",
+                    "source_media_snapshot_id": source_media_snapshot_id.0,
+                    "track_actions": [],
+                    "track_order": ["video", "audio"],
+                    "defaults": [{"target": "audio", "strategy": "first"}]
+                }
+            }),
+        );
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: Some(job.id),
+                kind: "synthetic.workflow.operation.remux".to_owned(),
+                priority: 0,
+                payload: workflow_payload.to_ticket_payload().unwrap(),
+                max_attempts,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        let lease = self
+            .cp
+            .acquire_lease(NewLease {
+                ticket_id: ticket.id,
+                worker_id,
+                ttl: time::Duration::seconds(5),
+                now: T0,
+            })
+            .await
+            .unwrap();
+        (ticket, workflow_payload, lease)
+    }
+
+    async fn event_count(&self, kind: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = ?")
+            .bind(kind)
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn ticket_state(&self, ticket_id: voom_core::TicketId) -> String {
+        sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
+            .bind(i64::try_from(ticket_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
     }
 }
 
@@ -926,6 +1661,9 @@ enum FakeBehavior {
     Crash,
     DispatchError,
     RequireTranscodeProtocolPayload,
+    RequireRemuxProtocolPayload,
+    RequireCorrelatedRemuxDispatch,
+    RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
     SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
@@ -953,6 +1691,35 @@ impl ClientHandle for FakeClient {
                     detail: format!("transcode payload must match worker protocol: {err}"),
                 },
             )?;
+        }
+        if matches!(
+            self.behavior,
+            FakeBehavior::RequireRemuxProtocolPayload
+                | FakeBehavior::RequireCorrelatedRemuxDispatch
+                | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+        ) {
+            serde_json::from_value::<RemuxRequest>(request.payload.clone()).map_err(|err| {
+                ProtocolError::InvalidPayload {
+                    detail: format!("remux payload must match worker protocol: {err}"),
+                }
+            })?;
+        }
+        if matches!(self.behavior, FakeBehavior::RequireCorrelatedRemuxDispatch) {
+            if request.lease_id != LeaseId(1) {
+                return Err(ProtocolError::InvalidPayload {
+                    detail: format!(
+                        "remux lease id must be workflow lease 1, got {:?}",
+                        request.lease_id
+                    ),
+                });
+            }
+            if _idempotency_key != "ticket-1-lease-1" {
+                return Err(ProtocolError::InvalidPayload {
+                    detail: format!(
+                        "remux idempotency key must be ticket-1-lease-1, got {_idempotency_key}"
+                    ),
+                });
+            }
         }
         if matches!(
             self.behavior,
@@ -994,16 +1761,38 @@ async fn write_behavior(
     match behavior {
         FakeBehavior::Success
         | FakeBehavior::RequireTranscodeProtocolPayload
+        | FakeBehavior::RequireRemuxProtocolPayload
+        | FakeBehavior::RequireCorrelatedRemuxDispatch
+        | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
         | FakeBehavior::SlowTranscodeResult => {
             let delay = match behavior {
                 FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
                 _ => Duration::from_millis(25),
             };
             tokio::time::sleep(delay).await;
-            let payload = if request.operation == OperationKind::TranscodeVideo {
-                transcode_result_payload_for_request(&request).await
-            } else {
-                json!({"ok": true})
+            let payload = match request.operation {
+                OperationKind::TranscodeVideo => {
+                    transcode_result_payload_for_request(&request).await
+                }
+                OperationKind::Remux
+                    if matches!(
+                        behavior,
+                        FakeBehavior::RequireRemuxProtocolPayload
+                            | FakeBehavior::RequireCorrelatedRemuxDispatch
+                    ) =>
+                {
+                    remux_result_payload_for_request(&request).await
+                }
+                OperationKind::Remux
+                    if matches!(
+                        behavior,
+                        FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+                    ) =>
+                {
+                    write_frame(&mut writer, mkvtoolnix_unavailable_frame(&request)).await;
+                    return;
+                }
+                _ => json!({"ok": true}),
             };
             write_frame(&mut writer, result_frame(&request, payload)).await;
         }
@@ -1062,6 +1851,47 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
     })
 }
 
+async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<RemuxRequest>(request.payload.clone()).unwrap();
+    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
+    let input = RemuxObservedFacts {
+        size_bytes: request.input.expected.size_bytes,
+        content_hash: request.input.expected.content_hash,
+        modified_at: None,
+        local_file_key: None,
+    };
+    serde_json::to_value(RemuxResult {
+        status: RemuxStatus::Remuxed,
+        provider: "mkvtoolnix".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: RemuxObservedFacts {
+            size_bytes: output_bytes.len().try_into().unwrap(),
+            content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
+            modified_at: None,
+            local_file_key: None,
+        },
+        output_container: "mkv".to_owned(),
+        kept_snapshot_stream_ids: request
+            .selection
+            .keep_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        default_snapshot_stream_ids: request
+            .selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+    })
+    .unwrap()
+}
+
 async fn write_frame(writer: &mut DuplexStream, frame: ProgressFrame) {
     let bytes = serde_json::to_vec(&frame).unwrap();
     writer.write_all(&bytes).await.unwrap();
@@ -1084,6 +1914,18 @@ fn progress_frame(request: &OperationRequest, seq: u64) -> ProgressFrame {
         emitted_at: Utc::now(),
         percent: Some(PercentBps::try_from(100).unwrap()),
         message: None,
+        payload: None,
+    }
+}
+
+fn mkvtoolnix_unavailable_frame(request: &OperationRequest) -> ProgressFrame {
+    ProgressFrame::Error {
+        lease_id: request.lease_id,
+        seq: 0,
+        emitted_at: Utc::now(),
+        class: FailureClass::WorkerCrash,
+        code: ErrorCode::WorkerCrash,
+        message: "mkvtoolnix worker unavailable".to_owned(),
         payload: None,
     }
 }
@@ -1130,6 +1972,85 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
                 "container": "mkv",
                 "profile": "default-hevc",
             }),
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn policy_remux_plan(target: TargetRef) -> WorkflowPlan {
+    policy_remux_plan_with_payload(
+        target,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+        }),
+    )
+}
+
+fn policy_remux_plan_for_snapshot(
+    target: TargetRef,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    policy_remux_plan_with_payload(
+        target,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "track_actions": [],
+            "track_order": ["video", "audio"],
+            "defaults": [{"target": "audio", "strategy": "first"}],
+        }),
+    )
+}
+
+fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-remux-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "policy-node_remux".to_owned(),
+            operation: OperationKind::Remux,
+            policy_target: Some(target),
+            operation_payload,
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn non_policy_remux_plan() -> WorkflowPlan {
+    WorkflowPlan {
+        id: "non-policy-remux-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "remux".to_owned(),
+            operation: OperationKind::Remux,
+            policy_target: None,
+            operation_payload: Value::Null,
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,

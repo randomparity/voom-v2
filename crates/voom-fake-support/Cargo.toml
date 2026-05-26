@@ -11,6 +11,7 @@ repository.workspace = true
 voom-core.workspace = true
 voom-worker-protocol.workspace = true
 
+blake3.workspace = true
 chrono.workspace = true
 secrecy.workspace = true
 serde.workspace = true

@@ -101,7 +101,7 @@ impl ControlPlane {
                     id: input.file_version_id,
                 },
                 container: Some(input.container),
-                stream_summary: serde_json::json!({"video_stream_count": 1}),
+                stream_summary: stream_summary_from_snapshot_payload(&snapshot.payload),
                 video_codec: Some(input.video_codec),
                 width: None,
                 height: None,
@@ -150,6 +150,25 @@ impl ControlPlane {
     pub async fn list_policy_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError> {
         self.policy_inputs.list_input_sets().await
     }
+}
+
+fn stream_summary_from_snapshot_payload(payload: &serde_json::Value) -> serde_json::Value {
+    let streams = payload
+        .get("streams")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    let video_stream_count = streams.as_array().map_or(0, |streams| {
+        streams
+            .iter()
+            .filter(|stream| {
+                stream.get("kind").and_then(serde_json::Value::as_str) == Some("video")
+            })
+            .count()
+    });
+    serde_json::json!({
+        "video_stream_count": video_stream_count,
+        "streams": streams,
+    })
 }
 
 #[cfg(test)]

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "plan_id": "plan_a07cb70c14486e7d",
+  "plan_hash": "blake3:a07cb70c14486e7d7d2f1388e8960d6991a980610b3998ed740d4497e8f237e6",
+  "policy": {
+    "slug": "remux-track-selection",
+    "source_hash": "63658831359b53c38b124084e63c060e51732867f122c097dfaa55b4cb4ed2ee"
+  },
+  "input": {
+    "slug": "remux-track-selection",
+    "source_label": "remux_track_selection",
+    "fixture_labels": [
+      "remux_track_selection"
+    ]
+  },
+  "summary": {
+    "total_node_count": 1,
+    "executable_node_count": 1,
+    "no_op_node_count": 0,
+    "blocked_node_count": 0,
+    "target_count": 1,
+    "operation_counts_by_kind": {
+      "remux": 1
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "node_3106e58a26aeb1b7",
+      "phase_name": "normalize",
+      "ordinal": 0,
+      "target": {
+        "type": "file_version",
+        "id": 7
+      },
+      "operation_kind": "remux",
+      "operation_payload": {
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [
+          {
+            "type": "keep_tracks",
+            "target": "audio",
+            "filter": {
+              "type": "language_in",
+              "values": [
+                "eng",
+                "und"
+              ]
+            }
+          },
+          {
+            "type": "remove_tracks",
+            "target": "subtitle",
+            "filter": {
+              "type": "forced"
+            }
+          }
+        ],
+        "track_order": [
+          "video",
+          "audio",
+          "subtitle"
+        ],
+        "defaults": [
+          {
+            "target": "audio",
+            "strategy": "first"
+          },
+          {
+            "target": "subtitle",
+            "strategy": "none"
+          }
+        ],
+        "source_media_snapshot_id": 42
+      },
+      "observed_state": {
+        "container": "mkv"
+      },
+      "status": "planned",
+      "status_reason": "track selection will be changed",
+      "capability_hints": {
+        "operation_capability": "remux"
+      },
+      "scheduling_hints": {
+        "priority_class": "normal",
+        "estimated_cpu_class": "unknown",
+        "estimated_gpu_class": "none",
+        "estimated_disk_bytes": "unknown",
+        "estimated_network_bytes": "unknown",
+        "expected_duration": "unknown",
+        "concurrency_key": "file_version:7"
+      },
+      "resource_estimates": {
+        "notes": []
+      },
+      "artifact_expectations": {
+        "outputs": []
+      },
+      "safety_hints": {
+        "requires_approval": false,
+        "destructive": false
+      }
+    }
+  ],
+  "edges": [],
+  "warnings": [],
+  "diagnostics": [],
+  "provenance": {
+    "planner": "voom-plan",
+    "format": "sprint5-v1"
+  }
+}

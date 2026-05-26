@@ -109,6 +109,61 @@ async fn create_policy_input_set_from_scan_links_existing_rows() {
 }
 
 #[tokio::test]
+async fn input_from_scan_copies_snapshot_stream_facts() {
+    let (cp, _tmp) = cp().await;
+    let streams = json!([
+        {
+            "id": "stream-0",
+            "index": 0,
+            "kind": "video",
+            "codec_name": "h264"
+        },
+        {
+            "id": "stream-1",
+            "index": 1,
+            "kind": "video",
+            "codec_name": "hevc"
+        },
+        {
+            "id": "stream-2",
+            "index": 2,
+            "kind": "audio",
+            "codec_name": "aac",
+            "language": "eng"
+        }
+    ]);
+    let payload = json!({
+        "format": "test",
+        "streams": streams.clone()
+    });
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot_with_payload(&cp, "/srv/a.mp4", "hash-a", payload).await;
+
+    let created = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "scan-h264".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let input_set = cp
+        .get_policy_input_set(created.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let media = &input_set.media_snapshots[0];
+
+    assert_eq!(media.container.as_deref(), Some("mkv"));
+    assert_eq!(media.video_codec.as_deref(), Some("hevc"));
+    assert_eq!(media.stream_summary["video_stream_count"], 2);
+    assert_eq!(media.stream_summary["streams"], streams);
+}
+
+#[tokio::test]
 async fn create_policy_input_set_from_scan_rejects_missing_file_version() {
     let (cp, _tmp) = cp().await;
     let (_, media_snapshot_id) = scanned_snapshot(&cp, "/srv/a.mp4", "hash-a").await;
@@ -174,6 +229,15 @@ async fn scanned_snapshot(
     path: &str,
     hash: &str,
 ) -> (FileVersionId, MediaSnapshotId) {
+    scanned_snapshot_with_payload(cp, path, hash, json!({"format": "test", "streams": []})).await
+}
+
+async fn scanned_snapshot_with_payload(
+    cp: &crate::ControlPlane,
+    path: &str,
+    hash: &str,
+    payload: serde_json::Value,
+) -> (FileVersionId, MediaSnapshotId) {
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
@@ -195,12 +259,7 @@ async fn scanned_snapshot(
         panic!("expected new file asset");
     };
     let snapshot = cp
-        .record_media_snapshot(
-            file_version_id,
-            None,
-            json!({"format": "test", "streams": []}),
-            T0,
-        )
+        .record_media_snapshot(file_version_id, None, payload, T0)
         .await
         .unwrap();
     (file_version_id, snapshot.id)

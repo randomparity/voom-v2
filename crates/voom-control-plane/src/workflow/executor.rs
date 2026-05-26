@@ -16,12 +16,13 @@ use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
-    TranscodeVideoRequest, TranscodeVideoResult,
+    RemuxRequest, RemuxResult, TranscodeVideoRequest, TranscodeVideoResult,
 };
 
 use super::binding::{
-    BranchContext, PolicyTranscodeSource, render_default_payload,
-    render_default_payload_with_fan_out, render_policy_transcode_payload,
+    BindingError, BranchContext, PolicyRemuxSource, PolicyTranscodeSource, render_default_payload,
+    render_default_payload_with_fan_out, render_policy_remux_payload,
+    render_policy_transcode_payload,
 };
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
@@ -32,6 +33,12 @@ use super::runtime::WorkerRuntimeRegistry;
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use super::timing::seeded_timing;
 use crate::ControlPlane;
+use crate::cases::{begin_tx, commit_tx};
+use crate::remux::commit::BundledRemuxResultProbeDispatcher;
+use crate::remux::{
+    ExecuteRemuxCompletion, ExecuteRemuxInput, RemuxDispatcher,
+    execute_remux_with_deferred_success_event, success_event_recovery_report,
+};
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
@@ -60,6 +67,8 @@ pub struct WorkflowExecutorOptions {
     pub max_attempts: u32,
     pub transcode_staging_root: PathBuf,
     pub transcode_target_dir: PathBuf,
+    pub remux_staging_root: PathBuf,
+    pub remux_target_dir: PathBuf,
     pub chaos: WorkflowChaosOptions,
 }
 
@@ -74,6 +83,8 @@ impl Default for WorkflowExecutorOptions {
             max_attempts: 1,
             transcode_staging_root: PathBuf::from("/tmp/voom/transcode/staging"),
             transcode_target_dir: PathBuf::from("/tmp/voom/transcode/output"),
+            remux_staging_root: PathBuf::from("/tmp/voom/remux/staging"),
+            remux_target_dir: PathBuf::from("/tmp/voom/remux/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -91,6 +102,8 @@ impl WorkflowExecutorOptions {
             max_attempts: 1,
             transcode_staging_root: PathBuf::from("/tmp/voom-test/transcode/staging"),
             transcode_target_dir: PathBuf::from("/tmp/voom-test/transcode/output"),
+            remux_staging_root: PathBuf::from("/tmp/voom-test/remux/staging"),
+            remux_target_dir: PathBuf::from("/tmp/voom-test/remux/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -419,6 +432,22 @@ where
                     ),
                     None => render_default_payload(operation, &branch, timing),
                 },
+                OperationKind::Remux => match node.policy_target() {
+                    Some(
+                        target @ (voom_plan::TargetRef::FileVersion { .. }
+                        | voom_plan::TargetRef::FileLocation { .. }),
+                    ) => render_policy_remux_payload(
+                        self.resolve_policy_remux_source(target).await?,
+                        node.operation_payload(),
+                        &self.options.remux_staging_root,
+                        &self.options.remux_target_dir,
+                        timing,
+                    ),
+                    Some(target) => Err(BindingError::new(format!(
+                        "remux requires file_version or file_location target, got {target:?}"
+                    ))),
+                    None => render_default_payload(operation, &branch, timing),
+                },
                 _ => render_default_payload(operation, &branch, timing),
             }
             .map_err(|e| VoomError::Config(format!("workflow root payload binding: {e}")))?;
@@ -478,6 +507,36 @@ where
             }
             other => Err(VoomError::Config(format!(
                 "transcode_video requires file_version or file_location target, got {other:?}"
+            ))),
+        }
+    }
+
+    async fn resolve_policy_remux_source(
+        &self,
+        target: &voom_plan::TargetRef,
+    ) -> Result<PolicyRemuxSource, VoomError> {
+        match target {
+            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyRemuxSource {
+                file_version_id: *id,
+                location_id: None,
+            }),
+            voom_plan::TargetRef::FileLocation { id } => {
+                let location = self
+                    .control_plane
+                    .identity
+                    .get_file_location(*id)
+                    .await?
+                    .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
+                if location.retired_at.is_some() {
+                    return Err(VoomError::Config(format!("file_location {id} is retired")));
+                }
+                Ok(PolicyRemuxSource {
+                    file_version_id: location.file_version_id,
+                    location_id: Some(*id),
+                })
+            }
+            other => Err(VoomError::Config(format!(
+                "remux requires file_version or file_location target, got {other:?}"
             ))),
         }
     }
@@ -1014,6 +1073,20 @@ async fn dispatch_ticket_inner(
         )
         .await;
     }
+    let validate_remux_result = workflow_payload.operation == OperationKind::Remux
+        && payload.get("source_file_version_id").is_some();
+    if validate_remux_result {
+        return dispatch_control_plane_remux(
+            control,
+            runtime,
+            ticket,
+            workflow_payload,
+            lease_id,
+            &payload,
+            &options,
+        )
+        .await;
+    }
     let request = OperationRequest {
         operation: workflow_payload.operation,
         lease_id,
@@ -1086,6 +1159,7 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
+            OperationKind::TranscodeVideo,
             self.options,
             crate::transcode::dispatch::dispatch_transcode_video_with_client(
                 self.runtime.client.as_ref(),
@@ -1151,9 +1225,150 @@ async fn dispatch_control_plane_transcode(
     release_lease_with_retry(control, lease_id, result).await
 }
 
+struct RuntimeRemuxDispatcher<'a> {
+    runtime: &'a super::runtime::WorkerRuntime,
+    control: &'a ControlPlane,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+    options: &'a WorkflowExecutorOptions,
+}
+
+#[async_trait::async_trait]
+impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
+    async fn dispatch_remux(&self, request: RemuxRequest) -> Result<RemuxResult, VoomError> {
+        let mut progress = crate::remux::dispatch::NoopRemuxProgressSink;
+        self.dispatch_remux_with_progress(request, &mut progress)
+            .await
+    }
+
+    async fn dispatch_remux_with_progress(
+        &self,
+        request: RemuxRequest,
+        progress: &mut dyn crate::remux::dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError> {
+        await_with_lease_heartbeats(
+            self.control,
+            self.lease_id,
+            OperationKind::Remux,
+            self.options,
+            crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
+                self.runtime.client.as_ref(),
+                &self.runtime.credentials,
+                &format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0),
+                self.lease_id,
+                request,
+                progress,
+            ),
+        )
+        .await
+    }
+}
+
+async fn dispatch_control_plane_remux(
+    control: &ControlPlane,
+    runtime: &super::runtime::WorkerRuntime,
+    ticket: &Ticket,
+    workflow_payload: &WorkflowTicketPayload,
+    lease_id: LeaseId,
+    payload: &Value,
+    options: &WorkflowExecutorOptions,
+) -> Result<(), VoomError> {
+    let _ = workflow_payload;
+    let input = match remux_input_for_workflow_ticket(ticket, lease_id, payload, options) {
+        Ok(input) => input,
+        Err(source) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                failure_class_for_error(&source),
+                source,
+            )
+            .await;
+        }
+    };
+    let completion = match execute_remux_with_deferred_success_event(
+        control,
+        input,
+        &RuntimeRemuxDispatcher {
+            runtime,
+            control,
+            ticket_id: ticket.id,
+            lease_id,
+            options,
+        },
+        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+        &BundledRemuxResultProbeDispatcher,
+    )
+    .await
+    {
+        Ok(completion) => completion,
+        Err(source) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                failure_class_for_error(&source),
+                source,
+            )
+            .await;
+        }
+    };
+    match completion {
+        ExecuteRemuxCompletion::Succeeded(success) => {
+            let result = serde_json::to_value(&success.report)
+                .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
+            match release_remux_lease_with_retry(control, lease_id, result, &success.success_event)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(source) => {
+                    let recovery = success_event_recovery_report(&success, &source);
+                    let result = serde_json::to_value(&recovery).map_err(|err| {
+                        VoomError::Internal(format!("encode remux success-event recovery: {err}"))
+                    })?;
+                    release_lease_with_retry(control, lease_id, result).await
+                }
+            }
+        }
+        ExecuteRemuxCompletion::Recovery(recovery) => {
+            let result = serde_json::to_value(&recovery.report)
+                .map_err(|err| VoomError::Internal(format!("encode remux recovery: {err}")))?;
+            release_lease_with_retry(control, lease_id, result).await
+        }
+    }
+}
+
+fn remux_input_for_workflow_ticket(
+    ticket: &Ticket,
+    lease_id: LeaseId,
+    payload: &Value,
+    options: &WorkflowExecutorOptions,
+) -> Result<ExecuteRemuxInput, VoomError> {
+    let operation_payload = payload
+        .get("remux")
+        .cloned()
+        .ok_or_else(|| VoomError::Config("remux workflow payload missing `remux`".to_owned()))?;
+    Ok(ExecuteRemuxInput {
+        job_id: ticket.job_id.ok_or_else(|| {
+            VoomError::Config(format!("remux ticket {} missing job_id", ticket.id))
+        })?,
+        ticket_id: ticket.id,
+        lease_id,
+        source_file_version_id: voom_core::FileVersionId(required_u64(
+            payload,
+            "source_file_version_id",
+        )?),
+        source_location_id: optional_u64(payload, "source_location_id")
+            .map(voom_core::FileLocationId),
+        operation_payload,
+        staging_root: options.remux_staging_root.clone(),
+        target_dir: options.remux_target_dir.clone(),
+    })
+}
+
 async fn await_with_lease_heartbeats<F, T>(
     control: &ControlPlane,
     lease_id: LeaseId,
+    operation: OperationKind,
     options: &WorkflowExecutorOptions,
     future: F,
 ) -> Result<T, VoomError>
@@ -1169,7 +1384,7 @@ where
     loop {
         tokio::select! {
             result = &mut future => return result,
-            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(OperationKind::TranscodeVideo) => {
+            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
                 heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
             }
         }
@@ -1567,6 +1782,37 @@ async fn release_lease_with_retry(
             .await
         {
             Ok(_) => return Ok(()),
+            Err(err) if is_database_locked(&err) => {
+                last = Some(err);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+}
+
+async fn release_remux_lease_with_retry(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    payload: Value,
+    success_event: &crate::remux::events::RemuxSucceededEvent,
+) -> Result<(), VoomError> {
+    let mut last = None;
+    for _ in 0..8 {
+        let result = async {
+            let mut tx = begin_tx(&control.pool).await?;
+            let now = control.clock().now();
+            crate::remux::events::append_succeeded_in_tx(control, &mut tx, success_event, now)
+                .await?;
+            control
+                .release_lease_in_tx(&mut tx, lease_id, payload.clone(), now)
+                .await?;
+            commit_tx(tx).await
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
             Err(err) if is_database_locked(&err) => {
                 last = Some(err);
                 tokio::time::sleep(Duration::from_millis(5)).await;
