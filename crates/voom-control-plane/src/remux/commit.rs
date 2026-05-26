@@ -92,6 +92,8 @@ pub async fn record_result_snapshot(
     file_version_id: FileVersionId,
     result: &RemuxResult,
 ) -> Result<voom_store::repo::identity::MediaSnapshot, VoomError> {
+    // Task 9 will replace this synthetic result summary with committed-result
+    // probing once remux execution receives a narrow probe dispatcher path.
     let payload = json!({
         "container": result.output_container,
         "source": "remux_result",

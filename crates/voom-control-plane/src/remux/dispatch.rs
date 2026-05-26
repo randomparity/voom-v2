@@ -60,6 +60,19 @@ pub fn request_for(
     })
 }
 
+pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {
+    let facts = observe_regular_file(&selected.location.value).await?;
+    if facts.size_bytes != selected.version.size_bytes
+        || facts.content_hash != selected.version.content_hash
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(format!(
+            "remux source facts do not match selected file_version at {}",
+            selected.location.value
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_result(
     selected: &SelectedSource,
     selection: &RemuxSelection,

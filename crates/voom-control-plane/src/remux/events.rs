@@ -18,9 +18,9 @@ pub fn record_started(
     _selection: &RemuxSelection,
     _staging_path: &Path,
 ) -> Result<(), VoomError> {
-    // Remux-specific event variants are owned by the events crate and are not
-    // available in this task's write surface. Artifact/media-snapshot events
-    // still record the durable state transitions.
+    // Temporary until Task 8 adds remux-specific event kinds. Generic
+    // artifact/media-snapshot events still record durable transitions through
+    // commit::record_staged_remux and commit::record_result_snapshot.
     Ok(())
 }
 

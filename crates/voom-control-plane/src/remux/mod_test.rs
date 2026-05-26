@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
+use voom_events::EventKind;
+use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
     RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts,
@@ -80,6 +82,8 @@ async fn execute_records_verified_committed_remux_result() {
     );
     assert!(report.target_path.ends_with("Movie.remux.mkv"));
     assert!(report.target_path.exists());
+    assert_eq!(count_events(&cp, EventKind::ArtifactStaged).await, 1);
+    assert_eq!(count_events(&cp, EventKind::MediaSnapshotRecorded).await, 2);
 }
 
 #[tokio::test]
@@ -104,6 +108,52 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
         !dir.path().join("out/Movie.remux.mkv").exists(),
         "mismatched input facts must stop before commit"
     );
+}
+
+#[tokio::test]
+async fn execute_revalidates_drifted_source_before_worker_dispatch() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    record_source_snapshot(&cp, seeded.0).await;
+    std::fs::write(&source, b"changed source bytes").unwrap();
+    let dispatcher = CountingRemuxDispatcher::default();
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded),
+        &dispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert_eq!(dispatcher.call_count(), 0);
+}
+
+#[tokio::test]
+async fn execute_revalidates_missing_source_before_worker_dispatch() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    record_source_snapshot(&cp, seeded.0).await;
+    std::fs::remove_file(&source).unwrap();
+    let dispatcher = CountingRemuxDispatcher::default();
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded),
+        &dispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ArtifactUnavailable);
+    assert_eq!(dispatcher.call_count(), 0);
 }
 
 #[tokio::test]
@@ -166,6 +216,29 @@ impl RemuxDispatcher for WrongInputFactsRemuxDispatcher {
         result.input_pre.size_bytes += 1;
         result.input_post = result.input_pre.clone();
         Ok(result)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CountingRemuxDispatcher {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingRemuxDispatcher {
+    fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl RemuxDispatcher for CountingRemuxDispatcher {
+    async fn dispatch_remux(
+        &self,
+        request: RemuxRequest,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
     }
 }
 
@@ -339,4 +412,22 @@ async fn seed_source(
 
 fn blake3_checksum(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+async fn count_events(cp: &crate::ControlPlane, kind: EventKind) -> usize {
+    cp.events()
+        .list(
+            EventFilter {
+                kind: Some(kind),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .len()
 }
