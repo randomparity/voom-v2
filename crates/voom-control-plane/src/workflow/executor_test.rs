@@ -667,7 +667,7 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
     options.remux_staging_root = dir.path().join("stage");
     options.remux_target_dir = dir.path().join("out");
 
-    let err = super::dispatch_control_plane_remux(
+    super::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,
@@ -677,16 +677,44 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
         &options,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
     assert_eq!(
         fixture.event_count("artifact.remux_succeeded").await,
         0,
-        "failed success-event append must not be reported as workflow success"
+        "failed success-event append must not be reported as normal remux success"
     );
-    assert_eq!(fixture.event_count("ticket.succeeded").await, 0);
-    assert_eq!(fixture.ticket_state(ticket.id).await, "leased");
+    assert_eq!(fixture.event_count("ticket.succeeded").await, 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["status"], "committed_success_event_failed");
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert_eq!(result["result_media_snapshot_id"], 2);
+    assert_eq!(result["error"]["code"], "DB_UNREACHABLE");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("event log unavailable")
+    );
+
+    let expiry = fixture
+        .cp
+        .expire_due(T0 + time::Duration::seconds(60))
+        .await
+        .unwrap();
+    assert!(expiry.expired_leases.is_empty());
+    assert!(expiry.requeued_tickets.is_empty());
+    assert!(expiry.failed_expiries.is_empty());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(
+        fixture
+            .event_count("ticket.requeued_after_lease_expiry")
+            .await,
+        0
+    );
 }
 
 #[tokio::test]

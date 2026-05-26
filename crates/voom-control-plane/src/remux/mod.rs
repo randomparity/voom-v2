@@ -76,6 +76,7 @@ pub(crate) struct ExecuteRemuxRecoveryReport {
     pub commit_record_id: ArtifactCommitRecordId,
     pub result_file_version_id: FileVersionId,
     pub result_file_location_id: FileLocationId,
+    pub result_media_snapshot_id: Option<MediaSnapshotId>,
     pub staging_path: PathBuf,
     pub target_path: PathBuf,
     pub error: ExecuteRemuxRecoveryError,
@@ -90,6 +91,33 @@ pub(crate) struct ExecuteRemuxRecoveryError {
 #[derive(Debug, Clone)]
 pub(crate) struct ExecuteRemuxRecovery {
     pub report: ExecuteRemuxRecoveryReport,
+}
+
+pub(crate) fn success_event_recovery_report(
+    success: &ExecuteRemuxSuccess,
+    source: &VoomError,
+) -> ExecuteRemuxRecoveryReport {
+    ExecuteRemuxRecoveryReport {
+        status: "committed_success_event_failed",
+        job_id: success.report.job_id,
+        ticket_id: success.report.ticket_id,
+        lease_id: success.report.lease_id,
+        source_file_version_id: success.report.source_file_version_id,
+        source_file_location_id: success.report.source_file_location_id,
+        staged_artifact_handle_id: success.report.staged_artifact_handle_id,
+        staged_artifact_location_id: success.report.staged_artifact_location_id,
+        verification_id: success.report.verification_id,
+        commit_record_id: success.report.commit_record_id,
+        result_file_version_id: success.report.result_file_version_id,
+        result_file_location_id: success.report.result_file_location_id,
+        result_media_snapshot_id: Some(success.report.result_media_snapshot_id),
+        staging_path: success.report.staging_path.clone(),
+        target_path: success.report.target_path.clone(),
+        error: ExecuteRemuxRecoveryError {
+            code: source.code(),
+            message: source.to_string(),
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -497,6 +525,7 @@ async fn execute_remux_core(
                         commit_record_id: committed.commit_record_id,
                         result_file_version_id,
                         result_file_location_id,
+                        result_media_snapshot_id: None,
                         staging_path,
                         target_path,
                         error: ExecuteRemuxRecoveryError {

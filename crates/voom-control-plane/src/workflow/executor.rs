@@ -36,7 +36,7 @@ use crate::ControlPlane;
 use crate::cases::{begin_tx, commit_tx};
 use crate::remux::{
     ExecuteRemuxCompletion, ExecuteRemuxInput, RemuxDispatcher,
-    execute_remux_with_deferred_success_event,
+    execute_remux_with_deferred_success_event, success_event_recovery_report,
 };
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
@@ -1314,7 +1314,18 @@ async fn dispatch_control_plane_remux(
         ExecuteRemuxCompletion::Succeeded(success) => {
             let result = serde_json::to_value(&success.report)
                 .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
-            release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await
+            match release_remux_lease_with_retry(control, lease_id, result, &success.success_event)
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(source) => {
+                    let recovery = success_event_recovery_report(&success, &source);
+                    let result = serde_json::to_value(&recovery).map_err(|err| {
+                        VoomError::Internal(format!("encode remux success-event recovery: {err}"))
+                    })?;
+                    release_lease_with_retry(control, lease_id, result).await
+                }
+            }
         }
         ExecuteRemuxCompletion::Recovery(recovery) => {
             let result = serde_json::to_value(&recovery.report)
