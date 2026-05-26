@@ -123,6 +123,32 @@ fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
 }
 
 #[test]
+fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux payload `source_media_snapshot_id` must be a positive integer"
+    );
+}
+
+#[test]
 fn policy_remux_payload_omits_absent_source_location() {
     let rendered = render_policy_remux_payload(
         PolicyRemuxSource {
@@ -134,7 +160,8 @@ fn policy_remux_payload_omits_absent_source_location() {
             "container": "mkv",
             "track_actions": [],
             "track_order": ["video", "audio", "subtitle"],
-            "defaults": []
+            "defaults": [],
+            "source_media_snapshot_id": 99
         }),
         std::path::Path::new("/tmp/voom-stage"),
         std::path::Path::new("/library/remux"),

@@ -449,6 +449,29 @@ async fn malformed_policy_remux_payload_is_rejected_before_default_fallback() {
 }
 
 #[tokio::test]
+async fn policy_remux_without_snapshot_pin_is_rejected_before_ticket_creation() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan_with_payload(
+        TargetRef::FileVersion {
+            id: FileVersionId(11),
+        },
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+        }),
+    );
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.source.to_string().contains("source_media_snapshot_id"));
+    assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
 async fn non_policy_remux_root_ticket_uses_default_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = non_policy_remux_plan();
@@ -1322,6 +1345,7 @@ fn policy_remux_plan(target: TargetRef) -> WorkflowPlan {
         json!({
             "type": "remux",
             "container": "mkv",
+            "source_media_snapshot_id": 99,
             "track_actions": [],
             "track_order": ["video", "audio", "subtitle"],
             "defaults": [],

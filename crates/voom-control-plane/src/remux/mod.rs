@@ -11,7 +11,9 @@ use voom_store::repo::artifacts::ArtifactVerificationStatus;
 use voom_worker_protocol::RemuxResult;
 
 use crate::ControlPlane;
-use crate::artifact::commit::CommitArtifactInput;
+use crate::artifact::commit::{
+    CommitArtifactCommandError, CommitArtifactInput, CommitArtifactReport,
+};
 use crate::artifact::verify::{
     NoVerifyArtifactHooks, VerifyArtifactDispatcher, VerifyArtifactInput,
     verify_artifact_with_dispatcher,
@@ -143,7 +145,7 @@ pub(crate) async fn execute_remux_with_dispatchers(
             target_path: target_path.clone(),
         })
         .await
-        .map_err(|err| VoomError::CommitFailure(err.to_string()))?;
+        .map_err(|err| remux_commit_failure(&err))?;
     let result_file_version_id = committed.result_file_version_id.ok_or_else(|| {
         VoomError::Internal("committed remux missing result_file_version_id".to_owned())
     })?;
@@ -183,6 +185,58 @@ pub(crate) async fn execute_remux_with_dispatchers(
         staging_path,
         target_path,
     })
+}
+
+fn remux_commit_failure(err: &CommitArtifactCommandError) -> VoomError {
+    VoomError::CommitFailure(format_commit_failure_message(
+        &err.to_string(),
+        err.commit_report(),
+    ))
+}
+
+fn format_commit_failure_message(
+    message: &str,
+    commit_report: Option<&CommitArtifactReport>,
+) -> String {
+    let Some(report) = commit_report else {
+        return message.to_owned();
+    };
+
+    let mut details = vec![
+        format!("commit_record_id={}", report.commit_record_id.0),
+        format!("artifact_handle_id={}", report.artifact_handle_id.0),
+        format!("verification_id={}", report.verification_id.0),
+        format!("target_path={}", report.target_path.display()),
+        format!("state={}", report.state.as_str()),
+    ];
+    if let Some(temp_path) = &report.temp_path {
+        details.push(format!("temp_path={}", temp_path.display()));
+    }
+    if let Some(id) = report.result_file_version_id {
+        details.push(format!("result_file_version_id={}", id.0));
+    }
+    if let Some(id) = report.result_file_location_id {
+        details.push(format!("result_file_location_id={}", id.0));
+    }
+    if let Some(recovery) = &report.recovery_required {
+        details.push(format!("recovery_reason={}", recovery.recovery_reason));
+        details.push(format!("target_path={}", recovery.target_path.display()));
+        details.push(format!("target_exists={}", recovery.target_exists));
+        if let Some(temp_path) = &recovery.temp_path {
+            details.push(format!("temp_path={}", temp_path.display()));
+        }
+        details.push(format!("temp_exists={}", recovery.temp_exists));
+        details.push(format!("staging_path={}", recovery.staging_path.display()));
+        details.push(format!("staging_exists={}", recovery.staging_exists));
+        if let Some(id) = recovery.result_file_version_id {
+            details.push(format!("result_file_version_id={}", id.0));
+        }
+        if let Some(id) = recovery.result_file_location_id {
+            details.push(format!("result_file_location_id={}", id.0));
+        }
+    }
+
+    format!("{message}; {}", details.join(" "))
 }
 
 #[cfg(test)]

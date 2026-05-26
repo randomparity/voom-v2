@@ -187,13 +187,15 @@ fn validate_policy_remux_payload(operation_payload: &Value) -> Result<(), Bindin
     validate_track_actions(required_array(operation_payload, "track_actions")?)?;
     validate_track_order(required_array(operation_payload, "track_order")?)?;
     validate_defaults(required_array(operation_payload, "defaults")?)?;
-    validate_optional_positive_u64(operation_payload, "source_media_snapshot_id")?;
+    validate_required_positive_u64(operation_payload, "source_media_snapshot_id")?;
     Ok(())
 }
 
-fn validate_optional_positive_u64(payload: &Value, field: &str) -> Result<(), BindingError> {
-    if let Some(value) = payload.get(field)
-        && value.as_u64().is_none_or(|value| value == 0)
+fn validate_required_positive_u64(payload: &Value, field: &str) -> Result<(), BindingError> {
+    if payload
+        .get(field)
+        .and_then(Value::as_u64)
+        .is_none_or(|value| value == 0)
     {
         return Err(BindingError::new(format!(
             "remux payload `{field}` must be a positive integer"

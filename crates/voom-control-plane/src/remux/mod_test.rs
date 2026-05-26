@@ -5,6 +5,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
 use voom_events::EventKind;
+use voom_store::repo::artifacts::ArtifactCommitState;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
@@ -255,6 +256,51 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
     assert!(message.contains("commit_record_id"));
     assert!(message.contains("result_file_version_id"));
     assert!(message.contains("result_file_location_id"));
+}
+
+#[test]
+fn commit_failure_message_preserves_recovery_metadata() {
+    let target_path = std::path::PathBuf::from("/media/Movie.remux.mkv");
+    let temp_path = std::path::PathBuf::from("/media/.voom-tmp.Movie.remux.mkv");
+    let staging_path = std::path::PathBuf::from("/stage/ticket-2/lease-3/Movie.remux.mkv");
+    let report = crate::artifact::commit::CommitArtifactReport {
+        commit_record_id: voom_core::ids::ArtifactCommitRecordId(10),
+        artifact_handle_id: voom_core::ArtifactHandleId(20),
+        verification_id: voom_core::ids::ArtifactVerificationId(30),
+        target_path: target_path.clone(),
+        temp_path: Some(temp_path.clone()),
+        state: ArtifactCommitState::RecoveryRequired,
+        result_file_version_id: Some(voom_core::FileVersionId(40)),
+        result_file_location_id: Some(voom_core::FileLocationId(50)),
+        recovery_required: Some(crate::artifact::commit::CommitRecoveryReport {
+            recovery_reason: "mutation_failed".to_owned(),
+            target_path,
+            target_exists: true,
+            temp_path: Some(temp_path),
+            temp_exists: false,
+            staging_path,
+            staging_exists: true,
+            result_file_version_id: Some(voom_core::FileVersionId(40)),
+            result_file_location_id: Some(voom_core::FileLocationId(50)),
+        }),
+    };
+
+    let message = format_commit_failure_message("commit finalize requires recovery", Some(&report));
+
+    assert!(message.contains("commit finalize requires recovery"));
+    assert!(message.contains("commit_record_id=10"));
+    assert!(message.contains("artifact_handle_id=20"));
+    assert!(message.contains("verification_id=30"));
+    assert!(message.contains("state=recovery_required"));
+    assert!(message.contains("recovery_reason=mutation_failed"));
+    assert!(message.contains("target_path=/media/Movie.remux.mkv"));
+    assert!(message.contains("target_exists=true"));
+    assert!(message.contains("temp_path=/media/.voom-tmp.Movie.remux.mkv"));
+    assert!(message.contains("temp_exists=false"));
+    assert!(message.contains("staging_path=/stage/ticket-2/lease-3/Movie.remux.mkv"));
+    assert!(message.contains("staging_exists=true"));
+    assert!(message.contains("result_file_version_id=40"));
+    assert!(message.contains("result_file_location_id=50"));
 }
 
 #[derive(Debug)]
