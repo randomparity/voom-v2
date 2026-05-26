@@ -87,6 +87,15 @@ impl MkvmergeTrackMapping {
     pub(crate) fn track_count(&self) -> usize {
         self.tracks_by_provider_index.len()
     }
+
+    pub(crate) fn provider_indexes_for_group(&self, group: RemuxTrackGroup) -> Vec<u32> {
+        self.tracks_by_provider_index
+            .iter()
+            .filter_map(|(provider_index, track)| {
+                track.kind.matches_group(group).then_some(*provider_index)
+            })
+            .collect()
+    }
 }
 
 pub fn track_mapping_from_identify(

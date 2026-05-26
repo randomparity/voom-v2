@@ -185,6 +185,7 @@ pub async fn handle_remux(
             "selection must include at least one video stream".to_owned(),
         ));
     }
+    validate_all_source_video_streams_kept(request, &input_mapping)?;
     run_mkvmerge_remux(config, request, &input_mapping)
         .await
         .map_err(MkvtoolnixWorkerError::from)?;
@@ -279,6 +280,12 @@ fn validate_staging_path(
     output_path: &Path,
 ) -> Result<(), MkvtoolnixWorkerError> {
     let root = canonical_existing_dir_no_symlink(staging_root)?;
+    if staging_root != root {
+        return Err(config_invalid(
+            "output_path",
+            "staging root must be canonical".to_owned(),
+        ));
+    }
     let parent = output_path.parent().ok_or_else(|| {
         config_invalid(
             "output_path",
@@ -293,6 +300,32 @@ fn validate_staging_path(
         ));
     }
     Ok(())
+}
+
+fn validate_all_source_video_streams_kept(
+    request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixWorkerError> {
+    let kept_provider_indexes = request
+        .selection
+        .keep_streams
+        .iter()
+        .map(|stream| stream.provider_stream_index)
+        .collect::<BTreeSet<_>>();
+    let missing_video_indexes = input_mapping
+        .provider_indexes_for_group(RemuxTrackGroup::Video)
+        .into_iter()
+        .filter(|provider_index| !kept_provider_indexes.contains(provider_index))
+        .collect::<Vec<_>>();
+    if missing_video_indexes.is_empty() {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "selection",
+        format!(
+            "unsupported media shape: must keep all source video streams; missing provider indexes {missing_video_indexes:?}"
+        ),
+    ))
 }
 
 fn canonical_existing_dir_no_symlink(path: &Path) -> Result<PathBuf, MkvtoolnixWorkerError> {

@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use voom_core::ErrorCode;
+use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
+    OperationDispatch, OperationFuture, OperationKind, OperationRequest, ProgressFrame,
     RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxSelection, RemuxStreamRef,
     RemuxTrackGroup,
 };
@@ -69,6 +70,19 @@ async fn handler_rejects_output_path_escape() {
 }
 
 #[tokio::test]
+async fn handler_rejects_non_canonical_staging_root() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    let stage = PathBuf::from(&request.output.staging_root);
+    request.output.staging_root = stage.join("../stage").to_string_lossy().into_owned();
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("staging root must be canonical"));
+}
+
+#[tokio::test]
 async fn handler_rejects_no_video_selection() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
@@ -86,6 +100,24 @@ async fn handler_rejects_no_video_selection() {
 }
 
 #[tokio::test]
+async fn handler_rejects_dropping_source_video_tracks_before_provider_run() {
+    let fixture = remux_fixture_with_two_input_videos_and_forbidden_provider_run().await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![video_ref("stream-0", 0), audio_ref("stream-2", 2)];
+    request.selection.default_streams = vec![audio_ref("stream-2", 2)];
+    request.selection.clear_default_streams = vec![video_ref("stream-0", 0)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("must keep all source video streams")
+    );
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
 async fn handler_rejects_input_drift_after_provider_run() {
     let fixture = remux_fixture_with_fake_mkvmerge_that_mutates_input().await;
 
@@ -94,6 +126,32 @@ async fn handler_rejects_input_drift_after_provider_run() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+}
+
+#[tokio::test]
+async fn handler_maps_mkvmerge_nonzero_exit_to_external_system_unavailable() {
+    let fixture = remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_provider_failure()).await;
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert!(err.to_string().contains("status 23"));
+}
+
+#[tokio::test]
+async fn handler_maps_mkvmerge_timeout_to_external_system_unavailable() {
+    let mut fixture =
+        remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_provider_timeout()).await;
+    fixture.config.timeout = std::time::Duration::from_millis(10);
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert!(err.to_string().contains("timed out"));
 }
 
 #[tokio::test]
@@ -275,6 +333,29 @@ async fn handler_returns_success_result_echoing_selected_ids() {
     assert_eq!(result.output_container, "mkv");
 }
 
+#[tokio::test]
+async fn malformed_request_payload_is_accepted_then_terminal_error() {
+    let request = OperationRequest {
+        operation: OperationKind::Remux,
+        lease_id: LeaseId(42),
+        payload: serde_json::json!({"input": 1}),
+        heartbeat_deadline_ms: 1_000,
+        progress_idle_deadline_ms: 1_000,
+    };
+
+    let frames = dispatch_frames(
+        handle_operation_with_test_config(request, MkvmergeConfig::for_tests())
+            .await
+            .unwrap(),
+    );
+
+    assert_terminal_error(
+        frames.last().unwrap(),
+        FailureClass::MalformedWorkerResult,
+        ErrorCode::MalformedWorkerResult,
+    );
+}
+
 struct RemuxFixture {
     _temp: tempfile::TempDir,
     request: RemuxRequest,
@@ -319,6 +400,11 @@ async fn remux_fixture_with_fake_mkvmerge_that_mutates_input() -> RemuxFixture {
         true,
     ))
     .await
+}
+
+async fn remux_fixture_with_two_input_videos_and_forbidden_provider_run() -> RemuxFixture {
+    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_two_input_videos_forbidden_provider_run())
+        .await
 }
 
 async fn remux_fixture_with_mkvmerge(body: &str) -> RemuxFixture {
@@ -535,6 +621,120 @@ printf output > "$out"
             ":"
         }
     )
+}
+
+fn fake_mkvmerge_body_with_two_input_videos_forbidden_provider_run() -> String {
+    r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "--identify" ]; then
+  cat <<'JSON'
+{"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":8,"type":"video","properties":{"number":2}},{"id":12,"type":"audio","properties":{"number":3}}]}
+JSON
+  exit 0
+fi
+printf '%s\n' 'provider run forbidden' >&2
+exit 42
+"#
+    .to_owned()
+}
+
+fn fake_mkvmerge_body_with_provider_failure() -> String {
+    r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "--identify" ]; then
+  last=""
+  for arg in "$@"; do last="$arg"; done
+  case "$last" in
+    *out.mkv)
+      cat <<'JSON'
+{"container":{"properties":{"container_type":"mkv"}},"tracks":[{"id":20,"type":"video","properties":{"default_track":false,"number":1}},{"id":21,"type":"audio","properties":{"default_track":true,"number":2}}]}
+JSON
+      ;;
+    *)
+      cat <<'JSON'
+{"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":12,"type":"audio","properties":{"number":2}}]}
+JSON
+      ;;
+  esac
+  exit 0
+fi
+printf '%s\n' 'mkvmerge failed deliberately' >&2
+exit 23
+"#
+    .to_owned()
+}
+
+fn fake_mkvmerge_body_with_provider_timeout() -> String {
+    r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "--identify" ]; then
+  last=""
+  for arg in "$@"; do last="$arg"; done
+  case "$last" in
+    *out.mkv)
+      cat <<'JSON'
+{"container":{"properties":{"container_type":"mkv"}},"tracks":[{"id":20,"type":"video","properties":{"default_track":false,"number":1}},{"id":21,"type":"audio","properties":{"default_track":true,"number":2}}]}
+JSON
+      ;;
+    *)
+      cat <<'JSON'
+{"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":12,"type":"audio","properties":{"number":2}}]}
+JSON
+      ;;
+  esac
+  exit 0
+fi
+sleep 2
+"#
+    .to_owned()
+}
+
+fn handle_operation_with_test_config(
+    req: OperationRequest,
+    config: MkvmergeConfig,
+) -> OperationFuture {
+    operation_handler(config)(req)
+}
+
+fn dispatch_frames(dispatch: OperationDispatch) -> Vec<ProgressFrame> {
+    let body = match dispatch.body {
+        voom_worker_protocol::http::OperationBody::Buffered(body) => body,
+        other @ voom_worker_protocol::http::OperationBody::Streaming(_) => {
+            assert!(
+                matches!(
+                    other,
+                    voom_worker_protocol::http::OperationBody::Buffered(_)
+                ),
+                "mkvtoolnix worker should buffer test responses"
+            );
+            Vec::new()
+        }
+    };
+    body.split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect()
+}
+
+fn assert_terminal_error(frame: &ProgressFrame, class: FailureClass, code: ErrorCode) {
+    let ProgressFrame::Error {
+        class: actual_class,
+        code: actual_code,
+        message,
+        payload,
+        ..
+    } = frame
+    else {
+        assert!(
+            matches!(frame, ProgressFrame::Error { .. }),
+            "expected terminal error frame, got {frame:?}"
+        );
+        return;
+    };
+    assert_eq!(*actual_class, class);
+    assert_eq!(*actual_code, code);
+    assert!(!message.trim().is_empty());
+    assert!(payload.is_some());
 }
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
