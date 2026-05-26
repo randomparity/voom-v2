@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
+use voom_core::{
+    ErrorCode, FailureClass, FileVersionId, JobId, MediaSnapshotId, SystemClock, WorkerId,
+};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
@@ -20,8 +22,8 @@ use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, TranscodeVideoRequest,
-    WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest,
+    RemuxResult, RemuxStatus, TranscodeVideoRequest, WorkerCredentials,
 };
 
 use crate::workflow::executor::{
@@ -509,6 +511,78 @@ async fn unsupported_policy_remux_target_is_rejected_before_default_fallback() {
             .contains("remux requires file_version or file_location target")
     );
     assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_runs_real_remux_path() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.remux_staging_root = dir.path().join("stage");
+    options.remux_target_dir = dir.path().join("out");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.summary.dispatch_count, 1);
+    assert_eq!(err.summary.failure_count, 1);
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert!(
+        err.source.to_string().contains("mkvtoolnix"),
+        "policy remux with source ids must use remux protocol dispatch, got: {}",
+        err.source
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.remux_staging_root = dir.path().join("stage");
+    options.remux_target_dir = dir.path().join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::Remux), 1);
+    assert_eq!(summary.failure_count, 0);
 }
 
 #[tokio::test]
@@ -1068,6 +1142,38 @@ impl ExecutorFixture {
         }
     }
 
+    async fn record_source_snapshot(&self, file_version_id: FileVersionId) -> MediaSnapshotId {
+        self.cp
+            .record_media_snapshot(
+                file_version_id,
+                None,
+                json!({
+                    "streams": [
+                        {
+                            "id": "stream-0",
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "h264",
+                            "disposition": {"default": true}
+                        },
+                        {
+                            "id": "stream-1",
+                            "index": 1,
+                            "kind": "audio",
+                            "codec_name": "aac",
+                            "language": "eng",
+                            "channels": 2,
+                            "disposition": {"default": false}
+                        }
+                    ]
+                }),
+                T0,
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
     async fn first_ticket_payload(&self) -> Value {
         let payload: String =
             sqlx::query_scalar("SELECT payload FROM tickets ORDER BY id ASC LIMIT 1")
@@ -1120,6 +1226,8 @@ enum FakeBehavior {
     Crash,
     DispatchError,
     RequireTranscodeProtocolPayload,
+    RequireRemuxProtocolPayload,
+    RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
     SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
@@ -1147,6 +1255,17 @@ impl ClientHandle for FakeClient {
                     detail: format!("transcode payload must match worker protocol: {err}"),
                 },
             )?;
+        }
+        if matches!(
+            self.behavior,
+            FakeBehavior::RequireRemuxProtocolPayload
+                | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+        ) {
+            serde_json::from_value::<RemuxRequest>(request.payload.clone()).map_err(|err| {
+                ProtocolError::InvalidPayload {
+                    detail: format!("remux payload must match worker protocol: {err}"),
+                }
+            })?;
         }
         if matches!(
             self.behavior,
@@ -1188,16 +1307,33 @@ async fn write_behavior(
     match behavior {
         FakeBehavior::Success
         | FakeBehavior::RequireTranscodeProtocolPayload
+        | FakeBehavior::RequireRemuxProtocolPayload
+        | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
         | FakeBehavior::SlowTranscodeResult => {
             let delay = match behavior {
                 FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
                 _ => Duration::from_millis(25),
             };
             tokio::time::sleep(delay).await;
-            let payload = if request.operation == OperationKind::TranscodeVideo {
-                transcode_result_payload_for_request(&request).await
-            } else {
-                json!({"ok": true})
+            let payload = match request.operation {
+                OperationKind::TranscodeVideo => {
+                    transcode_result_payload_for_request(&request).await
+                }
+                OperationKind::Remux
+                    if matches!(behavior, FakeBehavior::RequireRemuxProtocolPayload) =>
+                {
+                    remux_result_payload_for_request(&request).await
+                }
+                OperationKind::Remux
+                    if matches!(
+                        behavior,
+                        FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+                    ) =>
+                {
+                    write_frame(&mut writer, mkvtoolnix_unavailable_frame(&request)).await;
+                    return;
+                }
+                _ => json!({"ok": true}),
             };
             write_frame(&mut writer, result_frame(&request, payload)).await;
         }
@@ -1256,6 +1392,47 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
     })
 }
 
+async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<RemuxRequest>(request.payload.clone()).unwrap();
+    let output_bytes = b"remux bytes";
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
+    let input = RemuxObservedFacts {
+        size_bytes: request.input.expected.size_bytes,
+        content_hash: request.input.expected.content_hash,
+        modified_at: None,
+        local_file_key: None,
+    };
+    serde_json::to_value(RemuxResult {
+        status: RemuxStatus::Remuxed,
+        provider: "mkvtoolnix".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: RemuxObservedFacts {
+            size_bytes: output_bytes.len().try_into().unwrap(),
+            content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
+            modified_at: None,
+            local_file_key: None,
+        },
+        output_container: "mkv".to_owned(),
+        kept_snapshot_stream_ids: request
+            .selection
+            .keep_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        default_snapshot_stream_ids: request
+            .selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+    })
+    .unwrap()
+}
+
 async fn write_frame(writer: &mut DuplexStream, frame: ProgressFrame) {
     let bytes = serde_json::to_vec(&frame).unwrap();
     writer.write_all(&bytes).await.unwrap();
@@ -1278,6 +1455,18 @@ fn progress_frame(request: &OperationRequest, seq: u64) -> ProgressFrame {
         emitted_at: Utc::now(),
         percent: Some(PercentBps::try_from(100).unwrap()),
         message: None,
+        payload: None,
+    }
+}
+
+fn mkvtoolnix_unavailable_frame(request: &OperationRequest) -> ProgressFrame {
+    ProgressFrame::Error {
+        lease_id: request.lease_id,
+        seq: 0,
+        emitted_at: Utc::now(),
+        class: FailureClass::WorkerCrash,
+        code: ErrorCode::WorkerCrash,
+        message: "mkvtoolnix worker unavailable".to_owned(),
         payload: None,
     }
 }
@@ -1349,6 +1538,23 @@ fn policy_remux_plan(target: TargetRef) -> WorkflowPlan {
             "track_actions": [],
             "track_order": ["video", "audio", "subtitle"],
             "defaults": [],
+        }),
+    )
+}
+
+fn policy_remux_plan_for_snapshot(
+    target: TargetRef,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    policy_remux_plan_with_payload(
+        target,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "track_actions": [],
+            "track_order": ["video", "audio"],
+            "defaults": [{"target": "audio", "strategy": "first"}],
         }),
     )
 }
