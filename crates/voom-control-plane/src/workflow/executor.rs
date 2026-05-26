@@ -20,7 +20,7 @@ use voom_worker_protocol::{
 };
 
 use super::binding::{
-    BranchContext, PolicyRemuxSource, PolicyTranscodeSource, render_default_payload,
+    BindingError, BranchContext, PolicyRemuxSource, PolicyTranscodeSource, render_default_payload,
     render_default_payload_with_fan_out, render_policy_remux_payload,
     render_policy_transcode_payload,
 };
@@ -437,7 +437,13 @@ where
                         &self.options.remux_target_dir,
                         timing,
                     ),
-                    _ => render_default_payload(operation, &branch, timing),
+                    Some(voom_plan::TargetRef::Synthetic { .. }) => {
+                        render_default_payload(operation, &branch, timing)
+                    }
+                    Some(target) => Err(BindingError::new(format!(
+                        "remux requires file_version or file_location target, got {target:?}"
+                    ))),
+                    None => render_default_payload(operation, &branch, timing),
                 },
                 _ => render_default_payload(operation, &branch, timing),
             }

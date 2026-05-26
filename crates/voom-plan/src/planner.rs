@@ -1047,7 +1047,9 @@ fn evaluate_remux_track_operations(
                 changed |= remove_tracks_changes(&facts, *target, filter.as_ref())?;
             }
             CompiledOperation::SetDefaults { target, strategy } => {
-                if !facts.iter().any(|stream| stream.kind == *target) {
+                if !facts.iter().any(|stream| stream.kind == *target)
+                    && !matches!(strategy, DefaultStrategy::None | DefaultStrategy::Preserve)
+                {
                     return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
                 }
                 changed |= set_defaults_changes(&facts, *target, *strategy);

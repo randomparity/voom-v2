@@ -150,6 +150,75 @@ fn policy_remux_payload_rejects_incomplete_typed_payload() {
     assert_eq!(err.to_string(), "remux payload missing `container`");
 }
 
+#[test]
+fn policy_remux_payload_rejects_malformed_track_action_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [{"type": "keep_tracks"}],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux track_actions[0] missing `target`");
+}
+
+#[test]
+fn policy_remux_payload_rejects_malformed_track_order_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", 42, "subtitle"],
+            "defaults": []
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux track_order[1] must be a string");
+}
+
+#[test]
+fn policy_remux_payload_rejects_malformed_defaults_entry() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [{"target": "audio"}]
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux defaults[0] missing `strategy`");
+}
+
 fn operation_name_value(operation: OperationKind) -> serde_json::Value {
     serde_json::to_value(operation).unwrap()
 }

@@ -1,3 +1,4 @@
+use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::{FileLocationId, FileVersionId};
@@ -183,9 +184,55 @@ fn validate_policy_remux_payload(operation_payload: &Value) -> Result<(), Bindin
     if container != "mkv" {
         return Err(BindingError::new("remux payload `container` must be mkv"));
     }
-    required_array(operation_payload, "track_actions")?;
-    required_array(operation_payload, "track_order")?;
-    required_array(operation_payload, "defaults")?;
+    validate_track_actions(required_array(operation_payload, "track_actions")?)?;
+    validate_track_order(required_array(operation_payload, "track_order")?)?;
+    validate_defaults(required_array(operation_payload, "defaults")?)?;
+    Ok(())
+}
+
+fn validate_track_actions(actions: &[Value]) -> Result<(), BindingError> {
+    for (index, action) in actions.iter().enumerate() {
+        let object = action.as_object().ok_or_else(|| {
+            BindingError::new(format!("remux track_actions[{index}] must be an object"))
+        })?;
+        required_object_string(object, "track_actions", index, "type")?;
+        required_object_string(object, "track_actions", index, "target")?;
+        if object
+            .get("filter")
+            .is_some_and(|filter| !filter.is_object())
+        {
+            return Err(BindingError::new(format!(
+                "remux track_actions[{index}] `filter` must be an object"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_track_order(order: &[Value]) -> Result<(), BindingError> {
+    for (index, target) in order.iter().enumerate() {
+        let Some(target) = target.as_str() else {
+            return Err(BindingError::new(format!(
+                "remux track_order[{index}] must be a string"
+            )));
+        };
+        if !matches!(target, "video" | "audio" | "subtitle" | "attachment") {
+            return Err(BindingError::new(format!(
+                "remux track_order[{index}] has unsupported target `{target}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_defaults(defaults: &[Value]) -> Result<(), BindingError> {
+    for (index, default) in defaults.iter().enumerate() {
+        let object = default.as_object().ok_or_else(|| {
+            BindingError::new(format!("remux defaults[{index}] must be an object"))
+        })?;
+        required_object_string(object, "defaults", index, "target")?;
+        required_object_string(object, "defaults", index, "strategy")?;
+    }
     Ok(())
 }
 
@@ -213,13 +260,25 @@ fn required_array<'a>(payload: &'a Value, field: &str) -> Result<&'a Vec<Value>,
         .ok_or_else(|| BindingError::new(format!("remux payload missing `{field}`")))
 }
 
+fn required_object_string<'a>(
+    object: &'a Map<String, Value>,
+    parent: &str,
+    index: usize,
+    field: &str,
+) -> Result<&'a str, BindingError> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| BindingError::new(format!("remux {parent}[{index}] missing `{field}`")))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingError {
     detail: String,
 }
 
 impl BindingError {
-    fn new(detail: impl Into<String>) -> Self {
+    pub(crate) fn new(detail: impl Into<String>) -> Self {
         Self {
             detail: detail.into(),
         }

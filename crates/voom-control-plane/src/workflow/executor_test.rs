@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
+use voom_core::{ErrorCode, FileAssetId, FileVersionId, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
@@ -470,27 +470,21 @@ async fn non_policy_remux_root_ticket_uses_default_payload() {
 }
 
 #[tokio::test]
-async fn synthetic_policy_remux_root_ticket_uses_default_payload() {
+async fn unsupported_policy_remux_target_is_rejected_before_default_fallback() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    fixture.plan = policy_remux_plan(TargetRef::Synthetic {
-        key: "variant-1".to_owned(),
-        kind: voom_policy::TargetKind::MediaVariant,
+    fixture.plan = policy_remux_plan(TargetRef::FileAsset {
+        id: FileAssetId(99),
     });
 
     let err = fixture.run().await.unwrap_err();
 
-    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
-    let ticket_payload = fixture.first_ticket_payload().await;
-    let workflow_payload =
-        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
-            .unwrap();
-    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
-    assert_eq!(
-        workflow_payload.rendered_payload["path"],
-        "/library/root.mkv"
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.source
+            .to_string()
+            .contains("remux requires file_version or file_location target")
     );
-    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
-    assert!(workflow_payload.rendered_payload.get("remux").is_none());
+    assert_eq!(fixture.ticket_count().await, 0);
 }
 
 #[tokio::test]
