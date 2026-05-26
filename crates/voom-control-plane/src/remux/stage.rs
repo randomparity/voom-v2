@@ -151,10 +151,17 @@ async fn reject_symlink_components(path: &Path, label: &str) -> Result<(), VoomE
     for component in path.components() {
         match component {
             Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir
-            | Component::CurDir
-            | Component::ParentDir
-            | Component::Normal(_) => current.push(component.as_os_str()),
+            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !current.pop() && !current.has_root() {
+                    current.push(component.as_os_str());
+                }
+            }
+        }
+
+        if current.as_os_str().is_empty() {
+            continue;
         }
 
         match tokio::fs::symlink_metadata(&current).await {
@@ -165,7 +172,7 @@ async fn reject_symlink_components(path: &Path, label: &str) -> Result<(), VoomE
                 )));
             }
             Ok(_) => {}
-            Err(err) if err.kind() == ErrorKind::NotFound => break,
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
                 return Err(VoomError::Config(format!(
                     "inspect {label} component {}: {err}",
