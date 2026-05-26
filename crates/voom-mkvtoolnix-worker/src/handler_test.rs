@@ -305,13 +305,33 @@ async fn handler_rejects_wrong_selected_stream_kind_order() {
 
 #[tokio::test]
 async fn handler_accepts_video_keep_when_track_order_omits_video() {
-    let fixture = remux_fixture().await;
+    let fixture = remux_fixture_with_output_specs(vec![
+        output_track("audio", true),
+        output_track("video", false),
+    ])
+    .await;
     let mut request = fixture.request;
     request.selection.track_order = vec![RemuxTrackGroup::Audio];
 
     let result = handle_remux(&request, &fixture.config).await.unwrap();
 
     assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
+}
+
+#[tokio::test]
+async fn handler_accepts_output_reordered_by_track_order() {
+    let fixture = remux_fixture_with_output_specs(vec![
+        output_track("audio", true),
+        output_track("video", false),
+    ])
+    .await;
+    let mut request = fixture.request;
+    request.selection.track_order = vec![RemuxTrackGroup::Audio, RemuxTrackGroup::Video];
+
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
+
+    assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
+    assert_eq!(result.default_snapshot_stream_ids, ["stream-1"]);
 }
 
 #[tokio::test]

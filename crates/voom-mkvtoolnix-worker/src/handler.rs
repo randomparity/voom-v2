@@ -454,18 +454,19 @@ fn validate_output_selection(
     input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
     output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixWorkerError> {
-    if output_mapping.track_count() != request.selection.keep_streams.len() {
+    let expected_order = expected_output_stream_order(request, input_mapping)?;
+    if output_mapping.track_count() != expected_order.len() {
         return Err(malformed_worker_result(
             "output_probe",
             format!(
                 "selected stream mismatch: expected {} output tracks, got {}",
-                request.selection.keep_streams.len(),
+                expected_order.len(),
                 output_mapping.track_count()
             ),
         ));
     }
 
-    let saw_video = (0..request.selection.keep_streams.len()).any(|output_index| {
+    let saw_video = (0..expected_order.len()).any(|output_index| {
         u32::try_from(output_index)
             .ok()
             .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))
@@ -478,7 +479,7 @@ fn validate_output_selection(
         ));
     }
 
-    for (output_index, kept_stream) in request.selection.keep_streams.iter().enumerate() {
+    for (output_index, kept_stream) in expected_order.iter().enumerate() {
         let expected_track = input_mapping
             .track_for_provider_index(kept_stream.provider_stream_index)
             .ok_or_else(|| {
@@ -518,9 +519,7 @@ fn validate_output_selection(
         .iter()
         .map(|stream| stream.snapshot_stream_id.clone())
         .collect::<Vec<_>>();
-    let actual_default = request
-        .selection
-        .keep_streams
+    let actual_default = expected_order
         .iter()
         .enumerate()
         .filter_map(|(index, stream)| {
@@ -538,6 +537,38 @@ fn validate_output_selection(
         ));
     }
     Ok(())
+}
+
+fn expected_output_stream_order<'a>(
+    request: &'a RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+) -> Result<Vec<&'a RemuxStreamRef>, MkvtoolnixWorkerError> {
+    let mut ordered = Vec::new();
+    let mut used = BTreeSet::new();
+    for group in &request.selection.track_order {
+        for (index, stream) in request.selection.keep_streams.iter().enumerate() {
+            let track = input_mapping
+                .track_for_provider_index(stream.provider_stream_index)
+                .ok_or_else(|| {
+                    malformed_worker_result(
+                        "output_probe",
+                        format!(
+                            "selected stream mismatch: missing input track for provider index {}",
+                            stream.provider_stream_index
+                        ),
+                    )
+                })?;
+            if track.kind.matches_group(*group) && used.insert(index) {
+                ordered.push(stream);
+            }
+        }
+    }
+    for (index, stream) in request.selection.keep_streams.iter().enumerate() {
+        if used.insert(index) {
+            ordered.push(stream);
+        }
+    }
+    Ok(ordered)
 }
 
 fn success_dispatch(
