@@ -1756,10 +1756,22 @@ async fn acquire_lease_with_retry(
     control: &ControlPlane,
     input: NewLease,
 ) -> Result<voom_store::repo::leases::Lease, VoomError> {
+    retry_on_database_locked(|| {
+        let input = input.clone();
+        async move { control.acquire_lease(input).await }
+    })
+    .await
+}
+
+async fn retry_on_database_locked<T, Fut, Op>(mut operation: Op) -> Result<T, VoomError>
+where
+    Fut: Future<Output = Result<T, VoomError>>,
+    Op: FnMut() -> Fut,
+{
     let mut last = None;
     for _ in 0..8 {
-        match control.acquire_lease(input.clone()).await {
-            Ok(lease) => return Ok(lease),
+        match operation().await {
+            Ok(value) => return Ok(value),
             Err(err) if is_database_locked(&err) => {
                 last = Some(err);
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1775,21 +1787,16 @@ async fn release_lease_with_retry(
     lease_id: LeaseId,
     payload: Value,
 ) -> Result<(), VoomError> {
-    let mut last = None;
-    for _ in 0..8 {
-        match control
-            .release_lease(lease_id, payload.clone(), control.clock().now())
-            .await
-        {
-            Ok(_) => return Ok(()),
-            Err(err) if is_database_locked(&err) => {
-                last = Some(err);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(err) => return Err(err),
+    retry_on_database_locked(|| {
+        let payload = payload.clone();
+        async move {
+            control
+                .release_lease(lease_id, payload, control.clock().now())
+                .await
+                .map(|_| ())
         }
-    }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+    })
+    .await
 }
 
 async fn release_remux_lease_with_retry(
@@ -1798,29 +1805,20 @@ async fn release_remux_lease_with_retry(
     payload: Value,
     success_event: &crate::remux::events::RemuxSucceededEvent,
 ) -> Result<(), VoomError> {
-    let mut last = None;
-    for _ in 0..8 {
-        let result = async {
+    retry_on_database_locked(|| {
+        let payload = payload.clone();
+        async move {
             let mut tx = begin_tx(&control.pool).await?;
             let now = control.clock().now();
             crate::remux::events::append_succeeded_in_tx(control, &mut tx, success_event, now)
                 .await?;
             control
-                .release_lease_in_tx(&mut tx, lease_id, payload.clone(), now)
+                .release_lease_in_tx(&mut tx, lease_id, payload, now)
                 .await?;
             commit_tx(tx).await
         }
-        .await;
-        match result {
-            Ok(()) => return Ok(()),
-            Err(err) if is_database_locked(&err) => {
-                last = Some(err);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+    })
+    .await
 }
 
 async fn fail_lease_with_retry(
@@ -1829,21 +1827,16 @@ async fn fail_lease_with_retry(
     reason: String,
     class: FailureClass,
 ) -> Result<(), VoomError> {
-    let mut last = None;
-    for _ in 0..8 {
-        match control
-            .fail_lease(lease_id, reason.clone(), class, control.clock().now())
-            .await
-        {
-            Ok(_) => return Ok(()),
-            Err(err) if is_database_locked(&err) => {
-                last = Some(err);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(err) => return Err(err),
+    retry_on_database_locked(|| {
+        let reason = reason.clone();
+        async move {
+            control
+                .fail_lease(lease_id, reason, class, control.clock().now())
+                .await
+                .map(|_| ())
         }
-    }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+    })
+    .await
 }
 
 async fn heartbeat_lease_with_retry(
@@ -1851,21 +1844,13 @@ async fn heartbeat_lease_with_retry(
     lease_id: LeaseId,
     ttl: time::Duration,
 ) -> Result<(), VoomError> {
-    let mut last = None;
-    for _ in 0..8 {
-        match control
+    retry_on_database_locked(|| async move {
+        control
             .heartbeat_lease(lease_id, ttl, control.clock().now())
             .await
-        {
-            Ok(_) => return Ok(()),
-            Err(err) if is_database_locked(&err) => {
-                last = Some(err);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+            .map(|_| ())
+    })
+    .await
 }
 
 fn is_database_locked(err: &VoomError) -> bool {

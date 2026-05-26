@@ -13,7 +13,8 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock, WorkerId,
+    ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock,
+    VoomError, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
@@ -27,6 +28,7 @@ use voom_worker_protocol::{
     RemuxResult, RemuxStatus, TranscodeVideoRequest, WorkerCredentials,
 };
 
+use super::retry_on_database_locked;
 use crate::workflow::executor::{
     WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary, is_synthetic_root_ticket,
 };
@@ -37,6 +39,58 @@ use crate::workflow::timing::EffectiveTiming;
 use voom_plan::TargetRef;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+#[tokio::test]
+async fn retry_on_database_locked_retries_locked_errors_until_success() {
+    let attempts = AtomicU32::new(0);
+
+    let result = retry_on_database_locked(|| {
+        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+        async move {
+            if attempt < 2 {
+                Err(VoomError::Database("database is locked".to_owned()))
+            } else {
+                Ok("done")
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(result, "done");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_on_database_locked_stops_after_eight_locked_errors() {
+    let attempts = AtomicU32::new(0);
+
+    let err = retry_on_database_locked(|| {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        async { Err::<(), _>(VoomError::Database("database is locked".to_owned())) }
+    })
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
+    assert!(err.to_string().contains("database is locked"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 8);
+}
+
+#[tokio::test]
+async fn retry_on_database_locked_does_not_retry_other_errors() {
+    let attempts = AtomicU32::new(0);
+
+    let err = retry_on_database_locked(|| {
+        attempts.fetch_add(1, Ordering::SeqCst);
+        async { Err::<(), _>(VoomError::Config("bad lease".to_owned())) }
+    })
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
 
 #[tokio::test]
 async fn executor_never_exceeds_max_in_flight_dispatches() {
