@@ -553,6 +553,48 @@ async fn policy_remux_ticket_runs_real_remux_path() {
 }
 
 #[tokio::test]
+async fn policy_remux_ticket_with_source_ids_requires_registered_runtime() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker_without_runtime("remux-worker", OperationKind::Remux, 1)
+        .await;
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.source
+            .to_string()
+            .contains("missing runtime for worker"),
+        "policy remux with source ids must require the real remux runtime, got: {}",
+        err.source
+    );
+    assert_eq!(err.summary.dispatch_count, 0);
+    assert_eq!(fixture.lease_count().await, 0);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::Remux);
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+}
+
+#[tokio::test]
 async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     let dir = tempfile::tempdir().unwrap();
