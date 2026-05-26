@@ -141,6 +141,61 @@ async fn handler_rejects_dropping_source_video_tracks_before_provider_run() {
 }
 
 #[tokio::test]
+async fn handler_rejects_attachment_track_order_before_provider_run() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Attachment];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("unsupported attachment remux"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn handler_rejects_attachment_keep_stream_before_provider_run() {
+    let fixture = remux_fixture_with_attachment_track_and_forbidden_provider_run().await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![video_ref("stream-0", 0), attachment_ref("stream-2", 2)];
+    request.selection.default_streams = vec![];
+    request.selection.clear_default_streams = vec![];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("unsupported attachment remux"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn handler_rejects_default_streams_outside_keep_streams() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.default_streams = vec![audio_ref("stream-2", 1)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("default_streams must be a subset"));
+}
+
+#[tokio::test]
+async fn handler_rejects_clear_default_streams_outside_keep_streams() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.clear_default_streams = vec![audio_ref("stream-2", 1)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("clear_default_streams must be a subset")
+    );
+}
+
+#[tokio::test]
 async fn handler_rejects_input_drift_after_provider_run() {
     let fixture = remux_fixture_with_fake_mkvmerge_that_mutates_input().await;
 
@@ -430,6 +485,11 @@ async fn remux_fixture_with_two_input_videos_and_forbidden_provider_run() -> Rem
         .await
 }
 
+async fn remux_fixture_with_attachment_track_and_forbidden_provider_run() -> RemuxFixture {
+    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_attachment_track_forbidden_provider_run())
+        .await
+}
+
 async fn remux_fixture_with_mkvmerge(body: &str) -> RemuxFixture {
     let temp = tempfile::tempdir().unwrap();
     let input = temp.path().join("input.mp4");
@@ -501,6 +561,13 @@ fn video_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStrea
 }
 
 fn audio_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStreamRef {
+    RemuxStreamRef {
+        snapshot_stream_id: snapshot_stream_id.to_owned(),
+        provider_stream_index,
+    }
+}
+
+fn attachment_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStreamRef {
     RemuxStreamRef {
         snapshot_stream_id: snapshot_stream_id.to_owned(),
         provider_stream_index,
@@ -652,6 +719,21 @@ set -eu
 if [ "${1:-}" = "--identify" ]; then
   cat <<'JSON'
 {"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":8,"type":"video","properties":{"number":2}},{"id":12,"type":"audio","properties":{"number":3}}]}
+JSON
+  exit 0
+fi
+printf '%s\n' 'provider run forbidden' >&2
+exit 42
+"#
+    .to_owned()
+}
+
+fn fake_mkvmerge_body_with_attachment_track_forbidden_provider_run() -> String {
+    r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "--identify" ]; then
+  cat <<'JSON'
+{"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":12,"type":"audio","properties":{"number":2}},{"id":99,"type":"attachments","properties":{"number":3}}],"attachments":[{"id":99,"file_name":"cover.jpg"}]}
 JSON
   exit 0
 fi

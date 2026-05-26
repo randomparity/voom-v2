@@ -56,3 +56,40 @@ fn build_args_rejects_missing_track_mapping() {
 
     assert!(err.to_string().contains("missing mkvmerge track id"));
 }
+
+#[test]
+fn build_args_disable_unselected_audio_subtitles_and_attachments() {
+    let request = RemuxRequest {
+        input: RemuxInput {
+            path: "/tmp/input.mp4".to_owned(),
+            expected: RemuxExpectedFacts {
+                size_bytes: 1,
+                content_hash: "blake3:abc".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: RemuxOutput {
+            staging_root: "/tmp/stage".to_owned(),
+            path: "/tmp/stage/out.mkv".to_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection: RemuxSelection {
+            keep_streams: vec![RemuxStreamRef {
+                snapshot_stream_id: "stream-0".to_owned(),
+                provider_stream_index: 0,
+            }],
+            default_streams: vec![],
+            clear_default_streams: vec![],
+            track_order: vec![RemuxTrackGroup::Video],
+        },
+    };
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert!(args.contains(&"--no-audio".to_owned()));
+    assert!(args.contains(&"--no-subtitles".to_owned()));
+    assert!(args.contains(&"--no-attachments".to_owned()));
+}

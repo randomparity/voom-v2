@@ -177,6 +177,7 @@ pub async fn handle_remux(
             "selection must include at least one video stream".to_owned(),
         ));
     }
+    validate_no_attachment_refs(request, &input_mapping)?;
     validate_all_source_video_streams_kept(request, &input_mapping)?;
     run_mkvmerge_remux(config, request, &input_mapping)
         .await
@@ -235,11 +236,31 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
             "selection must include at least one video stream".to_owned(),
         ));
     }
+    if request
+        .selection
+        .track_order
+        .contains(&RemuxTrackGroup::Attachment)
+    {
+        return Err(config_invalid(
+            "selection",
+            "unsupported attachment remux selection".to_owned(),
+        ));
+    }
     reject_duplicate_refs("keep_streams", &request.selection.keep_streams)?;
     reject_duplicate_refs("default_streams", &request.selection.default_streams)?;
     reject_duplicate_refs(
         "clear_default_streams",
         &request.selection.clear_default_streams,
+    )?;
+    validate_ref_subset(
+        "default_streams",
+        &request.selection.default_streams,
+        &request.selection.keep_streams,
+    )?;
+    validate_ref_subset(
+        "clear_default_streams",
+        &request.selection.clear_default_streams,
+        &request.selection.keep_streams,
     )?;
     Ok(())
 }
@@ -261,6 +282,25 @@ fn reject_duplicate_refs(
             return Err(config_invalid(
                 "selection",
                 format!("duplicate provider_stream_index in {field}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_ref_subset(
+    field: &str,
+    streams: &[RemuxStreamRef],
+    keep_streams: &[RemuxStreamRef],
+) -> Result<(), MkvtoolnixWorkerError> {
+    for stream in streams {
+        if !keep_streams.iter().any(|kept| {
+            kept.snapshot_stream_id == stream.snapshot_stream_id
+                && kept.provider_stream_index == stream.provider_stream_index
+        }) {
+            return Err(config_invalid(
+                "selection",
+                format!("{field} must be a subset of keep_streams"),
             ));
         }
     }
@@ -303,6 +343,29 @@ async fn reject_existing_output_path(output_path: &Path) -> Result<(), Mkvtoolni
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(config_invalid("output_path", err.to_string())),
     }
+}
+
+fn validate_no_attachment_refs(
+    request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixWorkerError> {
+    let refs = request
+        .selection
+        .keep_streams
+        .iter()
+        .chain(request.selection.default_streams.iter())
+        .chain(request.selection.clear_default_streams.iter());
+    for stream in refs {
+        if input_mapping
+            .provider_index_matches_group(stream.provider_stream_index, RemuxTrackGroup::Attachment)
+        {
+            return Err(config_invalid(
+                "selection",
+                "unsupported attachment remux selection".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_all_source_video_streams_kept(

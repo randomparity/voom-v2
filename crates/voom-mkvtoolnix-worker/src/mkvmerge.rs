@@ -96,6 +96,15 @@ impl MkvmergeTrackMapping {
             })
             .collect()
     }
+
+    pub(crate) fn provider_index_matches_group(
+        &self,
+        provider_index: u32,
+        group: RemuxTrackGroup,
+    ) -> bool {
+        self.track_for_provider_index(provider_index)
+            .is_some_and(|track| track.kind.matches_group(group))
+    }
 }
 
 pub fn track_mapping_from_identify(
@@ -136,25 +145,35 @@ pub fn build_mkvmerge_args(
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Vec<String>, MkvtoolnixError> {
     let keep = selected_tracks(&request.selection.keep_streams, mapping)?;
+    if keep
+        .iter()
+        .any(|track| track.kind == MkvmergeTrackKind::Attachment)
+    {
+        return Err(MkvtoolnixError::ConfigInvalid(
+            "unsupported attachment remux selection".to_owned(),
+        ));
+    }
     let mut args = vec![
         "--output".to_owned(),
         request.output.path.clone(),
         "--no-global-tags".to_owned(),
     ];
     extend_group_selection(&mut args, "--video-tracks", &keep, MkvmergeTrackKind::Video);
-    extend_group_selection(&mut args, "--audio-tracks", &keep, MkvmergeTrackKind::Audio);
-    extend_group_selection(
+    extend_optional_group_selection(
+        &mut args,
+        "--audio-tracks",
+        "--no-audio",
+        &keep,
+        MkvmergeTrackKind::Audio,
+    );
+    extend_optional_group_selection(
         &mut args,
         "--subtitle-tracks",
+        "--no-subtitles",
         &keep,
         MkvmergeTrackKind::Subtitle,
     );
-    extend_group_selection(
-        &mut args,
-        "--attachments",
-        &keep,
-        MkvmergeTrackKind::Attachment,
-    );
+    args.push("--no-attachments".to_owned());
     extend_default_flags(&mut args, &request.selection, mapping)?;
     if let Some(track_order) = track_order(&request.selection, mapping)? {
         args.push("--track-order".to_owned());
@@ -244,6 +263,26 @@ fn extend_group_selection(
         .map(|track| track.id.to_string())
         .collect::<Vec<_>>();
     if !ids.is_empty() {
+        args.push(option.to_owned());
+        args.push(ids.join(","));
+    }
+}
+
+fn extend_optional_group_selection(
+    args: &mut Vec<String>,
+    option: &str,
+    none_option: &str,
+    keep: &[MkvmergeTrack],
+    kind: MkvmergeTrackKind,
+) {
+    let ids = keep
+        .iter()
+        .filter(|track| track.kind == kind)
+        .map(|track| track.id.to_string())
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        args.push(none_option.to_owned());
+    } else {
         args.push(option.to_owned());
         args.push(ids.join(","));
     }
