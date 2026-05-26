@@ -1,14 +1,19 @@
-use voom_core::{FileLocationId, FileVersionId, VoomError};
+use std::path::PathBuf;
+
+use serde_json::Value;
+use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId, VoomError};
 use voom_store::repo::identity::{
     FileLocation, FileLocationKind, FileVersion, IdentityRepo, MediaSnapshot,
 };
 
 use crate::ControlPlane;
+use crate::artifact::fs::canonical_existing_file_no_symlink;
 
 #[derive(Debug, Clone)]
 pub struct SelectedSource {
     pub version: FileVersion,
     pub location: FileLocation,
+    pub canonical_path: PathBuf,
 }
 
 pub async fn select_source(
@@ -27,19 +32,44 @@ pub async fn select_source(
         )));
     }
     let location = select_location(cp, file_version_id, source_location_id).await?;
-    Ok(SelectedSource { version, location })
+    let canonical_path = canonical_existing_file_no_symlink(&location.value).await?;
+    Ok(SelectedSource {
+        version,
+        location,
+        canonical_path,
+    })
 }
 
 pub async fn read_media_snapshot(
     cp: &ControlPlane,
     file_version_id: FileVersionId,
+    operation_payload: &Value,
 ) -> Result<MediaSnapshot, VoomError> {
-    cp.identity
-        .list_media_snapshots_by_version(file_version_id)
+    let snapshot_id = source_media_snapshot_id(operation_payload)?;
+    let snapshot = cp
+        .identity
+        .get_media_snapshot(snapshot_id)
         .await?
-        .into_iter()
-        .next_back()
-        .ok_or_else(|| VoomError::NotFound(format!("media snapshot for {file_version_id}")))
+        .ok_or_else(|| VoomError::NotFound(format!("media_snapshot {snapshot_id}")))?;
+    if snapshot.file_version_id != file_version_id {
+        return Err(VoomError::Config(format!(
+            "media_snapshot {snapshot_id} does not belong to file_version {file_version_id}"
+        )));
+    }
+    Ok(snapshot)
+}
+
+fn source_media_snapshot_id(operation_payload: &Value) -> Result<MediaSnapshotId, VoomError> {
+    operation_payload
+        .get("source_media_snapshot_id")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .map(MediaSnapshotId)
+        .ok_or_else(|| {
+            VoomError::Config(
+                "remux operation payload requires source_media_snapshot_id".to_owned(),
+            )
+        })
 }
 
 async fn select_location(

@@ -42,7 +42,7 @@ pub fn request_for(
 ) -> Result<RemuxRequest, VoomError> {
     Ok(RemuxRequest {
         input: RemuxInput {
-            path: selected.location.value.clone(),
+            path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: RemuxExpectedFacts {
                 size_bytes: selected.version.size_bytes,
                 content_hash: selected.version.content_hash.clone(),
@@ -61,7 +61,7 @@ pub fn request_for(
 }
 
 pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {
-    let facts = observe_regular_file(&selected.location.value).await?;
+    let facts = observe_regular_file(&selected.canonical_path).await?;
     if facts.size_bytes != selected.version.size_bytes
         || facts.content_hash != selected.version.content_hash
     {

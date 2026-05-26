@@ -88,14 +88,20 @@ fn output_file_name(source: &Path) -> String {
 }
 
 async fn reject_existing_file(path: &Path, label: &str) -> Result<(), VoomError> {
-    if tokio::fs::try_exists(path)
-        .await
-        .map_err(|err| VoomError::Config(format!("stat remux {label} {}: {err}", path.display())))?
-    {
-        return Err(VoomError::Config(format!(
-            "remux {label} already exists: {}",
-            path.display()
-        )));
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => {
+            return Err(VoomError::Config(format!(
+                "remux {label} already exists: {}",
+                path.display()
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(VoomError::Config(format!(
+                "stat remux {label} {}: {err}",
+                path.display()
+            )));
+        }
     }
     Ok(())
 }

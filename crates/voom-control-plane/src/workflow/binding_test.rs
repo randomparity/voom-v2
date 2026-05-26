@@ -68,7 +68,8 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
         "container": "mkv",
         "track_actions": [],
         "track_order": ["video", "audio", "subtitle"],
-        "defaults": []
+        "defaults": [],
+        "source_media_snapshot_id": 99
     });
 
     let rendered = render_policy_remux_payload(
@@ -85,12 +86,40 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
 
     assert_eq!(rendered["operation"], "remux");
     assert_eq!(rendered["remux"], operation_payload);
+    assert_eq!(rendered["remux"]["source_media_snapshot_id"], 99);
     assert_eq!(rendered["staging_root"], "/tmp/voom-stage");
     assert_eq!(rendered["target_dir"], "/library/remux");
     assert_eq!(rendered["duration_ms"], 25);
     assert_eq!(rendered["progress_interval_ms"], 10);
     assert_eq!(rendered["source_file_version_id"], 42);
     assert_eq!(rendered["source_location_id"], 7);
+}
+
+#[test]
+fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+            "source_media_snapshot_id": "99"
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux payload `source_media_snapshot_id` must be a positive integer"
+    );
 }
 
 #[test]

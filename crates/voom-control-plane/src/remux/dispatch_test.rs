@@ -1,5 +1,7 @@
 use super::*;
 
+use std::path::PathBuf;
+
 use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
 use voom_worker_protocol::{
     RemuxObservedFacts, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
@@ -52,6 +54,7 @@ fn selected_source() -> crate::remux::source::SelectedSource {
             retired_at: None,
             epoch: 0,
         },
+        canonical_path: PathBuf::from("/library/source.mkv"),
     }
 }
 

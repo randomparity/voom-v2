@@ -18,56 +18,11 @@ async fn execute_records_verified_committed_remux_result() {
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    cp.record_media_snapshot(
-        seeded.0,
-        None,
-        json!({
-            "streams": [
-                {
-                    "id": "stream-0",
-                    "index": 0,
-                    "kind": "video",
-                    "codec_name": "h264",
-                    "disposition": {
-                        "default": true
-                    }
-                },
-                {
-                    "id": "stream-1",
-                    "index": 1,
-                    "kind": "audio",
-                    "codec_name": "aac",
-                    "language": "eng",
-                    "channels": 2,
-                    "disposition": {
-                        "default": false
-                    }
-                }
-            ]
-        }),
-        OffsetDateTime::UNIX_EPOCH,
-    )
-    .await
-    .unwrap();
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
 
     let report = execute_remux_with_dispatchers(
         &cp,
-        ExecuteRemuxInput {
-            job_id: JobId(1),
-            ticket_id: TicketId(2),
-            lease_id: LeaseId(3),
-            source_file_version_id: seeded.0,
-            source_location_id: Some(seeded.1),
-            operation_payload: json!({
-                "type": "remux",
-                "container": "mkv",
-                "track_actions": [],
-                "track_order": ["video", "audio"],
-                "defaults": [{"target": "audio", "strategy": "first"}]
-            }),
-            staging_root: dir.path().join("stage"),
-            target_dir: dir.path().join("out"),
-        },
+        remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
     )
@@ -87,16 +42,101 @@ async fn execute_records_verified_committed_remux_result() {
 }
 
 #[tokio::test]
+async fn execute_uses_pinned_source_media_snapshot() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let pinned = record_source_snapshot_with_audio_languages(&cp, seeded.0, &["eng"]).await;
+    let _latest = record_source_snapshot_with_audio_languages(&cp, seeded.0, &["spa"]).await;
+
+    let report = execute_remux_with_dispatchers(
+        &cp,
+        remux_input_with_operation_payload(
+            &dir,
+            seeded,
+            json!({
+                "type": "remux",
+                "container": "mkv",
+                "source_media_snapshot_id": pinned.0,
+                "track_actions": [
+                    {
+                        "type": "keep_tracks",
+                        "target": "audio",
+                        "filter": {"type": "language_in", "values": ["eng"]}
+                    }
+                ],
+                "track_order": ["video", "audio"],
+                "defaults": []
+            }),
+        ),
+        &ExpectKeepStreamsRemuxDispatcher {
+            expected: vec!["stream-0", "stream-1"],
+        },
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.result_media_snapshot_id.0, pinned.0 + 2);
+}
+
+#[tokio::test]
+async fn execute_rejects_missing_source_media_snapshot_id() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let _snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input_without_source_media_snapshot_id(&dir, seeded),
+        &FakeRemuxDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("source_media_snapshot_id"));
+}
+
+#[tokio::test]
+async fn execute_rejects_source_media_snapshot_for_other_file_version() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    let other = dir.path().join("Other.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    std::fs::write(&other, b"other bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let other_seeded = seed_source(&cp, &other, b"other bytes").await;
+    let mismatched_snapshot_id = record_source_snapshot(&cp, other_seeded.0).await;
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded, mismatched_snapshot_id),
+        &FakeRemuxDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("does not belong"));
+}
+
+#[tokio::test]
 async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
     let (cp, _db, dir) = fixture().await;
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    record_source_snapshot(&cp, seeded.0).await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
 
     let err = execute_remux_with_dispatchers(
         &cp,
-        remux_input(&dir, seeded),
+        remux_input(&dir, seeded, source_media_snapshot_id),
         &WrongInputFactsRemuxDispatcher,
         &FakeVerifyDispatcher,
     )
@@ -116,13 +156,13 @@ async fn execute_revalidates_drifted_source_before_worker_dispatch() {
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    record_source_snapshot(&cp, seeded.0).await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
     std::fs::write(&source, b"changed source bytes").unwrap();
     let dispatcher = CountingRemuxDispatcher::default();
 
     let err = execute_remux_with_dispatchers(
         &cp,
-        remux_input(&dir, seeded),
+        remux_input(&dir, seeded, source_media_snapshot_id),
         &dispatcher,
         &FakeVerifyDispatcher,
     )
@@ -139,20 +179,20 @@ async fn execute_revalidates_missing_source_before_worker_dispatch() {
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    record_source_snapshot(&cp, seeded.0).await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
     std::fs::remove_file(&source).unwrap();
     let dispatcher = CountingRemuxDispatcher::default();
 
     let err = execute_remux_with_dispatchers(
         &cp,
-        remux_input(&dir, seeded),
+        remux_input(&dir, seeded, source_media_snapshot_id),
         &dispatcher,
         &FakeVerifyDispatcher,
     )
     .await
     .unwrap_err();
 
-    assert_eq!(err.error_code(), ErrorCode::ArtifactUnavailable);
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert_eq!(dispatcher.call_count(), 0);
 }
 
@@ -162,7 +202,7 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
-    record_source_snapshot(&cp, seeded.0).await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
     sqlx::query(
         "CREATE TRIGGER fail_remux_result_snapshot \
          BEFORE INSERT ON media_snapshots \
@@ -174,7 +214,7 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
 
     let err = execute_remux_with_dispatchers(
         &cp,
-        remux_input(&dir, seeded),
+        remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
     )
@@ -216,6 +256,31 @@ impl RemuxDispatcher for WrongInputFactsRemuxDispatcher {
         result.input_pre.size_bytes += 1;
         result.input_post = result.input_pre.clone();
         Ok(result)
+    }
+}
+
+#[derive(Debug)]
+struct ExpectKeepStreamsRemuxDispatcher {
+    expected: Vec<&'static str>,
+}
+
+#[async_trait]
+impl RemuxDispatcher for ExpectKeepStreamsRemuxDispatcher {
+    async fn dispatch_remux(
+        &self,
+        request: RemuxRequest,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        assert_eq!(
+            request
+                .selection
+                .keep_streams
+                .iter()
+                .map(|stream| stream.snapshot_stream_id.as_str())
+                .collect::<Vec<_>>(),
+            self.expected
+        );
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
     }
 }
 
@@ -324,43 +389,95 @@ async fn fixture() -> (
 async fn record_source_snapshot(
     cp: &crate::ControlPlane,
     file_version_id: voom_core::FileVersionId,
-) {
+) -> voom_core::MediaSnapshotId {
+    record_source_snapshot_with_audio_languages(cp, file_version_id, &["eng"]).await
+}
+
+async fn record_source_snapshot_with_audio_languages(
+    cp: &crate::ControlPlane,
+    file_version_id: voom_core::FileVersionId,
+    languages: &[&str],
+) -> voom_core::MediaSnapshotId {
+    let audio_streams = languages
+        .iter()
+        .enumerate()
+        .map(|(offset, language)| {
+            let index = offset + 1;
+            json!({
+                "id": format!("stream-{index}"),
+                "index": index,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": language,
+                "channels": 2,
+                "disposition": {
+                    "default": false
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut streams = vec![json!({
+        "id": "stream-0",
+        "index": 0,
+        "kind": "video",
+        "codec_name": "h264",
+        "disposition": {
+            "default": true
+        }
+    })];
+    streams.extend(audio_streams);
+
     cp.record_media_snapshot(
         file_version_id,
         None,
-        json!({
-            "streams": [
-                {
-                    "id": "stream-0",
-                    "index": 0,
-                    "kind": "video",
-                    "codec_name": "h264",
-                    "disposition": {
-                        "default": true
-                    }
-                },
-                {
-                    "id": "stream-1",
-                    "index": 1,
-                    "kind": "audio",
-                    "codec_name": "aac",
-                    "language": "eng",
-                    "channels": 2,
-                    "disposition": {
-                        "default": false
-                    }
-                }
-            ]
-        }),
+        json!({ "streams": streams }),
         OffsetDateTime::UNIX_EPOCH,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .id
 }
 
 fn remux_input(
     dir: &tempfile::TempDir,
     seeded: (voom_core::FileVersionId, voom_core::FileLocationId),
+    source_media_snapshot_id: voom_core::MediaSnapshotId,
+) -> ExecuteRemuxInput {
+    remux_input_with_operation_payload(
+        dir,
+        seeded,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "track_actions": [],
+            "track_order": ["video", "audio"],
+            "defaults": [{"target": "audio", "strategy": "first"}]
+        }),
+    )
+}
+
+fn remux_input_without_source_media_snapshot_id(
+    dir: &tempfile::TempDir,
+    seeded: (voom_core::FileVersionId, voom_core::FileLocationId),
+) -> ExecuteRemuxInput {
+    remux_input_with_operation_payload(
+        dir,
+        seeded,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio"],
+            "defaults": [{"target": "audio", "strategy": "first"}]
+        }),
+    )
+}
+
+fn remux_input_with_operation_payload(
+    dir: &tempfile::TempDir,
+    seeded: (voom_core::FileVersionId, voom_core::FileLocationId),
+    operation_payload: serde_json::Value,
 ) -> ExecuteRemuxInput {
     ExecuteRemuxInput {
         job_id: JobId(1),
@@ -368,13 +485,7 @@ fn remux_input(
         lease_id: LeaseId(3),
         source_file_version_id: seeded.0,
         source_location_id: Some(seeded.1),
-        operation_payload: json!({
-            "type": "remux",
-            "container": "mkv",
-            "track_actions": [],
-            "track_order": ["video", "audio"],
-            "defaults": [{"target": "audio", "strategy": "first"}]
-        }),
+        operation_payload,
         staging_root: dir.path().join("stage"),
         target_dir: dir.path().join("out"),
     }

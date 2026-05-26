@@ -361,7 +361,7 @@ impl<'a> PlanBuilder<'a> {
         snapshot: &MediaSnapshotInput,
         operations: &[&CompiledOperation],
     ) {
-        let payload = remux_payload(operations);
+        let payload = remux_payload(snapshot, operations);
         let observed_state = snapshot
             .container
             .as_ref()
@@ -924,7 +924,10 @@ fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
     }
 }
 
-fn remux_payload(operations: &[&CompiledOperation]) -> serde_json::Value {
+fn remux_payload(
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+) -> serde_json::Value {
     let container = operations
         .iter()
         .find_map(|operation| match operation {
@@ -973,13 +976,19 @@ fn remux_payload(operations: &[&CompiledOperation]) -> serde_json::Value {
         })
         .collect::<Vec<_>>();
 
-    json!({
+    let mut payload = json!({
         "type": "remux",
         "container": container,
         "track_actions": track_actions,
         "track_order": track_order,
         "defaults": defaults,
-    })
+    });
+    if let Some(id) = snapshot.existing_media_snapshot_id
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("source_media_snapshot_id".to_owned(), json!(id.0));
+    }
+    payload
 }
 
 fn track_action_payload(

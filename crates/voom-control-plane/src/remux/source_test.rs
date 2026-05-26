@@ -35,6 +35,24 @@ async fn source_selection_rejects_ambiguous_live_locations() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn source_selection_rejects_final_path_symlink() {
+    let (cp, _db, dir) = fixture().await;
+    let real = dir.path().join("real.mp4");
+    let link = dir.path().join("link.mp4");
+    std::fs::write(&real, b"source bytes").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let seeded = seed_source(&cp, &link, b"source bytes").await;
+
+    let err = select_source(&cp, seeded.file_version_id, None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SeededSource {
     file_version_id: FileVersionId,

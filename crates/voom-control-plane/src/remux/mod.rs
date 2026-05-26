@@ -88,7 +88,9 @@ pub(crate) async fn execute_remux_with_dispatchers(
 ) -> Result<ExecuteRemuxReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
-    let snapshot = source::read_media_snapshot(cp, input.source_file_version_id).await?;
+    let snapshot =
+        source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
+            .await?;
     let selection =
         selection::selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)?;
     let staging_path = stage::staging_path(

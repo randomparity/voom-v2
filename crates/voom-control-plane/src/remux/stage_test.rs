@@ -58,3 +58,47 @@ async fn target_path_rejects_existing_output() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(err.to_string().contains("target path already exists"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_path_rejects_dangling_symlink_output() {
+    let root = tempfile::tempdir().unwrap();
+    let path = staging_path(
+        root.path(),
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(root.path().join("missing"), &path).unwrap();
+
+    let err = staging_path(
+        root.path(),
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("staging path already exists"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn target_path_rejects_dangling_symlink_output() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("Movie.remux.mkv");
+    std::os::unix::fs::symlink(root.path().join("missing"), &target).unwrap();
+
+    let err = target_path(root.path(), Path::new("/library/Movie.mp4"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("target path already exists"));
+}

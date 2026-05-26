@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use voom_core::MediaSnapshotId;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
     CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage, MediaSnapshotInput,
@@ -270,6 +271,23 @@ fn groups_container_and_track_operations_into_one_remux_node() {
                 "strategy": "first"
             }
         ])
+    );
+}
+
+#[test]
+fn remux_payload_includes_existing_media_snapshot_id_when_available() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+    let mut snapshot = snapshot_with_streams(Some("mp4"));
+    snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(99));
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(
+        plan.nodes[0].operation_payload["source_media_snapshot_id"],
+        99
     );
 }
 
