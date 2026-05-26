@@ -538,8 +538,9 @@ async fn policy_remux_ticket_runs_real_remux_path() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = dir.path().join("stage");
-    options.remux_target_dir = dir.path().join("out");
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -619,8 +620,9 @@ async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = dir.path().join("stage");
-    options.remux_target_dir = dir.path().join("out");
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -664,8 +666,9 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
     .unwrap();
     let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = dir.path().join("stage");
-    options.remux_target_dir = dir.path().join("out");
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
 
     super::dispatch_control_plane_remux(
         &fixture.cp,
@@ -753,8 +756,9 @@ async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failur
     .unwrap();
     let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = dir.path().join("stage");
-    options.remux_target_dir = dir.path().join("out");
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
 
     super::dispatch_control_plane_remux(
         &fixture.cp,
@@ -838,8 +842,9 @@ async fn policy_remux_dispatch_uses_workflow_lease_and_idempotency_key() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = dir.path().join("stage");
-    options.remux_target_dir = dir.path().join("out");
+    let root = dir.path().canonicalize().unwrap();
+    options.remux_staging_root = root.join("stage");
+    options.remux_target_dir = root.join("out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -1456,12 +1461,17 @@ impl ExecutorFixture {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let _ = tokio::fs::write(path, bytes).await;
+        let location_value = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
         let outcome = self
             .cp
             .record_discovered_file(
                 DiscoveredFile {
                     location_kind: FileLocationKind::LocalPath,
-                    location_value: path.to_string_lossy().into_owned(),
+                    location_value,
                     content_hash: format!("blake3:{}", blake3::hash(bytes).to_hex()),
                     size_bytes: bytes.len().try_into().unwrap(),
                     observed_at: T0,

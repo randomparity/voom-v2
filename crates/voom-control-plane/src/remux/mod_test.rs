@@ -806,6 +806,7 @@ fn remux_input_with_operation_payload(
     seeded: (voom_core::FileVersionId, voom_core::FileLocationId),
     operation_payload: serde_json::Value,
 ) -> ExecuteRemuxInput {
+    let root = dir.path().canonicalize().unwrap();
     ExecuteRemuxInput {
         job_id: JobId(1),
         ticket_id: TicketId(2),
@@ -813,8 +814,8 @@ fn remux_input_with_operation_payload(
         source_file_version_id: seeded.0,
         source_location_id: Some(seeded.1),
         operation_payload,
-        staging_root: dir.path().join("stage"),
-        target_dir: dir.path().join("out"),
+        staging_root: root.join("stage"),
+        target_dir: root.join("out"),
     }
 }
 
@@ -823,11 +824,16 @@ async fn seed_source(
     path: &std::path::Path,
     bytes: &[u8],
 ) -> (voom_core::FileVersionId, voom_core::FileLocationId) {
+    let location_value = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string();
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {
                 location_kind: FileLocationKind::LocalPath,
-                location_value: path.display().to_string(),
+                location_value,
                 content_hash: blake3_checksum(bytes),
                 size_bytes: u64::try_from(bytes.len()).unwrap(),
                 observed_at: OffsetDateTime::UNIX_EPOCH,

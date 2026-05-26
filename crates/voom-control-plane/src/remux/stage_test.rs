@@ -7,13 +7,14 @@ use voom_core::{ErrorCode, LeaseId, TicketId};
 #[tokio::test]
 async fn staging_path_includes_ticket_and_lease() {
     let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
     let source = Path::new("/library/Movie.mp4");
 
-    let path = staging_path(root.path(), TicketId(10), LeaseId(20), source)
+    let path = staging_path(&root_path, TicketId(10), LeaseId(20), source)
         .await
         .unwrap();
 
-    assert!(path.starts_with(root.path().canonicalize().unwrap()));
+    assert!(path.starts_with(root_path));
     assert!(path.to_string_lossy().contains("ticket-10"));
     assert!(path.to_string_lossy().contains("lease-20"));
     assert!(path.ends_with("Movie.remux.mkv"));
@@ -22,8 +23,9 @@ async fn staging_path_includes_ticket_and_lease() {
 #[tokio::test]
 async fn staging_path_rejects_existing_output() {
     let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
     let path = staging_path(
-        root.path(),
+        &root_path,
         TicketId(10),
         LeaseId(20),
         Path::new("/library/Movie.mp4"),
@@ -33,7 +35,7 @@ async fn staging_path_rejects_existing_output() {
     tokio::fs::write(&path, b"stale").await.unwrap();
 
     let err = staging_path(
-        root.path(),
+        &root_path,
         TicketId(10),
         LeaseId(20),
         Path::new("/library/Movie.mp4"),
@@ -51,8 +53,9 @@ async fn staging_path_makes_lease_directory_private() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
     let path = staging_path(
-        root.path(),
+        &root_path,
         TicketId(10),
         LeaseId(20),
         Path::new("/library/Movie.mp4"),
@@ -75,10 +78,11 @@ async fn staging_path_makes_lease_directory_private() {
 #[tokio::test]
 async fn target_path_rejects_existing_output() {
     let root = tempfile::tempdir().unwrap();
-    let target = root.path().join("Movie.remux.mkv");
+    let root_path = root.path().canonicalize().unwrap();
+    let target = root_path.join("Movie.remux.mkv");
     tokio::fs::write(&target, b"existing").await.unwrap();
 
-    let err = target_path(root.path(), Path::new("/library/Movie.mp4"))
+    let err = target_path(&root_path, Path::new("/library/Movie.mp4"))
         .await
         .unwrap_err();
 
@@ -90,8 +94,9 @@ async fn target_path_rejects_existing_output() {
 #[tokio::test]
 async fn staging_path_rejects_dangling_symlink_output() {
     let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
     let path = staging_path(
-        root.path(),
+        &root_path,
         TicketId(10),
         LeaseId(20),
         Path::new("/library/Movie.mp4"),
@@ -100,10 +105,10 @@ async fn staging_path_rejects_dangling_symlink_output() {
     .unwrap();
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(root.path().join("missing"), &path).unwrap();
+    std::os::unix::fs::symlink(root_path.join("missing"), &path).unwrap();
 
     let err = staging_path(
-        root.path(),
+        &root_path,
         TicketId(10),
         LeaseId(20),
         Path::new("/library/Movie.mp4"),
@@ -119,8 +124,9 @@ async fn staging_path_rejects_dangling_symlink_output() {
 #[tokio::test]
 async fn staging_path_rejects_symlink_ancestor_before_creation() {
     let root = tempfile::tempdir().unwrap();
-    let real = root.path().join("real");
-    let linked = root.path().join("linked");
+    let root_path = root.path().canonicalize().unwrap();
+    let real = root_path.join("real");
+    let linked = root_path.join("linked");
     std::fs::create_dir(&real).unwrap();
     std::os::unix::fs::symlink(&real, &linked).unwrap();
 
@@ -142,9 +148,10 @@ async fn staging_path_rejects_symlink_ancestor_before_creation() {
 #[tokio::test]
 async fn staging_path_rejects_lexical_symlink_escape_after_missing_component() {
     let root = tempfile::tempdir().unwrap();
-    let real = root.path().join("real");
-    let linked = root.path().join("linked");
-    let path = root.path().join("missing/../linked/nested");
+    let root_path = root.path().canonicalize().unwrap();
+    let real = root_path.join("real");
+    let linked = root_path.join("linked");
+    let path = root_path.join("missing/../linked/nested");
     std::fs::create_dir(&real).unwrap();
     std::os::unix::fs::symlink(&real, &linked).unwrap();
 
@@ -160,17 +167,18 @@ async fn staging_path_rejects_lexical_symlink_escape_after_missing_component() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(err.to_string().contains("symlink"));
     assert!(!real.join("nested").exists());
-    assert!(!root.path().join("missing").exists());
+    assert!(!root_path.join("missing").exists());
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn target_path_rejects_dangling_symlink_output() {
     let root = tempfile::tempdir().unwrap();
-    let target = root.path().join("Movie.remux.mkv");
-    std::os::unix::fs::symlink(root.path().join("missing"), &target).unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let target = root_path.join("Movie.remux.mkv");
+    std::os::unix::fs::symlink(root_path.join("missing"), &target).unwrap();
 
-    let err = target_path(root.path(), Path::new("/library/Movie.mp4"))
+    let err = target_path(&root_path, Path::new("/library/Movie.mp4"))
         .await
         .unwrap_err();
 
@@ -182,8 +190,9 @@ async fn target_path_rejects_dangling_symlink_output() {
 #[tokio::test]
 async fn target_path_rejects_symlink_ancestor_before_creation() {
     let root = tempfile::tempdir().unwrap();
-    let real = root.path().join("real");
-    let linked = root.path().join("linked");
+    let root_path = root.path().canonicalize().unwrap();
+    let real = root_path.join("real");
+    let linked = root_path.join("linked");
     std::fs::create_dir(&real).unwrap();
     std::os::unix::fs::symlink(&real, &linked).unwrap();
 
@@ -200,9 +209,10 @@ async fn target_path_rejects_symlink_ancestor_before_creation() {
 #[tokio::test]
 async fn target_path_rejects_lexical_symlink_escape_after_missing_component() {
     let root = tempfile::tempdir().unwrap();
-    let real = root.path().join("real");
-    let linked = root.path().join("linked");
-    let path = root.path().join("missing/../linked/nested");
+    let root_path = root.path().canonicalize().unwrap();
+    let real = root_path.join("real");
+    let linked = root_path.join("linked");
+    let path = root_path.join("missing/../linked/nested");
     std::fs::create_dir(&real).unwrap();
     std::os::unix::fs::symlink(&real, &linked).unwrap();
 
@@ -213,5 +223,5 @@ async fn target_path_rejects_lexical_symlink_escape_after_missing_component() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(err.to_string().contains("symlink"));
     assert!(!real.join("nested").exists());
-    assert!(!root.path().join("missing").exists());
+    assert!(!root_path.join("missing").exists());
 }
