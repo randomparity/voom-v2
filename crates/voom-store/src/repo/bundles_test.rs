@@ -92,6 +92,33 @@ async fn add_member_then_remove_member() {
 }
 
 #[tokio::test]
+async fn external_audio_member_role_round_trips() {
+    let (bun, _id, mv_id, _a, b, _tmp) = fresh().await;
+    let bundle = bun
+        .create(NewAssetBundle {
+            media_variant_id: mv_id,
+            display_name: "Movie+ExtractedAudio".to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let member = bun
+        .add_member(NewBundleMember {
+            bundle_id: bundle.id,
+            file_asset_id: b,
+            role: BundleMemberRole::ExternalAudio,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(member.role, BundleMemberRole::ExternalAudio);
+    let members = bun.list_members(bundle.id).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, BundleMemberRole::ExternalAudio);
+}
+
+#[tokio::test]
 async fn add_member_rejects_duplicate_file_asset_membership() {
     let (bun, _id, mv_id, a, _b, _tmp) = fresh().await;
     let bundle1 = bun

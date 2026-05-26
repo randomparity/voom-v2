@@ -33,6 +33,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0010_remote_execution.sql",
     "0011_scheduler_decisions.sql",
     "0012_staged_artifact_commit.sql",
+    "0013_audio_sidecar_support.sql",
 ];
 
 fn workspace_root() -> PathBuf {

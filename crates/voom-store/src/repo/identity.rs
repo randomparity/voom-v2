@@ -134,8 +134,9 @@ impl ProducedBy {
         }
     }
 
-    /// True for the two producers that the SQL CHECK allows to leave
-    /// `produced_from_version_id` NULL.
+    /// True for producers that the identity repository allows to leave
+    /// `produced_from_version_id` NULL. Audio sidecar staged commits
+    /// use a narrower artifact repository helper instead.
     #[must_use]
     pub const fn allows_null_parent(self) -> bool {
         matches!(self, Self::Ingest | Self::ExternalObserved)
