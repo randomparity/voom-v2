@@ -1258,25 +1258,17 @@ async fn dispatch_control_plane_remux(
     options: &WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
     let _ = workflow_payload;
-    let operation_payload = payload
-        .get("remux")
-        .cloned()
-        .ok_or_else(|| VoomError::Config("remux workflow payload missing `remux`".to_owned()))?;
-    let input = ExecuteRemuxInput {
-        job_id: ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!("remux ticket {} missing job_id", ticket.id))
-        })?,
-        ticket_id: ticket.id,
-        lease_id,
-        source_file_version_id: voom_core::FileVersionId(required_u64(
-            payload,
-            "source_file_version_id",
-        )?),
-        source_location_id: optional_u64(payload, "source_location_id")
-            .map(voom_core::FileLocationId),
-        operation_payload,
-        staging_root: options.remux_staging_root.clone(),
-        target_dir: options.remux_target_dir.clone(),
+    let input = match remux_input_for_workflow_ticket(ticket, lease_id, payload, options) {
+        Ok(input) => input,
+        Err(source) => {
+            return fail_lease_and_return(
+                control,
+                lease_id,
+                failure_class_for_error(&source),
+                source,
+            )
+            .await;
+        }
     };
     let report = match execute_remux_with_dispatchers(
         control,
@@ -1306,6 +1298,34 @@ async fn dispatch_control_plane_remux(
     let result = serde_json::to_value(report)
         .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
     release_lease_with_retry(control, lease_id, result).await
+}
+
+fn remux_input_for_workflow_ticket(
+    ticket: &Ticket,
+    lease_id: LeaseId,
+    payload: &Value,
+    options: &WorkflowExecutorOptions,
+) -> Result<ExecuteRemuxInput, VoomError> {
+    let operation_payload = payload
+        .get("remux")
+        .cloned()
+        .ok_or_else(|| VoomError::Config("remux workflow payload missing `remux`".to_owned()))?;
+    Ok(ExecuteRemuxInput {
+        job_id: ticket.job_id.ok_or_else(|| {
+            VoomError::Config(format!("remux ticket {} missing job_id", ticket.id))
+        })?,
+        ticket_id: ticket.id,
+        lease_id,
+        source_file_version_id: voom_core::FileVersionId(required_u64(
+            payload,
+            "source_file_version_id",
+        )?),
+        source_location_id: optional_u64(payload, "source_location_id")
+            .map(voom_core::FileLocationId),
+        operation_payload,
+        staging_root: options.remux_staging_root.clone(),
+        target_dir: options.remux_target_dir.clone(),
+    })
 }
 
 async fn await_with_lease_heartbeats<F, T>(

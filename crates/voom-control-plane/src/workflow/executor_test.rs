@@ -18,6 +18,7 @@ use voom_core::{
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
+use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
@@ -658,6 +659,83 @@ async fn policy_remux_dispatch_uses_workflow_lease_and_idempotency_key() {
 
     assert_eq!(summary.operation_count(OperationKind::Remux), 1);
     assert_eq!(summary.failure_count, 0);
+}
+
+#[tokio::test]
+async fn invalid_policy_remux_payload_fails_acquired_lease() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let worker_id = fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let job = fixture
+        .cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let workflow_payload = WorkflowTicketPayload::new_for_test(
+        "workflow-1",
+        "plan-1",
+        "policy-node_remux",
+        "root",
+        OperationKind::Remux,
+        json!({
+            "operation": "remux",
+            "source_file_version_id": 11
+        }),
+    );
+    let ticket = fixture
+        .cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: "synthetic.workflow.operation.remux".to_owned(),
+            priority: 0,
+            payload: workflow_payload.to_ticket_payload().unwrap(),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    fixture
+        .cp
+        .mark_ready_if_unblocked(ticket.id, T0)
+        .await
+        .unwrap();
+    let lease = fixture
+        .cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id,
+            ttl: time::Duration::seconds(5),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let runtime = fixture.registry.get(worker_id).unwrap();
+
+    let err = super::dispatch_control_plane_remux(
+        &fixture.cp,
+        &runtime,
+        &ticket,
+        &workflow_payload,
+        lease.id,
+        &workflow_payload.rendered_payload,
+        &WorkflowExecutorOptions::for_tests(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(fixture.held_lease_count().await, 0);
+    assert_eq!(fixture.first_ticket_failed_class().await, "worker_crash");
 }
 
 #[tokio::test]
