@@ -304,6 +304,55 @@ async fn handler_rejects_wrong_selected_stream_kind_order() {
 }
 
 #[tokio::test]
+async fn handler_rejects_wrong_same_kind_selected_track() {
+    let fixture = remux_fixture_with_input_specs_and_output_specs(
+        vec![
+            input_track("video"),
+            input_track_with_language("audio", "eng"),
+            input_track_with_language("audio", "spa"),
+        ],
+        vec![
+            output_track("video", false),
+            output_track_with_language("audio", true, "spa"),
+        ],
+    )
+    .await;
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        err.to_string()
+            .contains("selected stream identity mismatch")
+    );
+}
+
+#[tokio::test]
+async fn handler_rejects_ambiguous_same_kind_selected_track_identity() {
+    let fixture = remux_fixture_with_input_specs_and_output_specs(
+        vec![
+            input_track("video"),
+            input_track("audio"),
+            input_track("audio"),
+        ],
+        vec![output_track("video", false), output_track("audio", true)],
+    )
+    .await;
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        err.to_string()
+            .contains("selected stream identity is ambiguous")
+    );
+}
+
+#[tokio::test]
 async fn handler_accepts_video_keep_when_track_order_omits_video() {
     let fixture = remux_fixture_with_output_specs(vec![
         output_track("audio", true),
@@ -718,20 +767,48 @@ printf output > "$out"
 #[derive(Debug, Clone, Copy)]
 struct InputTrackSpec {
     kind: &'static str,
+    language: Option<&'static str>,
 }
 
 fn input_track(kind: &'static str) -> InputTrackSpec {
-    InputTrackSpec { kind }
+    InputTrackSpec {
+        kind,
+        language: None,
+    }
+}
+
+fn input_track_with_language(kind: &'static str, language: &'static str) -> InputTrackSpec {
+    InputTrackSpec {
+        kind,
+        language: Some(language),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct OutputTrackSpec {
     kind: &'static str,
     default: bool,
+    language: Option<&'static str>,
 }
 
 fn output_track(kind: &'static str, default: bool) -> OutputTrackSpec {
-    OutputTrackSpec { kind, default }
+    OutputTrackSpec {
+        kind,
+        default,
+        language: None,
+    }
+}
+
+fn output_track_with_language(
+    kind: &'static str,
+    default: bool,
+    language: &'static str,
+) -> OutputTrackSpec {
+    OutputTrackSpec {
+        kind,
+        default,
+        language: Some(language),
+    }
 }
 
 fn fake_mkvmerge_body_with_output_specs(
@@ -743,12 +820,13 @@ fn fake_mkvmerge_body_with_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
+            let language = language_property(spec.language);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{language}}}}}"#,
                 index + 20,
                 spec.kind,
                 spec.default,
-                index + 1
+                index + 1,
             )
         })
         .collect::<Vec<_>>()
@@ -765,11 +843,12 @@ fn fake_mkvmerge_body_with_input_and_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
+            let language = language_property(spec.language);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"number":{}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"number":{}{language}}}}}"#,
                 index + 7,
                 spec.kind,
-                index + 1
+                index + 1,
             )
         })
         .collect::<Vec<_>>()
@@ -778,17 +857,24 @@ fn fake_mkvmerge_body_with_input_and_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
+            let language = language_property(spec.language);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{language}}}}}"#,
                 index + 20,
                 spec.kind,
                 spec.default,
-                index + 1
+                index + 1,
             )
         })
         .collect::<Vec<_>>()
         .join(",");
     fake_mkvmerge_body_from_input_and_output_tracks(&input_tracks, &output_tracks, output_container)
+}
+
+fn language_property(language: Option<&str>) -> String {
+    language.map_or_else(String::new, |language| {
+        format!(r#","language":"{language}""#)
+    })
 }
 
 fn fake_mkvmerge_body_from_input_and_output_tracks(

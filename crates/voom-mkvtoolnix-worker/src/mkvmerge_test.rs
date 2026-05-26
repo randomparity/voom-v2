@@ -23,6 +23,55 @@ fn maps_snapshot_provider_indexes_to_mkvmerge_track_ids() {
 }
 
 #[test]
+fn track_fingerprint_ignores_remux_changed_fields() {
+    let before = serde_json::json!({
+        "tracks": [
+            {"id": 12, "type": "audio", "properties": {
+                "default_track": false,
+                "language": "eng",
+                "number": 2
+            }}
+        ]
+    });
+    let after = serde_json::json!({
+        "tracks": [
+            {"id": 21, "type": "audio", "properties": {
+                "default_track": true,
+                "language": "eng",
+                "number": 1
+            }}
+        ]
+    });
+
+    let before = track_mapping_from_identify(&before)
+        .unwrap()
+        .track_for_provider_index(0)
+        .unwrap();
+    let after = track_mapping_from_identify(&after)
+        .unwrap()
+        .track_for_provider_index(0)
+        .unwrap();
+
+    assert_eq!(before.fingerprint, after.fingerprint);
+}
+
+#[test]
+fn track_fingerprint_distinguishes_same_kind_languages() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 12, "type": "audio", "properties": {"language": "eng", "number": 2}},
+            {"id": 13, "type": "audio", "properties": {"language": "spa", "number": 3}}
+        ]
+    });
+
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let english = mapping.track_for_provider_index(0).unwrap();
+    let spanish = mapping.track_for_provider_index(1).unwrap();
+
+    assert_ne!(english.fingerprint, spanish.fingerprint);
+}
+
+#[test]
 fn reads_real_mkvmerge_container_type_string() {
     let identify = serde_json::json!({
         "container": {

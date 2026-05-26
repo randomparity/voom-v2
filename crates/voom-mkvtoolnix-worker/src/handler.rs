@@ -491,17 +491,7 @@ fn validate_output_selection(
                     ),
                 )
             })?;
-        let output_track = u32::try_from(output_index)
-            .ok()
-            .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))
-            .ok_or_else(|| {
-                malformed_worker_result(
-                    "output_probe",
-                    format!(
-                        "selected stream mismatch: missing output track at index {output_index}"
-                    ),
-                )
-            })?;
+        let output_track = output_track_at(output_mapping, output_index)?;
         if output_track.kind != expected_track.kind {
             return Err(malformed_worker_result(
                 "output_probe",
@@ -511,6 +501,13 @@ fn validate_output_selection(
                 ),
             ));
         }
+        validate_output_track_identity(
+            input_mapping,
+            kept_stream,
+            output_index,
+            &expected_track,
+            &output_track,
+        )?;
     }
 
     let default_streams = request
@@ -552,6 +549,59 @@ fn validate_output_selection(
         ));
     }
     Ok(())
+}
+
+fn validate_output_track_identity(
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+    kept_stream: &RemuxStreamRef,
+    output_index: usize,
+    expected_track: &crate::mkvmerge::MkvmergeTrack,
+    output_track: &crate::mkvmerge::MkvmergeTrack,
+) -> Result<(), MkvtoolnixWorkerError> {
+    if input_mapping
+        .provider_indexes_for_kind(expected_track.kind)
+        .len()
+        <= 1
+    {
+        return Ok(());
+    }
+
+    let matching_input_indexes = input_mapping
+        .provider_indexes_matching_identity(expected_track.kind, &expected_track.fingerprint);
+    if matching_input_indexes.len() > 1 {
+        return Err(malformed_worker_result(
+            "output_probe",
+            format!(
+                "selected stream identity is ambiguous for {}: same-kind input provider indexes {matching_input_indexes:?} share the same observable fingerprint",
+                kept_stream.snapshot_stream_id
+            ),
+        ));
+    }
+    if output_track.fingerprint != expected_track.fingerprint {
+        return Err(malformed_worker_result(
+            "output_probe",
+            format!(
+                "selected stream identity mismatch: expected {} at output index {output_index}",
+                kept_stream.snapshot_stream_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn output_track_at(
+    output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+    output_index: usize,
+) -> Result<crate::mkvmerge::MkvmergeTrack, MkvtoolnixWorkerError> {
+    u32::try_from(output_index)
+        .ok()
+        .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))
+        .ok_or_else(|| {
+            malformed_worker_result(
+                "output_probe",
+                format!("selected stream mismatch: missing output track at index {output_index}"),
+            )
+        })
 }
 
 fn expected_output_stream_order<'a>(

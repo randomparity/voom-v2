@@ -10,7 +10,7 @@ use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
 
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MkvmergeTrackKind {
     Video,
     Audio,
@@ -41,11 +41,28 @@ impl MkvmergeTrackKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct MkvmergeTrackFingerprint(String);
+
+impl MkvmergeTrackFingerprint {
+    fn from_identify(track: &Value) -> Self {
+        let mut fields = Vec::new();
+        collect_fingerprint_fields(track, &mut fields);
+        fields.sort_unstable();
+        Self(fields.join("\n"))
+    }
+
+    fn synthetic(kind: MkvmergeTrackKind) -> Self {
+        Self(format!("type={kind:?}"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MkvmergeTrack {
     pub(crate) id: u64,
     pub(crate) kind: MkvmergeTrackKind,
     pub(crate) default: bool,
+    pub(crate) fingerprint: MkvmergeTrackFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +83,9 @@ impl MkvmergeTrackMapping {
                             id,
                             kind: MkvmergeTrackKind::Video,
                             default: false,
+                            fingerprint: MkvmergeTrackFingerprint::synthetic(
+                                MkvmergeTrackKind::Video,
+                            ),
                         },
                     )
                 })
@@ -81,7 +101,7 @@ impl MkvmergeTrackMapping {
     }
 
     pub(crate) fn track_for_provider_index(&self, provider_index: u32) -> Option<MkvmergeTrack> {
-        self.tracks_by_provider_index.get(&provider_index).copied()
+        self.tracks_by_provider_index.get(&provider_index).cloned()
     }
 
     pub(crate) fn track_count(&self) -> usize {
@@ -97,6 +117,13 @@ impl MkvmergeTrackMapping {
             .collect()
     }
 
+    pub(crate) fn provider_indexes_for_kind(&self, kind: MkvmergeTrackKind) -> Vec<u32> {
+        self.tracks_by_provider_index
+            .iter()
+            .filter_map(|(provider_index, track)| (track.kind == kind).then_some(*provider_index))
+            .collect()
+    }
+
     pub(crate) fn provider_index_matches_group(
         &self,
         provider_index: u32,
@@ -104,6 +131,19 @@ impl MkvmergeTrackMapping {
     ) -> bool {
         self.track_for_provider_index(provider_index)
             .is_some_and(|track| track.kind.matches_group(group))
+    }
+
+    pub(crate) fn provider_indexes_matching_identity(
+        &self,
+        kind: MkvmergeTrackKind,
+        fingerprint: &MkvmergeTrackFingerprint,
+    ) -> Vec<u32> {
+        self.tracks_by_provider_index
+            .iter()
+            .filter_map(|(provider_index, track)| {
+                (track.kind == kind && &track.fingerprint == fingerprint).then_some(*provider_index)
+            })
+            .collect()
     }
 }
 
@@ -132,12 +172,36 @@ pub fn track_mapping_from_identify(
         mapped.insert(
             u32::try_from(provider_index)
                 .map_err(|err| MkvtoolnixError::IdentifyFailed(err.to_string()))?,
-            MkvmergeTrack { id, kind, default },
+            MkvmergeTrack {
+                id,
+                kind,
+                default,
+                fingerprint: MkvmergeTrackFingerprint::from_identify(track),
+            },
         );
     }
     Ok(MkvmergeTrackMapping {
         tracks_by_provider_index: mapped,
     })
+}
+
+const TRACK_FINGERPRINT_FIELDS: &[&str] = &["type"];
+
+const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] = &["forced_track", "language", "track_name"];
+
+fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
+    for key in TRACK_FINGERPRINT_FIELDS {
+        if let Some(value) = track.get(*key) {
+            fields.push(format!("/{key}={value}"));
+        }
+    }
+    if let Some(properties) = track.get("properties").and_then(Value::as_object) {
+        for key in TRACK_PROPERTY_FINGERPRINT_FIELDS {
+            if let Some(value) = properties.get(*key) {
+                fields.push(format!("/properties/{key}={value}"));
+            }
+        }
+    }
 }
 
 pub fn build_mkvmerge_args(
