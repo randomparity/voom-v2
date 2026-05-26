@@ -12,7 +12,7 @@ use crate::{
     NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext, PlanningDiagnostic,
     PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
     SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
-    remux::{RemuxPlanningBlock, evaluate_filter, stream_facts},
+    remux::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts},
 };
 
 #[derive(Debug)]
@@ -998,17 +998,15 @@ fn remux_group_shape(
     operations: &[&CompiledOperation],
     target_container: &str,
 ) -> RemuxGroupShape {
-    if let Err(block) = evaluate_remux_track_operations(snapshot, operations) {
-        return remux_block_shape(block);
-    }
+    let track_selection_changed = match evaluate_remux_track_operations(snapshot, operations) {
+        Ok(changed) => changed,
+        Err(block) => return remux_block_shape(block),
+    };
 
-    let has_track_change = operations
-        .iter()
-        .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
     let Some(current_container) = snapshot.container.as_deref() else {
         return RemuxGroupShape::InsufficientFacts("snapshot container is unknown");
     };
-    if current_container.eq_ignore_ascii_case(target_container) && !has_track_change {
+    if current_container.eq_ignore_ascii_case(target_container) && !track_selection_changed {
         RemuxGroupShape::NoOp
     } else if current_container.eq_ignore_ascii_case(target_container) {
         RemuxGroupShape::TrackSelectionChange
@@ -1022,41 +1020,122 @@ fn remux_group_shape(
 fn evaluate_remux_track_operations(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
-) -> Result<(), RemuxPlanningBlock> {
+) -> Result<bool, RemuxPlanningBlock> {
     let has_track_operation = operations
         .iter()
         .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
-    if !has_track_operation {
-        return Ok(());
+    let has_stream_facts = has_remux_stream_fact_shape(snapshot);
+    if !has_track_operation && !has_stream_facts {
+        return Ok(false);
     }
 
     let facts = stream_facts(snapshot)?;
+    if !facts.iter().any(|stream| stream.kind == TrackTarget::Video) {
+        return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+    }
+    if !has_track_operation {
+        return Ok(false);
+    }
+
+    let mut changed = false;
     for operation in operations {
         match operation {
-            CompiledOperation::KeepTracks { target, filter }
-            | CompiledOperation::RemoveTracks { target, filter } => {
-                for stream in facts.iter().filter(|stream| stream.kind == *target) {
-                    if let Some(filter) = filter {
-                        evaluate_filter(filter, stream)?;
-                    }
-                }
+            CompiledOperation::KeepTracks { target, filter } => {
+                changed |= keep_tracks_changes(&facts, *target, filter.as_ref())?;
             }
-            CompiledOperation::SetDefaults { target, .. } => {
+            CompiledOperation::RemoveTracks { target, filter } => {
+                changed |= remove_tracks_changes(&facts, *target, filter.as_ref())?;
+            }
+            CompiledOperation::SetDefaults { target, strategy } => {
                 if !facts.iter().any(|stream| stream.kind == *target) {
                     return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
                 }
+                changed |= set_defaults_changes(&facts, *target, *strategy);
             }
             CompiledOperation::ReorderTracks { targets } => {
                 if targets.is_empty() {
                     return Err(RemuxPlanningBlock::UnsupportedMediaShape);
                 }
+                changed = true;
             }
             CompiledOperation::SetContainer { .. } => {}
             _ => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
         }
     }
 
-    Ok(())
+    Ok(changed)
+}
+
+fn keep_tracks_changes(
+    facts: &[SnapshotStreamFact],
+    target: TrackTarget,
+    filter: Option<&TrackFilter>,
+) -> Result<bool, RemuxPlanningBlock> {
+    let Some(filter) = filter else {
+        return Ok(false);
+    };
+    for stream in facts.iter().filter(|stream| stream.kind == target) {
+        if !evaluate_filter(filter, stream)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn remove_tracks_changes(
+    facts: &[SnapshotStreamFact],
+    target: TrackTarget,
+    filter: Option<&TrackFilter>,
+) -> Result<bool, RemuxPlanningBlock> {
+    let Some(filter) = filter else {
+        return Ok(facts.iter().any(|stream| stream.kind == target));
+    };
+    for stream in facts.iter().filter(|stream| stream.kind == target) {
+        if evaluate_filter(filter, stream)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn set_defaults_changes(
+    facts: &[SnapshotStreamFact],
+    target: TrackTarget,
+    strategy: DefaultStrategy,
+) -> bool {
+    let target_streams = facts
+        .iter()
+        .filter(|stream| stream.kind == target)
+        .collect::<Vec<_>>();
+    match strategy {
+        DefaultStrategy::First => target_streams
+            .iter()
+            .min_by_key(|stream| stream.provider_stream_index)
+            .is_none_or(|first| {
+                !first.is_default
+                    || target_streams.iter().any(|stream| {
+                        stream.provider_stream_index != first.provider_stream_index
+                            && stream.is_default
+                    })
+            }),
+        DefaultStrategy::None => target_streams.iter().any(|stream| stream.is_default),
+        DefaultStrategy::Preserve | DefaultStrategy::Best => true,
+    }
+}
+
+fn has_remux_stream_fact_shape(snapshot: &MediaSnapshotInput) -> bool {
+    let Some(streams) = snapshot
+        .stream_summary
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    streams.iter().all(|stream| {
+        stream.as_object().is_some_and(|stream| {
+            stream.contains_key("id") && stream.contains_key("index") && stream.contains_key("kind")
+        })
+    })
 }
 
 fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {

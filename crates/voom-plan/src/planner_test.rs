@@ -140,6 +140,58 @@ fn snapshot_with_streams(container: Option<&str>) -> MediaSnapshotInput {
     snapshot
 }
 
+fn snapshot_mkv_with_audio_languages_and_defaults(
+    languages_and_defaults: &[(&str, bool)],
+) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mkv"), None, Some(1));
+    let audio_streams = languages_and_defaults
+        .iter()
+        .enumerate()
+        .map(|(offset, (language, is_default))| {
+            let index = offset + 1;
+            serde_json::json!({
+                "id": format!("stream-{index}"),
+                "index": index,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": language,
+                "disposition": {
+                    "default": is_default
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut streams = vec![serde_json::json!({
+        "id": "stream-0",
+        "index": 0,
+        "kind": "video",
+        "codec_name": "h264"
+    })];
+    streams.extend(audio_streams);
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": streams
+    });
+    snapshot
+}
+
+fn snapshot_mp4_with_audio_only_stream_facts() -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mp4"), None, Some(0));
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 0,
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng"
+            }
+        ]
+    });
+    snapshot
+}
+
 fn snapshot_mp4_with_video_audio_subtitle() -> MediaSnapshotInput {
     snapshot_with_streams(Some("mp4"))
 }
@@ -367,6 +419,66 @@ fn defaults_best_blocks_instead_of_joining_executable_group() {
     assert!(plan.nodes.iter().any(
         |node| node.operation_kind == "set_defaults" && node.status == NodeStatus::Blocked
     ));
+}
+
+#[test]
+fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
+        target: TrackTarget::Audio,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned(), "spa".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::First,
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mp4_with_audio_only_stream_facts())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
 }
 
 #[test]
