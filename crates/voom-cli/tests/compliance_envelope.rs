@@ -264,6 +264,7 @@ async fn seed(fixture: FixtureName) -> Seeded {
 async fn seed_scanned_remux() -> Seeded {
     let tmp = NamedTempFile::new().unwrap();
     let dir = TempDir::new().unwrap();
+    let root = dir.path().canonicalize().unwrap();
     let url = sqlite_url_for(tmp.path());
     voom_store::init(&url).await.unwrap();
     let pool = voom_store::connect(&url).await.unwrap();
@@ -280,7 +281,7 @@ async fn seed_scanned_remux() -> Seeded {
         )
         .await
         .unwrap();
-    let source = dir.path().join("Movie.mp4");
+    let source = root.join("Movie.mp4");
     let source_bytes = b"source bytes";
     std::fs::write(&source, source_bytes).unwrap();
     let outcome = cp

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::path::Path;
 
 use serde_json::Value;
@@ -263,7 +264,7 @@ pub async fn run_mkvmerge_remux(
     let args = build_mkvmerge_args(request, mapping)?;
     let mut command = Command::new(&config.command);
     command.args(args).kill_on_drop(true);
-    let output = timeout(config.timeout, command.output())
+    let output = timeout(config.timeout, command_output(&mut command))
         .await
         .map_err(|_| MkvtoolnixError::MkvmergeFailed("mkvmerge timed out".to_owned()))?
         .map_err(|err| MkvtoolnixError::MkvmergeFailed(err.to_string()))?;
@@ -426,7 +427,7 @@ async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, Mk
         .arg("json")
         .arg(path)
         .kill_on_drop(true);
-    let output = timeout(config.timeout, command.output())
+    let output = timeout(config.timeout, command_output(&mut command))
         .await
         .map_err(|_| MkvtoolnixError::IdentifyFailed("mkvmerge identify timed out".to_owned()))?
         .map_err(|err| MkvtoolnixError::IdentifyFailed(err.to_string()))?;
@@ -447,6 +448,22 @@ fn command_error(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
+    for attempt in 0..3 {
+        match command.output().await {
+            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+    command.output().await
+}
+
+fn is_text_file_busy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(26)
 }
 
 #[cfg(test)]

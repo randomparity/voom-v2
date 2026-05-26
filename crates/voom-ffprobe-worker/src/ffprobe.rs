@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -136,7 +137,7 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
         .arg(path)
         .kill_on_drop(true);
 
-    let output = timeout(FFPROBE_TIMEOUT, command.output())
+    let output = timeout(FFPROBE_TIMEOUT, command_output(&mut command))
         .await
         .map_err(|_| {
             external_system_unavailable(
@@ -233,12 +234,12 @@ async fn probe_file(
 
 fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
     let started = std::time::Instant::now();
-    let mut child = std::process::Command::new(ffprobe_bin)
+    let mut command = std::process::Command::new(ffprobe_bin);
+    command
         .arg("-version")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(std::process::Stdio::null());
+    let mut child = spawn_with_retry(&mut command).ok()?;
     loop {
         if let Some(status) = child.try_wait().ok()? {
             if !status.success() {
@@ -255,6 +256,34 @@ fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
+}
+
+async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
+    for attempt in 0..3 {
+        match command.output().await {
+            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+    command.output().await
+}
+
+fn spawn_with_retry(command: &mut std::process::Command) -> io::Result<std::process::Child> {
+    for attempt in 0..3 {
+        match command.spawn() {
+            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    command.spawn()
+}
+
+fn is_text_file_busy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(26)
 }
 
 fn parse_ffprobe_version(line: &str) -> Option<String> {
