@@ -2,17 +2,20 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
+use voom_core::{LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, PercentBps, ProgressFrame,
-    REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxResult,
-    RemuxSelection, WorkerCredentials, is_supported_remux_container,
+    ClientHandle, OperationKind, PercentBps, REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput,
+    RemuxOutput, RemuxRequest, RemuxResult, RemuxSelection, WorkerCredentials,
+    is_supported_remux_container,
 };
 
 use super::RemuxDispatcher;
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
-use crate::artifact::worker::{BundledWorkerProcess, WorkerCommand};
+use crate::artifact::worker::{
+    BundledWorkerProcess, WorkerCommand, WorkerOperationDispatch, WorkerProgressHandler,
+    WorkerStreamLabels, bundled_worker_command_from, dispatch_operation_with_client,
+};
 
 const MKVTOOLNIX_WORKER_BIN_ENV: &str = "VOOM_MKVTOOLNIX_WORKER_BIN";
 const DISPATCH_IDLE_DEADLINE_MS: u32 = 30_000;
@@ -217,112 +220,68 @@ pub(crate) async fn dispatch_remux_with_client_context_and_progress<C>(
 where
     C: ClientHandle + ?Sized,
 {
-    let payload = serde_json::to_value(remux)
-        .map_err(|err| VoomError::Internal(format!("remux payload encode: {err}")))?;
-    let request = OperationRequest {
-        operation: OperationKind::Remux,
-        lease_id,
-        payload,
-        heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
-        progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
-    };
-    let dispatch = client
-        .dispatch(credentials, idempotency_key, request)
-        .await
-        .map_err(|err| VoomError::WorkerCrash(format!("remux dispatch failed: {err}")))?;
-    consume_remux_stream(dispatch, progress).await
-}
-
-async fn consume_remux_stream(
-    mut dispatch: voom_worker_protocol::DispatchStream,
-    progress: &mut dyn RemuxProgressSink,
-) -> Result<RemuxResult, VoomError> {
-    loop {
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(u64::from(DISPATCH_IDLE_DEADLINE_MS)),
-            dispatch.frames.next_frame(),
-        )
-        .await
-        .map_err(|_| VoomError::WorkerTimeout("remux worker progress idle timeout".to_owned()))?
-        .map_err(|err| VoomError::MalformedWorkerResult(format!("remux stream: {err}")))?;
-        match outcome {
-            NdjsonOutcome::Frame(ProgressFrame::Progress {
-                percent, message, ..
-            }) => {
-                progress.record_remux_progress(percent, message).await?;
-            }
-            NdjsonOutcome::Frame(_) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    "remux worker sent terminal frame as non-terminal progress".to_owned(),
-                ));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
-                return serde_json::from_value::<RemuxResult>(payload).map_err(|err| {
-                    VoomError::MalformedWorkerResult(format!("remux result decode: {err}"))
-                });
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Error {
-                class,
-                code,
-                message,
-                ..
-            }) => {
-                return Err(worker_error(class, code, message));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    "progress frame cannot terminate remux stream".to_owned(),
-                ));
-            }
-            NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
-                return Err(VoomError::WorkerCrash(
-                    "remux worker stream ended before terminal frame".to_owned(),
-                ));
-            }
-        }
-    }
+    let mut progress = RemuxWorkerProgressHandler { inner: progress };
+    dispatch_operation_with_client(
+        client,
+        credentials,
+        WorkerOperationDispatch {
+            idempotency_key,
+            operation: OperationKind::Remux,
+            lease_id,
+            payload: remux,
+            heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
+            progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
+            labels: remux_stream_labels(),
+        },
+        &mut progress,
+    )
+    .await
 }
 
 fn bundled_mkvtoolnix_worker_command() -> WorkerCommand {
-    if let Some(configured) = std::env::var_os(MKVTOOLNIX_WORKER_BIN_ENV) {
-        return WorkerCommand::new(configured);
-    }
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(exe_dir) = current_exe.parent()
-    {
-        for worker_dir in worker_search_dirs(exe_dir) {
-            let sibling = worker_dir.join(format!(
-                "voom-mkvtoolnix-worker{}",
-                std::env::consts::EXE_SUFFIX
-            ));
-            if sibling.is_file() {
-                return WorkerCommand::new(sibling);
-            }
-        }
-    }
-    WorkerCommand::new("voom-mkvtoolnix-worker")
+    bundled_mkvtoolnix_worker_command_from(
+        std::env::var_os(MKVTOOLNIX_WORKER_BIN_ENV),
+        std::env::current_exe(),
+    )
 }
 
-fn worker_search_dirs(exe_dir: &Path) -> Vec<std::path::PathBuf> {
-    if exe_dir.file_name().is_some_and(|name| name == "deps")
-        && let Some(parent) = exe_dir.parent()
-    {
-        return vec![parent.to_path_buf(), exe_dir.to_path_buf()];
-    }
-    vec![exe_dir.to_path_buf()]
+fn bundled_mkvtoolnix_worker_command_from(
+    configured_bin: Option<std::ffi::OsString>,
+    current_exe: std::io::Result<std::path::PathBuf>,
+) -> WorkerCommand {
+    bundled_worker_command_from(
+        configured_bin,
+        current_exe,
+        "voom-mkvtoolnix-worker",
+        |command, _worker_dir| command,
+    )
 }
 
-fn worker_error(class: FailureClass, code: ErrorCode, message: String) -> VoomError {
-    match code {
-        ErrorCode::ArtifactUnavailable => VoomError::ArtifactUnavailable(message),
-        ErrorCode::ArtifactChecksumMismatch => VoomError::ArtifactChecksumMismatch(message),
-        ErrorCode::MalformedWorkerResult => VoomError::MalformedWorkerResult(message),
-        ErrorCode::WorkerTimeout => VoomError::WorkerTimeout(message),
-        ErrorCode::WorkerCrash => VoomError::WorkerCrash(message),
-        _ if class == FailureClass::MalformedWorkerResult => {
-            VoomError::MalformedWorkerResult(message)
-        }
-        _ => VoomError::WorkerCrash(message),
+struct RemuxWorkerProgressHandler<'a> {
+    inner: &'a mut dyn RemuxProgressSink,
+}
+
+#[async_trait]
+impl WorkerProgressHandler for RemuxWorkerProgressHandler<'_> {
+    async fn record_progress(
+        &mut self,
+        percent: Option<PercentBps>,
+        message: Option<String>,
+    ) -> Result<(), VoomError> {
+        self.inner.record_remux_progress(percent, message).await
+    }
+}
+
+const fn remux_stream_labels() -> WorkerStreamLabels {
+    WorkerStreamLabels {
+        payload_encode: "remux payload encode",
+        dispatch_failed: "remux dispatch failed",
+        progress_idle_timeout: "remux worker progress idle timeout",
+        stream_protocol: "remux stream",
+        terminal_frame_as_progress: "remux worker sent terminal frame as non-terminal progress",
+        progress_terminal: "progress frame cannot terminate remux stream",
+        stream_ended: "remux worker stream ended before terminal frame",
+        result_decode: "remux result decode",
     }
 }
 
