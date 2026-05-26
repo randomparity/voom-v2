@@ -192,8 +192,37 @@ async fn execute_revalidates_missing_source_before_worker_dispatch() {
     .await
     .unwrap_err();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(err.error_code(), ErrorCode::ArtifactUnavailable);
     assert_eq!(dispatcher.call_count(), 0);
+}
+
+#[tokio::test]
+async fn execute_sends_canonical_staging_root_to_worker() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+    let staging_root = dir.path().join("stage-parent/stage/../stage");
+    let canonical_staging_root = dir.path().join("stage-parent/stage");
+    let dispatcher = CaptureStagingRootRemuxDispatcher::default();
+    let mut input = remux_input(&dir, seeded, source_media_snapshot_id);
+    input.staging_root = staging_root;
+
+    execute_remux_with_dispatchers(&cp, input, &dispatcher, &FakeVerifyDispatcher)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        dispatcher.captured_staging_root(),
+        Some(
+            canonical_staging_root
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        )
+    );
 }
 
 #[tokio::test]
@@ -292,6 +321,29 @@ struct CountingRemuxDispatcher {
 impl CountingRemuxDispatcher {
     fn call_count(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[derive(Debug, Default)]
+struct CaptureStagingRootRemuxDispatcher {
+    staging_root: std::sync::Mutex<Option<String>>,
+}
+
+impl CaptureStagingRootRemuxDispatcher {
+    fn captured_staging_root(&self) -> Option<String> {
+        self.staging_root.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RemuxDispatcher for CaptureStagingRootRemuxDispatcher {
+    async fn dispatch_remux(
+        &self,
+        request: RemuxRequest,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        *self.staging_root.lock().unwrap() = Some(request.output.staging_root.clone());
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
     }
 }
 

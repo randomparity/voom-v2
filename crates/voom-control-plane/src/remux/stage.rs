@@ -1,6 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
 
 use voom_core::{LeaseId, TicketId, VoomError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedStagingPath {
+    pub canonical_root: PathBuf,
+    pub path: PathBuf,
+}
 
 pub async fn staging_path(
     staging_root: &Path,
@@ -8,6 +15,20 @@ pub async fn staging_path(
     lease_id: LeaseId,
     source_path: &Path,
 ) -> Result<PathBuf, VoomError> {
+    Ok(
+        prepare_staging_path(staging_root, ticket_id, lease_id, source_path)
+            .await?
+            .path,
+    )
+}
+
+pub async fn prepare_staging_path(
+    staging_root: &Path,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+    source_path: &Path,
+) -> Result<PreparedStagingPath, VoomError> {
+    reject_symlink_components(staging_root, "remux staging root").await?;
     tokio::fs::create_dir_all(staging_root)
         .await
         .map_err(|err| {
@@ -24,6 +45,7 @@ pub async fn staging_path(
         ))
     })?;
     let ticket_parent = canonical_root.join(format!("ticket-{}", ticket_id.0));
+    reject_symlink_components(&ticket_parent, "remux staging ticket parent").await?;
     tokio::fs::create_dir_all(&ticket_parent)
         .await
         .map_err(|err| {
@@ -34,6 +56,7 @@ pub async fn staging_path(
         })?;
     reject_symlink_dir(&ticket_parent, "remux staging ticket parent").await?;
     let parent = ticket_parent.join(format!("lease-{}", lease_id.0));
+    reject_symlink_components(&parent, "remux staging parent").await?;
     tokio::fs::create_dir_all(&parent).await.map_err(|err| {
         VoomError::Config(format!(
             "create remux staging parent {}: {err}",
@@ -56,10 +79,14 @@ pub async fn staging_path(
     }
     let path = canonical_parent.join(output_file_name(source_path));
     reject_existing_file(&path, "staging path").await?;
-    Ok(path)
+    Ok(PreparedStagingPath {
+        canonical_root,
+        path,
+    })
 }
 
 pub async fn target_path(target_dir: &Path, source_path: &Path) -> Result<PathBuf, VoomError> {
+    reject_symlink_components(target_dir, "remux target dir").await?;
     tokio::fs::create_dir_all(target_dir).await.map_err(|err| {
         VoomError::Config(format!(
             "create remux target dir {}: {err}",
@@ -115,6 +142,37 @@ async fn reject_symlink_dir(path: &Path, label: &str) -> Result<(), VoomError> {
             "{label} must be a non-symlink directory: {}",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+async fn reject_symlink_components(path: &Path, label: &str) -> Result<(), VoomError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir
+            | Component::Normal(_) => current.push(component.as_os_str()),
+        }
+
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(VoomError::Config(format!(
+                    "{label} must not traverse a symlink: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => break,
+            Err(err) => {
+                return Err(VoomError::Config(format!(
+                    "inspect {label} component {}: {err}",
+                    current.display()
+                )));
+            }
+        }
     }
     Ok(())
 }

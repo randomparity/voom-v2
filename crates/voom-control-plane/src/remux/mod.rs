@@ -93,13 +93,14 @@ pub(crate) async fn execute_remux_with_dispatchers(
             .await?;
     let selection =
         selection::selection_from_payload_and_snapshot(&input.operation_payload, &snapshot)?;
-    let staging_path = stage::staging_path(
+    let staging = stage::prepare_staging_path(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
         std::path::Path::new(&selected.location.value),
     )
     .await?;
+    let staging_path = staging.path.clone();
     let target_path = stage::target_path(
         &input.target_dir,
         std::path::Path::new(&selected.location.value),
@@ -108,7 +109,12 @@ pub(crate) async fn execute_remux_with_dispatchers(
 
     events::record_started(cp, &input, selected.location.id, &selection, &staging_path)?;
     dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::request_for(&selected, &selection, &input.staging_root, &staging_path)?;
+    let request = dispatch::request_for(
+        &selected,
+        &selection,
+        &staging.canonical_root,
+        &staging_path,
+    )?;
     let result = remux.dispatch_remux(request).await?;
     dispatch::validate_result(&selected, &selection, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;

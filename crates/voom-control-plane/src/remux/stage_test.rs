@@ -90,6 +90,29 @@ async fn staging_path_rejects_dangling_symlink_output() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn staging_path_rejects_symlink_ancestor_before_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    let linked = root.path().join("linked");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    let err = staging_path(
+        &linked.join("nested"),
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+    assert!(!real.join("nested").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn target_path_rejects_dangling_symlink_output() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("Movie.remux.mkv");
@@ -101,4 +124,22 @@ async fn target_path_rejects_dangling_symlink_output() {
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(err.to_string().contains("target path already exists"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn target_path_rejects_symlink_ancestor_before_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    let linked = root.path().join("linked");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    let err = target_path(&linked.join("nested"), Path::new("/library/Movie.mp4"))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+    assert!(!real.join("nested").exists());
 }
