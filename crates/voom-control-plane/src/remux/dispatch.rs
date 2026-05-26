@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
+use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxResult,
@@ -153,17 +153,37 @@ pub(crate) async fn dispatch_remux_with_client<C>(
 where
     C: ClientHandle + ?Sized,
 {
+    dispatch_remux_with_client_context(
+        client,
+        credentials,
+        "remux-control-plane",
+        LeaseId(0),
+        remux,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_remux_with_client_context<C>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    idempotency_key: &str,
+    lease_id: LeaseId,
+    remux: RemuxRequest,
+) -> Result<RemuxResult, VoomError>
+where
+    C: ClientHandle + ?Sized,
+{
     let payload = serde_json::to_value(remux)
         .map_err(|err| VoomError::Internal(format!("remux payload encode: {err}")))?;
     let request = OperationRequest {
         operation: OperationKind::Remux,
-        lease_id: voom_core::LeaseId(0),
+        lease_id,
         payload,
         heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
         progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
     };
     let dispatch = client
-        .dispatch(credentials, "remux-control-plane", request)
+        .dispatch(credentials, idempotency_key, request)
         .await
         .map_err(|err| VoomError::WorkerCrash(format!("remux dispatch failed: {err}")))?;
     consume_remux_stream(dispatch).await

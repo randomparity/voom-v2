@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    ErrorCode, FailureClass, FileVersionId, JobId, MediaSnapshotId, SystemClock, WorkerId,
+    ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
@@ -615,6 +615,39 @@ async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
             OperationKind::Remux,
             1,
             FakeBehavior::RequireRemuxProtocolPayload,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.remux_staging_root = dir.path().join("stage");
+    options.remux_target_dir = dir.path().join("out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::Remux), 1);
+    assert_eq!(summary.failure_count, 0);
+}
+
+#[tokio::test]
+async fn policy_remux_dispatch_uses_workflow_lease_and_idempotency_key() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_remux_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "remux-worker",
+            OperationKind::Remux,
+            1,
+            FakeBehavior::RequireCorrelatedRemuxDispatch,
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
@@ -1269,6 +1302,7 @@ enum FakeBehavior {
     DispatchError,
     RequireTranscodeProtocolPayload,
     RequireRemuxProtocolPayload,
+    RequireCorrelatedRemuxDispatch,
     RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
     SlowTranscodeResult,
     MalformedTranscodeResult,
@@ -1301,6 +1335,7 @@ impl ClientHandle for FakeClient {
         if matches!(
             self.behavior,
             FakeBehavior::RequireRemuxProtocolPayload
+                | FakeBehavior::RequireCorrelatedRemuxDispatch
                 | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
         ) {
             serde_json::from_value::<RemuxRequest>(request.payload.clone()).map_err(|err| {
@@ -1308,6 +1343,23 @@ impl ClientHandle for FakeClient {
                     detail: format!("remux payload must match worker protocol: {err}"),
                 }
             })?;
+        }
+        if matches!(self.behavior, FakeBehavior::RequireCorrelatedRemuxDispatch) {
+            if request.lease_id != LeaseId(1) {
+                return Err(ProtocolError::InvalidPayload {
+                    detail: format!(
+                        "remux lease id must be workflow lease 1, got {:?}",
+                        request.lease_id
+                    ),
+                });
+            }
+            if _idempotency_key != "ticket-1-lease-1" {
+                return Err(ProtocolError::InvalidPayload {
+                    detail: format!(
+                        "remux idempotency key must be ticket-1-lease-1, got {_idempotency_key}"
+                    ),
+                });
+            }
         }
         if matches!(
             self.behavior,
@@ -1350,6 +1402,7 @@ async fn write_behavior(
         FakeBehavior::Success
         | FakeBehavior::RequireTranscodeProtocolPayload
         | FakeBehavior::RequireRemuxProtocolPayload
+        | FakeBehavior::RequireCorrelatedRemuxDispatch
         | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
         | FakeBehavior::SlowTranscodeResult => {
             let delay = match behavior {
@@ -1362,7 +1415,11 @@ async fn write_behavior(
                     transcode_result_payload_for_request(&request).await
                 }
                 OperationKind::Remux
-                    if matches!(behavior, FakeBehavior::RequireRemuxProtocolPayload) =>
+                    if matches!(
+                        behavior,
+                        FakeBehavior::RequireRemuxProtocolPayload
+                            | FakeBehavior::RequireCorrelatedRemuxDispatch
+                    ) =>
                 {
                     remux_result_payload_for_request(&request).await
                 }

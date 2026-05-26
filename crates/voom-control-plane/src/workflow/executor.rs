@@ -1223,6 +1223,7 @@ async fn dispatch_control_plane_transcode(
 struct RuntimeRemuxDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
     control: &'a ControlPlane,
+    ticket_id: TicketId,
     lease_id: LeaseId,
     options: &'a WorkflowExecutorOptions,
 }
@@ -1235,9 +1236,11 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
             self.lease_id,
             OperationKind::Remux,
             self.options,
-            crate::remux::dispatch::dispatch_remux_with_client(
+            crate::remux::dispatch::dispatch_remux_with_client_context(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
+                &format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0),
+                self.lease_id,
                 request,
             ),
         )
@@ -1281,6 +1284,7 @@ async fn dispatch_control_plane_remux(
         &RuntimeRemuxDispatcher {
             runtime,
             control,
+            ticket_id: ticket.id,
             lease_id,
             options,
         },
