@@ -178,6 +178,55 @@ fn default_verify_worker_command_searches_profile_dir_from_test_deps_dir() {
     assert_eq!(command.env, Vec::<(OsString, OsString)>::new());
 }
 
+#[test]
+fn bundled_worker_command_from_discovers_named_worker_in_profile_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let deps_dir = dir.path().join("deps");
+    std::fs::create_dir(&deps_dir).unwrap();
+    let current_exe = deps_dir.join("artifact_worker_test");
+    let worker = dir.path().join("voom-example-worker");
+    std::fs::write(&worker, b"").unwrap();
+
+    let command = bundled_worker_command_from(
+        None,
+        Ok(current_exe),
+        "voom-example-worker",
+        |command, _worker_dir| command,
+    );
+
+    assert_eq!(command.program, worker.as_os_str());
+    assert_eq!(command.env, Vec::<(OsString, OsString)>::new());
+}
+
+#[test]
+fn bundled_worker_command_from_allows_sibling_tool_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let current_exe = dir.path().join("voom");
+    let worker = dir.path().join("voom-example-worker");
+    let tool = dir.path().join("example-tool");
+    std::fs::write(&worker, b"").unwrap();
+    std::fs::write(&tool, b"").unwrap();
+
+    let command = bundled_worker_command_from(
+        None,
+        Ok(current_exe),
+        "voom-example-worker",
+        |command, worker_dir| {
+            let sibling_tool = worker_dir.join("example-tool");
+            if sibling_tool.is_file() {
+                return command.env("VOOM_EXAMPLE_TOOL", sibling_tool);
+            }
+            command
+        },
+    );
+
+    assert_eq!(command.program, worker.as_os_str());
+    assert_eq!(
+        command.env,
+        vec![(OsString::from("VOOM_EXAMPLE_TOOL"), tool.into_os_string())]
+    );
+}
+
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {
     let mut wrong_credentials = worker.credentials.clone();
     wrong_credentials.worker_id = WorkerId(worker.worker_id.0 + 1);

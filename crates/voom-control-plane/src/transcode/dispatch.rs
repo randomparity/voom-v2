@@ -2,19 +2,21 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
+use voom_core::{LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
-    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CONTAINER, TranscodeVideoExpectedFacts,
-    TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest,
-    TranscodeVideoResult, WorkerCredentials, is_supported_transcode_video_codec,
-    is_supported_transcode_video_container,
+    ClientHandle, OperationKind, TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CONTAINER,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest, TranscodeVideoResult, WorkerCredentials,
+    is_supported_transcode_video_codec, is_supported_transcode_video_container,
 };
 
 use super::TranscodeVideoDispatcher;
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
-use crate::artifact::worker::{BundledWorkerProcess, WorkerCommand};
+use crate::artifact::worker::{
+    BundledWorkerProcess, NoopWorkerProgressHandler, WorkerCommand, WorkerOperationDispatch,
+    WorkerStreamLabels, bundled_worker_command_from, dispatch_operation_with_client,
+};
 
 const FFMPEG_WORKER_BIN_ENV: &str = "VOOM_FFMPEG_WORKER_BIN";
 const DISPATCH_IDLE_DEADLINE_MS: u32 = 30_000;
@@ -118,108 +120,56 @@ pub(crate) async fn dispatch_transcode_video_with_client<C>(
 where
     C: ClientHandle + ?Sized,
 {
-    let payload = serde_json::to_value(transcode)
-        .map_err(|err| VoomError::Internal(format!("transcode_video payload encode: {err}")))?;
-    let request = OperationRequest {
-        operation: OperationKind::TranscodeVideo,
-        lease_id: voom_core::LeaseId(0),
-        payload,
-        heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
-        progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
-    };
-    let dispatch = client
-        .dispatch(credentials, "transcode-video-control-plane", request)
-        .await
-        .map_err(|err| VoomError::WorkerCrash(format!("transcode dispatch failed: {err}")))?;
-    consume_transcode_stream(dispatch).await
-}
-
-async fn consume_transcode_stream(
-    mut dispatch: voom_worker_protocol::DispatchStream,
-) -> Result<TranscodeVideoResult, VoomError> {
-    loop {
-        let outcome = tokio::time::timeout(
-            Duration::from_millis(u64::from(DISPATCH_IDLE_DEADLINE_MS)),
-            dispatch.frames.next_frame(),
-        )
-        .await
-        .map_err(|_| VoomError::WorkerTimeout("transcode worker progress idle timeout".to_owned()))?
-        .map_err(|err| VoomError::MalformedWorkerResult(format!("transcode stream: {err}")))?;
-        match outcome {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {}
-            NdjsonOutcome::Frame(_) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    "transcode worker sent terminal frame as non-terminal progress".to_owned(),
-                ));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
-                return serde_json::from_value::<TranscodeVideoResult>(payload).map_err(|err| {
-                    VoomError::MalformedWorkerResult(format!(
-                        "transcode_video result decode: {err}"
-                    ))
-                });
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Error {
-                class,
-                code,
-                message,
-                ..
-            }) => {
-                return Err(worker_error(class, code, message));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    "progress frame cannot terminate transcode stream".to_owned(),
-                ));
-            }
-            NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
-                return Err(VoomError::WorkerCrash(
-                    "transcode worker stream ended before terminal frame".to_owned(),
-                ));
-            }
-        }
-    }
+    let mut progress = NoopWorkerProgressHandler;
+    dispatch_operation_with_client(
+        client,
+        credentials,
+        WorkerOperationDispatch {
+            idempotency_key: "transcode-video-control-plane",
+            operation: OperationKind::TranscodeVideo,
+            lease_id: LeaseId(0),
+            payload: transcode,
+            heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
+            progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
+            labels: transcode_stream_labels(),
+        },
+        &mut progress,
+    )
+    .await
 }
 
 fn bundled_ffmpeg_worker_command() -> WorkerCommand {
-    if let Some(configured) = std::env::var_os(FFMPEG_WORKER_BIN_ENV) {
-        return WorkerCommand::new(configured);
-    }
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(exe_dir) = current_exe.parent()
-    {
-        for worker_dir in worker_search_dirs(exe_dir) {
-            let sibling = worker_dir.join(format!(
-                "voom-ffmpeg-worker{}",
-                std::env::consts::EXE_SUFFIX
-            ));
-            if sibling.is_file() {
-                return WorkerCommand::new(sibling);
-            }
-        }
-    }
-    WorkerCommand::new("voom-ffmpeg-worker")
+    bundled_ffmpeg_worker_command_from(
+        std::env::var_os(FFMPEG_WORKER_BIN_ENV),
+        std::env::current_exe(),
+    )
 }
 
-fn worker_search_dirs(exe_dir: &Path) -> Vec<std::path::PathBuf> {
-    if exe_dir.file_name().is_some_and(|name| name == "deps")
-        && let Some(parent) = exe_dir.parent()
-    {
-        return vec![parent.to_path_buf(), exe_dir.to_path_buf()];
-    }
-    vec![exe_dir.to_path_buf()]
+fn bundled_ffmpeg_worker_command_from(
+    configured_bin: Option<std::ffi::OsString>,
+    current_exe: std::io::Result<std::path::PathBuf>,
+) -> WorkerCommand {
+    bundled_worker_command_from(
+        configured_bin,
+        current_exe,
+        "voom-ffmpeg-worker",
+        |command, _worker_dir| command,
+    )
 }
 
-fn worker_error(class: FailureClass, code: ErrorCode, message: String) -> VoomError {
-    match code {
-        ErrorCode::ArtifactUnavailable => VoomError::ArtifactUnavailable(message),
-        ErrorCode::ArtifactChecksumMismatch => VoomError::ArtifactChecksumMismatch(message),
-        ErrorCode::MalformedWorkerResult => VoomError::MalformedWorkerResult(message),
-        ErrorCode::WorkerTimeout => VoomError::WorkerTimeout(message),
-        ErrorCode::WorkerCrash => VoomError::WorkerCrash(message),
-        _ if class == FailureClass::MalformedWorkerResult => {
-            VoomError::MalformedWorkerResult(message)
-        }
-        _ => VoomError::WorkerCrash(message),
+const fn transcode_stream_labels() -> WorkerStreamLabels {
+    WorkerStreamLabels {
+        payload_encode: "transcode_video payload encode",
+        dispatch_failed: "transcode dispatch failed",
+        progress_idle_timeout: "transcode worker progress idle timeout",
+        stream_protocol: "transcode stream",
+        terminal_frame_as_progress: "transcode worker sent terminal frame as non-terminal progress",
+        progress_terminal: "progress frame cannot terminate transcode stream",
+        stream_ended: "transcode worker stream ended before terminal frame",
+        result_decode: "transcode_video result decode",
     }
 }
+
+#[cfg(test)]
+#[path = "dispatch_test.rs"]
+mod tests;

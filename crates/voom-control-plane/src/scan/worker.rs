@@ -1,4 +1,4 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,6 +17,8 @@ use voom_worker_protocol::{
     ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest,
     ProbeFileResult, ProgressFrame, ProtocolError, WorkerCredentials,
 };
+
+use crate::artifact::worker::{WorkerCommand, bundled_worker_command_from};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -107,36 +109,6 @@ impl Display for ScanWorkerError {
 }
 
 impl std::error::Error for ScanWorkerError {}
-
-#[derive(Debug, Clone)]
-pub struct WorkerCommand {
-    program: OsString,
-    args: Vec<OsString>,
-    env: Vec<(OsString, OsString)>,
-}
-
-impl WorkerCommand {
-    pub fn new(program: impl AsRef<OsStr>) -> Self {
-        Self {
-            program: program.as_ref().to_os_string(),
-            args: Vec::new(),
-            env: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
-        self.args.push(arg.as_ref().to_os_string());
-        self
-    }
-
-    #[must_use]
-    pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
-        self.env
-            .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
-        self
-    }
-}
 
 pub struct BundledWorkerProcess {
     pub worker_id: WorkerId,
@@ -369,38 +341,19 @@ fn bundled_ffprobe_command_from(
     configured_bin: Option<OsString>,
     current_exe: std::io::Result<PathBuf>,
 ) -> WorkerCommand {
-    if let Some(configured_bin) = configured_bin {
-        return WorkerCommand::new(configured_bin);
-    }
-    if let Ok(current_exe) = current_exe
-        && let Some(exe_dir) = current_exe.parent()
-    {
-        for worker_dir in worker_search_dirs(exe_dir) {
-            let sibling = worker_dir.join(format!(
-                "voom-ffprobe-worker{}",
-                std::env::consts::EXE_SUFFIX
-            ));
-            if sibling.is_file() {
-                let ffprobe_sibling =
-                    worker_dir.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
-                let command = WorkerCommand::new(sibling);
-                if ffprobe_sibling.is_file() {
-                    return command.env("VOOM_FFPROBE_BIN", ffprobe_sibling);
-                }
-                return command;
+    bundled_worker_command_from(
+        configured_bin,
+        current_exe,
+        "voom-ffprobe-worker",
+        |command, worker_dir| {
+            let ffprobe_sibling =
+                worker_dir.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
+            if ffprobe_sibling.is_file() {
+                return command.env("VOOM_FFPROBE_BIN", ffprobe_sibling);
             }
-        }
-    }
-    WorkerCommand::new("voom-ffprobe-worker")
-}
-
-fn worker_search_dirs(exe_dir: &std::path::Path) -> Vec<PathBuf> {
-    if exe_dir.file_name().is_some_and(|name| name == "deps")
-        && let Some(parent) = exe_dir.parent()
-    {
-        return vec![parent.to_path_buf(), exe_dir.to_path_buf()];
-    }
-    vec![exe_dir.to_path_buf()]
+            command
+        },
+    )
 }
 
 fn spawn_worker(
