@@ -154,6 +154,7 @@ async fn audio_extraction_maps_exactly_one_selected_audio_stream() {
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-map\n0:3\n"));
     assert!(!args.contains("-map\n0\n"));
+    assert!(args.contains("-metadata:s:a:0\nsnapshot_stream_id=stream-3\n"));
 }
 
 #[tokio::test]

@@ -61,6 +61,7 @@ pub struct AudioOutputProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceAudioFact {
+    pub snapshot_stream_id: Option<String>,
     pub provider_stream_index: u32,
     pub audio_ordinal: usize,
     pub codec: String,
@@ -308,6 +309,7 @@ async fn probe_audio_streams(
         .enumerate()
         .filter_map(|(audio_ordinal, stream)| {
             Some(SourceAudioFact {
+                snapshot_stream_id: None,
                 provider_stream_index: u32::try_from(stream.get("index")?.as_u64()?).ok()?,
                 audio_ordinal,
                 codec: stream
@@ -379,7 +381,7 @@ fn selected_source_streams(
     selected_refs
         .iter()
         .map(|selected| {
-            source_streams
+            let mut source = source_streams
                 .iter()
                 .find(|stream| stream.provider_stream_index == selected.provider_stream_index)
                 .cloned()
@@ -388,7 +390,9 @@ fn selected_source_streams(
                         "selected audio stream {} was not present in input probe",
                         selected.provider_stream_index
                     ))
-                })
+                })?;
+            source.snapshot_stream_id = Some(selected.snapshot_stream_id.clone());
+            Ok(source)
         })
         .collect()
 }
@@ -502,6 +506,11 @@ fn append_audio_metadata(
         command
             .arg(format!("-metadata:s:a:{output_audio_ordinal}"))
             .arg(format!("title={title}"));
+    }
+    if let Some(snapshot_stream_id) = &source.snapshot_stream_id {
+        command
+            .arg(format!("-metadata:s:a:{output_audio_ordinal}"))
+            .arg(format!("snapshot_stream_id={snapshot_stream_id}"));
     }
     if let Some(default) = source.default {
         command
