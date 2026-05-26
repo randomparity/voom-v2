@@ -335,6 +335,44 @@ async fn handler_accepts_output_reordered_by_track_order() {
 }
 
 #[tokio::test]
+async fn handler_accepts_reordered_defaults_in_output_order() {
+    let fixture = remux_fixture_with_input_specs_and_output_specs(
+        vec![
+            input_track("video"),
+            input_track("audio"),
+            input_track("subtitles"),
+        ],
+        vec![
+            output_track("subtitles", true),
+            output_track("video", false),
+            output_track("audio", true),
+        ],
+    )
+    .await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        subtitle_ref("stream-2", 2),
+    ];
+    request.selection.default_streams = vec![audio_ref("stream-1", 1), subtitle_ref("stream-2", 2)];
+    request.selection.clear_default_streams = vec![video_ref("stream-0", 0)];
+    request.selection.track_order = vec![
+        RemuxTrackGroup::Subtitle,
+        RemuxTrackGroup::Video,
+        RemuxTrackGroup::Audio,
+    ];
+
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
+
+    assert_eq!(
+        result.kept_snapshot_stream_ids,
+        ["stream-0", "stream-1", "stream-2"]
+    );
+    assert_eq!(result.default_snapshot_stream_ids, ["stream-1", "stream-2"]);
+}
+
+#[tokio::test]
 async fn handler_rejects_overwrite_true() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
@@ -490,6 +528,18 @@ async fn remux_fixture_with_output_specs(output_specs: Vec<OutputTrackSpec>) -> 
     .await
 }
 
+async fn remux_fixture_with_input_specs_and_output_specs(
+    input_specs: Vec<InputTrackSpec>,
+    output_specs: Vec<OutputTrackSpec>,
+) -> RemuxFixture {
+    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_input_and_output_specs(
+        &input_specs,
+        &output_specs,
+        "mkv",
+    ))
+    .await
+}
+
 async fn remux_fixture_with_fake_mkvmerge_that_mutates_input() -> RemuxFixture {
     remux_fixture_with_mkvmerge(&fake_mkvmerge_body(
         &["stream-0", "stream-1"],
@@ -587,6 +637,13 @@ fn audio_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStrea
     }
 }
 
+fn subtitle_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStreamRef {
+    RemuxStreamRef {
+        snapshot_stream_id: snapshot_stream_id.to_owned(),
+        provider_stream_index,
+    }
+}
+
 fn attachment_ref(snapshot_stream_id: &str, provider_stream_index: u32) -> RemuxStreamRef {
     RemuxStreamRef {
         snapshot_stream_id: snapshot_stream_id.to_owned(),
@@ -659,6 +716,15 @@ printf output > "$out"
 }
 
 #[derive(Debug, Clone, Copy)]
+struct InputTrackSpec {
+    kind: &'static str,
+}
+
+fn input_track(kind: &'static str) -> InputTrackSpec {
+    InputTrackSpec { kind }
+}
+
+#[derive(Debug, Clone, Copy)]
 struct OutputTrackSpec {
     kind: &'static str,
     default: bool,
@@ -688,6 +754,78 @@ fn fake_mkvmerge_body_with_output_specs(
         .collect::<Vec<_>>()
         .join(",");
     fake_mkvmerge_body_from_output_tracks(&output_tracks, output_container, mutate_input)
+}
+
+fn fake_mkvmerge_body_with_input_and_output_specs(
+    input_specs: &[InputTrackSpec],
+    output_specs: &[OutputTrackSpec],
+    output_container: &str,
+) -> String {
+    let input_tracks = input_specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            format!(
+                r#"{{"id":{},"type":"{}","properties":{{"number":{}}}}}"#,
+                index + 7,
+                spec.kind,
+                index + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let output_tracks = output_specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            format!(
+                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}}}}}"#,
+                index + 20,
+                spec.kind,
+                spec.default,
+                index + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    fake_mkvmerge_body_from_input_and_output_tracks(&input_tracks, &output_tracks, output_container)
+}
+
+fn fake_mkvmerge_body_from_input_and_output_tracks(
+    input_tracks: &str,
+    output_tracks: &str,
+    output_container: &str,
+) -> String {
+    format!(
+        r#"#!/bin/sh
+set -eu
+if [ "${{1:-}}" = "--identify" ]; then
+  last=""
+  for arg in "$@"; do last="$arg"; done
+  case "$last" in
+    *out.mkv)
+      cat <<'JSON'
+{{"container":{{"properties":{{"container_type":"{output_container}"}}}},"tracks":[{output_tracks}]}}
+JSON
+      ;;
+    *)
+      cat <<'JSON'
+{{"container":{{"properties":{{"container_type":"MP4"}}}},"tracks":[{input_tracks}]}}
+JSON
+      ;;
+  esac
+  exit 0
+fi
+last=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output" ]; then out="$arg"; fi
+  last="$arg"
+  prev="$arg"
+done
+printf output > "$out"
+"#
+    )
 }
 
 fn fake_mkvmerge_body_from_output_tracks(

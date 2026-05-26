@@ -513,10 +513,25 @@ fn validate_output_selection(
         }
     }
 
-    let expected_default = request
+    let default_streams = request
         .selection
         .default_streams
         .iter()
+        .map(|stream| {
+            (
+                stream.snapshot_stream_id.as_str(),
+                stream.provider_stream_index,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_default = expected_order
+        .iter()
+        .filter(|stream| {
+            default_streams.contains(&(
+                stream.snapshot_stream_id.as_str(),
+                stream.provider_stream_index,
+            ))
+        })
         .map(|stream| stream.snapshot_stream_id.clone())
         .collect::<Vec<_>>();
     let actual_default = expected_order
