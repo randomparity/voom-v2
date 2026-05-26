@@ -86,6 +86,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
             ComplianceExecutionOptions {
                 transcode_staging_root: tmp.path().join("stage"),
                 transcode_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
             },
         )
         .await

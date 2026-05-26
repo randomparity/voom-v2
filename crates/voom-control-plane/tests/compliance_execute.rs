@@ -9,7 +9,7 @@ use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or
 use voom_worker_protocol::OperationKind;
 
 #[tokio::test]
-async fn compliance_execute_runs_set_container_as_remux_through_workflow_executor()
+async fn compliance_execute_rejects_synthetic_policy_remux_before_ticket_fallback()
 -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::NamedTempFile::new()?;
     let url = format!("sqlite://{}", tmp.path().display());

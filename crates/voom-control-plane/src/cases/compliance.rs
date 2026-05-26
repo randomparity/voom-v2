@@ -84,6 +84,8 @@ pub struct ComplianceExecutedTicket {
 pub struct ComplianceExecutionOptions {
     pub transcode_staging_root: PathBuf,
     pub transcode_target_dir: PathBuf,
+    pub remux_staging_root: PathBuf,
+    pub remux_target_dir: PathBuf,
 }
 
 impl Default for ComplianceExecutionOptions {
@@ -92,6 +94,8 @@ impl Default for ComplianceExecutionOptions {
         Self {
             transcode_staging_root: defaults.transcode_staging_root,
             transcode_target_dir: defaults.transcode_target_dir,
+            remux_staging_root: defaults.remux_staging_root,
+            remux_target_dir: defaults.remux_target_dir,
         }
     }
 }
@@ -390,6 +394,23 @@ impl ControlPlane {
         input_set_id: PolicyInputSetId,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        self.execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy_version_id,
+            input_set_id,
+            runtimes,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_compliance_policy_with_runtime_registry_and_options_for_test(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        runtimes: WorkerRuntimeRegistry,
+        options: ComplianceExecutionOptions,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
@@ -418,14 +439,8 @@ impl ControlPlane {
                 None,
             ));
         };
-        self.execute_compliance_workflow(
-            apply_data,
-            bridge.summary,
-            workflow,
-            runtimes,
-            ComplianceExecutionOptions::default(),
-        )
-        .await
+        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes, options)
+            .await
     }
 
     async fn execute_compliance_workflow(
@@ -439,6 +454,8 @@ impl ControlPlane {
         let executor_options = WorkflowExecutorOptions {
             transcode_staging_root: options.transcode_staging_root,
             transcode_target_dir: options.transcode_target_dir,
+            remux_staging_root: options.remux_staging_root,
+            remux_target_dir: options.remux_target_dir,
             ..WorkflowExecutorOptions::default()
         };
         let executor = WorkflowExecutor::with_options(

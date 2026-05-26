@@ -1,18 +1,26 @@
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use voom_events::EventKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, OperationKind, OperationRequest, OperationResponse,
     ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
+use crate::cases::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp};
-use crate::workflow::{WorkerRuntimeRegistry, executor::WorkflowExecutorOptions};
+use crate::workflow::{
+    WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::WorkflowTicketPayload,
+};
+
+const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
 #[test]
 fn compliance_execution_defaults_use_production_transcode_paths() {
@@ -26,6 +34,21 @@ fn compliance_execution_defaults_use_production_transcode_paths() {
     assert_eq!(
         compliance_defaults.transcode_target_dir,
         workflow_defaults.transcode_target_dir
+    );
+}
+
+#[test]
+fn compliance_execution_defaults_use_production_remux_paths() {
+    let workflow_defaults = WorkflowExecutorOptions::default();
+    let compliance_defaults = super::ComplianceExecutionOptions::default();
+
+    assert_eq!(
+        compliance_defaults.remux_staging_root,
+        workflow_defaults.remux_staging_root
+    );
+    assert_eq!(
+        compliance_defaults.remux_target_dir,
+        workflow_defaults.remux_target_dir
     );
 }
 
@@ -369,6 +392,66 @@ async fn compliance_execute_reports_issues_applied_when_runtime_registry_fails()
 }
 
 #[tokio::test]
+async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created_policy = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_video(&cp).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "scan-remux-roots".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    register_policy_remux_worker(&cp).await;
+    let options = super::ComplianceExecutionOptions {
+        remux_staging_root: PathBuf::from("/custom/remux/staging"),
+        remux_target_dir: PathBuf::from("/custom/remux/output"),
+        ..super::ComplianceExecutionOptions::default()
+    };
+
+    let err = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            created_policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            options,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    let ticket_payload: String =
+        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
+            .bind("synthetic.workflow.operation.remux")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let payload = serde_json::from_str(&ticket_payload).unwrap();
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", payload).unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/custom/remux/staging"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/custom/remux/output"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        file_version_id.0
+    );
+}
+
+#[tokio::test]
 async fn policy_runtime_registry_loads_transcode_video_workers() {
     let (cp, _tmp) = cp().await;
     let worker_id = register_policy_worker_with_extra(
@@ -571,6 +654,51 @@ async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+async fn scanned_snapshot_with_video(
+    cp: &crate::ControlPlane,
+) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/remux-roots.mp4".to_owned(),
+                content_hash: "hash-remux-roots".to_owned(),
+                size_bytes: 1024,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("expected a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            serde_json::json!({
+                "format": "test",
+                "streams": [
+                    {
+                        "id": "stream-0",
+                        "index": 0,
+                        "kind": "video",
+                        "codec_name": "h264"
+                    }
+                ]
+            }),
+            T0,
+        )
+        .await
+        .unwrap();
+    (file_version_id, snapshot.id)
 }
 
 async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {
