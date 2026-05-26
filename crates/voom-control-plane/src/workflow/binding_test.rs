@@ -230,6 +230,33 @@ fn policy_remux_payload_rejects_malformed_track_action_entry() {
 }
 
 #[test]
+fn policy_remux_payload_rejects_attachment_track_action_target() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [{"type": "remove_tracks", "target": "attachment"}],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+            "source_media_snapshot_id": 99
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux track_actions[0] target `attachment` is unsupported"
+    );
+}
+
+#[test]
 fn policy_remux_payload_rejects_malformed_track_order_entry() {
     let err = render_policy_remux_payload(
         PolicyRemuxSource {
@@ -250,6 +277,33 @@ fn policy_remux_payload_rejects_malformed_track_order_entry() {
     .unwrap_err();
 
     assert_eq!(err.to_string(), "remux track_order[1] must be a string");
+}
+
+#[test]
+fn policy_remux_payload_rejects_attachment_track_order_group() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "attachment"],
+            "defaults": [],
+            "source_media_snapshot_id": 99
+        }),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        "remux track_order[1] target `attachment` is unsupported"
+    );
 }
 
 #[test]

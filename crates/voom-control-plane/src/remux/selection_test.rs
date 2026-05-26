@@ -70,6 +70,62 @@ fn selection_rejects_keep_remove_video_policy() {
 }
 
 #[test]
+fn selection_rejects_attachment_source_stream_before_keep_ids() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": []
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng"]);
+    snapshot.payload["streams"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id": "stream-2",
+            "index": 2,
+            "kind": "attachment",
+            "codec_name": "mjpeg",
+            "filename": "cover.jpg"
+        }));
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("attachment remux selection is unsupported")
+    );
+}
+
+#[test]
+fn selection_rejects_attachment_track_action_target() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [
+            {
+                "type": "remove_tracks",
+                "target": "attachment",
+                "filter": null
+            }
+        ],
+        "track_order": ["video", "audio"],
+        "defaults": []
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng"]);
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("attachment track policy is unsupported")
+    );
+}
+
+#[test]
 fn selection_rejects_empty_track_order() {
     assert_track_order_rejected(&json!([]), "track_order must include at least one group");
 }

@@ -210,7 +210,12 @@ fn validate_track_actions(actions: &[Value]) -> Result<(), BindingError> {
             BindingError::new(format!("remux track_actions[{index}] must be an object"))
         })?;
         required_object_string(object, "track_actions", index, "type")?;
-        required_object_string(object, "track_actions", index, "target")?;
+        let target = required_object_string(object, "track_actions", index, "target")?;
+        if target == "attachment" {
+            return Err(BindingError::new(format!(
+                "remux track_actions[{index}] target `attachment` is unsupported"
+            )));
+        }
         if object
             .get("filter")
             .is_some_and(|filter| !filter.is_object())
@@ -231,7 +236,12 @@ fn validate_track_order(order: &[Value]) -> Result<(), BindingError> {
                 "remux track_order[{index}] must be a string"
             )));
         };
-        if !matches!(target, "video" | "audio" | "subtitle" | "attachment") {
+        if target == "attachment" {
+            return Err(BindingError::new(format!(
+                "remux track_order[{index}] target `attachment` is unsupported"
+            )));
+        }
+        if !matches!(target, "video" | "audio" | "subtitle") {
             return Err(BindingError::new(format!(
                 "remux track_order[{index}] has unsupported target `{target}`"
             )));

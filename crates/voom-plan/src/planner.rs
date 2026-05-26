@@ -870,6 +870,11 @@ fn remux_candidate_support(operation: &CompiledOperation) -> RemuxCandidateSuppo
                     "video track selection is not supported by remux planning",
                 );
             }
+            if *target == TrackTarget::Attachment {
+                return RemuxCandidateSupport::Unsupported(
+                    "attachment track selection is not supported by remux planning",
+                );
+            }
             if filter.as_ref().is_some_and(filter_has_unsupported_shape) {
                 RemuxCandidateSupport::Unsupported(
                     "track filter is not supported by remux planning",
@@ -1058,6 +1063,12 @@ fn evaluate_remux_track_operations(
 
     let facts = stream_facts(snapshot)?;
     if !facts.iter().any(|stream| stream.kind == TrackTarget::Video) {
+        return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+    }
+    if facts
+        .iter()
+        .any(|stream| stream.kind == TrackTarget::Attachment)
+    {
         return Err(RemuxPlanningBlock::UnsupportedMediaShape);
     }
     if !has_track_operation {

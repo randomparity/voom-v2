@@ -33,8 +33,10 @@ backup, daemon scheduling, or UI media controls.
 Sprint 13 delivers:
 
 - Planner support for executable `remux` nodes that combine same-target,
-  same-phase `container mkv`, `keep/remove audio|subtitle|attachment where ...`,
+  same-phase `container mkv`, `keep/remove audio|subtitle where ...`,
   `order tracks [...]`, and `defaults audio|subtitle ...` operations.
+- Attachment-bearing sources and `keep/remove attachment ...` operations block
+  visibly until worker attachment preservation/removal is supported.
 - Preservation of typed policy intent in the plan payload; policy text is never
   lowered into command-line arguments.
 - Track selector evaluation against durable `MediaSnapshot` stream facts.
@@ -119,6 +121,10 @@ track model. The compiler continues to emit the existing typed operations
 (`set_container`, `keep_tracks`, `remove_tracks`, `reorder_tracks`, and
 `set_defaults`). The planner, not the compiler, groups those compiled operations
 into an executable `remux` plan payload:
+
+Attachment-target keep/remove operations are accepted by the policy compiler but
+remain blocked at planning/execution binding in Sprint 13; they are not lowered
+into executable remux payloads.
 
 ```json
 {
