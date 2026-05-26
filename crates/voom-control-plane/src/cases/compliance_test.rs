@@ -53,6 +53,21 @@ fn compliance_execution_defaults_use_production_remux_paths() {
 }
 
 #[test]
+fn compliance_execution_defaults_use_production_audio_paths() {
+    let workflow_defaults = WorkflowExecutorOptions::default();
+    let compliance_defaults = super::ComplianceExecutionOptions::default();
+
+    assert_eq!(
+        compliance_defaults.audio_staging_root,
+        workflow_defaults.audio_staging_root
+    );
+    assert_eq!(
+        compliance_defaults.audio_target_dir,
+        workflow_defaults.audio_target_dir
+    );
+}
+
+#[test]
 fn compliance_ticket_operation_is_derived_from_workflow_ticket_kind() {
     assert_eq!(
         super::operation_from_ticket_kind("synthetic.workflow.operation.remux").unwrap(),
@@ -452,6 +467,73 @@ async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
 }
 
 #[tokio::test]
+async fn compliance_execute_options_reach_policy_audio_ticket_payload() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/audio-transcode-extract.voom").unwrap();
+    let created_policy = cp
+        .create_policy_document("audio-transcode-extract", &source)
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_audio(&cp).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "scan-audio-roots".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    register_policy_audio_worker(&cp, OperationKind::TranscodeAudio).await;
+    let options = super::ComplianceExecutionOptions {
+        audio_staging_root: PathBuf::from("/custom/audio/staging"),
+        audio_target_dir: PathBuf::from("/custom/audio/output"),
+        ..super::ComplianceExecutionOptions::default()
+    };
+
+    let err = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            created_policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            options,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    let ticket_payload: String =
+        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
+            .bind("synthetic.workflow.operation.transcode_audio")
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let payload = serde_json::from_str(&ticket_payload).unwrap();
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_audio",
+        payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/custom/audio/staging"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/custom/audio/output"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        file_version_id.0
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["type"],
+        "transcode_audio"
+    );
+}
+
+#[tokio::test]
 async fn policy_runtime_registry_loads_transcode_video_workers() {
     let (cp, _tmp) = cp().await;
     let worker_id = register_policy_worker_with_extra(
@@ -461,6 +543,46 @@ async fn policy_runtime_registry_loads_transcode_video_workers() {
         serde_json::json!({
             "endpoint": "127.0.0.1:9",
             "secret": "policy-transcode-secret",
+        }),
+    )
+    .await;
+
+    let registry = cp.policy_runtime_registry().await.unwrap();
+
+    let runtime = registry.get(worker_id).unwrap();
+    assert_eq!(runtime.credentials.worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn policy_runtime_registry_loads_transcode_audio_workers() {
+    let (cp, _tmp) = cp().await;
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeAudio,
+        "policy-test-transcode-audio",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:9",
+            "secret": "policy-transcode-audio-secret",
+        }),
+    )
+    .await;
+
+    let registry = cp.policy_runtime_registry().await.unwrap();
+
+    let runtime = registry.get(worker_id).unwrap();
+    assert_eq!(runtime.credentials.worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn policy_runtime_registry_loads_extract_audio_workers() {
+    let (cp, _tmp) = cp().await;
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::ExtractAudio,
+        "policy-test-extract-audio",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:9",
+            "secret": "policy-extract-audio-secret",
         }),
     )
     .await;
@@ -701,6 +823,64 @@ async fn scanned_snapshot_with_video(
     (file_version_id, snapshot.id)
 }
 
+async fn scanned_snapshot_with_audio(
+    cp: &crate::ControlPlane,
+) -> (voom_core::FileVersionId, voom_core::MediaSnapshotId) {
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: "/srv/audio-roots.mkv".to_owned(),
+                content_hash: "hash-audio-roots".to_owned(),
+                size_bytes: 1024,
+                observed_at: T0,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("expected a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            serde_json::json!({
+                "format": "test",
+                "streams": [
+                    {
+                        "id": "stream-0",
+                        "index": 0,
+                        "kind": "video",
+                        "codec_name": "h264"
+                    },
+                    {
+                        "id": "audio-1",
+                        "index": 1,
+                        "kind": "audio",
+                        "codec_name": "opus",
+                        "language": "eng",
+                        "channels": 2,
+                        "disposition": {
+                            "default": false,
+                            "forced": false,
+                            "commentary": false
+                        }
+                    }
+                ]
+            }),
+            T0,
+        )
+        .await
+        .unwrap();
+    (file_version_id, snapshot.id)
+}
+
 async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::WorkerId {
     register_policy_worker_with_extra(
         cp,
@@ -769,10 +949,20 @@ fn success_runtime_registry(worker_id: voom_core::WorkerId) -> WorkerRuntimeRegi
     )
 }
 
+async fn register_policy_audio_worker(
+    cp: &crate::ControlPlane,
+    operation: OperationKind,
+) -> voom_core::WorkerId {
+    register_policy_worker_with_extra(cp, operation, "policy-test-audio", serde_json::json!({}))
+        .await
+}
+
 fn operation_name(operation: OperationKind) -> &'static str {
     match operation {
         OperationKind::Remux => "remux",
         OperationKind::TranscodeVideo => "transcode_video",
+        OperationKind::TranscodeAudio => "transcode_audio",
+        OperationKind::ExtractAudio => "extract_audio",
         _ => unreachable!("compliance tests only seed remux/transcode"),
     }
 }

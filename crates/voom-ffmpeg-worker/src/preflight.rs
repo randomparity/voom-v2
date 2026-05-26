@@ -14,6 +14,10 @@ pub struct FfmpegPreflight {
     pub ffmpeg_version: String,
     pub ffprobe_version: String,
     pub hevc_encoder: String,
+    pub aac_encoder: String,
+    pub opus_encoder: String,
+    pub matroska_muxer: String,
+    pub ogg_muxer: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +77,24 @@ pub fn preflight_with_paths(
             "ffmpeg does not advertise required libx265 encoder".to_owned(),
         )
     })?;
+    let aac_encoder = parse_token(&encoders, "aac").ok_or_else(|| {
+        FFmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
+    })?;
+    let opus_encoder = parse_token(&encoders, "libopus").ok_or_else(|| {
+        FFmpegPreflightError::Failed(
+            "ffmpeg does not advertise required libopus encoder".to_owned(),
+        )
+    })?;
+    let muxers = command_text(
+        "ffmpeg -hide_banner -muxers",
+        command_output(Command::new(ffmpeg_path).arg("-hide_banner").arg("-muxers")),
+    )?;
+    let matroska_muxer = parse_token(&muxers, "matroska").ok_or_else(|| {
+        FFmpegPreflightError::Failed("ffmpeg does not advertise required matroska muxer".to_owned())
+    })?;
+    let ogg_muxer = parse_token(&muxers, "ogg").ok_or_else(|| {
+        FFmpegPreflightError::Failed("ffmpeg does not advertise required ogg muxer".to_owned())
+    })?;
 
     Ok(FfmpegPreflight {
         ffmpeg_path: ffmpeg_path.to_owned(),
@@ -80,6 +102,10 @@ pub fn preflight_with_paths(
         ffmpeg_version,
         ffprobe_version,
         hevc_encoder,
+        aac_encoder,
+        opus_encoder,
+        matroska_muxer,
+        ogg_muxer,
     })
 }
 
@@ -185,10 +211,13 @@ fn is_text_file_busy(err: &io::Error) -> bool {
 }
 
 fn parse_libx265_encoder(encoders: &str) -> Option<String> {
-    encoders
-        .lines()
-        .find(|line| line.split_whitespace().any(|token| token == "libx265"))
-        .map(|_| "libx265".to_owned())
+    parse_token(encoders, "libx265")
+}
+
+fn parse_token(text: &str, token: &str) -> Option<String> {
+    text.lines()
+        .find(|line| line.split_whitespace().any(|candidate| candidate == token))
+        .map(|_| token.to_owned())
 }
 
 #[cfg(test)]

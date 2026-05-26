@@ -371,6 +371,289 @@ fn artifact_remux_started_payload_serializes_selection_correlation_fields() {
 }
 
 #[test]
+fn artifact_audio_transcode_started_payload_serializes_audit_correlation_fields() {
+    let p = ArtifactAudioTranscodeStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        source_media_snapshot_id: 6,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        selected_streams: vec![ArtifactAudioStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            provider_stream_index: 7,
+        }],
+        target_codec: "aac".to_owned(),
+        output_container: "mkv".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    };
+
+    let json = serde_json::to_value(Event::ArtifactAudioTranscodeStarted(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.audio_transcode_started");
+    assert_eq!(json["payload"]["job_id"], 1);
+    assert_eq!(json["payload"]["ticket_id"], 2);
+    assert_eq!(json["payload"]["lease_id"], 3);
+    assert_eq!(json["payload"]["source_file_version_id"], 4);
+    assert_eq!(json["payload"]["source_file_location_id"], 5);
+    assert_eq!(json["payload"]["source_media_snapshot_id"], 6);
+    assert_eq!(
+        json["payload"]["selected_streams"][0]["snapshot_stream_id"],
+        "audio-1"
+    );
+    assert_eq!(
+        json["payload"]["selected_streams"][0]["provider_stream_index"],
+        7
+    );
+    assert_eq!(json["payload"]["provider"], "ffmpeg");
+    assert_eq!(json["payload"]["provider_version"], serde_json::Value::Null);
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactAudioTranscodeStarted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactAudioTranscodeStarted(p).kind(),
+        EventKind::ArtifactAudioTranscodeStarted
+    );
+}
+
+#[test]
+fn artifact_audio_transcode_progress_payload_serializes_progress_and_selection() {
+    let p = ArtifactAudioTranscodeProgressPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        source_media_snapshot_id: 6,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        selected_streams: vec![ArtifactAudioStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            provider_stream_index: 7,
+        }],
+        percent_bps: Some(2500),
+        message: Some("encoding audio".to_owned()),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: Some("6.1".to_owned()),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactAudioTranscodeProgress(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.audio_transcode_progress");
+    assert_eq!(json["payload"]["percent_bps"], 2500);
+    assert_eq!(json["payload"]["message"], "encoding audio");
+    assert_eq!(
+        json["payload"]["selected_streams"][0]["provider_stream_index"],
+        7
+    );
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactAudioTranscodeProgress(q) if q == p));
+}
+
+#[test]
+fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provider() {
+    let p = ArtifactAudioTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        source_media_snapshot_id: 6,
+        artifact_handle_id: 8,
+        artifact_location_id: 9,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        selected_streams: vec![ArtifactAudioStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            provider_stream_index: 7,
+        }],
+        selected_snapshot_stream_ids: vec!["audio-1".to_owned()],
+        output_container: "mkv".to_owned(),
+        output_audio_codecs: vec!["aac".to_owned()],
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactAudioTranscodeSucceeded(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.audio_transcode_succeeded");
+    assert_eq!(json["payload"]["artifact_handle_id"], 8);
+    assert_eq!(json["payload"]["artifact_location_id"], 9);
+    assert_eq!(
+        json["payload"]["selected_snapshot_stream_ids"],
+        serde_json::json!(["audio-1"])
+    );
+    assert_eq!(
+        json["payload"]["output_audio_codecs"],
+        serde_json::json!(["aac"])
+    );
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactAudioTranscodeSucceeded(q) if q == p));
+}
+
+#[test]
+fn artifact_audio_transcode_failed_payload_carries_public_error_code_and_known_ids() {
+    let p = ArtifactAudioTranscodeFailedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: Some(5),
+        source_media_snapshot_id: Some(6),
+        artifact_handle_id: Some(8),
+        artifact_location_id: Some(9),
+        staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
+        selected_streams: vec![ArtifactAudioStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            provider_stream_index: 7,
+        }],
+        failure_class: FailureClass::PolicyValidationError,
+        error_code: "CONFIG_INVALID".to_owned(),
+        message: "unsupported audio codec".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: Some("6.1".to_owned()),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactAudioTranscodeFailed(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.audio_transcode_failed");
+    assert_eq!(json["payload"]["error_code"], "CONFIG_INVALID");
+    assert_eq!(json["payload"]["artifact_handle_id"], 8);
+    assert_eq!(json["payload"]["artifact_location_id"], 9);
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactAudioTranscodeFailed(q) if q == p));
+}
+
+#[test]
+fn artifact_audio_extract_started_and_progress_payloads_round_trip() {
+    let selected_stream = ArtifactAudioStreamPayload {
+        snapshot_stream_id: "audio-2".to_owned(),
+        provider_stream_index: 11,
+    };
+    let started = ArtifactAudioExtractStartedPayload {
+        job_id: 10,
+        ticket_id: 20,
+        lease_id: Some(30),
+        source_file_version_id: 40,
+        source_file_location_id: 50,
+        source_media_snapshot_id: 60,
+        source_bundle_id: 70,
+        staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
+        selected_stream: selected_stream.clone(),
+        role: "external_audio".to_owned(),
+        target_codec: "opus".to_owned(),
+        output_container: "ogg".to_owned(),
+        provider: None,
+        provider_version: None,
+    };
+    let progress = ArtifactAudioExtractProgressPayload {
+        job_id: 10,
+        ticket_id: 20,
+        lease_id: Some(30),
+        source_file_version_id: 40,
+        source_file_location_id: 50,
+        source_media_snapshot_id: 60,
+        source_bundle_id: 70,
+        staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
+        selected_stream: selected_stream.clone(),
+        percent_bps: Some(5000),
+        message: Some("extracting audio".to_owned()),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: Some("6.1".to_owned()),
+    };
+    let started_json =
+        serde_json::to_value(Event::ArtifactAudioExtractStarted(started.clone())).unwrap();
+    let progress_json =
+        serde_json::to_value(Event::ArtifactAudioExtractProgress(progress.clone())).unwrap();
+
+    assert_eq!(started_json["kind"], "artifact.audio_extract_started");
+    assert_eq!(progress_json["kind"], "artifact.audio_extract_progress");
+    assert_eq!(
+        started_json["payload"]["selected_stream"]["snapshot_stream_id"],
+        "audio-2"
+    );
+
+    assert!(matches!(
+        serde_json::from_value::<Event>(started_json).unwrap(),
+        Event::ArtifactAudioExtractStarted(q) if q == started
+    ));
+    assert!(matches!(
+        serde_json::from_value::<Event>(progress_json).unwrap(),
+        Event::ArtifactAudioExtractProgress(q) if q == progress
+    ));
+}
+
+#[test]
+fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
+    let selected_stream = ArtifactAudioStreamPayload {
+        snapshot_stream_id: "audio-2".to_owned(),
+        provider_stream_index: 11,
+    };
+    let succeeded = ArtifactAudioExtractSucceededPayload {
+        job_id: 10,
+        ticket_id: 20,
+        lease_id: Some(30),
+        source_file_version_id: 40,
+        source_file_location_id: 50,
+        source_media_snapshot_id: 60,
+        source_bundle_id: 70,
+        artifact_handle_id: 80,
+        artifact_location_id: 90,
+        staging_path: "/tmp/voom-stage/20/30/out.ogg".to_owned(),
+        selected_stream: selected_stream.clone(),
+        selected_snapshot_stream_id: "audio-2".to_owned(),
+        role: "external_audio".to_owned(),
+        output_container: "ogg".to_owned(),
+        output_audio_codec: "opus".to_owned(),
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
+    };
+    let failed = ArtifactAudioExtractFailedPayload {
+        job_id: 10,
+        ticket_id: 20,
+        lease_id: Some(30),
+        source_file_version_id: 40,
+        source_file_location_id: Some(50),
+        source_media_snapshot_id: Some(60),
+        source_bundle_id: 70,
+        artifact_handle_id: Some(80),
+        artifact_location_id: Some(90),
+        staging_path: Some("/tmp/voom-stage/20/30/out.ogg".to_owned()),
+        selected_stream: Some(selected_stream),
+        role: Some("external_audio".to_owned()),
+        failure_class: FailureClass::PolicyValidationError,
+        error_code: "CONFIG_INVALID".to_owned(),
+        message: "source stream missing".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: Some("6.1".to_owned()),
+    };
+    let succeeded_json =
+        serde_json::to_value(Event::ArtifactAudioExtractSucceeded(succeeded.clone())).unwrap();
+    let failed_json =
+        serde_json::to_value(Event::ArtifactAudioExtractFailed(failed.clone())).unwrap();
+
+    assert_eq!(succeeded_json["kind"], "artifact.audio_extract_succeeded");
+    assert_eq!(failed_json["kind"], "artifact.audio_extract_failed");
+    assert_eq!(
+        succeeded_json["payload"]["selected_snapshot_stream_id"],
+        "audio-2"
+    );
+    assert_eq!(failed_json["payload"]["error_code"], "CONFIG_INVALID");
+
+    assert!(matches!(
+        serde_json::from_value::<Event>(succeeded_json).unwrap(),
+        Event::ArtifactAudioExtractSucceeded(q) if q == succeeded
+    ));
+    assert!(matches!(
+        serde_json::from_value::<Event>(failed_json).unwrap(),
+        Event::ArtifactAudioExtractFailed(q) if q == failed
+    ));
+}
+
+#[test]
 fn artifact_remux_failed_payload_serializes_public_error_code() {
     let p = ArtifactRemuxFailedPayload {
         job_id: 1,
