@@ -1,0 +1,118 @@
+use std::path::{Path, PathBuf};
+
+use voom_core::{LeaseId, TicketId, VoomError};
+
+pub async fn staging_path(
+    staging_root: &Path,
+    ticket_id: TicketId,
+    lease_id: LeaseId,
+    source_path: &Path,
+) -> Result<PathBuf, VoomError> {
+    tokio::fs::create_dir_all(staging_root)
+        .await
+        .map_err(|err| {
+            VoomError::Config(format!(
+                "create remux staging root {}: {err}",
+                staging_root.display()
+            ))
+        })?;
+    reject_symlink_dir(staging_root, "remux staging root").await?;
+    let canonical_root = tokio::fs::canonicalize(staging_root).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize remux staging root {}: {err}",
+            staging_root.display()
+        ))
+    })?;
+    let ticket_parent = canonical_root.join(format!("ticket-{}", ticket_id.0));
+    tokio::fs::create_dir_all(&ticket_parent)
+        .await
+        .map_err(|err| {
+            VoomError::Config(format!(
+                "create remux staging ticket parent {}: {err}",
+                ticket_parent.display()
+            ))
+        })?;
+    reject_symlink_dir(&ticket_parent, "remux staging ticket parent").await?;
+    let parent = ticket_parent.join(format!("lease-{}", lease_id.0));
+    tokio::fs::create_dir_all(&parent).await.map_err(|err| {
+        VoomError::Config(format!(
+            "create remux staging parent {}: {err}",
+            parent.display()
+        ))
+    })?;
+    reject_symlink_dir(&parent, "remux staging parent").await?;
+    let canonical_parent = tokio::fs::canonicalize(&parent).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize remux staging parent {}: {err}",
+            parent.display()
+        ))
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(VoomError::Config(format!(
+            "remux staging parent {} escapes root {}",
+            canonical_parent.display(),
+            canonical_root.display()
+        )));
+    }
+    let path = canonical_parent.join(output_file_name(source_path));
+    reject_existing_file(&path, "staging path").await?;
+    Ok(path)
+}
+
+pub async fn target_path(target_dir: &Path, source_path: &Path) -> Result<PathBuf, VoomError> {
+    tokio::fs::create_dir_all(target_dir).await.map_err(|err| {
+        VoomError::Config(format!(
+            "create remux target dir {}: {err}",
+            target_dir.display()
+        ))
+    })?;
+    reject_symlink_dir(target_dir, "remux target dir").await?;
+    let canonical_dir = tokio::fs::canonicalize(target_dir).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize remux target dir {}: {err}",
+            target_dir.display()
+        ))
+    })?;
+    let path = canonical_dir.join(output_file_name(source_path));
+    reject_existing_file(&path, "target path").await?;
+    Ok(path)
+}
+
+fn output_file_name(source: &Path) -> String {
+    let stem = source
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("output");
+    format!("{stem}.remux.mkv")
+}
+
+async fn reject_existing_file(path: &Path, label: &str) -> Result<(), VoomError> {
+    if tokio::fs::try_exists(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("stat remux {label} {}: {err}", path.display())))?
+    {
+        return Err(VoomError::Config(format!(
+            "remux {label} already exists: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+async fn reject_symlink_dir(path: &Path, label: &str) -> Result<(), VoomError> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("{label} {}: {err}", path.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(VoomError::Config(format!(
+            "{label} must be a non-symlink directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "stage_test.rs"]
+mod tests;

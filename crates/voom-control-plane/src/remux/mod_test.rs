@@ -1,0 +1,210 @@
+use super::*;
+
+use async_trait::async_trait;
+use serde_json::json;
+use time::OffsetDateTime;
+use voom_core::{JobId, LeaseId, TicketId, rng_test_support::FrozenRng};
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_worker_protocol::{
+    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts,
+    VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
+};
+
+#[tokio::test]
+async fn execute_records_verified_committed_remux_result() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    cp.record_media_snapshot(
+        seeded.0,
+        None,
+        json!({
+            "streams": [
+                {
+                    "id": "stream-0",
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "disposition": {
+                        "default": true
+                    }
+                },
+                {
+                    "id": "stream-1",
+                    "index": 1,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "language": "eng",
+                    "channels": 2,
+                    "disposition": {
+                        "default": false
+                    }
+                }
+            ]
+        }),
+        OffsetDateTime::UNIX_EPOCH,
+    )
+    .await
+    .unwrap();
+
+    let report = execute_remux_with_dispatchers(
+        &cp,
+        ExecuteRemuxInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            operation_payload: json!({
+                "type": "remux",
+                "container": "mkv",
+                "track_actions": [],
+                "track_order": ["video", "audio"],
+                "defaults": [{"target": "audio", "strategy": "first"}]
+            }),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+        },
+        &FakeRemuxDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.source_file_version_id, seeded.0);
+    assert!(
+        report
+            .staging_path
+            .ends_with("ticket-2/lease-3/Movie.remux.mkv")
+    );
+    assert!(report.target_path.ends_with("Movie.remux.mkv"));
+    assert!(report.target_path.exists());
+}
+
+#[derive(Debug)]
+struct FakeRemuxDispatcher;
+
+#[async_trait]
+impl RemuxDispatcher for FakeRemuxDispatcher {
+    async fn dispatch_remux(
+        &self,
+        request: RemuxRequest,
+    ) -> Result<RemuxResult, voom_core::VoomError> {
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
+    }
+}
+
+#[derive(Debug)]
+struct FakeVerifyDispatcher;
+
+#[async_trait]
+impl crate::artifact::verify::VerifyArtifactDispatcher for FakeVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "fake-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: request.expected.size_bytes,
+                content_hash: request.expected.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
+
+fn remux_result(request: RemuxRequest) -> RemuxResult {
+    let output_hash = blake3_checksum(b"remux bytes");
+    let input = RemuxObservedFacts {
+        size_bytes: request.input.expected.size_bytes,
+        content_hash: request.input.expected.content_hash,
+        modified_at: None,
+        local_file_key: None,
+    };
+    RemuxResult {
+        status: RemuxStatus::Remuxed,
+        provider: "mkvtoolnix".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: RemuxObservedFacts {
+            size_bytes: 11,
+            content_hash: output_hash,
+            modified_at: None,
+            local_file_key: None,
+        },
+        output_container: "mkv".to_owned(),
+        kept_snapshot_stream_ids: request
+            .selection
+            .keep_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        default_snapshot_stream_ids: request
+            .selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+    }
+}
+
+async fn fixture() -> (
+    crate::ControlPlane,
+    tempfile::NamedTempFile,
+    tempfile::TempDir,
+) {
+    let db = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = crate::ControlPlane::open_with_pool_and_rng(
+        pool,
+        std::sync::Arc::new(voom_core::SystemClock),
+        std::sync::Arc::new(std::sync::Mutex::new(FrozenRng::new(u32::MAX))),
+    )
+    .await
+    .unwrap();
+    (cp, db, tempfile::TempDir::new().unwrap())
+}
+
+async fn seed_source(
+    cp: &crate::ControlPlane,
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> (voom_core::FileVersionId, voom_core::FileLocationId) {
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: path.display().to_string(),
+                content_hash: blake3_checksum(bytes),
+                size_bytes: u64::try_from(bytes.len()).unwrap(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id,
+        file_location_id,
+        ..
+    } = outcome
+    else {
+        panic!("seed_source should create a new file asset");
+    };
+    (file_version_id, file_location_id)
+}
+
+fn blake3_checksum(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
