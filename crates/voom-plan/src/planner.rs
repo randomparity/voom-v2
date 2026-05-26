@@ -884,11 +884,27 @@ fn remux_candidate_support(operation: &CompiledOperation) -> RemuxCandidateSuppo
         } => RemuxCandidateSupport::Unsupported(
             "default strategy best is not supported by remux planning",
         ),
-        CompiledOperation::ReorderTracks { .. } | CompiledOperation::SetDefaults { .. } => {
-            RemuxCandidateSupport::Supported
+        CompiledOperation::ReorderTracks { targets } => {
+            if duplicate_track_targets(targets) {
+                RemuxCandidateSupport::Unsupported("track order contains duplicate target groups")
+            } else {
+                RemuxCandidateSupport::Supported
+            }
         }
+        CompiledOperation::SetDefaults { .. } => RemuxCandidateSupport::Supported,
         _ => RemuxCandidateSupport::Unsupported("operation is not supported by remux planning"),
     }
+}
+
+fn duplicate_track_targets(targets: &[TrackTarget]) -> bool {
+    let mut seen = Vec::new();
+    for target in targets {
+        if seen.contains(target) {
+            return true;
+        }
+        seen.push(*target);
+    }
+    false
 }
 
 fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
@@ -932,18 +948,20 @@ fn remux_payload(operations: &[&CompiledOperation]) -> serde_json::Value {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let track_order = operations
+    let reorder_operations = operations
         .iter()
-        .find_map(|operation| match operation {
-            CompiledOperation::ReorderTracks { targets } => Some(
-                targets
-                    .iter()
-                    .map(|target| track_target_payload(*target))
-                    .collect::<Vec<serde_json::Value>>(),
-            ),
+        .filter_map(|operation| match operation {
+            CompiledOperation::ReorderTracks { targets } => Some(targets),
             _ => None,
         })
-        .unwrap_or_else(default_track_order);
+        .collect::<Vec<_>>();
+    let track_order = match reorder_operations.as_slice() {
+        [targets] => targets
+            .iter()
+            .map(|target| track_target_payload(*target))
+            .collect::<Vec<serde_json::Value>>(),
+        _ => default_track_order(),
+    };
     let defaults = operations
         .iter()
         .filter_map(|operation| match operation {
@@ -1038,6 +1056,7 @@ fn evaluate_remux_track_operations(
     }
 
     let mut changed = false;
+    let mut seen_reorder = false;
     for operation in operations {
         match operation {
             CompiledOperation::KeepTracks { target, filter } => {
@@ -1055,9 +1074,10 @@ fn evaluate_remux_track_operations(
                 changed |= set_defaults_changes(&facts, *target, *strategy);
             }
             CompiledOperation::ReorderTracks { targets } => {
-                if targets.is_empty() {
+                if seen_reorder || targets.is_empty() || duplicate_track_targets(targets) {
                     return Err(RemuxPlanningBlock::UnsupportedMediaShape);
                 }
+                seen_reorder = true;
                 changed |= reorder_tracks_changes(&facts, targets)?;
             }
             CompiledOperation::SetContainer { .. } => {}

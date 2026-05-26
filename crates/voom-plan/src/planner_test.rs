@@ -565,6 +565,51 @@ fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
 }
 
 #[test]
+fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::ReorderTracks {
+            targets: vec![
+                TrackTarget::Audio,
+                TrackTarget::Video,
+                TrackTarget::Subtitle,
+            ],
+        },
+        CompiledOperation::ReorderTracks {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+        },
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+}
+
+#[test]
+fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![TrackTarget::Video, TrackTarget::Audio, TrackTarget::Audio],
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "reorder_tracks");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+}
+
+#[test]
 fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
         container: "mkv".to_owned(),

@@ -210,6 +210,7 @@ fn validate_track_actions(actions: &[Value]) -> Result<(), BindingError> {
 }
 
 fn validate_track_order(order: &[Value]) -> Result<(), BindingError> {
+    let mut seen = Vec::new();
     for (index, target) in order.iter().enumerate() {
         let Some(target) = target.as_str() else {
             return Err(BindingError::new(format!(
@@ -221,6 +222,12 @@ fn validate_track_order(order: &[Value]) -> Result<(), BindingError> {
                 "remux track_order[{index}] has unsupported target `{target}`"
             )));
         }
+        if seen.contains(&target) {
+            return Err(BindingError::new(format!(
+                "remux track_order[{index}] duplicates target `{target}`"
+            )));
+        }
+        seen.push(target);
     }
     Ok(())
 }
