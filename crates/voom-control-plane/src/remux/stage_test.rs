@@ -45,6 +45,33 @@ async fn staging_path_rejects_existing_output() {
     assert!(err.to_string().contains("staging path already exists"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_path_makes_lease_directory_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let path = staging_path(
+        root.path(),
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+    )
+    .await
+    .unwrap();
+
+    let mode = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+
+    assert_eq!(
+        mode, 0o700,
+        "remux worker output path must live in a private lease directory so another local user cannot replace it before mkvmerge writes"
+    );
+}
+
 #[tokio::test]
 async fn target_path_rejects_existing_output() {
     let root = tempfile::tempdir().unwrap();

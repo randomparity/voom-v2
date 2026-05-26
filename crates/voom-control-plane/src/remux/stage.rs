@@ -38,6 +38,7 @@ pub async fn prepare_staging_path(
             ))
         })?;
     reject_symlink_dir(staging_root, "remux staging root").await?;
+    secure_private_dir(staging_root, "remux staging root").await?;
     let canonical_root = tokio::fs::canonicalize(staging_root).await.map_err(|err| {
         VoomError::Config(format!(
             "canonicalize remux staging root {}: {err}",
@@ -55,6 +56,7 @@ pub async fn prepare_staging_path(
             ))
         })?;
     reject_symlink_dir(&ticket_parent, "remux staging ticket parent").await?;
+    secure_private_dir(&ticket_parent, "remux staging ticket parent").await?;
     let parent = ticket_parent.join(format!("lease-{}", lease_id.0));
     reject_symlink_components(&parent, "remux staging parent").await?;
     tokio::fs::create_dir_all(&parent).await.map_err(|err| {
@@ -64,6 +66,7 @@ pub async fn prepare_staging_path(
         ))
     })?;
     reject_symlink_dir(&parent, "remux staging parent").await?;
+    secure_private_dir(&parent, "remux staging parent").await?;
     let canonical_parent = tokio::fs::canonicalize(&parent).await.map_err(|err| {
         VoomError::Config(format!(
             "canonicalize remux staging parent {}: {err}",
@@ -181,6 +184,38 @@ async fn reject_symlink_components(path: &Path, label: &str) -> Result<(), VoomE
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn secure_private_dir(path: &Path, label: &str) -> Result<(), VoomError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("inspect {label} {}: {err}", path.display())))?
+        .permissions();
+    permissions.set_mode(0o700);
+    tokio::fs::set_permissions(path, permissions)
+        .await
+        .map_err(|err| VoomError::Config(format!("secure {label} {}: {err}", path.display())))?;
+    let mode = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("inspect {label} {}: {err}", path.display())))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != 0o700 {
+        return Err(VoomError::Config(format!(
+            "{label} must be private: {} has mode {mode:o}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn secure_private_dir(_path: &Path, _label: &str) -> Result<(), VoomError> {
     Ok(())
 }
 
