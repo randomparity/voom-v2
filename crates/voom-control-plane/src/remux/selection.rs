@@ -1,18 +1,21 @@
 use std::collections::{BTreeSet, HashSet};
 
-use serde::Deserialize;
 use serde_json::{Value, json};
 use voom_core::VoomError;
-use voom_plan::remux::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts};
+use voom_plan::remux::{
+    RemuxOperationPayload, RemuxPlanningBlock, RemuxTrackActionKind, SnapshotStreamFact,
+    evaluate_filter, stream_facts,
+};
 use voom_policy::{DefaultStrategy, MediaSnapshotInput, TargetRef, TrackTarget};
 use voom_store::repo::identity::MediaSnapshot;
-use voom_worker_protocol::{RemuxSelection, RemuxStreamRef, RemuxTrackGroup};
+use voom_worker_protocol::{RemuxSelection, RemuxStreamRef};
 
 pub fn selection_from_payload_and_snapshot(
     payload: &Value,
     snapshot: &MediaSnapshot,
 ) -> Result<RemuxSelection, VoomError> {
-    let payload = RemuxPayload::parse(payload)?;
+    let payload = RemuxOperationPayload::try_from_execution_value(payload)
+        .map_err(|err| VoomError::Config(format!("remux operation payload is invalid: {err}")))?;
     if !voom_worker_protocol::is_supported_remux_container(&payload.container) {
         return Err(VoomError::Config(format!(
             "remux container {} is unsupported",
@@ -52,11 +55,11 @@ pub fn selection_from_payload_and_snapshot(
         }
         let matching_ids = matching_stream_ids(&facts, action.target, action.filter.as_ref())?;
         match action.kind {
-            TrackActionKind::KeepTracks => {
+            RemuxTrackActionKind::KeepTracks => {
                 remove_target(&facts, action.target, &mut keep_ids);
                 keep_ids.extend(matching_ids);
             }
-            TrackActionKind::RemoveTracks => {
+            RemuxTrackActionKind::RemoveTracks => {
                 for id in matching_ids {
                     keep_ids.remove(&id);
                 }
@@ -116,7 +119,7 @@ fn remove_target(
 }
 
 fn default_refs(
-    defaults: &[DefaultAction],
+    defaults: &[voom_plan::remux::RemuxDefaultAction],
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
 ) -> Result<(Vec<RemuxStreamRef>, Vec<RemuxStreamRef>), VoomError> {
@@ -228,148 +231,6 @@ fn remux_block_error(block: RemuxPlanningBlock) -> VoomError {
         RemuxPlanningBlock::UnsupportedMediaShape => {
             VoomError::Config("remux selector is unsupported for this media shape".to_owned())
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct RemuxPayload {
-    container: String,
-    track_actions: Vec<TrackAction>,
-    track_order: Vec<RemuxTrackGroup>,
-    defaults: Vec<DefaultAction>,
-}
-
-impl RemuxPayload {
-    fn parse(value: &Value) -> Result<Self, VoomError> {
-        let raw = RawRemuxPayload::deserialize(value).map_err(|err| {
-            VoomError::Config(format!("remux operation payload is invalid: {err}"))
-        })?;
-        if raw.r#type != "remux" {
-            return Err(VoomError::Config(
-                "remux operation payload missing type remux".to_owned(),
-            ));
-        }
-        Ok(Self {
-            container: raw.container,
-            track_actions: raw
-                .track_actions
-                .into_iter()
-                .map(TrackAction::from_raw)
-                .collect::<Result<Vec<_>, _>>()?,
-            track_order: track_order_from_values(&raw.track_order)?,
-            defaults: raw.defaults,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RawRemuxPayload {
-    r#type: String,
-    container: String,
-    #[serde(default)]
-    track_actions: Vec<RawTrackAction>,
-    #[serde(default = "default_track_order_values")]
-    track_order: Vec<Value>,
-    #[serde(default)]
-    defaults: Vec<DefaultAction>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct RawTrackAction {
-    r#type: String,
-    target: TrackTarget,
-    filter: Option<voom_policy::TrackFilter>,
-}
-
-#[derive(Debug, Clone)]
-struct TrackAction {
-    kind: TrackActionKind,
-    target: TrackTarget,
-    filter: Option<voom_policy::TrackFilter>,
-}
-
-impl TrackAction {
-    fn from_raw(raw: RawTrackAction) -> Result<Self, VoomError> {
-        let kind = match raw.r#type.as_str() {
-            "keep_tracks" => TrackActionKind::KeepTracks,
-            "remove_tracks" => TrackActionKind::RemoveTracks,
-            other => {
-                return Err(VoomError::Config(format!(
-                    "remux track action {other} is unsupported"
-                )));
-            }
-        };
-        Ok(Self {
-            kind,
-            target: raw.target,
-            filter: raw.filter,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrackActionKind {
-    KeepTracks,
-    RemoveTracks,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct DefaultAction {
-    target: TrackTarget,
-    strategy: DefaultStrategy,
-}
-
-fn default_track_order_values() -> Vec<Value> {
-    vec![json!("video"), json!("audio"), json!("subtitle")]
-}
-
-fn track_order_from_values(values: &[Value]) -> Result<Vec<RemuxTrackGroup>, VoomError> {
-    if values.is_empty() {
-        return Err(VoomError::Config(
-            "track_order must include at least one group".to_owned(),
-        ));
-    }
-    let mut seen = Vec::new();
-    let mut groups = Vec::with_capacity(values.len());
-    for value in values {
-        let Some(group) = value.as_str() else {
-            return Err(VoomError::Config(
-                "track_order entries must be strings".to_owned(),
-            ));
-        };
-        let parsed = match group {
-            "video" => RemuxTrackGroup::Video,
-            "audio" => RemuxTrackGroup::Audio,
-            "subtitle" => RemuxTrackGroup::Subtitle,
-            "attachment" => {
-                return Err(VoomError::Config(
-                    "track_order attachment group is unsupported".to_owned(),
-                ));
-            }
-            other => {
-                return Err(VoomError::Config(format!(
-                    "track_order group {other} is unsupported"
-                )));
-            }
-        };
-        if seen.contains(&parsed) {
-            return Err(VoomError::Config(format!(
-                "track_order duplicates group {}",
-                track_group_name(parsed)
-            )));
-        }
-        seen.push(parsed);
-        groups.push(parsed);
-    }
-    Ok(groups)
-}
-
-fn track_group_name(group: RemuxTrackGroup) -> &'static str {
-    match group {
-        RemuxTrackGroup::Video => "video",
-        RemuxTrackGroup::Audio => "audio",
-        RemuxTrackGroup::Subtitle => "subtitle",
-        RemuxTrackGroup::Attachment => "attachment",
     }
 }
 

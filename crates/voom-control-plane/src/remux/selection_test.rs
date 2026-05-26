@@ -10,6 +10,7 @@ fn selection_preserves_video_and_applies_audio_keep() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
+        "source_media_snapshot_id": 1,
         "track_actions": [
             {
                 "type": "keep_tracks",
@@ -48,6 +49,7 @@ fn selection_rejects_keep_remove_video_policy() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
+        "source_media_snapshot_id": 1,
         "track_actions": [
             {
                 "type": "remove_tracks",
@@ -74,6 +76,7 @@ fn selection_rejects_attachment_source_stream_before_keep_ids() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
+        "source_media_snapshot_id": 1,
         "track_actions": [],
         "track_order": ["video", "audio"],
         "defaults": []
@@ -100,18 +103,13 @@ fn selection_rejects_attachment_source_stream_before_keep_ids() {
 }
 
 #[test]
-fn selection_rejects_attachment_track_action_target() {
+fn selection_maps_shared_payload_schema_errors_to_config() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
-        "track_actions": [
-            {
-                "type": "remove_tracks",
-                "target": "attachment",
-                "filter": null
-            }
-        ],
-        "track_order": ["video", "audio"],
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio", "audio"],
         "defaults": []
     });
     let snapshot = snapshot_with_video_audio_languages(["eng"]);
@@ -121,53 +119,9 @@ fn selection_rejects_attachment_track_action_target() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(
         err.to_string()
-            .contains("attachment track policy is unsupported")
+            .contains("remux track_order[2] duplicates target `audio`"),
+        "{err}"
     );
-}
-
-#[test]
-fn selection_rejects_empty_track_order() {
-    assert_track_order_rejected(&json!([]), "track_order must include at least one group");
-}
-
-#[test]
-fn selection_rejects_duplicate_track_order_groups() {
-    assert_track_order_rejected(
-        &json!(["video", "audio", "audio"]),
-        "track_order duplicates group audio",
-    );
-}
-
-#[test]
-fn selection_rejects_attachment_track_order_group() {
-    assert_track_order_rejected(
-        &json!(["video", "attachment"]),
-        "track_order attachment group is unsupported",
-    );
-}
-
-#[test]
-fn selection_rejects_unsupported_track_order_strings() {
-    assert_track_order_rejected(
-        &json!(["video", "chapters"]),
-        "track_order group chapters is unsupported",
-    );
-}
-
-fn assert_track_order_rejected(track_order: &serde_json::Value, expected: &str) {
-    let payload = json!({
-        "type": "remux",
-        "container": "mkv",
-        "track_actions": [],
-        "track_order": track_order,
-        "defaults": []
-    });
-    let snapshot = snapshot_with_video_audio_languages(["eng"]);
-
-    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
-
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains(expected), "{err}");
 }
 
 fn snapshot_with_video_audio_languages<const N: usize>(languages: [&str; N]) -> MediaSnapshot {
