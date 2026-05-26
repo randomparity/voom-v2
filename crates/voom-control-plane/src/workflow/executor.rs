@@ -20,8 +20,9 @@ use voom_worker_protocol::{
 };
 
 use super::binding::{
-    BranchContext, PolicyTranscodeSource, render_default_payload,
-    render_default_payload_with_fan_out, render_policy_transcode_payload,
+    BranchContext, PolicyRemuxSource, PolicyTranscodeSource, render_default_payload,
+    render_default_payload_with_fan_out, render_policy_remux_payload,
+    render_policy_transcode_payload,
 };
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
@@ -60,6 +61,8 @@ pub struct WorkflowExecutorOptions {
     pub max_attempts: u32,
     pub transcode_staging_root: PathBuf,
     pub transcode_target_dir: PathBuf,
+    pub remux_staging_root: PathBuf,
+    pub remux_target_dir: PathBuf,
     pub chaos: WorkflowChaosOptions,
 }
 
@@ -74,6 +77,8 @@ impl Default for WorkflowExecutorOptions {
             max_attempts: 1,
             transcode_staging_root: PathBuf::from("/tmp/voom/transcode/staging"),
             transcode_target_dir: PathBuf::from("/tmp/voom/transcode/output"),
+            remux_staging_root: PathBuf::from("/tmp/voom/remux/staging"),
+            remux_target_dir: PathBuf::from("/tmp/voom/remux/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -91,6 +96,8 @@ impl WorkflowExecutorOptions {
             max_attempts: 1,
             transcode_staging_root: PathBuf::from("/tmp/voom-test/transcode/staging"),
             transcode_target_dir: PathBuf::from("/tmp/voom-test/transcode/output"),
+            remux_staging_root: PathBuf::from("/tmp/voom-test/remux/staging"),
+            remux_target_dir: PathBuf::from("/tmp/voom-test/remux/output"),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -419,6 +426,19 @@ where
                     ),
                     None => render_default_payload(operation, &branch, timing),
                 },
+                OperationKind::Remux => match node.policy_target() {
+                    Some(
+                        target @ (voom_plan::TargetRef::FileVersion { .. }
+                        | voom_plan::TargetRef::FileLocation { .. }),
+                    ) => render_policy_remux_payload(
+                        self.resolve_policy_remux_source(target).await?,
+                        node.operation_payload(),
+                        &self.options.remux_staging_root,
+                        &self.options.remux_target_dir,
+                        timing,
+                    ),
+                    _ => render_default_payload(operation, &branch, timing),
+                },
                 _ => render_default_payload(operation, &branch, timing),
             }
             .map_err(|e| VoomError::Config(format!("workflow root payload binding: {e}")))?;
@@ -478,6 +498,36 @@ where
             }
             other => Err(VoomError::Config(format!(
                 "transcode_video requires file_version or file_location target, got {other:?}"
+            ))),
+        }
+    }
+
+    async fn resolve_policy_remux_source(
+        &self,
+        target: &voom_plan::TargetRef,
+    ) -> Result<PolicyRemuxSource, VoomError> {
+        match target {
+            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyRemuxSource {
+                file_version_id: *id,
+                location_id: None,
+            }),
+            voom_plan::TargetRef::FileLocation { id } => {
+                let location = self
+                    .control_plane
+                    .identity
+                    .get_file_location(*id)
+                    .await?
+                    .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
+                if location.retired_at.is_some() {
+                    return Err(VoomError::Config(format!("file_location {id} is retired")));
+                }
+                Ok(PolicyRemuxSource {
+                    file_version_id: location.file_version_id,
+                    location_id: Some(*id),
+                })
+            }
+            other => Err(VoomError::Config(format!(
+                "remux requires file_version or file_location target, got {other:?}"
             ))),
         }
     }

@@ -325,6 +325,175 @@ async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options()
 }
 
 #[tokio::test]
+async fn policy_remux_root_ticket_carries_source_ids_and_operation_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::Remux);
+    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(workflow_payload.rendered_payload["remux"]["type"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["remux"]["container"],
+        "mkv"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["remux"]["track_order"],
+        json!(["video", "audio", "subtitle"])
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_file_location_target_carries_source_version_and_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.plan = policy_remux_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        source_file_version_id.0
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_location_id"],
+        source_location_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_carries_staging_and_target_roots_from_options() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.remux_staging_root = PathBuf::from("/tmp/voom-remux-stage");
+    options.remux_target_dir = PathBuf::from("/media/remuxed");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-remux-stage"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/media/remuxed"
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_ticket_uses_default_remux_roots() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-test/remux/staging"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/tmp/voom-test/remux/output"
+    );
+}
+
+#[tokio::test]
+async fn malformed_policy_remux_payload_is_rejected_before_default_fallback() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan_with_payload(
+        TargetRef::FileVersion {
+            id: FileVersionId(11),
+        },
+        json!({"container": "mkv"}),
+    );
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.source.to_string().contains("type: remux"));
+    assert_eq!(fixture.ticket_count().await, 0);
+}
+
+#[tokio::test]
+async fn non_policy_remux_root_ticket_uses_default_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = non_policy_remux_plan();
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["path"],
+        "/library/root.mkv"
+    );
+    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
+    assert!(workflow_payload.rendered_payload.get("remux").is_none());
+}
+
+#[tokio::test]
+async fn synthetic_policy_remux_root_ticket_uses_default_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_remux_plan(TargetRef::Synthetic {
+        key: "variant-1".to_owned(),
+        kind: voom_policy::TargetKind::MediaVariant,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.remux", ticket_payload)
+            .unwrap();
+    assert_eq!(workflow_payload.rendered_payload["operation"], "remux");
+    assert_eq!(
+        workflow_payload.rendered_payload["path"],
+        "/library/root.mkv"
+    );
+    assert_eq!(workflow_payload.rendered_payload["container"], "mkv");
+    assert!(workflow_payload.rendered_payload.get("remux").is_none());
+}
+
+#[tokio::test]
 async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     let dir = tempfile::tempdir().unwrap();
@@ -755,6 +924,13 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn ticket_count(&self) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
     async fn first_lease_heartbeat_window(&self) -> (String, String) {
         sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1")
             .fetch_one(&self.cp.pool)
@@ -1130,6 +1306,67 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
                 "container": "mkv",
                 "profile": "default-hevc",
             }),
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn policy_remux_plan(target: TargetRef) -> WorkflowPlan {
+    policy_remux_plan_with_payload(
+        target,
+        json!({
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [],
+            "track_order": ["video", "audio", "subtitle"],
+            "defaults": [],
+        }),
+    )
+}
+
+fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-remux-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "policy-node_remux".to_owned(),
+            operation: OperationKind::Remux,
+            policy_target: Some(target),
+            operation_payload,
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn non_policy_remux_plan() -> WorkflowPlan {
+    WorkflowPlan {
+        id: "non-policy-remux-test".to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: "remux".to_owned(),
+            operation: OperationKind::Remux,
+            policy_target: None,
+            operation_payload: Value::Null,
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,
