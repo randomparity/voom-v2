@@ -100,8 +100,8 @@ impl MkvmergeTrackMapping {
             .map(|track| track.id)
     }
 
-    pub(crate) fn track_for_provider_index(&self, provider_index: u32) -> Option<MkvmergeTrack> {
-        self.tracks_by_provider_index.get(&provider_index).cloned()
+    pub(crate) fn track_for_provider_index(&self, provider_index: u32) -> Option<&MkvmergeTrack> {
+        self.tracks_by_provider_index.get(&provider_index)
     }
 
     pub(crate) fn track_count(&self) -> usize {
@@ -239,7 +239,7 @@ pub fn build_mkvmerge_args(
     );
     args.push("--no-attachments".to_owned());
     extend_default_flags(&mut args, &request.selection, mapping)?;
-    if let Some(track_order) = track_order(&request.selection, mapping)? {
+    if let Some(track_order) = track_order(&request.selection, &keep) {
         args.push("--track-order".to_owned());
         args.push(track_order);
     }
@@ -306,10 +306,10 @@ pub struct OutputProbe {
     pub mapping: MkvmergeTrackMapping,
 }
 
-fn selected_tracks(
+fn selected_tracks<'a>(
     refs: &[RemuxStreamRef],
-    mapping: &MkvmergeTrackMapping,
-) -> Result<Vec<MkvmergeTrack>, MkvtoolnixError> {
+    mapping: &'a MkvmergeTrackMapping,
+) -> Result<Vec<&'a MkvmergeTrack>, MkvtoolnixError> {
     refs.iter()
         .map(|stream| {
             mapping
@@ -327,7 +327,7 @@ fn selected_tracks(
 fn extend_group_selection(
     args: &mut Vec<String>,
     option: &str,
-    keep: &[MkvmergeTrack],
+    keep: &[&MkvmergeTrack],
     kind: MkvmergeTrackKind,
 ) {
     let ids = keep
@@ -345,7 +345,7 @@ fn extend_optional_group_selection(
     args: &mut Vec<String>,
     option: &str,
     none_option: &str,
-    keep: &[MkvmergeTrack],
+    keep: &[&MkvmergeTrack],
     kind: MkvmergeTrackKind,
 ) {
     let ids = keep
@@ -397,42 +397,25 @@ fn extend_default_flags(
     Ok(())
 }
 
-fn track_order(
-    selection: &RemuxSelection,
-    mapping: &MkvmergeTrackMapping,
-) -> Result<Option<String>, MkvtoolnixError> {
+fn track_order(selection: &RemuxSelection, keep: &[&MkvmergeTrack]) -> Option<String> {
     if selection.track_order.is_empty() {
-        return Ok(None);
+        return None;
     }
-    let keep = selection
-        .keep_streams
-        .iter()
-        .map(|stream| {
-            mapping
-                .track_for_provider_index(stream.provider_stream_index)
-                .ok_or_else(|| {
-                    MkvtoolnixError::ConfigInvalid(format!(
-                        "missing mkvmerge track id for provider stream index {}",
-                        stream.provider_stream_index
-                    ))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let mut ordered = Vec::new();
     let mut used = BTreeSet::new();
     for group in &selection.track_order {
-        for track in &keep {
+        for track in keep {
             if track.kind.matches_group(*group) && used.insert(track.id) {
                 ordered.push(format!("0:{}", track.id));
             }
         }
     }
-    for track in &keep {
+    for track in keep {
         if used.insert(track.id) {
             ordered.push(format!("0:{}", track.id));
         }
     }
-    Ok(Some(ordered.join(",")))
+    Some(ordered.join(","))
 }
 
 async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, MkvtoolnixError> {

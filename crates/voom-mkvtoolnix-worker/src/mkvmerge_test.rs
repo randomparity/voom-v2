@@ -43,14 +43,10 @@ fn track_fingerprint_ignores_remux_changed_fields() {
         ]
     });
 
-    let before = track_mapping_from_identify(&before)
-        .unwrap()
-        .track_for_provider_index(0)
-        .unwrap();
-    let after = track_mapping_from_identify(&after)
-        .unwrap()
-        .track_for_provider_index(0)
-        .unwrap();
+    let before_mapping = track_mapping_from_identify(&before).unwrap();
+    let before = before_mapping.track_for_provider_index(0).unwrap();
+    let after_mapping = track_mapping_from_identify(&after).unwrap();
+    let after = after_mapping.track_for_provider_index(0).unwrap();
 
     assert_eq!(before.fingerprint, after.fingerprint);
 }

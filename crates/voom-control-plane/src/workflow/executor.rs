@@ -1251,7 +1251,7 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
             self.lease_id,
             OperationKind::Remux,
             self.options,
-            crate::remux::dispatch::dispatch_remux_with_client_context(
+            crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
                 &format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0),

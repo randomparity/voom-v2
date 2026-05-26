@@ -141,32 +141,28 @@ pub fn validate_result(
             "remux source facts do not match selected file_version".to_owned(),
         ));
     }
-    let expected_kept = selection
-        .keep_streams
-        .iter()
-        .map(|stream| stream.snapshot_stream_id.as_str())
-        .collect::<Vec<_>>();
-    let actual_kept = result
+    let kept_ids_match = result
         .kept_snapshot_stream_ids
         .iter()
         .map(String::as_str)
-        .collect::<Vec<_>>();
-    if actual_kept != expected_kept {
+        .eq(selection
+            .keep_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str()));
+    if !kept_ids_match {
         return Err(VoomError::MalformedWorkerResult(
             "remux result kept stream ids do not match request".to_owned(),
         ));
     }
-    let expected_defaults = selection
-        .default_streams
-        .iter()
-        .map(|stream| stream.snapshot_stream_id.as_str())
-        .collect::<Vec<_>>();
-    let actual_defaults = result
+    let default_ids_match = result
         .default_snapshot_stream_ids
         .iter()
         .map(String::as_str)
-        .collect::<Vec<_>>();
-    if actual_defaults != expected_defaults {
+        .eq(selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str()));
+    if !default_ids_match {
         return Err(VoomError::MalformedWorkerResult(
             "remux result default stream ids do not match request".to_owned(),
         ));
@@ -199,35 +195,13 @@ where
     C: ClientHandle + ?Sized,
 {
     let mut progress = NoopRemuxProgressSink;
-    dispatch_remux_with_client_context(
+    dispatch_remux_with_client_context_and_progress(
         client,
         credentials,
         "remux-control-plane",
         LeaseId(0),
         remux,
         &mut progress,
-    )
-    .await
-}
-
-pub(crate) async fn dispatch_remux_with_client_context<C>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    idempotency_key: &str,
-    lease_id: LeaseId,
-    remux: RemuxRequest,
-    progress: &mut dyn RemuxProgressSink,
-) -> Result<RemuxResult, VoomError>
-where
-    C: ClientHandle + ?Sized,
-{
-    dispatch_remux_with_client_context_and_progress(
-        client,
-        credentials,
-        idempotency_key,
-        lease_id,
-        remux,
-        progress,
     )
     .await
 }

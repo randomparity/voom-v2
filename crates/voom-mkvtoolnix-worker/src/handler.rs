@@ -505,8 +505,8 @@ fn validate_output_selection(
             input_mapping,
             kept_stream,
             output_index,
-            &expected_track,
-            &output_track,
+            expected_track,
+            output_track,
         )?;
     }
 
@@ -592,7 +592,7 @@ fn validate_output_track_identity(
 fn output_track_at(
     output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
     output_index: usize,
-) -> Result<crate::mkvmerge::MkvmergeTrack, MkvtoolnixWorkerError> {
+) -> Result<&crate::mkvmerge::MkvmergeTrack, MkvtoolnixWorkerError> {
     u32::try_from(output_index)
         .ok()
         .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))

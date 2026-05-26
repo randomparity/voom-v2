@@ -30,6 +30,32 @@ fn validate_result_rejects_missing_kept_stream_id() {
     assert!(err.to_string().contains("kept stream ids"));
 }
 
+#[test]
+fn validate_result_rejects_mismatched_default_stream_order() {
+    let selection = RemuxSelection {
+        keep_streams: vec![RemuxStreamRef {
+            snapshot_stream_id: "stream-0".to_owned(),
+            provider_stream_index: 0,
+        }],
+        default_streams: vec![RemuxStreamRef {
+            snapshot_stream_id: "stream-0".to_owned(),
+            provider_stream_index: 0,
+        }],
+        clear_default_streams: Vec::new(),
+        track_order: vec![RemuxTrackGroup::Video],
+    };
+    let mut result = remux_result();
+    result.default_snapshot_stream_ids = Vec::new();
+
+    let err = validate_result(&selected_source(), &selection, &result).unwrap_err();
+
+    assert_eq!(
+        err.error_code(),
+        voom_core::ErrorCode::MalformedWorkerResult
+    );
+    assert!(err.to_string().contains("default stream ids"));
+}
+
 fn selected_source() -> crate::remux::source::SelectedSource {
     crate::remux::source::SelectedSource {
         version: FileVersion {
