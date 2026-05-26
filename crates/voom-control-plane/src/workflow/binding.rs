@@ -2,6 +2,7 @@ use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::{FileLocationId, FileVersionId};
+use voom_plan::remux::RemuxOperationPayload;
 use voom_worker_protocol::OperationKind;
 
 use super::ticket_payload::operation_name;
@@ -139,13 +140,12 @@ pub fn render_policy_remux_payload(
     target_dir: &Path,
     timing: EffectiveTiming,
 ) -> Result<Value, BindingError> {
-    if operation_payload.get("type").and_then(Value::as_str) != Some("remux") {
-        return Err(BindingError::new("remux payload missing `type: remux`"));
-    }
-    validate_policy_remux_payload(operation_payload)?;
+    let remux_payload = RemuxOperationPayload::try_from_execution_value(operation_payload)
+        .map_err(|err| BindingError::new(err.to_string()))?
+        .into_value();
     let mut payload = json!({
         "operation": "remux",
-        "remux": operation_payload,
+        "remux": remux_payload,
         "staging_root": staging_root,
         "target_dir": target_dir,
         "duration_ms": timing.duration_ms,
@@ -168,97 +168,6 @@ fn insert_policy_file_source(object: &mut Map<String, Value>, source: PolicyFile
     }
 }
 
-fn validate_policy_remux_payload(operation_payload: &Value) -> Result<(), BindingError> {
-    let container = operation_payload
-        .get("container")
-        .and_then(Value::as_str)
-        .ok_or_else(|| BindingError::new("remux payload missing `container`"))?;
-    if container != "mkv" {
-        return Err(BindingError::new("remux payload `container` must be mkv"));
-    }
-    validate_track_actions(required_array(operation_payload, "track_actions")?)?;
-    validate_track_order(required_array(operation_payload, "track_order")?)?;
-    validate_defaults(required_array(operation_payload, "defaults")?)?;
-    validate_required_positive_u64(operation_payload, "source_media_snapshot_id")?;
-    Ok(())
-}
-
-fn validate_required_positive_u64(payload: &Value, field: &str) -> Result<(), BindingError> {
-    if payload
-        .get(field)
-        .and_then(Value::as_u64)
-        .is_none_or(|value| value == 0)
-    {
-        return Err(BindingError::new(format!(
-            "remux payload `{field}` must be a positive integer"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_track_actions(actions: &[Value]) -> Result<(), BindingError> {
-    for (index, action) in actions.iter().enumerate() {
-        let object = action.as_object().ok_or_else(|| {
-            BindingError::new(format!("remux track_actions[{index}] must be an object"))
-        })?;
-        required_object_string(object, "track_actions", index, "type")?;
-        let target = required_object_string(object, "track_actions", index, "target")?;
-        if target == "attachment" {
-            return Err(BindingError::new(format!(
-                "remux track_actions[{index}] target `attachment` is unsupported"
-            )));
-        }
-        if object
-            .get("filter")
-            .is_some_and(|filter| !filter.is_object())
-        {
-            return Err(BindingError::new(format!(
-                "remux track_actions[{index}] `filter` must be an object"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_track_order(order: &[Value]) -> Result<(), BindingError> {
-    let mut seen = Vec::new();
-    for (index, target) in order.iter().enumerate() {
-        let Some(target) = target.as_str() else {
-            return Err(BindingError::new(format!(
-                "remux track_order[{index}] must be a string"
-            )));
-        };
-        if target == "attachment" {
-            return Err(BindingError::new(format!(
-                "remux track_order[{index}] target `attachment` is unsupported"
-            )));
-        }
-        if !matches!(target, "video" | "audio" | "subtitle") {
-            return Err(BindingError::new(format!(
-                "remux track_order[{index}] has unsupported target `{target}`"
-            )));
-        }
-        if seen.contains(&target) {
-            return Err(BindingError::new(format!(
-                "remux track_order[{index}] duplicates target `{target}`"
-            )));
-        }
-        seen.push(target);
-    }
-    Ok(())
-}
-
-fn validate_defaults(defaults: &[Value]) -> Result<(), BindingError> {
-    for (index, default) in defaults.iter().enumerate() {
-        let object = default.as_object().ok_or_else(|| {
-            BindingError::new(format!("remux defaults[{index}] must be an object"))
-        })?;
-        required_object_string(object, "defaults", index, "target")?;
-        required_object_string(object, "defaults", index, "strategy")?;
-    }
-    Ok(())
-}
-
 #[must_use]
 pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
     BranchContext {
@@ -274,25 +183,6 @@ fn required_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str, Bindi
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| BindingError::new(format!("transcode_video payload missing `{field}`")))
-}
-
-fn required_array<'a>(payload: &'a Value, field: &str) -> Result<&'a Vec<Value>, BindingError> {
-    payload
-        .get(field)
-        .and_then(Value::as_array)
-        .ok_or_else(|| BindingError::new(format!("remux payload missing `{field}`")))
-}
-
-fn required_object_string<'a>(
-    object: &'a Map<String, Value>,
-    parent: &str,
-    index: usize,
-    field: &str,
-) -> Result<&'a str, BindingError> {
-    object
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| BindingError::new(format!("remux {parent}[{index}] missing `{field}`")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

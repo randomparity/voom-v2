@@ -12,7 +12,11 @@ use crate::{
     NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext, PlanningDiagnostic,
     PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
     SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
-    remux::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts},
+    remux::{
+        RemuxDefaultAction, RemuxOperationPayload, RemuxPlanningBlock, RemuxTrackAction,
+        RemuxTrackActionKind, SnapshotStreamFact, default_track_order, evaluate_filter,
+        stream_facts,
+    },
 };
 
 #[derive(Debug)]
@@ -874,14 +878,14 @@ fn remux_payload(
         .iter()
         .filter_map(|operation| match operation {
             CompiledOperation::KeepTracks { target, filter } => Some(track_action_payload(
-                "keep_tracks",
+                RemuxTrackActionKind::KeepTracks,
                 *target,
-                filter.as_ref(),
+                filter.clone(),
             )),
             CompiledOperation::RemoveTracks { target, filter } => Some(track_action_payload(
-                "remove_tracks",
+                RemuxTrackActionKind::RemoveTracks,
                 *target,
-                filter.as_ref(),
+                filter.clone(),
             )),
             _ => None,
         })
@@ -896,63 +900,50 @@ fn remux_payload(
     let track_order = match reorder_operations.as_slice() {
         [targets] => targets
             .iter()
-            .map(|target| track_target_payload(*target))
-            .collect::<Vec<serde_json::Value>>(),
+            .map(|target| remux_track_group(*target))
+            .collect::<Vec<_>>(),
         _ => default_track_order(),
     };
     let defaults = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::SetDefaults { target, strategy } => Some(json!({
-                "target": track_target_payload(*target),
-                "strategy": default_strategy_payload(*strategy),
-            })),
+            CompiledOperation::SetDefaults { target, strategy } => Some(RemuxDefaultAction {
+                target: *target,
+                strategy: *strategy,
+            }),
             _ => None,
         })
         .collect::<Vec<_>>();
 
-    let mut payload = json!({
-        "type": "remux",
-        "container": container,
-        "track_actions": track_actions,
-        "track_order": track_order,
-        "defaults": defaults,
-    });
-    if let Some(id) = snapshot.existing_media_snapshot_id
-        && let Some(object) = payload.as_object_mut()
-    {
-        object.insert("source_media_snapshot_id".to_owned(), json!(id.0));
+    RemuxOperationPayload {
+        container: container.to_owned(),
+        source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+        track_actions,
+        track_order,
+        defaults,
     }
-    payload
+    .into_value()
 }
 
 fn track_action_payload(
-    action_type: &str,
+    kind: RemuxTrackActionKind,
     target: TrackTarget,
-    filter: Option<&TrackFilter>,
-) -> serde_json::Value {
-    let mut action = serde_json::Map::new();
-    action.insert("type".to_owned(), json!(action_type));
-    action.insert("target".to_owned(), track_target_payload(target));
-    if let Some(filter) = filter {
-        action.insert(
-            "filter".to_owned(),
-            serde_json::to_value(filter).unwrap_or_else(|_| json!({})),
-        );
+    filter: Option<TrackFilter>,
+) -> RemuxTrackAction {
+    RemuxTrackAction {
+        kind,
+        target,
+        filter,
     }
-    serde_json::Value::Object(action)
 }
 
-fn default_track_order() -> Vec<serde_json::Value> {
-    vec![json!("video"), json!("audio"), json!("subtitle")]
-}
-
-fn track_target_payload(target: TrackTarget) -> serde_json::Value {
-    serde_json::to_value(target).unwrap_or_else(|_| json!("unknown"))
-}
-
-fn default_strategy_payload(strategy: DefaultStrategy) -> serde_json::Value {
-    serde_json::to_value(strategy).unwrap_or_else(|_| json!("unknown"))
+fn remux_track_group(target: TrackTarget) -> voom_worker_protocol::RemuxTrackGroup {
+    match target {
+        TrackTarget::Video => voom_worker_protocol::RemuxTrackGroup::Video,
+        TrackTarget::Audio => voom_worker_protocol::RemuxTrackGroup::Audio,
+        TrackTarget::Subtitle => voom_worker_protocol::RemuxTrackGroup::Subtitle,
+        TrackTarget::Attachment => voom_worker_protocol::RemuxTrackGroup::Attachment,
+    }
 }
 
 fn remux_group_shape(
