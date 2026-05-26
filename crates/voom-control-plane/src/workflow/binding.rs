@@ -100,13 +100,13 @@ pub fn render_default_payload_with_fan_out(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyTranscodeSource {
+pub struct PolicyFileSource {
     pub file_version_id: FileVersionId,
     pub location_id: Option<FileLocationId>,
 }
 
 pub fn render_policy_transcode_payload(
-    source: PolicyTranscodeSource,
+    source: PolicyFileSource,
     operation_payload: &Value,
     staging_root: &Path,
     target_dir: &Path,
@@ -128,24 +128,12 @@ pub fn render_policy_transcode_payload(
     let Some(object) = payload.as_object_mut() else {
         return Err(BindingError::new("rendered payload must be a JSON object"));
     };
-    object.insert(
-        "source_file_version_id".to_owned(),
-        json!(source.file_version_id),
-    );
-    if let Some(location_id) = source.location_id {
-        object.insert("source_location_id".to_owned(), json!(location_id));
-    }
+    insert_policy_file_source(object, source);
     Ok(payload)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyRemuxSource {
-    pub file_version_id: FileVersionId,
-    pub location_id: Option<FileLocationId>,
-}
-
 pub fn render_policy_remux_payload(
-    source: PolicyRemuxSource,
+    source: PolicyFileSource,
     operation_payload: &Value,
     staging_root: &Path,
     target_dir: &Path,
@@ -166,6 +154,11 @@ pub fn render_policy_remux_payload(
     let Some(object) = payload.as_object_mut() else {
         return Err(BindingError::new("rendered payload must be a JSON object"));
     };
+    insert_policy_file_source(object, source);
+    Ok(payload)
+}
+
+fn insert_policy_file_source(object: &mut Map<String, Value>, source: PolicyFileSource) {
     object.insert(
         "source_file_version_id".to_owned(),
         json!(source.file_version_id),
@@ -173,7 +166,6 @@ pub fn render_policy_remux_payload(
     if let Some(location_id) = source.location_id {
         object.insert("source_location_id".to_owned(), json!(location_id));
     }
-    Ok(payload)
 }
 
 fn validate_policy_remux_payload(operation_payload: &Value) -> Result<(), BindingError> {

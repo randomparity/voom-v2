@@ -353,6 +353,24 @@ async fn policy_transcode_file_location_target_carries_source_version_and_locati
 }
 
 #[tokio::test]
+async fn policy_transcode_file_location_target_rejects_retired_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (_source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.retire_source_location(source_location_id).await;
+    fixture.plan = policy_transcode_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(
+        err.source.to_string(),
+        format!("config error: file_location {source_location_id} is retired")
+    );
+}
+
+#[tokio::test]
 async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
@@ -434,6 +452,24 @@ async fn policy_remux_file_location_target_carries_source_version_and_location()
     assert_eq!(
         workflow_payload.rendered_payload["source_location_id"],
         source_location_id.0
+    );
+}
+
+#[tokio::test]
+async fn policy_remux_file_location_target_rejects_retired_location() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let (_source_file_version_id, source_location_id) = fixture.seed_local_source().await;
+    fixture.retire_source_location(source_location_id).await;
+    fixture.plan = policy_remux_plan(TargetRef::FileLocation {
+        id: source_location_id,
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
+    assert_eq!(
+        err.source.to_string(),
+        format!("config error: file_location {source_location_id} is retired")
     );
 }
 
@@ -1543,6 +1579,16 @@ impl ExecutorFixture {
             } => (file_version_id, file_location_id),
             IngestOutcome::AliasAttached { .. } => panic!("seed must create a new file asset"),
         }
+    }
+
+    async fn retire_source_location(&self, source_location_id: voom_core::FileLocationId) {
+        let result = sqlx::query("UPDATE file_locations SET retired_at = ? WHERE id = ?")
+            .bind("1970-01-01T00:00:00Z")
+            .bind(i64::try_from(source_location_id.0).unwrap())
+            .execute(&self.cp.pool)
+            .await
+            .unwrap();
+        assert_eq!(result.rows_affected(), 1);
     }
 
     async fn record_source_snapshot(&self, file_version_id: FileVersionId) -> MediaSnapshotId {
