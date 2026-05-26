@@ -144,6 +144,67 @@ fn remux_or_returns_true_before_later_insufficient_child() {
 }
 
 #[test]
+fn remux_and_evaluates_later_missing_facts_after_false_child() {
+    let stream = SnapshotStreamFact {
+        snapshot_stream_id: "stream-0".to_owned(),
+        provider_stream_index: 0,
+        kind: TrackTarget::Audio,
+        codec_name: Some("aac".to_owned()),
+        language: None,
+        channels: Some(2),
+        title: None,
+        mime_type: None,
+        filename: None,
+        is_default: false,
+        is_forced: false,
+    };
+
+    let err = evaluate_filter(
+        &TrackFilter::And {
+            filters: vec![
+                TrackFilter::CodecIn {
+                    values: vec!["flac".to_owned()],
+                },
+                TrackFilter::LanguageIn {
+                    values: vec!["eng".to_owned()],
+                },
+            ],
+        },
+        &stream,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, RemuxPlanningBlock::InsufficientSnapshotFacts);
+}
+
+#[test]
+fn remux_title_contains_is_case_sensitive() {
+    let stream = SnapshotStreamFact {
+        snapshot_stream_id: "stream-0".to_owned(),
+        provider_stream_index: 0,
+        kind: TrackTarget::Audio,
+        codec_name: Some("aac".to_owned()),
+        language: Some("eng".to_owned()),
+        channels: Some(2),
+        title: Some("Main Audio".to_owned()),
+        mime_type: None,
+        filename: None,
+        is_default: false,
+        is_forced: false,
+    };
+
+    let matched = evaluate_filter(
+        &TrackFilter::TitleContains {
+            value: "main".to_owned(),
+        },
+        &stream,
+    )
+    .unwrap();
+
+    assert!(!matched);
+}
+
+#[test]
 fn remux_channels_filter_uses_comparison_op() {
     let stream = SnapshotStreamFact {
         snapshot_stream_id: "stream-0".to_owned(),

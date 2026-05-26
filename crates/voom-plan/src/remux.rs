@@ -117,15 +117,13 @@ pub fn evaluate_filter(
                 .title
                 .as_ref()
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
-            Ok(title
-                .to_ascii_lowercase()
-                .contains(&value.to_ascii_lowercase()))
+            Ok(title.contains(value))
         }
         TrackFilter::Not { inner } => Ok(!evaluate_filter(inner, stream)?),
         TrackFilter::And { filters } => {
             let mut matched = true;
             for filter in filters {
-                matched = matched && evaluate_filter(filter, stream)?;
+                matched = evaluate_filter(filter, stream)? && matched;
             }
             Ok(matched)
         }
