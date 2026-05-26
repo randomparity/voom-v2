@@ -272,21 +272,6 @@ impl<'a> PlanBuilder<'a> {
                 container,
                 profile,
             ),
-            CompiledOperation::Conditional {
-                condition,
-                operations,
-            } => match evaluate_condition(condition, snapshot) {
-                ConditionEval::Matched => {
-                    self.expand_operations_for_snapshot(phase_name, snapshot, operations);
-                }
-                ConditionEval::NotMatched => {}
-                ConditionEval::Unknown => self.expand_blocked_insufficient_facts_for_operations(
-                    phase_name, snapshot, operations,
-                ),
-            },
-            CompiledOperation::Rules { mode, rules } => {
-                self.expand_rules_for_snapshot(phase_name, snapshot, *mode, rules);
-            }
             unsupported => {
                 let operation_kind = operation_kind(unsupported);
                 self.expand_blocked_unsupported_for_snapshot(
@@ -296,61 +281,6 @@ impl<'a> PlanBuilder<'a> {
                     operation_payload(unsupported),
                     "operation is not supported by Sprint 5 planner",
                 );
-            }
-        }
-    }
-
-    fn expand_rules_for_snapshot(
-        &mut self,
-        phase_name: &str,
-        snapshot: &MediaSnapshotInput,
-        mode: RuleMatchMode,
-        rules: &[CompiledRule],
-    ) {
-        match mode {
-            RuleMatchMode::First => {
-                for rule in rules {
-                    match rule_condition_matches(rule, snapshot) {
-                        ConditionEval::Matched => {
-                            self.expand_operations_for_snapshot(
-                                phase_name,
-                                snapshot,
-                                &rule.operations,
-                            );
-                            break;
-                        }
-                        ConditionEval::NotMatched => {}
-                        ConditionEval::Unknown => {
-                            self.expand_blocked_insufficient_facts_for_operations(
-                                phase_name,
-                                snapshot,
-                                &rule.operations,
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-            RuleMatchMode::All => {
-                for rule in rules {
-                    match rule_condition_matches(rule, snapshot) {
-                        ConditionEval::Matched => {
-                            self.expand_operations_for_snapshot(
-                                phase_name,
-                                snapshot,
-                                &rule.operations,
-                            );
-                        }
-                        ConditionEval::NotMatched => {}
-                        ConditionEval::Unknown => {
-                            self.expand_blocked_insufficient_facts_for_operations(
-                                phase_name,
-                                snapshot,
-                                &rule.operations,
-                            );
-                        }
-                    }
-                }
             }
         }
     }

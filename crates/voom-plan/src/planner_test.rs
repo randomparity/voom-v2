@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use voom_core::MediaSnapshotId;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
-    CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage, MediaSnapshotInput,
-    PolicyDiagnostic, PolicyInputSetDraft, PolicyInputSourceKind, SourceLocation, SourceSpan,
-    TargetKind, TargetRef, TrackFilter, TrackTarget,
+    CompiledRule, CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage,
+    MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft, PolicyInputSourceKind,
+    RuleMatchMode, SourceLocation, SourceSpan, TargetKind, TargetRef, TrackFilter, TrackTarget,
 };
 
 use crate::{
@@ -1215,4 +1215,124 @@ fn unsupported_condition_comparison_blocks_nested_operation() {
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
     );
+}
+
+#[test]
+fn rules_first_uses_first_matching_rule_only() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Rules {
+            mode: RuleMatchMode::First,
+            rules: vec![
+                rule(
+                    "wrong-container",
+                    Some(container_is("avi")),
+                    vec![CompiledOperation::ClearTags],
+                ),
+                rule(
+                    "matching-container",
+                    Some(container_is("mp4")),
+                    vec![transcode_video()],
+                ),
+                rule("not-reached", None, vec![CompiledOperation::ClearTags]),
+            ],
+        }),
+        input: transcodable_input("mp4"),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
+fn rules_all_preserves_matching_rule_order() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Rules {
+            mode: RuleMatchMode::All,
+            rules: vec![
+                rule(
+                    "transcode",
+                    Some(container_is("mp4")),
+                    vec![transcode_video()],
+                ),
+                rule(
+                    "clear-tags",
+                    Some(container_is("mp4")),
+                    vec![CompiledOperation::ClearTags],
+                ),
+            ],
+        }),
+        input: transcodable_input("mp4"),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[1].operation_kind, "clear_tags");
+    assert_eq!(plan.nodes[1].status, NodeStatus::Blocked);
+}
+
+#[test]
+fn rules_unknown_condition_blocks_nested_leaf_operation() {
+    let plan = generate_plan(PlanningRequest {
+        policy: policy(CompiledOperation::Rules {
+            mode: RuleMatchMode::First,
+            rules: vec![rule(
+                "host-state",
+                Some(CompiledCondition::Predicate {
+                    name: "external_host_state".to_owned(),
+                }),
+                vec![transcode_video()],
+            )],
+        }),
+        input: input(Some("mp4")),
+        context: PlanningContext::default(),
+    })
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+fn rule(
+    name: &str,
+    condition: Option<CompiledCondition>,
+    operations: Vec<CompiledOperation>,
+) -> CompiledRule {
+    CompiledRule {
+        name: name.to_owned(),
+        condition,
+        operations,
+    }
+}
+
+fn container_is(container: &str) -> CompiledCondition {
+    CompiledCondition::FieldComparison {
+        path: vec!["container".to_owned(), "name".to_owned()],
+        op: ComparisonOp::Eq,
+        value: CompiledValue::String {
+            value: container.to_owned(),
+        },
+    }
+}
+
+fn transcode_video() -> CompiledOperation {
+    CompiledOperation::TranscodeVideo {
+        target_codec: "hevc".to_owned(),
+        container: "mkv".to_owned(),
+        profile: "default".to_owned(),
+    }
+}
+
+fn transcodable_input(container: &str) -> PolicyInputSetDraft {
+    input_with_snapshot(snapshot_with(Some(container), Some("h264"), Some(1)))
 }
