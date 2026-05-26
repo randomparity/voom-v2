@@ -61,6 +61,8 @@ Sprint 13 explicitly does not deliver:
 - Daemon scheduling loops, remote media transfer, object storage, or UI
   controls.
 - Free-form MKVToolNix arguments in policy text.
+- Explicit video-track keep/remove policy. Sprint 13 preserves all source video
+  streams in source order and blocks policy operations that target `video`.
 - Arbitrary stream-ID reordering beyond V1 target-group ordering.
 - A durable meaning for `defaults ... best`; that remains blocked until Sprint
   15 quality/profile work defines ranking inputs.
@@ -113,7 +115,10 @@ defaults subtitle: none
 ```
 
 Sprint 13 makes those operations executable when they are supported by the V1
-track model. The compiled model remains the source of truth:
+track model. The compiler continues to emit the existing typed operations
+(`set_container`, `keep_tracks`, `remove_tracks`, `reorder_tracks`, and
+`set_defaults`). The planner, not the compiler, groups those compiled operations
+into an executable `remux` plan payload:
 
 ```json
 {
@@ -139,11 +144,14 @@ track model. The compiled model remains the source of truth:
 }
 ```
 
-The planner groups consecutive same-phase operations for the same target
-snapshot into one `remux` node when at least one operation would require a
-mutation. Grouping is limited to one snapshot and one phase. Phase dependency
-edges stay unchanged, and operations in different phases remain separate plan
-nodes.
+The planner builds one remux mutation group per target snapshot per phase. It
+collects all supported same-phase container and track operations for that target,
+even when non-remux operations such as tag edits appear between them in policy
+text. The grouped operations become one `remux` node when at least one operation
+would require a mutation. Unsupported same-phase remux operations produce a
+blocked node for that operation and are not silently dropped into the executable
+group. Phase dependency edges stay unchanged, and operations in different phases
+remain separate plan nodes.
 
 Planning behavior:
 
@@ -155,6 +163,9 @@ Planning behavior:
   facts to evaluate selectors and defaults.
 - Track operations no-op when the selected keep/remove/default/order result
   matches the snapshot.
+- Sources with no video stream block with `unsupported_media_shape`.
+- `keep/remove video ...` blocks with `unsupported_media_shape`; all source video
+  streams are otherwise preserved in source order.
 - `defaults audio: first`, `defaults subtitle: first`, `defaults subtitle:
   none`, and `defaults ... preserve` are V1-supported.
 - `defaults ... best` blocks with `unsupported_media_shape` until Sprint 15.
@@ -190,9 +201,32 @@ Sprint 13 adds typed protocol structs for `remux`:
     "overwrite": false
   },
   "selection": {
-    "keep_stream_ids": [0, 1, 3],
-    "default_stream_ids": [1],
-    "clear_default_stream_ids": [2],
+    "keep_streams": [
+      {
+        "snapshot_stream_id": "stream-0",
+        "provider_stream_index": 0
+      },
+      {
+        "snapshot_stream_id": "stream-1",
+        "provider_stream_index": 1
+      },
+      {
+        "snapshot_stream_id": "stream-2",
+        "provider_stream_index": 2
+      }
+    ],
+    "default_streams": [
+      {
+        "snapshot_stream_id": "stream-1",
+        "provider_stream_index": 1
+      }
+    ],
+    "clear_default_streams": [
+      {
+        "snapshot_stream_id": "stream-2",
+        "provider_stream_index": 2
+      }
+    ],
     "track_order": ["video", "audio", "subtitle"]
   }
 }
@@ -209,10 +243,19 @@ The result reports provider facts and observed output:
   "input_post": { "size_bytes": 1234, "content_hash": "blake3:..." },
   "output": { "size_bytes": 1200, "content_hash": "blake3:..." },
   "output_container": "mkv",
-  "kept_stream_ids": [0, 1, 3],
-  "default_stream_ids": [1]
+  "kept_snapshot_stream_ids": ["stream-0", "stream-1", "stream-2"],
+  "default_snapshot_stream_ids": ["stream-1"]
 }
 ```
+
+`snapshot_stream_id` is the durable stream identity from the source
+`MediaSnapshot`; `provider_stream_index` is the worker-local selector used for
+the input file format. The control plane resolves both values immediately before
+dispatch from the same re-read snapshot used for execution preconditions. The
+worker must echo snapshot IDs in the result, and the control plane validates
+those IDs against the request before recording success. Provider-specific track
+IDs may be observed for diagnostics, but they are not the durable contract
+between planner, control plane, and worker.
 
 The worker must:
 
@@ -224,8 +267,8 @@ The worker must:
 - observe and verify input bytes before and after MKVToolNix;
 - invoke MKVToolNix out of process with a deterministic command shape derived
   from typed request fields;
-- keep the selected primary video stream by default unless an explicit V1 policy
-  action removes a supported non-video target;
+- preserve all source video streams in source order because Sprint 13 has no
+  explicit video-track keep/remove policy;
 - fail if the request would produce no video stream;
 - emit progress frames when the provider exposes useful progress;
 - observe output bytes after MKVToolNix exits;
@@ -311,9 +354,10 @@ and leases remain the source of truth.
 
 Every remux event payload must include enough correlation data to reconstruct
 the ticket attempt without reading provider logs: job ID, ticket ID, lease or
-attempt identity, source file version/location IDs, selected stream IDs, default
-stream IDs, staging path or staged artifact IDs when known, provider
-name/version when known, and the failure class and public error code on failure.
+attempt identity, source file version/location IDs, selected snapshot stream
+IDs, provider stream indexes used for dispatch, default snapshot stream IDs,
+staging path or staged artifact IDs when known, provider name/version when
+known, and the failure class and public error code on failure.
 
 CLI reports must expose stable IDs for:
 
