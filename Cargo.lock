@@ -2728,6 +2728,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "voom-mkvtoolnix-worker"
+version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "chrono",
+ "libc",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "voom-core",
+ "voom-worker-protocol",
+]
+
+[[package]]
 name = "voom-plan"
 version = "0.1.0-dev"
 dependencies = [

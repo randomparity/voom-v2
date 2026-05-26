@@ -1,0 +1,58 @@
+use voom_worker_protocol::{
+    RemuxExpectedFacts, RemuxInput, RemuxOutput, RemuxRequest, RemuxSelection, RemuxStreamRef,
+    RemuxTrackGroup,
+};
+
+use super::*;
+
+#[test]
+fn maps_snapshot_provider_indexes_to_mkvmerge_track_ids() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 7, "type": "video", "properties": {"number": 1}},
+            {"id": 12, "type": "audio", "properties": {"number": 2}},
+            {"id": 14, "type": "subtitles", "properties": {"number": 3}}
+        ]
+    });
+
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+
+    assert_eq!(mapping.mkvmerge_track_id_for_provider_index(0), Some(7));
+    assert_eq!(mapping.mkvmerge_track_id_for_provider_index(1), Some(12));
+    assert_eq!(mapping.mkvmerge_track_id_for_provider_index(2), Some(14));
+}
+
+#[test]
+fn build_args_rejects_missing_track_mapping() {
+    let request = RemuxRequest {
+        input: RemuxInput {
+            path: "/tmp/input.mp4".to_owned(),
+            expected: RemuxExpectedFacts {
+                size_bytes: 1,
+                content_hash: "blake3:abc".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: RemuxOutput {
+            staging_root: "/tmp/stage".to_owned(),
+            path: "/tmp/stage/out.mkv".to_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection: RemuxSelection {
+            keep_streams: vec![RemuxStreamRef {
+                snapshot_stream_id: "stream-0".to_owned(),
+                provider_stream_index: 0,
+            }],
+            default_streams: vec![],
+            clear_default_streams: vec![],
+            track_order: vec![RemuxTrackGroup::Video],
+        },
+    };
+    let mapping = MkvmergeTrackMapping::from_pairs([(1, 7)]);
+
+    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+
+    assert!(err.to_string().contains("missing mkvmerge track id"));
+}
