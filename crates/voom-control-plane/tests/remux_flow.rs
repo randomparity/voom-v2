@@ -231,16 +231,42 @@ async fn assert_remux_execution_result(
         .iter()
         .find(|snapshot| snapshot.id == result_media_snapshot_id)
         .unwrap();
-    assert_eq!(result_snapshot.payload["container"], "mkv");
-    assert_eq!(result_snapshot.payload["source"], "remux_result");
+    assert!(result_snapshot.payload.get("snapshot_kind").is_none());
+    assert_eq!(result_snapshot.payload["format"], "sprint10-v1");
+    assert_eq!(result_snapshot.payload["probe"]["provider"], "ffprobe");
     assert_eq!(
-        result_snapshot.payload["kept_snapshot_stream_ids"],
-        serde_json::json!(["stream-0", "stream-1", "stream-3"])
+        result_snapshot.payload["container"]["format_name"],
+        "matroska,webm"
     );
+    let streams = result_snapshot.payload["streams"].as_array().unwrap();
+    assert!(streams.iter().all(|stream| {
+        stream["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("stream-"))
+    }));
     assert_eq!(
-        result_snapshot.payload["default_snapshot_stream_ids"],
-        serde_json::json!(["stream-1"])
+        streams
+            .iter()
+            .filter(|stream| stream["kind"].as_str() == Some("video"))
+            .count(),
+        1
     );
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("audio")
+            && stream["language"].as_str() == Some("eng")
+            && stream["disposition"]["default"] == true
+    }));
+    assert!(!streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("audio") && stream["language"].as_str() == Some("spa")
+    }));
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("subtitle")
+            && stream["language"].as_str() == Some("eng")
+            && stream["disposition"]["forced"] != true
+    }));
+    assert!(!streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("subtitle") && stream["disposition"]["forced"] == true
+    }));
 }
 
 async fn assert_row_exists(pool: &sqlx::SqlitePool, sql: &str, id: u64) {

@@ -262,7 +262,7 @@ pub async fn persist_scanned_media_snapshot(
     })
 }
 
-fn snapshot_with_stream_ids(snapshot: &Value) -> Result<Value, VoomError> {
+pub(crate) fn snapshot_with_stream_ids(snapshot: &Value) -> Result<Value, VoomError> {
     let mut normalized = snapshot.clone();
     let Some(streams) = normalized.get_mut("streams") else {
         return Ok(normalized);

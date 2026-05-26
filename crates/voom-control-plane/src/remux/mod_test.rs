@@ -9,8 +9,9 @@ use voom_store::repo::artifacts::ArtifactCommitState;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
-    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts,
-    VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
+    ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus, RemuxObservedFacts,
+    RemuxRequest, RemuxResult, RemuxStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
+    VerifyArtifactResult, VerifyArtifactStatus,
 };
 
 #[tokio::test]
@@ -26,6 +27,7 @@ async fn execute_records_verified_committed_remux_result() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap();
@@ -83,6 +85,7 @@ async fn execute_uses_pinned_source_media_snapshot() {
             expected: vec!["stream-0", "stream-1"],
         },
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap();
@@ -103,6 +106,7 @@ async fn execute_rejects_missing_source_media_snapshot_id() {
         remux_input_without_source_media_snapshot_id(&dir, seeded),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -127,6 +131,7 @@ async fn execute_rejects_source_media_snapshot_for_other_file_version() {
         remux_input(&dir, seeded, mismatched_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -153,6 +158,7 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &WrongInputFactsRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -183,6 +189,7 @@ async fn verification_failure_event_includes_staged_artifact_ids() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FailedVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -207,6 +214,7 @@ async fn worker_progress_frames_record_remux_progress_events() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &ProgressingRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap();
@@ -235,6 +243,7 @@ async fn success_event_append_failure_prevents_successful_report_without_success
         remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -263,6 +272,7 @@ async fn execute_revalidates_drifted_source_before_worker_dispatch() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &dispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -286,6 +296,7 @@ async fn execute_revalidates_missing_source_before_worker_dispatch() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &dispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -307,9 +318,15 @@ async fn execute_sends_canonical_staging_root_to_worker() {
     let mut input = remux_input(&dir, seeded, source_media_snapshot_id);
     input.staging_root = staging_root;
 
-    execute_remux_with_dispatchers(&cp, input, &dispatcher, &FakeVerifyDispatcher)
-        .await
-        .unwrap();
+    execute_remux_with_dispatchers(
+        &cp,
+        input,
+        &dispatcher,
+        &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         dispatcher.captured_staging_root(),
@@ -344,6 +361,7 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
         remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -551,6 +569,66 @@ impl crate::artifact::verify::VerifyArtifactDispatcher for FakeVerifyDispatcher 
                 content_hash: request.expected.content_hash,
                 modified_at: None,
                 local_file_key: None,
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FakeResultProbeDispatcher;
+
+#[async_trait]
+impl commit::RemuxResultProbeDispatcher for FakeResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: ProbeFileRequest,
+    ) -> Result<commit::ProbedRemuxResult, voom_core::VoomError> {
+        let mut tx = cp.pool_for_test().begin().await.unwrap();
+        let worker = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let facts = ObservedFileFacts {
+            size_bytes: request.expected.size_bytes,
+            content_hash: request.expected.content_hash,
+            modified_at: None,
+            local_file_key: None,
+        };
+        Ok(commit::ProbedRemuxResult {
+            worker_id: worker.id,
+            result: ProbeFileResult {
+                status: ProbeFileStatus::Probed,
+                provider: "ffprobe".to_owned(),
+                provider_version: "test".to_owned(),
+                pre_probe: facts.clone(),
+                post_probe: facts,
+                snapshot: json!({
+                    "format": "sprint10-v1",
+                    "probe": {
+                        "provider": "ffprobe",
+                        "provider_version": "test"
+                    },
+                    "container": {
+                        "format_name": "matroska,webm"
+                    },
+                    "streams": [
+                        {
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "h264"
+                        },
+                        {
+                            "index": 1,
+                            "kind": "audio",
+                            "codec_name": "aac",
+                            "language": "eng",
+                            "disposition": {
+                                "default": true
+                            }
+                        }
+                    ]
+                }),
             },
         })
     }

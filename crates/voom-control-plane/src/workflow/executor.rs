@@ -34,6 +34,7 @@ use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use super::timing::seeded_timing;
 use crate::ControlPlane;
 use crate::cases::{begin_tx, commit_tx};
+use crate::remux::commit::BundledRemuxResultProbeDispatcher;
 use crate::remux::{
     ExecuteRemuxCompletion, ExecuteRemuxInput, RemuxDispatcher,
     execute_remux_with_deferred_success_event, success_event_recovery_report,
@@ -1296,6 +1297,7 @@ async fn dispatch_control_plane_remux(
             options,
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+        &BundledRemuxResultProbeDispatcher,
     )
     .await
     {

@@ -155,6 +155,7 @@ impl ControlPlane {
             input,
             &dispatch::BundledRemuxDispatcher,
             &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+            &commit::BundledRemuxResultProbeDispatcher,
         )
         .await
     }
@@ -165,8 +166,9 @@ pub(crate) async fn execute_remux_with_dispatchers(
     input: ExecuteRemuxInput,
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
+    result_probe: &dyn commit::RemuxResultProbeDispatcher,
 ) -> Result<ExecuteRemuxReport, VoomError> {
-    match execute_remux_core(cp, input, remux, verify, true, false).await? {
+    match execute_remux_core(cp, input, remux, verify, result_probe, true, false).await? {
         ExecuteRemuxCompletion::Succeeded(success) => Ok(success.report),
         ExecuteRemuxCompletion::Recovery(recovery) => Err(recovery_error(&recovery.report)),
     }
@@ -177,8 +179,9 @@ pub(crate) async fn execute_remux_with_deferred_success_event(
     input: ExecuteRemuxInput,
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
+    result_probe: &dyn commit::RemuxResultProbeDispatcher,
 ) -> Result<ExecuteRemuxCompletion, VoomError> {
-    execute_remux_core(cp, input, remux, verify, false, true).await
+    execute_remux_core(cp, input, remux, verify, result_probe, false, true).await
 }
 
 #[expect(
@@ -190,6 +193,7 @@ async fn execute_remux_core(
     input: ExecuteRemuxInput,
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
+    result_probe: &dyn commit::RemuxResultProbeDispatcher,
     append_success_event: bool,
     recover_post_commit_snapshot_failure: bool,
 ) -> Result<ExecuteRemuxCompletion, VoomError> {
@@ -503,7 +507,15 @@ async fn execute_remux_core(
         .await?;
         return Err(err);
     };
-    let snapshot = match commit::record_result_snapshot(cp, result_file_version_id, &result).await {
+    let snapshot = match commit::record_result_snapshot_with_dispatcher(
+        cp,
+        result_file_version_id,
+        &target_path,
+        &result,
+        result_probe,
+    )
+    .await
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             let source = VoomError::ExternalSystemUnavailable(format!(
