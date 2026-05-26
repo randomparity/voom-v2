@@ -15,6 +15,7 @@ pub mod fixtures;
 pub mod hash;
 pub mod model;
 pub mod planner;
+pub mod remux;
 
 pub use compliance_model::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,

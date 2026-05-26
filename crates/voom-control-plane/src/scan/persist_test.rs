@@ -57,8 +57,10 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
     assert_eq!(persisted.file_asset_id.0, 1);
     assert_eq!(snapshot.file_version_id, persisted.file_version_id);
     assert_eq!(snapshot.probed_by, Some(worker.id));
-    assert_eq!(snapshot.payload, result.snapshot);
+    assert_eq!(snapshot.payload["format"], result.snapshot["format"]);
     assert_eq!(snapshot.payload["streams"][0]["language"], "eng");
+    assert_eq!(snapshot.payload["streams"][0]["id"], "stream-0");
+    assert_eq!(result.snapshot["streams"][0].get("id"), None);
     assert_eq!(
         snapshot.payload["streams"][0]["disposition"]["default"],
         true
@@ -112,6 +114,35 @@ async fn content_drift_skips_persistence_and_returns_failed_content_drift() {
     assert_eq!(table_count(&cp, "file_locations").await, 0);
     assert_eq!(table_count(&cp, "media_snapshots").await, 0);
     assert!(state_transition_event_kinds(&cp).await.is_empty());
+}
+
+#[tokio::test]
+async fn persist_scan_assigns_stable_stream_ids() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    let candidate = candidate_facts(123, "blake3:abc");
+    let result = matching_probe_result(&candidate);
+
+    let persisted = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/movie.mkv"),
+        &[],
+        &candidate,
+        &result,
+    )
+    .await
+    .unwrap();
+
+    let snapshot = cp
+        .identity()
+        .get_media_snapshot(persisted.media_snapshot_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(snapshot.payload["streams"][0]["id"], "stream-0");
+    assert_eq!(result.snapshot["streams"][0].get("id"), None);
 }
 
 #[tokio::test]
