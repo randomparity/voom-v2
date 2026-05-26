@@ -80,9 +80,10 @@ async fn execute_scanned_remux_outputs_ticket_result_ids() {
     let seeded = seed_scanned_remux().await;
     let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
 
-    let staging_root = seeded.dir.path().join("stage");
-    let output_dir = seeded.dir.path().join("out");
-    let ffprobe_bin = fake_ffprobe_bin(seeded.dir.path());
+    let remux_root = seeded.dir.path().canonicalize().unwrap();
+    let staging_root = remux_root.join("stage");
+    let output_dir = remux_root.join("out");
+    let ffprobe_bin = fake_ffprobe_bin(&remux_root);
     let output = compliance_execute_command_with_dirs(
         &seeded.url,
         seeded.version_id,
@@ -128,9 +129,10 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     let seeded = seed_scanned_remux().await;
     let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
 
-    let staging_root = seeded.dir.path().join("stage");
-    let output_dir = seeded.dir.path().join("out");
-    let ffprobe_bin = fake_ffprobe_bin(seeded.dir.path());
+    let remux_root = seeded.dir.path().canonicalize().unwrap();
+    let staging_root = remux_root.join("stage");
+    let output_dir = remux_root.join("out");
+    let ffprobe_bin = fake_ffprobe_bin(&remux_root);
     std::fs::create_dir_all(&output_dir).unwrap();
     std::fs::write(output_dir.join("Movie.remux.mkv"), b"existing").unwrap();
 
@@ -160,7 +162,7 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
     assert_eq!(json["data"]["execution"]["failure_count"], 1);
     redact_local(&mut json);
-    redact_temp_path_values(&mut json, seeded.dir.path());
+    redact_temp_path_values(&mut json, &remux_root);
     insta::assert_json_snapshot!(
         "execute_scanned_remux_existing_target_outputs_failure_envelope",
         json
