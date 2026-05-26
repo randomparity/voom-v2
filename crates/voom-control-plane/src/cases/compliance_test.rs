@@ -431,20 +431,27 @@ async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
     let runtimes = success_runtime_registry(worker_id);
     let before = boundary_counts(&cp).await;
 
-    cp.execute_compliance_policy_with_runtime_registry_for_test(
-        policy_version_id,
-        input_set_id,
-        runtimes,
-    )
-    .await
-    .unwrap();
+    let err = cp
+        .execute_compliance_policy_with_runtime_registry_for_test(
+            policy_version_id,
+            input_set_id,
+            runtimes,
+        )
+        .await
+        .unwrap_err();
+
+    assert_synthetic_policy_remux_error(&err.source);
+    let partial = err.partial.unwrap();
+    assert_eq!(partial.issues.created_count, 1);
+    assert_eq!(partial.execution.submitted_node_count, 1);
+    assert_eq!(partial.tickets.len(), 0);
 
     let after = boundary_counts(&cp).await;
     assert!(after.count("issues") > before.count("issues"));
     assert!(after.count("events") > before.count("events"));
     assert!(after.count("jobs") > before.count("jobs"));
-    assert!(after.count("tickets") > before.count("tickets"));
-    assert!(after.count("leases") > before.count("leases"));
+    assert_eq!(after.count("tickets"), before.count("tickets"));
+    assert_eq!(after.count("leases"), before.count("leases"));
     assert_eq!(after.count("workers"), before.count("workers"));
     assert_eq!(
         after.count("worker_capabilities"),
@@ -472,25 +479,22 @@ async fn compliance_ticket_reporting_uses_kind_without_parsing_payload() {
     let worker_id = register_policy_remux_worker(&cp).await;
     let runtimes = success_runtime_registry(worker_id);
 
-    let data = cp
+    let err = cp
         .execute_compliance_policy_with_runtime_registry_for_test(
             policy_version_id,
             input_set_id,
             runtimes,
         )
         .await
-        .unwrap();
-    let job_id = data.execution.job_id.unwrap();
+        .unwrap_err();
 
-    sqlx::query("UPDATE tickets SET payload = json_set(payload, '$.operation', 'scan_library') WHERE job_id = ?")
-        .bind(i64::try_from(job_id.0).unwrap())
-        .execute(cp.pool_for_test())
-        .await
-        .unwrap();
+    assert_synthetic_policy_remux_error(&err.source);
+    let partial = err.partial.unwrap();
+    let job_id = partial.execution.job_id.unwrap();
+    assert_eq!(partial.tickets.len(), 0);
 
     let tickets = cp.compliance_executed_tickets(job_id).await.unwrap();
-
-    assert_eq!(tickets[0].operation, "remux");
+    assert_eq!(tickets.len(), 0);
 }
 
 #[tokio::test]
@@ -500,21 +504,26 @@ async fn compliance_execute_uses_production_workflow_lease_defaults() {
     let worker_id = register_policy_remux_worker(&cp).await;
     let runtimes = success_runtime_registry(worker_id);
 
-    cp.execute_compliance_policy_with_runtime_registry_for_test(
-        policy_version_id,
-        input_set_id,
-        runtimes,
-    )
-    .await
-    .unwrap();
-
-    let ttl_seconds: i64 = sqlx::query_scalar("SELECT ttl_seconds FROM leases ORDER BY id LIMIT 1")
-        .fetch_one(cp.pool_for_test())
+    let err = cp
+        .execute_compliance_policy_with_runtime_registry_for_test(
+            policy_version_id,
+            input_set_id,
+            runtimes,
+        )
         .await
-        .unwrap();
-    assert_eq!(
-        ttl_seconds, 30,
-        "user-facing compliance execution must not use test lease timing"
+        .unwrap_err();
+
+    assert_synthetic_policy_remux_error(&err.source);
+    assert_eq!(err.partial.unwrap().tickets.len(), 0);
+    assert_eq!(count_rows(&cp, "leases").await, 0);
+}
+
+fn assert_synthetic_policy_remux_error(source: &voom_core::VoomError) {
+    assert_eq!(source.code(), "CONFIG_INVALID");
+    assert!(
+        source
+            .to_string()
+            .contains("remux requires file_version or file_location target")
     );
 }
 

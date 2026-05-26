@@ -437,9 +437,6 @@ where
                         &self.options.remux_target_dir,
                         timing,
                     ),
-                    Some(voom_plan::TargetRef::Synthetic { .. }) => {
-                        render_default_payload(operation, &branch, timing)
-                    }
                     Some(target) => Err(BindingError::new(format!(
                         "remux requires file_version or file_location target, got {target:?}"
                     ))),

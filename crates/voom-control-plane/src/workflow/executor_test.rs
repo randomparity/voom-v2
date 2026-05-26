@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FileAssetId, FileVersionId, JobId, SystemClock, WorkerId};
+use voom_core::{ErrorCode, FileVersionId, JobId, SystemClock, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::jobs::NewJob;
@@ -472,8 +472,9 @@ async fn non_policy_remux_root_ticket_uses_default_payload() {
 #[tokio::test]
 async fn unsupported_policy_remux_target_is_rejected_before_default_fallback() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    fixture.plan = policy_remux_plan(TargetRef::FileAsset {
-        id: FileAssetId(99),
+    fixture.plan = policy_remux_plan(TargetRef::Synthetic {
+        key: "variant-1".to_owned(),
+        kind: voom_policy::TargetKind::MediaVariant,
     });
 
     let err = fixture.run().await.unwrap_err();

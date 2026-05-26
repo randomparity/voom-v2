@@ -48,10 +48,21 @@ async fn execute_outputs_report_and_execution_summary() {
     let output = compliance_command(&seeded.url, "execute", seeded.version_id, seeded.input_id);
     provider.shutdown().unwrap();
 
-    assert_eq!(output.status.code(), Some(0));
-    let json = envelope(output.stdout);
+    assert_eq!(output.status.code(), Some(2));
+    let mut json = envelope(output.stdout);
+    assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("workflow root payload binding"))
+    );
+    assert!(json["error"]["message"].as_str().is_some_and(|message| {
+        message.contains("remux requires file_version or file_location target")
+    }));
     assert_eq!(json["data"]["execution"]["submitted_node_count"], 1);
-    assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
+    assert_eq!(json["data"]["execution"]["dispatch_count"], 0);
+    redact_local(&mut json);
+    insta::assert_json_snapshot!("execute_outputs_report_and_execution_summary", json);
 }
 
 #[tokio::test]
@@ -192,6 +203,9 @@ fn envelope(stdout: Vec<u8>) -> Value {
 fn redact_local(json: &mut Value) {
     json["local"]["db_url"] = Value::String("[db-url]".to_owned());
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
+    if json["data"]["execution"]["job_id"].is_number() {
+        json["data"]["execution"]["job_id"] = Value::String("[job-id]".to_owned());
+    }
 }
 
 struct RemuxProviderLaunch {
