@@ -15,15 +15,17 @@ use super::*;
 #[tokio::test]
 async fn handler_rejects_existing_output() {
     let temp = tempfile::tempdir().unwrap();
-    let input = temp.path().join("input.mp4");
-    let output = temp.path().join("stage").join("out.mkv");
+    let root = temp.path().canonicalize().unwrap();
+    let input = root.join("input.mp4");
+    let stage = root.join("stage");
+    let output = stage.join("out.mkv");
     tokio::fs::create_dir_all(output.parent().unwrap())
         .await
         .unwrap();
     tokio::fs::write(&input, b"not real media").await.unwrap();
     tokio::fs::write(&output, b"stale").await.unwrap();
 
-    let request = request_for_paths(&input, temp.path().join("stage"), &output).await;
+    let request = request_for_paths(&input, &stage, &output).await;
     let err = handle_remux(&request, &MkvmergeConfig::for_tests())
         .await
         .unwrap_err();
@@ -58,12 +60,10 @@ async fn handler_rejects_dangling_output_symlink() {
 #[tokio::test]
 async fn handler_rejects_missing_input_with_artifact_unavailable() {
     let temp = tempfile::tempdir().unwrap();
-    let request = request_for_paths(
-        &temp.path().join("missing.mp4"),
-        temp.path().join("stage"),
-        &temp.path().join("stage/out.mkv"),
-    )
-    .await;
+    let root = temp.path().canonicalize().unwrap();
+    let stage = root.join("stage");
+    let request =
+        request_for_paths(&root.join("missing.mp4"), &stage, &stage.join("out.mkv")).await;
 
     let err = handle_remux(&request, &MkvmergeConfig::for_tests())
         .await
@@ -75,14 +75,11 @@ async fn handler_rejects_missing_input_with_artifact_unavailable() {
 #[tokio::test]
 async fn handler_rejects_output_path_escape() {
     let temp = tempfile::tempdir().unwrap();
-    let input = temp.path().join("input.mp4");
+    let root = temp.path().canonicalize().unwrap();
+    let input = root.join("input.mp4");
+    let stage = root.join("stage");
     tokio::fs::write(&input, b"input").await.unwrap();
-    let request = request_for_paths(
-        &input,
-        temp.path().join("stage"),
-        &temp.path().join("out.mkv"),
-    )
-    .await;
+    let request = request_for_paths(&input, &stage, &root.join("out.mkv")).await;
 
     let err = handle_remux(&request, &MkvmergeConfig::for_tests())
         .await
@@ -611,12 +608,13 @@ async fn remux_fixture_with_attachment_track_and_forbidden_provider_run() -> Rem
 
 async fn remux_fixture_with_mkvmerge(body: &str) -> RemuxFixture {
     let temp = tempfile::tempdir().unwrap();
-    let input = temp.path().join("input.mp4");
-    let stage = temp.path().join("stage");
+    let root = temp.path().canonicalize().unwrap();
+    let input = root.join("input.mp4");
+    let stage = root.join("stage");
     let output = stage.join("out.mkv");
     tokio::fs::create_dir_all(&stage).await.unwrap();
     tokio::fs::write(&input, b"input").await.unwrap();
-    let command = stub_bin(temp.path(), "mkvmerge", body);
+    let command = stub_bin(&root, "mkvmerge", body);
     let request = request_for_paths(&input, &stage, &output).await;
     RemuxFixture {
         _temp: temp,
