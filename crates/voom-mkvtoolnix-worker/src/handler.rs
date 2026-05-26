@@ -158,15 +158,7 @@ pub async fn handle_remux(
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
     validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
-    if tokio::fs::try_exists(&output_path)
-        .await
-        .map_err(|err| config_invalid("output_path", err.to_string()))?
-    {
-        return Err(config_invalid(
-            "output_path",
-            "output path already exists".to_owned(),
-        ));
-    }
+    reject_existing_output_path(&output_path).await?;
 
     let input_pre = observe_file_facts(&input_path)
         .await
@@ -300,6 +292,17 @@ fn validate_staging_path(
         ));
     }
     Ok(())
+}
+
+async fn reject_existing_output_path(output_path: &Path) -> Result<(), MkvtoolnixWorkerError> {
+    match tokio::fs::symlink_metadata(output_path).await {
+        Ok(_) => Err(config_invalid(
+            "output_path",
+            "output path already exists".to_owned(),
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(config_invalid("output_path", err.to_string())),
+    }
 }
 
 fn validate_all_source_video_streams_kept(

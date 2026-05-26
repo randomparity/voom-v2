@@ -32,6 +32,29 @@ async fn handler_rejects_existing_output() {
     assert!(err.to_string().contains("output path already exists"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn handler_rejects_dangling_output_symlink() {
+    let fixture = remux_fixture().await;
+    let output = PathBuf::from(&fixture.request.output.path);
+    let target = output
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("outside")
+        .join("out.mkv");
+    std::os::unix::fs::symlink(&target, &output).unwrap();
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("output path already exists"));
+    assert!(!target.exists());
+}
+
 #[tokio::test]
 async fn handler_rejects_missing_input_with_artifact_unavailable() {
     let temp = tempfile::tempdir().unwrap();
