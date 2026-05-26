@@ -243,7 +243,7 @@ impl RemuxPayload {
                 .into_iter()
                 .map(TrackAction::from_raw)
                 .collect::<Result<Vec<_>, _>>()?,
-            track_order: raw.track_order.into_iter().map(track_group).collect(),
+            track_order: track_order_from_values(&raw.track_order)?,
             defaults: raw.defaults,
         })
     }
@@ -255,8 +255,8 @@ struct RawRemuxPayload {
     container: String,
     #[serde(default)]
     track_actions: Vec<RawTrackAction>,
-    #[serde(default = "default_track_order")]
-    track_order: Vec<TrackTarget>,
+    #[serde(default = "default_track_order_values")]
+    track_order: Vec<Value>,
     #[serde(default)]
     defaults: Vec<DefaultAction>,
 }
@@ -306,20 +306,57 @@ struct DefaultAction {
     strategy: DefaultStrategy,
 }
 
-fn default_track_order() -> Vec<TrackTarget> {
-    vec![
-        TrackTarget::Video,
-        TrackTarget::Audio,
-        TrackTarget::Subtitle,
-    ]
+fn default_track_order_values() -> Vec<Value> {
+    vec![json!("video"), json!("audio"), json!("subtitle")]
 }
 
-fn track_group(target: TrackTarget) -> RemuxTrackGroup {
-    match target {
-        TrackTarget::Video => RemuxTrackGroup::Video,
-        TrackTarget::Audio => RemuxTrackGroup::Audio,
-        TrackTarget::Subtitle => RemuxTrackGroup::Subtitle,
-        TrackTarget::Attachment => RemuxTrackGroup::Attachment,
+fn track_order_from_values(values: &[Value]) -> Result<Vec<RemuxTrackGroup>, VoomError> {
+    if values.is_empty() {
+        return Err(VoomError::Config(
+            "track_order must include at least one group".to_owned(),
+        ));
+    }
+    let mut seen = Vec::new();
+    let mut groups = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(group) = value.as_str() else {
+            return Err(VoomError::Config(
+                "track_order entries must be strings".to_owned(),
+            ));
+        };
+        let parsed = match group {
+            "video" => RemuxTrackGroup::Video,
+            "audio" => RemuxTrackGroup::Audio,
+            "subtitle" => RemuxTrackGroup::Subtitle,
+            "attachment" => {
+                return Err(VoomError::Config(
+                    "track_order attachment group is unsupported".to_owned(),
+                ));
+            }
+            other => {
+                return Err(VoomError::Config(format!(
+                    "track_order group {other} is unsupported"
+                )));
+            }
+        };
+        if seen.contains(&parsed) {
+            return Err(VoomError::Config(format!(
+                "track_order duplicates group {}",
+                track_group_name(parsed)
+            )));
+        }
+        seen.push(parsed);
+        groups.push(parsed);
+    }
+    Ok(groups)
+}
+
+fn track_group_name(group: RemuxTrackGroup) -> &'static str {
+    match group {
+        RemuxTrackGroup::Video => "video",
+        RemuxTrackGroup::Audio => "audio",
+        RemuxTrackGroup::Subtitle => "subtitle",
+        RemuxTrackGroup::Attachment => "attachment",
     }
 }
 

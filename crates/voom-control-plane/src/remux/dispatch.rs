@@ -60,7 +60,11 @@ pub fn request_for(
     })
 }
 
-pub fn validate_result(selection: &RemuxSelection, result: &RemuxResult) -> Result<(), VoomError> {
+pub fn validate_result(
+    selected: &SelectedSource,
+    selection: &RemuxSelection,
+    result: &RemuxResult,
+) -> Result<(), VoomError> {
     if !is_supported_remux_container(&result.output_container) {
         return Err(VoomError::MalformedWorkerResult(format!(
             "remux result expected mkv, got {}",
@@ -70,6 +74,13 @@ pub fn validate_result(selection: &RemuxSelection, result: &RemuxResult) -> Resu
     if result.input_pre != result.input_post {
         return Err(VoomError::ArtifactChecksumMismatch(
             "remux source changed during worker execution".to_owned(),
+        ));
+    }
+    if result.input_pre.size_bytes != selected.version.size_bytes
+        || result.input_pre.content_hash != selected.version.content_hash
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(
+            "remux source facts do not match selected file_version".to_owned(),
         ));
     }
     let expected_kept = selection

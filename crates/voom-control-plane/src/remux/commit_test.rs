@@ -18,6 +18,7 @@ async fn result_snapshot_records_remux_result_ids() {
 
     assert_eq!(snapshot.file_version_id, file_version_id);
     assert_eq!(snapshot.payload["source"], "remux_result");
+    assert_eq!(snapshot.payload["snapshot_kind"], "synthetic_remux_result");
     assert_eq!(snapshot.payload["container"], "mkv");
     assert_eq!(
         snapshot.payload["kept_snapshot_stream_ids"],

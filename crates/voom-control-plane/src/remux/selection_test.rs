@@ -69,6 +69,51 @@ fn selection_rejects_keep_remove_video_policy() {
     );
 }
 
+#[test]
+fn selection_rejects_empty_track_order() {
+    assert_track_order_rejected(&json!([]), "track_order must include at least one group");
+}
+
+#[test]
+fn selection_rejects_duplicate_track_order_groups() {
+    assert_track_order_rejected(
+        &json!(["video", "audio", "audio"]),
+        "track_order duplicates group audio",
+    );
+}
+
+#[test]
+fn selection_rejects_attachment_track_order_group() {
+    assert_track_order_rejected(
+        &json!(["video", "attachment"]),
+        "track_order attachment group is unsupported",
+    );
+}
+
+#[test]
+fn selection_rejects_unsupported_track_order_strings() {
+    assert_track_order_rejected(
+        &json!(["video", "chapters"]),
+        "track_order group chapters is unsupported",
+    );
+}
+
+fn assert_track_order_rejected(track_order: &serde_json::Value, expected: &str) {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [],
+        "track_order": track_order,
+        "defaults": []
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng"]);
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains(expected), "{err}");
+}
+
 fn snapshot_with_video_audio_languages<const N: usize>(languages: [&str; N]) -> MediaSnapshot {
     let audio_streams = languages
         .iter()

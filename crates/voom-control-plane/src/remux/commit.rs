@@ -95,6 +95,7 @@ pub async fn record_result_snapshot(
     let payload = json!({
         "container": result.output_container,
         "source": "remux_result",
+        "snapshot_kind": "synthetic_remux_result",
         "provider": result.provider,
         "provider_version": result.provider_version,
         "kept_snapshot_stream_ids": result.kept_snapshot_stream_ids,

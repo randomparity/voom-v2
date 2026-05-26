@@ -107,7 +107,7 @@ pub(crate) async fn execute_remux_with_dispatchers(
     events::record_started(cp, &input, selected.location.id, &selection, &staging_path)?;
     let request = dispatch::request_for(&selected, &selection, &input.staging_root, &staging_path)?;
     let result = remux.dispatch_remux(request).await?;
-    dispatch::validate_result(&selection, &result)?;
+    dispatch::validate_result(&selected, &selection, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;
 
     let staged =
