@@ -1056,7 +1056,7 @@ fn evaluate_remux_track_operations(
                 if targets.is_empty() {
                     return Err(RemuxPlanningBlock::UnsupportedMediaShape);
                 }
-                changed = true;
+                changed |= reorder_tracks_changes(&facts, targets)?;
             }
             CompiledOperation::SetContainer { .. } => {}
             _ => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
@@ -1119,8 +1119,30 @@ fn set_defaults_changes(
                     })
             }),
         DefaultStrategy::None => target_streams.iter().any(|stream| stream.is_default),
-        DefaultStrategy::Preserve | DefaultStrategy::Best => true,
+        DefaultStrategy::Preserve => false,
+        DefaultStrategy::Best => true,
     }
+}
+
+fn reorder_tracks_changes(
+    facts: &[SnapshotStreamFact],
+    targets: &[TrackTarget],
+) -> Result<bool, RemuxPlanningBlock> {
+    if targets.contains(&TrackTarget::Attachment) {
+        return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+    }
+    let mut streams = facts
+        .iter()
+        .filter(|stream| stream.kind != TrackTarget::Attachment)
+        .collect::<Vec<_>>();
+    streams.sort_by_key(|stream| stream.provider_stream_index);
+    let mut current_order = Vec::new();
+    for stream in streams {
+        if current_order.last().copied() != Some(stream.kind) {
+            current_order.push(stream.kind);
+        }
+    }
+    Ok(current_order != targets)
 }
 
 fn has_remux_stream_fact_shape(snapshot: &MediaSnapshotInput) -> bool {
