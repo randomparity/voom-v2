@@ -153,6 +153,7 @@ pub fn render_policy_remux_payload(
     if operation_payload.get("type").and_then(Value::as_str) != Some("remux") {
         return Err(BindingError::new("remux payload missing `type: remux`"));
     }
+    validate_policy_remux_payload(operation_payload)?;
     let mut payload = json!({
         "operation": "remux",
         "remux": operation_payload,
@@ -174,6 +175,20 @@ pub fn render_policy_remux_payload(
     Ok(payload)
 }
 
+fn validate_policy_remux_payload(operation_payload: &Value) -> Result<(), BindingError> {
+    let container = operation_payload
+        .get("container")
+        .and_then(Value::as_str)
+        .ok_or_else(|| BindingError::new("remux payload missing `container`"))?;
+    if container != "mkv" {
+        return Err(BindingError::new("remux payload `container` must be mkv"));
+    }
+    required_array(operation_payload, "track_actions")?;
+    required_array(operation_payload, "track_order")?;
+    required_array(operation_payload, "defaults")?;
+    Ok(())
+}
+
 #[must_use]
 pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
     BranchContext {
@@ -189,6 +204,13 @@ fn required_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str, Bindi
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| BindingError::new(format!("transcode_video payload missing `{field}`")))
+}
+
+fn required_array<'a>(payload: &'a Value, field: &str) -> Result<&'a Vec<Value>, BindingError> {
+    payload
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| BindingError::new(format!("remux payload missing `{field}`")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

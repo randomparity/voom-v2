@@ -133,6 +133,23 @@ fn policy_remux_payload_rejects_non_remux_payload() {
     assert_eq!(err.to_string(), "remux payload missing `type: remux`");
 }
 
+#[test]
+fn policy_remux_payload_rejects_incomplete_typed_payload() {
+    let err = render_policy_remux_payload(
+        PolicyRemuxSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &serde_json::json!({"type": "remux"}),
+        std::path::Path::new("/tmp/voom-stage"),
+        std::path::Path::new("/library/remux"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap_err();
+
+    assert_eq!(err.to_string(), "remux payload missing `container`");
+}
+
 fn operation_name_value(operation: OperationKind) -> serde_json::Value {
     serde_json::to_value(operation).unwrap()
 }

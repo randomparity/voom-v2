@@ -438,13 +438,13 @@ async fn malformed_policy_remux_payload_is_rejected_before_default_fallback() {
         TargetRef::FileVersion {
             id: FileVersionId(11),
         },
-        json!({"container": "mkv"}),
+        json!({"type": "remux"}),
     );
 
     let err = fixture.run().await.unwrap_err();
 
     assert_eq!(err.source.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.source.to_string().contains("type: remux"));
+    assert!(err.source.to_string().contains("missing `container`"));
     assert_eq!(fixture.ticket_count().await, 0);
 }
 
