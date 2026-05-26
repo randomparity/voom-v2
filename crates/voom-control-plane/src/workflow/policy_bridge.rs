@@ -32,6 +32,7 @@ pub fn workflow_plan_from_compliance(
     report: &voom_plan::ComplianceReport,
 ) -> Result<PolicyExecutionPlan, VoomError> {
     let mut nodes = Vec::new();
+    let mut workflow_node_ids_by_plan_node_id = BTreeMap::new();
     let mut summary = PolicyExecutionSummary {
         plan_id: plan.plan_id.clone(),
         report_id: report.report_id.clone(),
@@ -47,8 +48,11 @@ pub fn workflow_plan_from_compliance(
     for node in &plan.nodes {
         match node.status {
             NodeStatus::Planned if node.operation_kind == "remux" => {
+                let workflow_node_id = format!("policy-node_{}", node.node_id);
+                workflow_node_ids_by_plan_node_id
+                    .insert(node.node_id.clone(), workflow_node_id.clone());
                 nodes.push(WorkflowNode::Operation(OperationNode {
-                    id: format!("policy-node_{}", node.node_id),
+                    id: workflow_node_id,
                     operation: OperationKind::Remux,
                     policy_target: Some(node.target.clone()),
                     operation_payload: node.operation_payload.clone(),
@@ -60,8 +64,11 @@ pub fn workflow_plan_from_compliance(
                 *summary.per_operation.entry("remux".to_owned()).or_insert(0) += 1;
             }
             NodeStatus::Planned if node.operation_kind == "transcode_video" => {
+                let workflow_node_id = format!("policy-node_{}", node.node_id);
+                workflow_node_ids_by_plan_node_id
+                    .insert(node.node_id.clone(), workflow_node_id.clone());
                 nodes.push(WorkflowNode::Operation(OperationNode {
-                    id: format!("policy-node_{}", node.node_id),
+                    id: workflow_node_id,
                     operation: OperationKind::TranscodeVideo,
                     policy_target: Some(node.target.clone()),
                     operation_payload: node.operation_payload.clone(),
@@ -86,6 +93,8 @@ pub fn workflow_plan_from_compliance(
         }
     }
 
+    apply_plan_dependencies(plan, &workflow_node_ids_by_plan_node_id, &mut nodes);
+
     let workflow = if nodes.is_empty() {
         None
     } else {
@@ -105,6 +114,37 @@ pub fn workflow_plan_from_compliance(
     };
 
     Ok(PolicyExecutionPlan { workflow, summary })
+}
+
+fn apply_plan_dependencies(
+    plan: &ExecutionPlan,
+    workflow_node_ids_by_plan_node_id: &BTreeMap<String, String>,
+    nodes: &mut [WorkflowNode],
+) {
+    let mut dependencies_by_workflow_node_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for edge in &plan.edges {
+        let Some(from_workflow_node_id) = workflow_node_ids_by_plan_node_id.get(&edge.from_node_id)
+        else {
+            continue;
+        };
+        let Some(to_workflow_node_id) = workflow_node_ids_by_plan_node_id.get(&edge.to_node_id)
+        else {
+            continue;
+        };
+        dependencies_by_workflow_node_id
+            .entry(to_workflow_node_id.clone())
+            .or_default()
+            .push(from_workflow_node_id.clone());
+    }
+    for node in nodes {
+        match node {
+            WorkflowNode::Operation(operation) => {
+                if let Some(depends_on) = dependencies_by_workflow_node_id.remove(&operation.id) {
+                    operation.depends_on = depends_on;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

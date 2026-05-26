@@ -1,7 +1,8 @@
 use serde_json::json;
 use voom_plan::{
-    ArtifactExpectations, CapabilityHints, ExecutionPlan, InputIdentity, NodeStatus, PlanNode,
-    PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints,
+    ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
+    NodeStatus, PlanNode, PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates,
+    SafetyHints, SchedulingHints,
 };
 use voom_policy::TargetRef;
 use voom_worker_protocol::OperationKind;
@@ -113,7 +114,64 @@ fn bridge_maps_planned_transcode_video() {
     );
 }
 
+#[test]
+fn bridge_preserves_plan_edges_between_included_planned_nodes() {
+    let first = node_with_id(
+        "node_remux_first",
+        "normalize",
+        "remux",
+        NodeStatus::Planned,
+    );
+    let second = node_with_id("node_remux_second", "tracks", "remux", NodeStatus::Planned);
+    let plan = plan_with_edges(
+        vec![first, second],
+        vec![Edge {
+            edge_id: "edge_first_second".to_owned(),
+            from_node_id: "node_remux_first".to_owned(),
+            to_node_id: "node_remux_second".to_owned(),
+            dependency_kind: DependencyKind::PhaseDependsOn,
+        }],
+    );
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes[0].id(), "policy-node_node_remux_first");
+    assert_eq!(workflow.nodes[1].id(), "policy-node_node_remux_second");
+    assert_eq!(
+        workflow.nodes[1].depends_on(),
+        ["policy-node_node_remux_first".to_owned()]
+    );
+}
+
+#[test]
+fn bridge_omits_dependencies_to_skipped_nodes() {
+    let skipped = node_with_id("node_remux_noop", "normalize", "remux", NodeStatus::NoOp);
+    let planned = node_with_id("node_remux_planned", "tracks", "remux", NodeStatus::Planned);
+    let plan = plan_with_edges(
+        vec![skipped, planned],
+        vec![Edge {
+            edge_id: "edge_skipped_planned".to_owned(),
+            from_node_id: "node_remux_noop".to_owned(),
+            to_node_id: "node_remux_planned".to_owned(),
+            dependency_kind: DependencyKind::PhaseDependsOn,
+        }],
+    );
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes.len(), 1);
+    assert!(workflow.nodes[0].depends_on().is_empty());
+}
+
 fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
+    plan_with_edges(nodes, Vec::new())
+}
+
+fn plan_with_edges(nodes: Vec<PlanNode>, edges: Vec<Edge>) -> ExecutionPlan {
     ExecutionPlan {
         schema_version: 1,
         plan_id: "plan_test".to_owned(),
@@ -133,7 +191,7 @@ fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
         generated_at: None,
         summary: PlanSummary::default(),
         nodes,
-        edges: Vec::new(),
+        edges,
         warnings: Vec::new(),
         diagnostics: Vec::new(),
         provenance: PlanProvenance::default(),
@@ -141,9 +199,23 @@ fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
 }
 
 fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
+    node_with_id(
+        &format!("node_{operation_kind}_{status:?}"),
+        "normalize",
+        operation_kind,
+        status,
+    )
+}
+
+fn node_with_id(
+    node_id: &str,
+    phase_name: &str,
+    operation_kind: &str,
+    status: NodeStatus,
+) -> PlanNode {
     PlanNode {
-        node_id: format!("node_{operation_kind}_{status:?}"),
-        phase_name: "normalize".to_owned(),
+        node_id: node_id.to_owned(),
+        phase_name: phase_name.to_owned(),
         ordinal: 0,
         target: TargetRef::FileVersion {
             id: voom_core::FileVersionId(42),
