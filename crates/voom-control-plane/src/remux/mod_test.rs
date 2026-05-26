@@ -312,8 +312,9 @@ async fn execute_sends_canonical_staging_root_to_worker() {
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
     let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
-    let staging_root = dir.path().join("stage-parent/stage/../stage");
-    let canonical_staging_root = dir.path().join("stage-parent/stage");
+    let root = dir.path().canonicalize().unwrap();
+    let staging_root = root.join("stage-parent/stage/../stage");
+    let canonical_staging_root = root.join("stage-parent/stage");
     let dispatcher = CaptureStagingRootRemuxDispatcher::default();
     let mut input = remux_input(&dir, seeded, source_media_snapshot_id);
     input.staging_root = staging_root;
