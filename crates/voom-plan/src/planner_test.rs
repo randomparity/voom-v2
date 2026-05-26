@@ -486,6 +486,30 @@ fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
 }
 
 #[test]
+fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![
+            TrackTarget::Video,
+            TrackTarget::Audio,
+            TrackTarget::Subtitle,
+        ],
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].status_reason,
+        "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
 fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
         target: TrackTarget::Audio,

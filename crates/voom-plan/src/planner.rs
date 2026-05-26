@@ -1164,7 +1164,12 @@ fn reorder_tracks_changes(
             current_order.push(stream.kind);
         }
     }
-    Ok(current_order != targets)
+    let requested_present_order = targets
+        .iter()
+        .copied()
+        .filter(|target| current_order.contains(target))
+        .collect::<Vec<_>>();
+    Ok(current_order != requested_present_order)
 }
 
 fn has_remux_stream_fact_shape(snapshot: &MediaSnapshotInput) -> bool {
