@@ -56,6 +56,12 @@ pub struct ExecuteRemuxReport {
     pub target_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ExecuteRemuxSuccess {
+    pub report: ExecuteRemuxReport,
+    pub success_event: events::RemuxSucceededEvent,
+}
+
 #[async_trait]
 pub trait RemuxDispatcher: Send + Sync {
     async fn dispatch_remux(
@@ -90,16 +96,45 @@ impl ControlPlane {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the remux workflow is intentionally linear so each fallible step records its failure event with the facts known at that point"
-)]
 pub(crate) async fn execute_remux_with_dispatchers(
     cp: &ControlPlane,
     input: ExecuteRemuxInput,
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
 ) -> Result<ExecuteRemuxReport, VoomError> {
+    Ok(execute_remux_core(cp, input, remux, verify, true)
+        .await?
+        .report)
+}
+
+pub(crate) async fn execute_remux_with_deferred_success_event(
+    cp: &ControlPlane,
+    input: ExecuteRemuxInput,
+    remux: &dyn RemuxDispatcher,
+    verify: &dyn VerifyArtifactDispatcher,
+) -> Result<ExecuteRemuxSuccess, VoomError> {
+    execute_remux_core(cp, input, remux, verify, false).await
+}
+
+pub(crate) fn is_post_commit_bookkeeping_error(source: &VoomError) -> bool {
+    matches!(
+        source,
+        VoomError::ExternalSystemUnavailable(message)
+            if message.starts_with("remux result snapshot failed after commit_record_id=")
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the remux workflow is intentionally linear so each fallible step records its failure event with the facts known at that point"
+)]
+async fn execute_remux_core(
+    cp: &ControlPlane,
+    input: ExecuteRemuxInput,
+    remux: &dyn RemuxDispatcher,
+    verify: &dyn VerifyArtifactDispatcher,
+    append_success_event: bool,
+) -> Result<ExecuteRemuxSuccess, VoomError> {
     let selected =
         match source::select_source(cp, input.source_file_version_id, input.source_location_id)
             .await
@@ -413,27 +448,14 @@ pub(crate) async fn execute_remux_with_dispatchers(
     let snapshot = match commit::record_result_snapshot(cp, result_file_version_id, &result).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            let err = VoomError::ExternalSystemUnavailable(format!(
+            return Err(VoomError::ExternalSystemUnavailable(format!(
                 "remux result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
                 committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
-            ));
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                Some(&result),
-                Some(&staged),
-                &err,
-            )
-            .await?;
-            return Err(err);
+            )));
         }
     };
-    let _success_event = events::record_succeeded(
-        cp,
-        events::RemuxSucceededEventInput {
+    let success_event =
+        events::RemuxSucceededEvent::from_input(&events::RemuxSucceededEventInput {
             input: &input,
             source_location_id: selected.location.id,
             selection: &selection,
@@ -441,25 +463,41 @@ pub(crate) async fn execute_remux_with_dispatchers(
             artifact_handle_id: staged.artifact_handle_id,
             artifact_location_id: staged.artifact_location_id,
             result: &result,
-        },
-    )
-    .await;
+        });
+    if append_success_event {
+        events::record_succeeded(
+            cp,
+            events::RemuxSucceededEventInput {
+                input: &input,
+                source_location_id: selected.location.id,
+                selection: &selection,
+                staging_path: &staging_path,
+                artifact_handle_id: staged.artifact_handle_id,
+                artifact_location_id: staged.artifact_location_id,
+                result: &result,
+            },
+        )
+        .await?;
+    }
 
-    Ok(ExecuteRemuxReport {
-        job_id: input.job_id,
-        ticket_id: input.ticket_id,
-        lease_id: input.lease_id,
-        source_file_version_id: input.source_file_version_id,
-        source_file_location_id: selected.location.id,
-        staged_artifact_handle_id: staged.artifact_handle_id,
-        staged_artifact_location_id: staged.artifact_location_id,
-        verification_id: verified.verification_id,
-        commit_record_id: committed.commit_record_id,
-        result_file_version_id,
-        result_file_location_id,
-        result_media_snapshot_id: snapshot.id,
-        staging_path,
-        target_path,
+    Ok(ExecuteRemuxSuccess {
+        report: ExecuteRemuxReport {
+            job_id: input.job_id,
+            ticket_id: input.ticket_id,
+            lease_id: input.lease_id,
+            source_file_version_id: input.source_file_version_id,
+            source_file_location_id: selected.location.id,
+            staged_artifact_handle_id: staged.artifact_handle_id,
+            staged_artifact_location_id: staged.artifact_location_id,
+            verification_id: verified.verification_id,
+            commit_record_id: committed.commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            result_media_snapshot_id: snapshot.id,
+            staging_path,
+            target_path,
+        },
+        success_event,
     })
 }
 

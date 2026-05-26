@@ -215,7 +215,7 @@ async fn worker_progress_frames_record_remux_progress_events() {
 }
 
 #[tokio::test]
-async fn success_event_append_failure_does_not_fail_completed_remux() {
+async fn success_event_append_failure_prevents_successful_report_without_success_event() {
     let (cp, _db, dir) = fixture().await;
     let source = dir.path().join("Movie.mp4");
     std::fs::write(&source, b"source bytes").unwrap();
@@ -230,16 +230,17 @@ async fn success_event_append_failure_does_not_fail_completed_remux() {
     .await
     .unwrap();
 
-    let report = execute_remux_with_dispatchers(
+    let err = execute_remux_with_dispatchers(
         &cp,
         remux_input(&dir, seeded, source_media_snapshot_id),
         &FakeRemuxDispatcher,
         &FakeVerifyDispatcher,
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert!(report.target_path.exists());
+    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
+    assert!(dir.path().join("out/Movie.remux.mkv").exists());
     assert_eq!(
         count_events(&cp, EventKind::ArtifactRemuxSucceeded).await,
         0
@@ -352,6 +353,8 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
     assert!(message.contains("commit_record_id"));
     assert!(message.contains("result_file_version_id"));
     assert!(message.contains("result_file_location_id"));
+    assert!(dir.path().join("out/Movie.remux.mkv").exists());
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxFailed).await, 0);
 }
 
 #[test]

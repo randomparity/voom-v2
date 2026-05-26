@@ -15,6 +15,7 @@ use voom_worker_protocol::{
 use super::ExecuteRemuxInput;
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
+use sqlx::{Sqlite, Transaction};
 
 pub async fn record_started(
     cp: &ControlPlane,
@@ -109,19 +110,29 @@ pub struct RemuxSucceededEventInput<'a> {
     pub result: &'a RemuxResult,
 }
 
-pub async fn record_succeeded(
-    cp: &ControlPlane,
-    event: RemuxSucceededEventInput<'_>,
-) -> Result<(), VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
-    let now = cp.clock().now();
-    append_event(
-        &cp.events,
-        &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(event.artifact_handle_id.0),
-        now,
-        Event::ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload {
+#[derive(Debug, Clone)]
+pub(crate) struct RemuxSucceededEvent {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub kept_snapshot_stream_ids: Vec<String>,
+    pub default_snapshot_stream_ids: Vec<String>,
+    pub output_container: String,
+    pub provider: String,
+    pub provider_version: String,
+}
+
+impl RemuxSucceededEvent {
+    pub(crate) fn from_input(event: &RemuxSucceededEventInput<'_>) -> Self {
+        Self {
             job_id: event.input.job_id.0,
             ticket_id: event.input.ticket_id.0,
             lease_id: Some(event.input.lease_id.0),
@@ -138,10 +149,53 @@ pub async fn record_succeeded(
             output_container: event.result.output_container.clone(),
             provider: event.result.provider.clone(),
             provider_version: event.result.provider_version.clone(),
+        }
+    }
+}
+
+pub async fn record_succeeded(
+    cp: &ControlPlane,
+    event: RemuxSucceededEventInput<'_>,
+) -> Result<(), VoomError> {
+    let mut tx = begin_tx(&cp.pool).await?;
+    let now = cp.clock().now();
+    let event = RemuxSucceededEvent::from_input(&event);
+    append_succeeded_in_tx(cp, &mut tx, &event, now).await?;
+    commit_tx(tx).await
+}
+
+pub(crate) async fn append_succeeded_in_tx(
+    cp: &ControlPlane,
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &RemuxSucceededEvent,
+    now: time::OffsetDateTime,
+) -> Result<(), VoomError> {
+    append_event(
+        &cp.events,
+        tx,
+        SubjectType::ArtifactHandle,
+        Some(event.artifact_handle_id),
+        now,
+        Event::ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload {
+            job_id: event.job_id,
+            ticket_id: event.ticket_id,
+            lease_id: event.lease_id,
+            source_file_version_id: event.source_file_version_id,
+            source_file_location_id: event.source_file_location_id,
+            artifact_handle_id: event.artifact_handle_id,
+            artifact_location_id: event.artifact_location_id,
+            staging_path: event.staging_path.clone(),
+            selected_streams: event.selected_streams.clone(),
+            default_streams: event.default_streams.clone(),
+            clear_default_streams: event.clear_default_streams.clone(),
+            kept_snapshot_stream_ids: event.kept_snapshot_stream_ids.clone(),
+            default_snapshot_stream_ids: event.default_snapshot_stream_ids.clone(),
+            output_container: event.output_container.clone(),
+            provider: event.provider.clone(),
+            provider_version: event.provider_version.clone(),
         }),
     )
-    .await?;
-    commit_tx(tx).await
+    .await
 }
 
 #[derive(Debug)]

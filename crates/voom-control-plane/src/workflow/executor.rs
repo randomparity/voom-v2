@@ -33,7 +33,11 @@ use super::runtime::WorkerRuntimeRegistry;
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use super::timing::seeded_timing;
 use crate::ControlPlane;
-use crate::remux::{ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_dispatchers};
+use crate::cases::{begin_tx, commit_tx};
+use crate::remux::{
+    ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
+    is_post_commit_bookkeeping_error,
+};
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
@@ -1281,7 +1285,7 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    let report = match execute_remux_with_dispatchers(
+    let success = match execute_remux_with_deferred_success_event(
         control,
         input,
         &RuntimeRemuxDispatcher {
@@ -1295,8 +1299,11 @@ async fn dispatch_control_plane_remux(
     )
     .await
     {
-        Ok(report) => report,
+        Ok(success) => success,
         Err(source) => {
+            if is_post_commit_bookkeeping_error(&source) {
+                return Err(source);
+            }
             return fail_lease_and_return(
                 control,
                 lease_id,
@@ -1306,9 +1313,9 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    let result = serde_json::to_value(report)
+    let result = serde_json::to_value(&success.report)
         .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
-    release_lease_with_retry(control, lease_id, result).await
+    release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await
 }
 
 fn remux_input_for_workflow_ticket(
@@ -1756,6 +1763,37 @@ async fn release_lease_with_retry(
             .await
         {
             Ok(_) => return Ok(()),
+            Err(err) if is_database_locked(&err) => {
+                last = Some(err);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+}
+
+async fn release_remux_lease_with_retry(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    payload: Value,
+    success_event: &crate::remux::events::RemuxSucceededEvent,
+) -> Result<(), VoomError> {
+    let mut last = None;
+    for _ in 0..8 {
+        let result = async {
+            let mut tx = begin_tx(&control.pool).await?;
+            let now = control.clock().now();
+            crate::remux::events::append_succeeded_in_tx(control, &mut tx, success_event, now)
+                .await?;
+            control
+                .release_lease_in_tx(&mut tx, lease_id, payload.clone(), now)
+                .await?;
+            commit_tx(tx).await
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
             Err(err) if is_database_locked(&err) => {
                 last = Some(err);
                 tokio::time::sleep(Duration::from_millis(5)).await;
