@@ -29,6 +29,7 @@ pub fn load_golden_plan(name: &str) -> Result<serde_json::Value, GoldenPlanFixtu
         "container_metadata_noncompliant" => {
             include_str!("../fixtures/plans/container_metadata_noncompliant.json")
         }
+        "remux_track_selection" => include_str!("../fixtures/plans/remux_track_selection.json"),
         _ => return Err(GoldenPlanFixtureError::UnknownFixture(name.to_owned())),
     };
     serde_json::from_str(source).map_err(GoldenPlanFixtureError::from)
@@ -49,6 +50,9 @@ pub fn load_golden_compliance_report(
         }
         "container_metadata_mixed" => {
             include_str!("../fixtures/reports/container_metadata_mixed.json")
+        }
+        "remux_track_selection" => {
+            include_str!("../fixtures/reports/remux_track_selection.json")
         }
         _ => return Err(GoldenPlanFixtureError::UnknownFixture(name.to_owned())),
     };

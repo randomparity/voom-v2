@@ -23,6 +23,21 @@ fn maps_snapshot_provider_indexes_to_mkvmerge_track_ids() {
 }
 
 #[test]
+fn reads_real_mkvmerge_container_type_string() {
+    let identify = serde_json::json!({
+        "container": {
+            "properties": {
+                "container_type": 17
+            },
+            "type": "Matroska"
+        },
+        "tracks": []
+    });
+
+    assert_eq!(identify_container_type(&identify), "Matroska");
+}
+
+#[test]
 fn build_args_rejects_missing_track_mapping() {
     let request = RemuxRequest {
         input: RemuxInput {

@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "report_id": "report_2d4d64450887bb90",
+  "report_hash": "blake3:57614b310621bf7f91760d2dd78617561e1bf01d103c5867367c0f6dfc173737",
+  "plan_id": "plan_a07cb70c14486e7d",
+  "plan_hash": "blake3:a07cb70c14486e7d7d2f1388e8960d6991a980610b3998ed740d4497e8f237e6",
+  "policy": {
+    "slug": "remux-track-selection",
+    "source_hash": "63658831359b53c38b124084e63c060e51732867f122c097dfaa55b4cb4ed2ee"
+  },
+  "input": {
+    "slug": "remux-track-selection",
+    "source_label": "remux_track_selection",
+    "fixture_labels": [
+      "remux_track_selection"
+    ]
+  },
+  "summary": {
+    "status": "noncompliant",
+    "total_check_count": 1,
+    "compliant_check_count": 0,
+    "noncompliant_check_count": 1,
+    "blocked_check_count": 0,
+    "executable_check_count": 1,
+    "operation_counts_by_kind": {
+      "remux": 1
+    }
+  },
+  "checks": [
+    {
+      "check_id": "check_a5240b718a02fea6",
+      "node_id": "node_3106e58a26aeb1b7",
+      "target": {
+        "type": "file_version",
+        "id": 7
+      },
+      "compliance_kind": "container",
+      "operation_kind": "remux",
+      "desired_state": {
+        "type": "remux",
+        "container": "mkv",
+        "track_actions": [
+          {
+            "type": "keep_tracks",
+            "target": "audio",
+            "filter": {
+              "type": "language_in",
+              "values": [
+                "eng",
+                "und"
+              ]
+            }
+          },
+          {
+            "type": "remove_tracks",
+            "target": "subtitle",
+            "filter": {
+              "type": "forced"
+            }
+          }
+        ],
+        "track_order": [
+          "video",
+          "audio",
+          "subtitle"
+        ],
+        "defaults": [
+          {
+            "target": "audio",
+            "strategy": "first"
+          },
+          {
+            "target": "subtitle",
+            "strategy": "none"
+          }
+        ],
+        "source_media_snapshot_id": 42
+      },
+      "observed_state": {
+        "container": "mkv"
+      },
+      "check_status": "noncompliant",
+      "reason": "track selection will be changed",
+      "issue_action_hint": "create_or_update_planned",
+      "execution_eligibility": "supported"
+    }
+  ],
+  "diagnostics": [],
+  "provenance": {
+    "reporter": "voom-plan",
+    "format": "sprint6-v1"
+  }
+}

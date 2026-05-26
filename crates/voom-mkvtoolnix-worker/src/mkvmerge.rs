@@ -215,10 +215,7 @@ pub async fn identify_output(
     path: &Path,
 ) -> Result<OutputProbe, MkvtoolnixError> {
     let identify = identify_json(config, path).await?;
-    let container = identify
-        .pointer("/container/properties/container_type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let container = identify_container_type(&identify);
     if !container.eq_ignore_ascii_case("mkv") && !container.eq_ignore_ascii_case("matroska") {
         return Err(MkvtoolnixError::OutputFactsMismatch(format!(
             "output container is not mkv: {container}"
@@ -226,6 +223,18 @@ pub async fn identify_output(
     }
     let mapping = track_mapping_from_identify(&identify)?;
     Ok(OutputProbe { mapping })
+}
+
+fn identify_container_type(identify: &Value) -> &str {
+    identify
+        .pointer("/container/type")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            identify
+                .pointer("/container/properties/container_type")
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
