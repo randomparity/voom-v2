@@ -118,8 +118,11 @@ struct ProviderCatalogEntry {
 }
 
 const PROBER_SECONDARY: &[OperationKind] = &[OperationKind::HashFile];
-const TRANSCODER_SECONDARY: &[OperationKind] =
-    &[OperationKind::ExtractAudio, OperationKind::TranscribeAudio];
+const TRANSCODER_SECONDARY: &[OperationKind] = &[
+    OperationKind::TranscodeAudio,
+    OperationKind::ExtractAudio,
+    OperationKind::TranscribeAudio,
+];
 const BACKUP_SECONDARY: &[OperationKind] = &[OperationKind::DeleteArtifact];
 
 const PROVIDERS: &[ProviderCatalogEntry] = &[
@@ -463,7 +466,14 @@ fn validate_payload(kind: ProviderKind, req: &OperationRequest) -> Result<(), Pr
         }
         ProviderKind::Transcoder => {
             require_path(&req.payload)?;
-            require_field(&req.payload, "target_codec", "h265")?;
+            match req.operation {
+                OperationKind::TranscodeAudio => {
+                    require_one_of(&req.payload, "target_codec", &["aac", "opus"])?;
+                }
+                _ => {
+                    require_field(&req.payload, "target_codec", "h265")?;
+                }
+            }
         }
         ProviderKind::Remuxer => {
             if let Some(request) = remux_protocol_payload(&req.payload)? {
@@ -518,6 +528,22 @@ fn require_field(
         Ok(())
     } else {
         Err(invalid(format!("{field} must be {expected}")))
+    }
+}
+
+fn require_one_of(
+    payload: &serde_json::Value,
+    field: &'static str,
+    expected: &[&'static str],
+) -> Result<(), ProtocolError> {
+    let actual = string_field(payload, field)?;
+    if expected.contains(&actual) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "{field} must be one of {}",
+            expected.join(", ")
+        )))
     }
 }
 

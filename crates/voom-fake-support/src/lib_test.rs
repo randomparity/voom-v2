@@ -143,6 +143,22 @@ fn remux_and_transcode_emit_output_path() {
 }
 
 #[test]
+fn fake_transcoder_accepts_audio_transcode_codec() {
+    let req = request(
+        OperationKind::TranscodeAudio,
+        serde_json::json!({"path": "/library/file-001.mkv", "target_codec": "opus"}),
+    );
+
+    let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames);
+
+    assert_eq!(payload["operation"], "transcode_audio");
+    assert_eq!(payload["target_codec"], "opus");
+}
+
+#[test]
 fn artifact_access_evidence_validates_selected_advertised_mode() {
     let payload = artifact_access_payload("shared_mount", &["shared_mount"]);
 

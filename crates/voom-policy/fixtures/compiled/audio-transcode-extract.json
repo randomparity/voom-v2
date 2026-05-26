@@ -1,0 +1,48 @@
+{
+  "policy_name": "audio transcode extract",
+  "slug": "audio-transcode-extract",
+  "source_hash": "785dd7429b362f0dd0ab290c2326b194d9a6067de1cd09f8dfdf4f3a8fa2d583",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "aac",
+          "container": "mkv",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng",
+              "und"
+            ]
+          }
+        },
+        {
+          "type": "extract_audio",
+          "target_codec": "opus",
+          "container": "ogg",
+          "filter": {
+            "type": "commentary"
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

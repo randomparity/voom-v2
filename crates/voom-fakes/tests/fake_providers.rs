@@ -78,7 +78,11 @@ async fn fake_providers_follow_worker_protocol() {
         assert!(matches!(err, ProtocolError::UnknownOperation { .. }));
 
         for (index, secondary) in case.secondary.iter().copied().enumerate() {
-            let req = operation_request(200 + index as u64, secondary, case.valid_payload.clone());
+            let req = operation_request(
+                200 + index as u64,
+                secondary,
+                valid_payload_for_operation(&case, secondary),
+            );
             let frames = collect_body(
                 client
                     .dispatch(
@@ -241,7 +245,11 @@ fn provider_cases() -> Vec<ProviderCase> {
             bin_env: "CARGO_BIN_EXE_fake-transcoder",
             name: "fake-transcoder",
             primary: OperationKind::TranscodeVideo,
-            secondary: &[OperationKind::ExtractAudio, OperationKind::TranscribeAudio],
+            secondary: &[
+                OperationKind::TranscodeAudio,
+                OperationKind::ExtractAudio,
+                OperationKind::TranscribeAudio,
+            ],
             valid_payload: serde_json::json!({
                 "path": "/library/movie.mkv",
                 "target_codec": "h265",
@@ -365,6 +373,18 @@ fn provider_cases() -> Vec<ProviderCase> {
             expected_field: "decision",
         },
     ]
+}
+
+fn valid_payload_for_operation(case: &ProviderCase, operation: OperationKind) -> serde_json::Value {
+    if case.name == "fake-transcoder" && operation == OperationKind::TranscodeAudio {
+        serde_json::json!({
+            "path": "/library/movie.mkv",
+            "target_codec": "opus",
+            "scenario": "default"
+        })
+    } else {
+        case.valid_payload.clone()
+    }
 }
 
 fn assert_two_frame_success(

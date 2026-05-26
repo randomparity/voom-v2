@@ -1,6 +1,7 @@
 use crate::workflow::binding::{
     PolicyFileSource, branch_context_with_probe_codec, render_default_payload,
-    render_default_payload_with_fan_out, render_policy_remux_payload,
+    render_default_payload_with_fan_out, render_policy_extract_audio_payload,
+    render_policy_remux_payload, render_policy_transcode_audio_payload,
 };
 use crate::workflow::model::WorkflowPlan;
 use crate::workflow::timing::EffectiveTiming;
@@ -93,6 +94,64 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
     assert_eq!(rendered["progress_interval_ms"], 10);
     assert_eq!(rendered["source_file_version_id"], 42);
     assert_eq!(rendered["source_location_id"], 7);
+}
+
+#[test]
+fn policy_transcode_audio_payload_renders_source_target_and_operation_payload() {
+    let operation_payload = serde_json::json!({
+        "type": "transcode_audio",
+        "target_codec": "opus",
+        "container": "mkv",
+        "source_media_snapshot_id": 99
+    });
+
+    let rendered = render_policy_transcode_audio_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            location_id: Some(FileLocationId(7)),
+        },
+        &operation_payload,
+        std::path::Path::new("/custom/audio/staging"),
+        std::path::Path::new("/custom/audio/output"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["operation"], "transcode_audio");
+    assert_eq!(rendered["audio"], operation_payload);
+    assert_eq!(rendered["audio"]["source_media_snapshot_id"], 99);
+    assert_eq!(rendered["staging_root"], "/custom/audio/staging");
+    assert_eq!(rendered["target_dir"], "/custom/audio/output");
+    assert_eq!(rendered["source_file_version_id"], 42);
+    assert_eq!(rendered["source_location_id"], 7);
+}
+
+#[test]
+fn policy_extract_audio_payload_renders_source_target_and_operation_payload() {
+    let operation_payload = serde_json::json!({
+        "type": "extract_audio",
+        "target_codec": "opus",
+        "container": "ogg",
+        "source_media_snapshot_id": 99
+    });
+
+    let rendered = render_policy_extract_audio_payload(
+        PolicyFileSource {
+            file_version_id: FileVersionId(42),
+            location_id: None,
+        },
+        &operation_payload,
+        std::path::Path::new("/custom/audio/staging"),
+        std::path::Path::new("/custom/audio/output"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["operation"], "extract_audio");
+    assert_eq!(rendered["audio"], operation_payload);
+    assert_eq!(rendered["target_dir"], "/custom/audio/output");
+    assert_eq!(rendered["source_file_version_id"], 42);
+    assert!(rendered.get("source_location_id").is_none());
 }
 
 #[test]

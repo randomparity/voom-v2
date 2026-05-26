@@ -306,6 +306,7 @@ impl<'a> Validator<'a> {
                     "phase inheritance through extend is deferred",
                 ),
                 "transcode" => self.validate_transcode_statement(operation),
+                "extract" => self.validate_extract_statement(operation),
                 "synthesize" | "verify" => self.error(
                     DiagnosticCode::DeferredExecutionOperation,
                     operation.span(),
@@ -381,6 +382,7 @@ impl<'a> Validator<'a> {
                 self.validate_condition(statement, text.as_ref(), tag_effects);
             }
             "transcode" => self.validate_transcode_statement(statement),
+            "extract" => self.validate_extract_statement(statement),
             "synthesize" | "verify" => self.error(
                 DiagnosticCode::DeferredExecutionOperation,
                 statement.span(),
@@ -605,11 +607,70 @@ impl<'a> Validator<'a> {
         if tokens.as_slice() == ["transcode", "video", "to", "hevc"] {
             return;
         }
+        if tokens
+            .get(0..4)
+            .is_some_and(|prefix| matches!(prefix, ["transcode", "audio", "to", "aac" | "opus"]))
+        {
+            if self.validate_required_track_filter(statement, text.as_ref(), 4) {
+                self.validate_language_tokens(statement, text.as_ref());
+            }
+            return;
+        }
         self.error(
             DiagnosticCode::UnsupportedTranscodeShape,
             statement.span(),
             "only `transcode video to hevc {}` is supported in Sprint 12",
         );
+    }
+
+    fn validate_extract_statement(&mut self, statement: &StatementAst) {
+        let text = statement_text(statement);
+        let tokens = words(text.as_ref());
+        if tokens.get(0..2) == Some(&["extract", "audio"]) {
+            if self.validate_required_track_filter(statement, text.as_ref(), 2) {
+                self.validate_language_tokens(statement, text.as_ref());
+            }
+            return;
+        }
+        self.error(
+            DiagnosticCode::UnknownPhaseStatementOrOperation,
+            statement.span(),
+            "unsupported extract operation",
+        );
+    }
+
+    fn validate_required_track_filter(
+        &mut self,
+        statement: &StatementAst,
+        text: &str,
+        where_index: usize,
+    ) -> bool {
+        let tokens = words(text);
+        if !text.contains(" where ") || tokens.get(where_index).copied() != Some("where") {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "operation requires a track filter after `where`",
+            );
+            return false;
+        }
+        let Some((_, filter)) = text.split_once(" where ") else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "operation requires a track filter after `where`",
+            );
+            return false;
+        };
+        if !is_valid_track_filter(filter.trim()) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "unknown track filter predicate",
+            );
+            return false;
+        }
+        true
     }
 
     fn validate_rules(

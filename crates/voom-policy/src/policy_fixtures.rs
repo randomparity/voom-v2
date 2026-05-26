@@ -56,6 +56,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         source_path: "fixtures/policies/video-transcode-hevc.voom",
         expected_json_path: "fixtures/compiled/video-transcode-hevc.json",
     },
+    PolicyFixture {
+        source_path: "fixtures/policies/audio-transcode-extract.voom",
+        expected_json_path: "fixtures/compiled/audio-transcode-extract.json",
+    },
 ];
 
 const INVALID_POLICY_FIXTURES: &[PolicyFixture] = &[

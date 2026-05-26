@@ -1,0 +1,6 @@
+policy "audio transcode extract" {
+  phase normalize {
+    transcode audio to aac where lang in [eng, und]
+    extract audio where commentary
+  }
+}

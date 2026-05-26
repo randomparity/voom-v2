@@ -102,6 +102,16 @@ pub enum CompiledOperation {
         container: String,
         profile: String,
     },
+    TranscodeAudio {
+        target_codec: String,
+        container: String,
+        filter: Option<TrackFilter>,
+    },
+    ExtractAudio {
+        target_codec: String,
+        container: String,
+        filter: Option<TrackFilter>,
+    },
     Conditional {
         condition: CompiledCondition,
         operations: Vec<CompiledOperation>,
@@ -325,11 +335,25 @@ fn lower_operation(
         "delete_tag" => Ok(CompiledOperation::DeleteTag {
             key: quoted_value(text.as_ref()).unwrap_or_default(),
         }),
+        "transcode" if tokens.get(1).copied() == Some("audio") => {
+            Ok(CompiledOperation::TranscodeAudio {
+                target_codec: token_string(&tokens, 3, "opus"),
+                container: "mkv".to_owned(),
+                filter: track_filter(text.as_ref()),
+            })
+        }
         "transcode" => Ok(CompiledOperation::TranscodeVideo {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
             profile: "default-hevc".to_owned(),
         }),
+        "extract" if tokens.get(1).copied() == Some("audio") => {
+            Ok(CompiledOperation::ExtractAudio {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: track_filter(text.as_ref()),
+            })
+        }
         "when" => Ok(CompiledOperation::Conditional {
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
             operations: match statement {

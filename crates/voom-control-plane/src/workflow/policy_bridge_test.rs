@@ -115,6 +115,38 @@ fn bridge_maps_planned_transcode_video() {
 }
 
 #[test]
+fn bridge_maps_planned_transcode_audio() {
+    let plan = plan(vec![node("transcode_audio", NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeAudio);
+    assert_eq!(bridged.summary.per_operation["transcode_audio"], 1);
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["type"],
+        "transcode_audio"
+    );
+}
+
+#[test]
+fn bridge_maps_planned_extract_audio() {
+    let plan = plan(vec![node("extract_audio", NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let workflow = bridged.workflow.unwrap();
+
+    assert_eq!(workflow.nodes[0].operation(), OperationKind::ExtractAudio);
+    assert_eq!(bridged.summary.per_operation["extract_audio"], 1);
+    assert_eq!(
+        workflow.nodes[0].operation_payload()["type"],
+        "extract_audio"
+    );
+}
+
+#[test]
 fn bridge_preserves_plan_edges_between_included_planned_nodes() {
     let first = node_with_id(
         "node_remux_first",
@@ -247,6 +279,18 @@ fn operation_payload(operation_kind: &str) -> serde_json::Value {
             "target_codec": "hevc",
             "container": "mkv",
             "profile": "default-hevc"
+        }),
+        "transcode_audio" => json!({
+            "type": "transcode_audio",
+            "target_codec": "opus",
+            "container": "mkv",
+            "source_media_snapshot_id": 99
+        }),
+        "extract_audio" => json!({
+            "type": "extract_audio",
+            "target_codec": "opus",
+            "container": "ogg",
+            "source_media_snapshot_id": 99
         }),
         _ => json!({"container": "mkv"}),
     }

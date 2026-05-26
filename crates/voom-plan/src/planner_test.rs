@@ -238,6 +238,32 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
     }
 }
 
+fn request_with_transcode_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
+    PlanningRequest {
+        policy: policy(CompiledOperation::TranscodeAudio {
+            target_codec: "opus".to_owned(),
+            container: "mkv".to_owned(),
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        }),
+        input: input_with_snapshot(snapshot),
+        context: PlanningContext::default(),
+    }
+}
+
+fn request_with_extract_audio(snapshot: MediaSnapshotInput) -> PlanningRequest {
+    PlanningRequest {
+        policy: policy(CompiledOperation::ExtractAudio {
+            target_codec: "opus".to_owned(),
+            container: "ogg".to_owned(),
+            filter: Some(TrackFilter::Commentary),
+        }),
+        input: input_with_snapshot(snapshot),
+        context: PlanningContext::default(),
+    }
+}
+
 #[test]
 fn groups_container_and_track_operations_into_one_remux_node() {
     let policy = compiled_policy_with_ops(vec![
@@ -917,6 +943,115 @@ fn transcode_video_blocks_unknown_or_multi_video_snapshots() {
     assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(2)));
 }
 
+#[test]
+fn transcode_audio_plans_selected_aac_audio_to_opus() {
+    let plan = generate_plan(request_with_transcode_audio(snapshot_with_audio_streams(
+        Some("mp4"),
+        &[
+            audio_stream(1, "aac", "eng", Some(false)),
+            audio_stream(2, "aac", "jpn", Some(false)),
+        ],
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].operation_payload["type"], "transcode_audio");
+    assert_eq!(plan.nodes[0].operation_payload["target_codec"], "opus");
+    assert_eq!(plan.nodes[0].operation_payload["container"], "mkv");
+    assert_eq!(
+        plan.nodes[0].operation_payload["source_media_snapshot_id"],
+        42
+    );
+    assert_eq!(
+        plan.nodes[0]
+            .capability_hints
+            .operation_capability
+            .as_deref(),
+        Some("transcode_audio")
+    );
+}
+
+#[test]
+fn transcode_audio_no_ops_selected_opus_audio_in_mkv() {
+    let plan = generate_plan(request_with_transcode_audio(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[audio_stream(1, "opus", "eng", Some(false))],
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
+fn transcode_audio_blocks_when_selector_matches_zero_audio_streams() {
+    let plan = generate_plan(request_with_transcode_audio(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[audio_stream(1, "aac", "jpn", Some(false))],
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].operation_kind.as_deref(),
+        Some("transcode_audio")
+    );
+}
+
+#[test]
+fn extract_audio_where_commentary_plans_for_exactly_one_known_commentary_stream() {
+    let plan = generate_plan(request_with_extract_audio(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[
+            audio_stream(1, "aac", "eng", Some(false)),
+            audio_stream(2, "aac", "eng", Some(true)),
+        ],
+    )))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].operation_payload["type"], "extract_audio");
+    assert_eq!(plan.nodes[0].operation_payload["target_codec"], "opus");
+    assert_eq!(plan.nodes[0].operation_payload["container"], "ogg");
+    assert_eq!(
+        plan.nodes[0]
+            .capability_hints
+            .operation_capability
+            .as_deref(),
+        Some("extract_audio")
+    );
+}
+
+#[test]
+fn extract_audio_where_commentary_blocks_on_zero_multiple_or_unknown_commentary() {
+    assert_extract_audio_blocked(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[audio_stream(1, "aac", "eng", Some(false))],
+    ));
+    assert_extract_audio_blocked(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[
+            audio_stream(1, "aac", "eng", Some(true)),
+            audio_stream(2, "aac", "eng", Some(true)),
+        ],
+    ));
+    assert_extract_audio_blocked(snapshot_with_audio_streams(
+        Some("mkv"),
+        &[audio_stream(1, "aac", "eng", None)],
+    ));
+}
+
+fn assert_extract_audio_blocked(snapshot: MediaSnapshotInput) {
+    let plan = generate_plan(request_with_extract_audio(snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(plan.summary.blocked_node_count, 1);
+}
+
 fn assert_transcode_blocked(snapshot: MediaSnapshotInput) {
     let plan = generate_plan(request_with_transcode(snapshot)).unwrap();
 
@@ -924,6 +1059,46 @@ fn assert_transcode_blocked(snapshot: MediaSnapshotInput) {
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(plan.summary.blocked_node_count, 1);
     assert_eq!(plan.diagnostics.len(), 1);
+}
+
+fn snapshot_with_audio_streams(
+    container: Option<&str>,
+    audio_streams: &[serde_json::Value],
+) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(container, Some("h264"), Some(1));
+    let mut streams = vec![serde_json::json!({
+        "id": "stream-0",
+        "index": 0,
+        "kind": "video",
+        "codec_name": "h264"
+    })];
+    streams.extend_from_slice(audio_streams);
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": streams
+    });
+    snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(42));
+    snapshot
+}
+
+fn audio_stream(
+    index: u32,
+    codec: &str,
+    language: &str,
+    commentary: Option<bool>,
+) -> serde_json::Value {
+    let mut stream = serde_json::json!({
+        "id": format!("stream-{index}"),
+        "index": index,
+        "kind": "audio",
+        "codec_name": codec,
+        "language": language,
+        "channels": 2
+    });
+    if let Some(commentary) = commentary {
+        stream["disposition"] = serde_json::json!({ "commentary": commentary });
+    }
+    stream
 }
 
 #[test]

@@ -2,6 +2,7 @@ use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::Path;
 use voom_core::{FileLocationId, FileVersionId};
+use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::remux::RemuxOperationPayload;
 use voom_worker_protocol::OperationKind;
 
@@ -47,6 +48,7 @@ pub fn render_default_payload_with_fan_out(
         | OperationKind::BackUpFile
         | OperationKind::VerifyArtifact
         | OperationKind::ExtractAudio
+        | OperationKind::TranscodeAudio
         | OperationKind::TranscribeAudio
         | OperationKind::DeleteArtifact => json!({ "path": branch.path }),
         OperationKind::ScoreQuality => {
@@ -146,6 +148,73 @@ pub fn render_policy_remux_payload(
     let mut payload = json!({
         "operation": "remux",
         "remux": remux_payload,
+        "staging_root": staging_root,
+        "target_dir": target_dir,
+        "duration_ms": timing.duration_ms,
+        "progress_interval_ms": timing.progress_interval_ms,
+    });
+    let Some(object) = payload.as_object_mut() else {
+        return Err(BindingError::new("rendered payload must be a JSON object"));
+    };
+    insert_policy_file_source(object, source);
+    Ok(payload)
+}
+
+pub fn render_policy_transcode_audio_payload(
+    source: PolicyFileSource,
+    operation_payload: &Value,
+    staging_root: &Path,
+    target_dir: &Path,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    render_policy_audio_payload(
+        source,
+        operation_payload,
+        AudioOperationType::TranscodeAudio,
+        "transcode_audio",
+        staging_root,
+        target_dir,
+        timing,
+    )
+}
+
+pub fn render_policy_extract_audio_payload(
+    source: PolicyFileSource,
+    operation_payload: &Value,
+    staging_root: &Path,
+    target_dir: &Path,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    render_policy_audio_payload(
+        source,
+        operation_payload,
+        AudioOperationType::ExtractAudio,
+        "extract_audio",
+        staging_root,
+        target_dir,
+        timing,
+    )
+}
+
+fn render_policy_audio_payload(
+    source: PolicyFileSource,
+    operation_payload: &Value,
+    expected_type: AudioOperationType,
+    operation: &str,
+    staging_root: &Path,
+    target_dir: &Path,
+    timing: EffectiveTiming,
+) -> Result<Value, BindingError> {
+    let audio_payload = AudioOperationPayload::try_from_execution_value(operation_payload)
+        .map_err(|err| BindingError::new(err.to_string()))?;
+    if audio_payload.operation_type != expected_type {
+        return Err(BindingError::new(format!(
+            "{operation} payload has mismatched type"
+        )));
+    }
+    let mut payload = json!({
+        "operation": operation,
+        "audio": audio_payload.into_value(),
         "staging_root": staging_root,
         "target_dir": target_dir,
         "duration_ms": timing.duration_ms,

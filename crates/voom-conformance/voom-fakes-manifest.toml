@@ -85,6 +85,11 @@ valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario =
 invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
 
 [[binaries.operations]]
+operation = "transcode_audio"
+valid_payload = { path = "/library/movie.mkv", target_codec = "opus", scenario = "default" }
+invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+
+[[binaries.operations]]
 operation = "extract_audio"
 valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
 invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
