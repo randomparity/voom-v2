@@ -1,5 +1,5 @@
 use crate::workflow::binding::{
-    PolicyRemuxSource, branch_context_with_probe_codec, render_default_payload,
+    PolicyFileSource, branch_context_with_probe_codec, render_default_payload,
     render_default_payload_with_fan_out, render_policy_remux_payload,
 };
 use crate::workflow::model::WorkflowPlan;
@@ -73,7 +73,7 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
     });
 
     let rendered = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: Some(FileLocationId(7)),
         },
@@ -98,7 +98,7 @@ fn policy_remux_payload_renders_source_target_and_operation_payload() {
 #[test]
 fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -125,7 +125,7 @@ fn policy_remux_payload_rejects_non_numeric_source_media_snapshot_id() {
 #[test]
 fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -151,7 +151,7 @@ fn policy_remux_payload_rejects_missing_source_media_snapshot_id() {
 #[test]
 fn policy_remux_payload_omits_absent_source_location() {
     let rendered = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -175,7 +175,7 @@ fn policy_remux_payload_omits_absent_source_location() {
 #[test]
 fn policy_remux_payload_rejects_non_remux_payload() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -192,7 +192,7 @@ fn policy_remux_payload_rejects_non_remux_payload() {
 #[test]
 fn policy_remux_payload_rejects_incomplete_typed_payload() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -209,7 +209,7 @@ fn policy_remux_payload_rejects_incomplete_typed_payload() {
 #[test]
 fn policy_remux_payload_rejects_malformed_track_action_entry() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -232,7 +232,7 @@ fn policy_remux_payload_rejects_malformed_track_action_entry() {
 #[test]
 fn policy_remux_payload_rejects_attachment_track_action_target() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -259,7 +259,7 @@ fn policy_remux_payload_rejects_attachment_track_action_target() {
 #[test]
 fn policy_remux_payload_rejects_malformed_track_order_entry() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -282,7 +282,7 @@ fn policy_remux_payload_rejects_malformed_track_order_entry() {
 #[test]
 fn policy_remux_payload_rejects_attachment_track_order_group() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -309,7 +309,7 @@ fn policy_remux_payload_rejects_attachment_track_order_group() {
 #[test]
 fn policy_remux_payload_rejects_duplicate_track_order_group() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },
@@ -335,7 +335,7 @@ fn policy_remux_payload_rejects_duplicate_track_order_group() {
 #[test]
 fn policy_remux_payload_rejects_malformed_defaults_entry() {
     let err = render_policy_remux_payload(
-        PolicyRemuxSource {
+        PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
         },

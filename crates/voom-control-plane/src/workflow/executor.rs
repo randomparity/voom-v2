@@ -20,9 +20,8 @@ use voom_worker_protocol::{
 };
 
 use super::binding::{
-    BindingError, BranchContext, PolicyRemuxSource, PolicyTranscodeSource, render_default_payload,
-    render_default_payload_with_fan_out, render_policy_remux_payload,
-    render_policy_transcode_payload,
+    BranchContext, PolicyFileSource, render_default_payload, render_default_payload_with_fan_out,
+    render_policy_remux_payload, render_policy_transcode_payload,
 };
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
@@ -424,7 +423,8 @@ where
                 ),
                 OperationKind::TranscodeVideo => match node.policy_target() {
                     Some(target) => render_policy_transcode_payload(
-                        self.resolve_policy_transcode_source(target).await?,
+                        self.resolve_policy_file_source(target, "transcode_video")
+                            .await?,
                         node.operation_payload(),
                         &self.options.transcode_staging_root,
                         &self.options.transcode_target_dir,
@@ -437,13 +437,13 @@ where
                         target @ (voom_plan::TargetRef::FileVersion { .. }
                         | voom_plan::TargetRef::FileLocation { .. }),
                     ) => render_policy_remux_payload(
-                        self.resolve_policy_remux_source(target).await?,
+                        self.resolve_policy_file_source(target, "remux").await?,
                         node.operation_payload(),
                         &self.options.remux_staging_root,
                         &self.options.remux_target_dir,
                         timing,
                     ),
-                    Some(target) => Err(BindingError::new(format!(
+                    Some(target) => Err(super::binding::BindingError::new(format!(
                         "remux requires file_version or file_location target, got {target:?}"
                     ))),
                     None => render_default_payload(operation, &branch, timing),
@@ -481,12 +481,13 @@ where
         Ok(())
     }
 
-    async fn resolve_policy_transcode_source(
+    async fn resolve_policy_file_source(
         &self,
         target: &voom_plan::TargetRef,
-    ) -> Result<PolicyTranscodeSource, VoomError> {
+        operation_name: &str,
+    ) -> Result<PolicyFileSource, VoomError> {
         match target {
-            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyTranscodeSource {
+            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyFileSource {
                 file_version_id: *id,
                 location_id: None,
             }),
@@ -500,43 +501,13 @@ where
                 if location.retired_at.is_some() {
                     return Err(VoomError::Config(format!("file_location {id} is retired")));
                 }
-                Ok(PolicyTranscodeSource {
+                Ok(PolicyFileSource {
                     file_version_id: location.file_version_id,
                     location_id: Some(*id),
                 })
             }
             other => Err(VoomError::Config(format!(
-                "transcode_video requires file_version or file_location target, got {other:?}"
-            ))),
-        }
-    }
-
-    async fn resolve_policy_remux_source(
-        &self,
-        target: &voom_plan::TargetRef,
-    ) -> Result<PolicyRemuxSource, VoomError> {
-        match target {
-            voom_plan::TargetRef::FileVersion { id } => Ok(PolicyRemuxSource {
-                file_version_id: *id,
-                location_id: None,
-            }),
-            voom_plan::TargetRef::FileLocation { id } => {
-                let location = self
-                    .control_plane
-                    .identity
-                    .get_file_location(*id)
-                    .await?
-                    .ok_or_else(|| VoomError::NotFound(format!("file_location {id}")))?;
-                if location.retired_at.is_some() {
-                    return Err(VoomError::Config(format!("file_location {id} is retired")));
-                }
-                Ok(PolicyRemuxSource {
-                    file_version_id: location.file_version_id,
-                    location_id: Some(*id),
-                })
-            }
-            other => Err(VoomError::Config(format!(
-                "remux requires file_version or file_location target, got {other:?}"
+                "{operation_name} requires file_version or file_location target, got {other:?}"
             ))),
         }
     }
