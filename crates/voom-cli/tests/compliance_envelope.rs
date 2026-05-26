@@ -4,7 +4,7 @@
     reason = "integration tests favor unwrap/panic over plumbing Result<()> through every assertion"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -76,12 +76,14 @@ async fn execute_scanned_remux_outputs_ticket_result_ids() {
 
     let staging_root = seeded.dir.path().join("stage");
     let output_dir = seeded.dir.path().join("out");
+    let ffprobe_bin = fake_ffprobe_bin(seeded.dir.path());
     let output = compliance_execute_command_with_dirs(
         &seeded.url,
         seeded.version_id,
         seeded.input_id,
         &staging_root,
         &output_dir,
+        &ffprobe_bin,
     );
     provider.shutdown().unwrap();
 
@@ -122,6 +124,7 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
 
     let staging_root = seeded.dir.path().join("stage");
     let output_dir = seeded.dir.path().join("out");
+    let ffprobe_bin = fake_ffprobe_bin(seeded.dir.path());
     std::fs::create_dir_all(&output_dir).unwrap();
     std::fs::write(output_dir.join("Movie.remux.mkv"), b"existing").unwrap();
 
@@ -131,6 +134,7 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
         seeded.input_id,
         &staging_root,
         &output_dir,
+        &ffprobe_bin,
     );
     provider.shutdown().unwrap();
 
@@ -380,8 +384,10 @@ fn compliance_execute_command_with_dirs(
     input_id: u64,
     staging_root: &Path,
     output_dir: &Path,
+    ffprobe_bin: &Path,
 ) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_voom"))
+        .env("VOOM_FFPROBE_BIN", ffprobe_bin)
         .args([
             "--database-url",
             url,
@@ -399,6 +405,55 @@ fn compliance_execute_command_with_dirs(
         .output()
         .unwrap()
 }
+
+fn fake_ffprobe_bin(dir: &Path) -> PathBuf {
+    let path = dir.join(format!("ffprobe-test{}", script_suffix()));
+    std::fs::write(&path, fake_ffprobe_script()).unwrap();
+    make_executable(&path);
+    path
+}
+
+#[cfg(unix)]
+fn script_suffix() -> &'static str {
+    ""
+}
+
+#[cfg(windows)]
+fn script_suffix() -> &'static str {
+    ".cmd"
+}
+
+#[cfg(unix)]
+fn fake_ffprobe_script() -> String {
+    format!(
+        "#!/bin/sh\n\
+         if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
+         cat <<'JSON'\n{}JSON\n",
+        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json")
+    )
+}
+
+#[cfg(windows)]
+fn fake_ffprobe_script() -> String {
+    format!(
+        "@echo off\r\n\
+         if \"%1\"==\"-version\" echo ffprobe version test-helper& exit /B 0\r\n\
+         powershell -NoProfile -Command \"@'`n{}'@\"\r\n",
+        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json")
+    )
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+#[cfg(windows)]
+fn make_executable(_path: &Path) {}
 
 fn envelope(stdout: Vec<u8>) -> Value {
     let stdout = String::from_utf8(stdout).unwrap();
