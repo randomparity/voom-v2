@@ -197,16 +197,18 @@ async fn execute_remux_core(
     append_success_event: bool,
     recover_post_commit_snapshot_failure: bool,
 ) -> Result<ExecuteRemuxCompletion, VoomError> {
+    let failure = RemuxFailureContext::new(cp, &input);
     let selected =
         match source::select_source(cp, input.source_file_version_id, input.source_location_id)
             .await
         {
             Ok(selected) => selected,
             Err(err) => {
-                record_partial_failure(cp, &input, &err).await?;
+                failure.record_failure(&err).await?;
                 return Err(err);
             }
         };
+    let failure = failure.with_source_location(selected.location.id);
     let snapshot = match source::read_media_snapshot(
         cp,
         input.source_file_version_id,
@@ -216,17 +218,7 @@ async fn execute_remux_core(
     {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                None,
-                None,
-                None,
-                None,
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
@@ -234,20 +226,11 @@ async fn execute_remux_core(
         match selection::selection_from_payload_and_snapshot(&input.operation_payload, &snapshot) {
             Ok(selection) => selection,
             Err(err) => {
-                record_failure(
-                    cp,
-                    &input,
-                    selected.location.id,
-                    None,
-                    None,
-                    None,
-                    None,
-                    &err,
-                )
-                .await?;
+                failure.record_failure(&err).await?;
                 return Err(err);
             }
         };
+    let failure = failure.with_selection(&selection);
     let staging = match stage::prepare_staging_path(
         &input.staging_root,
         input.ticket_id,
@@ -258,21 +241,12 @@ async fn execute_remux_core(
     {
         Ok(staging) => staging,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                None,
-                None,
-                None,
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
     let staging_path = staging.path.clone();
+    let failure = failure.with_staging_path(&staging_path);
     let target_path = match stage::target_path(
         &input.target_dir,
         std::path::Path::new(&selected.location.value),
@@ -281,34 +255,14 @@ async fn execute_remux_core(
     {
         Ok(path) => path,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                None,
-                None,
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
 
     events::record_started(cp, &input, selected.location.id, &selection, &staging_path).await?;
     if let Err(err) = dispatch::revalidate_source_file(&selected).await {
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            None,
-            None,
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     }
     let request = match dispatch::request_for(
@@ -319,17 +273,7 @@ async fn execute_remux_core(
     ) {
         Ok(request) => request,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                None,
-                None,
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
@@ -346,46 +290,17 @@ async fn execute_remux_core(
     {
         Ok(result) => result,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                None,
-                None,
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
+    let failure = failure.with_result(&result);
     if let Err(err) = dispatch::validate_result(&selected, &selection, &result) {
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            Some(&result),
-            None,
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     }
     if let Err(err) = dispatch::require_output_file_matches_result(&staging_path, &result).await {
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            Some(&result),
-            None,
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     }
 
@@ -395,20 +310,11 @@ async fn execute_remux_core(
         {
             Ok(staged) => staged,
             Err(err) => {
-                record_failure(
-                    cp,
-                    &input,
-                    selected.location.id,
-                    Some(&selection),
-                    Some(&staging_path),
-                    Some(&result),
-                    None,
-                    &err,
-                )
-                .await?;
+                failure.record_failure(&err).await?;
                 return Err(err);
             }
         };
+    let failure = failure.with_staged(&staged);
     let verified = match verify_artifact_with_dispatcher(
         cp,
         VerifyArtifactInput {
@@ -421,17 +327,7 @@ async fn execute_remux_core(
     {
         Ok(verified) => verified,
         Err(err) => {
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                Some(&result),
-                Some(&staged),
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
@@ -440,17 +336,7 @@ async fn execute_remux_core(
             "remux artifact verification failed for {}",
             staged.artifact_handle_id
         ));
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            Some(&result),
-            Some(&staged),
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     }
     let committed = match cp
@@ -463,48 +349,18 @@ async fn execute_remux_core(
         Ok(committed) => committed,
         Err(err) => {
             let err = remux_commit_failure(&err);
-            record_failure(
-                cp,
-                &input,
-                selected.location.id,
-                Some(&selection),
-                Some(&staging_path),
-                Some(&result),
-                Some(&staged),
-                &err,
-            )
-            .await?;
+            failure.record_failure(&err).await?;
             return Err(err);
         }
     };
     let Some(result_file_version_id) = committed.result_file_version_id else {
         let err = VoomError::Internal("committed remux missing result_file_version_id".to_owned());
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            Some(&result),
-            Some(&staged),
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     };
     let Some(result_file_location_id) = committed.result_file_location_id else {
         let err = VoomError::Internal("committed remux missing result_file_location_id".to_owned());
-        record_failure(
-            cp,
-            &input,
-            selected.location.id,
-            Some(&selection),
-            Some(&staging_path),
-            Some(&result),
-            Some(&staged),
-            &err,
-        )
-        .await?;
+        failure.record_failure(&err).await?;
         return Err(err);
     };
     let snapshot = match commit::record_result_snapshot_with_dispatcher(
@@ -603,55 +459,81 @@ fn recovery_error(report: &ExecuteRemuxRecoveryReport) -> VoomError {
     VoomError::ExternalSystemUnavailable(report.error.message.clone())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "remux failure events intentionally record the facts known at each workflow step"
-)]
-async fn record_failure(
-    cp: &ControlPlane,
-    input: &ExecuteRemuxInput,
-    source_location_id: FileLocationId,
-    selection: Option<&RemuxSelection>,
-    staging_path: Option<&Path>,
-    result: Option<&RemuxResult>,
-    staged: Option<&commit::StagedRemuxArtifact>,
-    err: &VoomError,
-) -> Result<(), VoomError> {
-    events::record_failed(
-        cp,
-        events::RemuxFailedEventInput {
-            input,
-            source_location_id: Some(source_location_id),
-            selection,
-            staging_path,
-            artifact_handle_id: staged.map(|staged| staged.artifact_handle_id),
-            artifact_location_id: staged.map(|staged| staged.artifact_location_id),
-            result,
-            error: err,
-        },
-    )
-    .await
+#[derive(Clone, Copy)]
+struct RemuxFailureContext<'a> {
+    cp: &'a ControlPlane,
+    input: &'a ExecuteRemuxInput,
+    source_location_id: Option<FileLocationId>,
+    selection: Option<&'a RemuxSelection>,
+    staging_path: Option<&'a Path>,
+    result: Option<&'a RemuxResult>,
+    staged: Option<&'a commit::StagedRemuxArtifact>,
 }
 
-async fn record_partial_failure(
-    cp: &ControlPlane,
-    input: &ExecuteRemuxInput,
-    err: &VoomError,
-) -> Result<(), VoomError> {
-    events::record_failed(
-        cp,
-        events::RemuxFailedEventInput {
+impl<'a> RemuxFailureContext<'a> {
+    fn new(cp: &'a ControlPlane, input: &'a ExecuteRemuxInput) -> Self {
+        Self {
+            cp,
             input,
             source_location_id: None,
             selection: None,
             staging_path: None,
-            artifact_handle_id: None,
-            artifact_location_id: None,
             result: None,
-            error: err,
-        },
-    )
-    .await
+            staged: None,
+        }
+    }
+
+    fn with_source_location(self, source_location_id: FileLocationId) -> Self {
+        Self {
+            source_location_id: Some(source_location_id),
+            ..self
+        }
+    }
+
+    fn with_selection(self, selection: &'a RemuxSelection) -> Self {
+        Self {
+            selection: Some(selection),
+            ..self
+        }
+    }
+
+    fn with_staging_path(self, staging_path: &'a Path) -> Self {
+        Self {
+            staging_path: Some(staging_path),
+            ..self
+        }
+    }
+
+    fn with_result(self, result: &'a RemuxResult) -> Self {
+        Self {
+            result: Some(result),
+            ..self
+        }
+    }
+
+    fn with_staged(self, staged: &'a commit::StagedRemuxArtifact) -> Self {
+        Self {
+            staged: Some(staged),
+            ..self
+        }
+    }
+
+    async fn record_failure(self, err: &VoomError) -> Result<(), VoomError> {
+        events::record_failed(
+            self.cp,
+            events::RemuxFailedEventInput {
+                input: self.input,
+                source_location_id: self.source_location_id,
+                selection: self.selection,
+                staging_path: self.staging_path,
+                artifact_handle_id: self.staged.map(|staged| staged.artifact_handle_id),
+                artifact_location_id: self.staged.map(|staged| staged.artifact_location_id),
+                result: self.result,
+                error: err,
+            },
+        )
+        .await
+    }
 }
 
 struct EventRemuxProgressSink<'a> {
