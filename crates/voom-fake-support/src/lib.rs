@@ -25,7 +25,8 @@ use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use voom_worker_protocol::{
     HttpServer, OperationDispatch, OperationFuture, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, ServerHandle, WorkerCredentials,
+    OperationResponse, PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest,
+    RemuxResult, RemuxStatus, ServerHandle, WorkerCredentials,
 };
 
 const MAX_FAKE_DURATION_MS: u64 = 30_000;
@@ -465,8 +466,17 @@ fn validate_payload(kind: ProviderKind, req: &OperationRequest) -> Result<(), Pr
             require_field(&req.payload, "target_codec", "h265")?;
         }
         ProviderKind::Remuxer => {
-            require_path(&req.payload)?;
-            require_field(&req.payload, "container", "mkv")?;
+            if let Some(request) = remux_protocol_payload(&req.payload)? {
+                if request.input.path.trim().is_empty() {
+                    return Err(invalid("remux input.path must not be empty"));
+                }
+                if request.output.container != "mkv" {
+                    return Err(invalid("remux output.container must be mkv"));
+                }
+            } else {
+                require_path(&req.payload)?;
+                require_field(&req.payload, "container", "mkv")?;
+            }
         }
         ProviderKind::ExternalSystem => {
             require_path(&req.payload)?;
@@ -528,6 +538,63 @@ fn scenario(payload: &serde_json::Value) -> &str {
         .and_then(|object| object.get("scenario"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("default")
+}
+
+fn remux_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<RemuxRequest>, ProtocolError> {
+    if !(payload.get("input").is_some() && payload.get("output").is_some()) {
+        return Ok(None);
+    }
+    serde_json::from_value(payload.clone())
+        .map(Some)
+        .map_err(|err| invalid(format!("remux protocol payload invalid: {err}")))
+}
+
+fn fake_remux_result(request: &RemuxRequest) -> Result<RemuxResult, ProtocolError> {
+    let bytes = b"fake remux bytes\n";
+    std::fs::write(&request.output.path, bytes)
+        .map_err(|err| invalid(format!("fake remux output write failed: {err}")))?;
+    Ok(RemuxResult {
+        status: RemuxStatus::Remuxed,
+        provider: "fake-remuxer".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: RemuxObservedFacts {
+            size_bytes: request.input.expected.size_bytes,
+            content_hash: request.input.expected.content_hash.clone(),
+            modified_at: None,
+            local_file_key: None,
+        },
+        input_post: RemuxObservedFacts {
+            size_bytes: request.input.expected.size_bytes,
+            content_hash: request.input.expected.content_hash.clone(),
+            modified_at: None,
+            local_file_key: None,
+        },
+        output: RemuxObservedFacts {
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
+            content_hash: blake3_checksum(bytes),
+            modified_at: None,
+            local_file_key: Some(request.output.path.clone()),
+        },
+        output_container: request.output.container.clone(),
+        kept_snapshot_stream_ids: request
+            .selection
+            .keep_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        default_snapshot_stream_ids: request
+            .selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+    })
+}
+
+fn blake3_checksum(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 pub fn synthetic_artifact_access_evidence(
@@ -598,6 +665,10 @@ fn result_payload(
             );
         }
         "fake-remuxer" => {
+            if let Some(request) = remux_protocol_payload(payload)? {
+                return serde_json::to_value(fake_remux_result(&request)?)
+                    .map_err(|err| invalid(format!("fake remux result encode failed: {err}")));
+            }
             object.insert(
                 "output_path".to_owned(),
                 serde_json::json!(transform_output_path(payload, "remuxed")),

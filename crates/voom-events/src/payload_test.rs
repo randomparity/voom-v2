@@ -309,6 +309,101 @@ fn artifact_transcode_started_payload_serializes_correlation_fields() {
 }
 
 #[test]
+fn artifact_remux_started_payload_serializes_selection_correlation_fields() {
+    let p = ArtifactRemuxStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        selected_streams: vec![
+            ArtifactRemuxStreamPayload {
+                snapshot_stream_id: "stream-0".to_owned(),
+                provider_stream_index: 0,
+            },
+            ArtifactRemuxStreamPayload {
+                snapshot_stream_id: "stream-1".to_owned(),
+                provider_stream_index: 1,
+            },
+        ],
+        default_streams: vec![ArtifactRemuxStreamPayload {
+            snapshot_stream_id: "stream-1".to_owned(),
+            provider_stream_index: 1,
+        }],
+        clear_default_streams: Vec::new(),
+        track_order: vec!["video".to_owned(), "audio".to_owned()],
+        provider: Some("mkvtoolnix".to_owned()),
+        provider_version: None,
+    };
+
+    let json = serde_json::to_value(Event::ArtifactRemuxStarted(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.remux_started");
+    assert_eq!(json["payload"]["job_id"], 1);
+    assert_eq!(json["payload"]["ticket_id"], 2);
+    assert_eq!(json["payload"]["lease_id"], 3);
+    assert_eq!(json["payload"]["source_file_version_id"], 4);
+    assert_eq!(json["payload"]["source_file_location_id"], 5);
+    assert_eq!(
+        json["payload"]["selected_streams"][1]["snapshot_stream_id"],
+        "stream-1"
+    );
+    assert_eq!(
+        json["payload"]["selected_streams"][1]["provider_stream_index"],
+        1
+    );
+    assert_eq!(
+        json["payload"]["default_streams"][0]["snapshot_stream_id"],
+        "stream-1"
+    );
+    assert_eq!(
+        json["payload"]["track_order"],
+        serde_json::json!(["video", "audio"])
+    );
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactRemuxStarted(q) if q == p));
+    assert_eq!(
+        Event::ArtifactRemuxStarted(p).kind(),
+        EventKind::ArtifactRemuxStarted
+    );
+}
+
+#[test]
+fn artifact_remux_failed_payload_serializes_public_error_code() {
+    let p = ArtifactRemuxFailedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: Some(5),
+        staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
+        selected_streams: Vec::new(),
+        default_streams: Vec::new(),
+        clear_default_streams: Vec::new(),
+        failure_class: voom_core::FailureClass::MalformedWorkerResult,
+        error_code: "MALFORMED_WORKER_RESULT".to_owned(),
+        message: "worker result did not match requested remux streams".to_owned(),
+        provider: Some("mkvtoolnix".to_owned()),
+        provider_version: Some("test".to_owned()),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactRemuxFailed(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.remux_failed");
+    assert_eq!(json["payload"]["failure_class"], "malformed_worker_result");
+    assert_eq!(json["payload"]["error_code"], "MALFORMED_WORKER_RESULT");
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactRemuxFailed(q) if q == p));
+    assert_eq!(
+        Event::ArtifactRemuxFailed(p).kind(),
+        EventKind::ArtifactRemuxFailed
+    );
+}
+
+#[test]
 fn artifact_verification_succeeded_rejects_failure_shape() {
     let raw = serde_json::json!({
         "kind": "artifact.verification_succeeded",

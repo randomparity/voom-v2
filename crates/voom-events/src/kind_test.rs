@@ -45,6 +45,10 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactTranscodeProgress,
         EventKind::ArtifactTranscodeSucceeded,
         EventKind::ArtifactTranscodeFailed,
+        EventKind::ArtifactRemuxStarted,
+        EventKind::ArtifactRemuxProgress,
+        EventKind::ArtifactRemuxSucceeded,
+        EventKind::ArtifactRemuxFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -155,6 +159,10 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactTranscodeProgress,
         EventKind::ArtifactTranscodeSucceeded,
         EventKind::ArtifactTranscodeFailed,
+        EventKind::ArtifactRemuxStarted,
+        EventKind::ArtifactRemuxProgress,
+        EventKind::ArtifactRemuxSucceeded,
+        EventKind::ArtifactRemuxFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -203,6 +211,24 @@ fn transcode_artifact_event_kinds_use_exact_sprint_12_wire_strings() {
             EventKind::ArtifactTranscodeFailed,
             "artifact.transcode_failed",
         ),
+    ];
+
+    for (kind, wire) in cases {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
+    }
+}
+
+#[test]
+fn remux_artifact_event_kinds_use_exact_sprint_13_wire_strings() {
+    let cases = [
+        (EventKind::ArtifactRemuxStarted, "artifact.remux_started"),
+        (EventKind::ArtifactRemuxProgress, "artifact.remux_progress"),
+        (
+            EventKind::ArtifactRemuxSucceeded,
+            "artifact.remux_succeeded",
+        ),
+        (EventKind::ArtifactRemuxFailed, "artifact.remux_failed"),
     ];
 
     for (kind, wire) in cases {

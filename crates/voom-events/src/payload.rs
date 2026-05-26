@@ -388,6 +388,83 @@ pub struct ArtifactTranscodeFailedPayload {
     pub provider_version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRemuxStreamPayload {
+    pub snapshot_stream_id: String,
+    pub provider_stream_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRemuxStartedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub track_order: Vec<String>,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRemuxProgressPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub percent_bps: Option<u16>,
+    pub message: Option<String>,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRemuxSucceededPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub kept_snapshot_stream_ids: Vec<String>,
+    pub default_snapshot_stream_ids: Vec<String>,
+    pub output_container: String,
+    pub provider: String,
+    pub provider_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRemuxFailedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: Option<u64>,
+    pub staging_path: Option<String>,
+    pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub failure_class: FailureClass,
+    pub error_code: String,
+    pub message: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
 // --- issues ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1007,6 +1084,14 @@ pub enum Event {
     ArtifactTranscodeSucceeded(ArtifactTranscodeSucceededPayload),
     #[serde(rename = "artifact.transcode_failed")]
     ArtifactTranscodeFailed(ArtifactTranscodeFailedPayload),
+    #[serde(rename = "artifact.remux_started")]
+    ArtifactRemuxStarted(ArtifactRemuxStartedPayload),
+    #[serde(rename = "artifact.remux_progress")]
+    ArtifactRemuxProgress(ArtifactRemuxProgressPayload),
+    #[serde(rename = "artifact.remux_succeeded")]
+    ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload),
+    #[serde(rename = "artifact.remux_failed")]
+    ArtifactRemuxFailed(ArtifactRemuxFailedPayload),
     #[serde(rename = "issue.opened")]
     IssueOpened(IssueLifecyclePayload),
     #[serde(rename = "issue.updated")]
@@ -1130,6 +1215,10 @@ impl Event {
             Self::ArtifactTranscodeProgress(_) => EventKind::ArtifactTranscodeProgress,
             Self::ArtifactTranscodeSucceeded(_) => EventKind::ArtifactTranscodeSucceeded,
             Self::ArtifactTranscodeFailed(_) => EventKind::ArtifactTranscodeFailed,
+            Self::ArtifactRemuxStarted(_) => EventKind::ArtifactRemuxStarted,
+            Self::ArtifactRemuxProgress(_) => EventKind::ArtifactRemuxProgress,
+            Self::ArtifactRemuxSucceeded(_) => EventKind::ArtifactRemuxSucceeded,
+            Self::ArtifactRemuxFailed(_) => EventKind::ArtifactRemuxFailed,
             Self::IssueOpened(_) => EventKind::IssueOpened,
             Self::IssueUpdated(_) => EventKind::IssueUpdated,
             Self::IssueResolved(_) => EventKind::IssueResolved,

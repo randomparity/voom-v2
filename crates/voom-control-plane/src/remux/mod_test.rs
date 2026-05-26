@@ -39,6 +39,11 @@ async fn execute_records_verified_committed_remux_result() {
     assert!(report.target_path.ends_with("Movie.remux.mkv"));
     assert!(report.target_path.exists());
     assert_eq!(count_events(&cp, EventKind::ArtifactStaged).await, 1);
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxStarted).await, 1);
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactRemuxSucceeded).await,
+        1
+    );
     assert_eq!(count_events(&cp, EventKind::MediaSnapshotRecorded).await, 2);
 }
 
@@ -148,6 +153,12 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
     assert!(
         !dir.path().join("out/Movie.remux.mkv").exists(),
         "mismatched input facts must stop before commit"
+    );
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxStarted).await, 1);
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxFailed).await, 1);
+    assert_eq!(
+        failed_remux_error_code(&cp).await.as_deref(),
+        Some("ARTIFACT_CHECKSUM_MISMATCH")
     );
 }
 
@@ -639,4 +650,28 @@ async fn count_events(cp: &crate::ControlPlane, kind: EventKind) -> usize {
         .unwrap()
         .items
         .len()
+}
+
+async fn failed_remux_error_code(cp: &crate::ControlPlane) -> Option<String> {
+    let event = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::ArtifactRemuxFailed),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 1,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .next()?;
+    match event.envelope.payload {
+        voom_events::Event::ArtifactRemuxFailed(payload) => Some(payload.error_code),
+        other => panic!("expected remux failed payload, got {other:?}"),
+    }
 }
