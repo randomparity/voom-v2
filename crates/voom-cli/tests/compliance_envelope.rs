@@ -22,7 +22,13 @@ async fn report_outputs_compliance_report_envelope() {
 
     let output = compliance_command(&seeded.url, "report", seeded.version_id, seeded.input_id);
 
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut json = envelope(output.stdout);
     assert_eq!(json["command"], "compliance");
     assert_eq!(json["status"], "ok");
@@ -146,7 +152,10 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     assert!(
         json["error"]["message"]
             .as_str()
-            .is_some_and(|message| { message.contains("remux target path already exists") })
+            .is_some_and(|message| { message.contains("remux target path already exists") }),
+        "stdout={} stderr={}",
+        serde_json::to_string_pretty(&json).unwrap(),
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
     assert_eq!(json["data"]["execution"]["failure_count"], 1);
@@ -432,8 +441,9 @@ fn script_suffix() -> &'static str {
 fn fake_ffprobe_script() -> String {
     "#!/bin/sh\n\
      if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
-     dir=$(CDPATH= cd \"$(dirname \"$0\")\" && pwd)\n\
-     cat \"$dir/basic-mp4.json\"\n"
+     script_dir=${0%/*}\n\
+     if [ \"$script_dir\" = \"$0\" ]; then script_dir=.; fi\n\
+     cat \"$script_dir/basic-mp4.json\"\n"
         .to_owned()
 }
 
