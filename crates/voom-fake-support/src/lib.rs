@@ -552,7 +552,7 @@ fn remux_protocol_payload(
 }
 
 fn fake_remux_result(request: &RemuxRequest) -> Result<RemuxResult, ProtocolError> {
-    let bytes = b"fake remux bytes\n";
+    let bytes = include_bytes!("../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     std::fs::write(&request.output.path, bytes)
         .map_err(|err| invalid(format!("fake remux output write failed: {err}")))?;
     Ok(RemuxResult {

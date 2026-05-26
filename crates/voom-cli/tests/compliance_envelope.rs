@@ -408,6 +408,11 @@ fn compliance_execute_command_with_dirs(
 
 fn fake_ffprobe_bin(dir: &Path) -> PathBuf {
     let path = dir.join(format!("ffprobe-test{}", script_suffix()));
+    std::fs::write(
+        dir.join("basic-mp4.json"),
+        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json"),
+    )
+    .unwrap();
     std::fs::write(&path, fake_ffprobe_script()).unwrap();
     make_executable(&path);
     path
@@ -425,22 +430,19 @@ fn script_suffix() -> &'static str {
 
 #[cfg(unix)]
 fn fake_ffprobe_script() -> String {
-    format!(
-        "#!/bin/sh\n\
-         if [ \"${{1:-}}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
-         cat <<'JSON'\n{}JSON\n",
-        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json")
-    )
+    "#!/bin/sh\n\
+     if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
+     dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+     cat \"$dir/basic-mp4.json\"\n"
+        .to_owned()
 }
 
 #[cfg(windows)]
 fn fake_ffprobe_script() -> String {
-    format!(
-        "@echo off\r\n\
-         if \"%1\"==\"-version\" echo ffprobe version test-helper& exit /B 0\r\n\
-         powershell -NoProfile -Command \"@'`n{}'@\"\r\n",
-        include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json")
-    )
+    "@echo off\r\n\
+     if \"%1\"==\"-version\" echo ffprobe version test-helper& exit /B 0\r\n\
+     type \"%~dp0basic-mp4.json\"\r\n"
+        .to_owned()
 }
 
 #[cfg(unix)]

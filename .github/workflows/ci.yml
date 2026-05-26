@@ -45,11 +45,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg mkvtoolnix
 
-      - name: Install ffmpeg (macOS)
+      - name: Install ffmpeg + mkvtoolnix (macOS)
         if: runner.os == 'macOS'
-        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+        run: brew list ffmpeg mkvtoolnix >/dev/null 2>&1 || brew install ffmpeg mkvtoolnix
 
       - name: just ci
         run: just ci
@@ -77,7 +77,7 @@ jobs:
       - name: Install ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg mkvtoolnix
 
       - name: Generate lcov
         run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info -- --test-threads=1
