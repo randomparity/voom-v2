@@ -21,6 +21,7 @@ pub mod low_level;
 pub mod ndjson;
 pub mod operation_kind;
 pub mod probe_file;
+pub mod remux;
 pub mod transcode_video;
 pub mod transport;
 pub mod verify_artifact;
@@ -36,6 +37,11 @@ pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
 pub use operation_kind::OperationKind;
 pub use probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
+};
+pub use remux::{
+    REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxObservedFacts, RemuxOutput,
+    RemuxRequest, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
+    is_supported_remux_container,
 };
 pub use transcode_video::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CONTAINER,
