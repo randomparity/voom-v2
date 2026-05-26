@@ -1,7 +1,9 @@
 use std::{
     ffi::{OsStr, OsString},
+    io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
+    thread,
     time::Duration,
 };
 
@@ -66,7 +68,7 @@ pub fn preflight_mkvmerge(command: &Path) -> Result<MkvmergeConfig, MkvtoolnixEr
     require_executable_file(command)?;
     let provider_version = first_output_line(
         "mkvmerge --version",
-        Command::new(command).arg("--version").output(),
+        command_output(Command::new(command).arg("--version")),
     )?;
     let _version = parse_mkvmerge_version(&provider_version)?;
     Ok(MkvmergeConfig::new(
@@ -177,6 +179,22 @@ fn command_text(
             text.trim()
         )))
     }
+}
+
+fn command_output(command: &mut Command) -> io::Result<Output> {
+    for attempt in 0..3 {
+        match command.output() {
+            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+    command.output()
+}
+
+fn is_text_file_busy(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(26)
 }
 
 #[cfg(test)]

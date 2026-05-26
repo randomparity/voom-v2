@@ -432,7 +432,7 @@ fn script_suffix() -> &'static str {
 fn fake_ffprobe_script() -> String {
     "#!/bin/sh\n\
      if [ \"${1:-}\" = '-version' ]; then printf 'ffprobe version test-helper\\n'; exit 0; fi\n\
-     dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+     dir=$(CDPATH= cd \"$(dirname \"$0\")\" && pwd)\n\
      cat \"$dir/basic-mp4.json\"\n"
         .to_owned()
 }
