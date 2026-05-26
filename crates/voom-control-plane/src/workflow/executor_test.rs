@@ -728,7 +728,7 @@ async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failur
     options.remux_staging_root = dir.path().join("stage");
     options.remux_target_dir = dir.path().join("out");
 
-    let err = super::dispatch_control_plane_remux(
+    super::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,
@@ -738,13 +738,52 @@ async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failur
         &options,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
     assert!(dir.path().join("out/Movie.remux.mkv").exists());
     assert_eq!(fixture.event_count("artifact.remux_failed").await, 0);
     assert_eq!(fixture.event_count("ticket.failed_retriable").await, 0);
-    assert_eq!(fixture.ticket_state(ticket.id).await, "leased");
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["status"], "committed_snapshot_failed");
+    assert_eq!(result["commit_record_id"], 1);
+    assert_eq!(result["result_file_version_id"], 2);
+    assert_eq!(result["result_file_location_id"], 2);
+    assert!(
+        result["target_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Movie.remux.mkv")
+    );
+    assert!(
+        result["staging_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("ticket-1/lease-1/Movie.remux.mkv")
+    );
+    assert_eq!(result["error"]["code"], "EXTERNAL_SYSTEM_UNAVAILABLE");
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("result_file_version_id=2")
+    );
+
+    let expiry = fixture
+        .cp
+        .expire_due(T0 + time::Duration::seconds(60))
+        .await
+        .unwrap();
+    assert!(expiry.expired_leases.is_empty());
+    assert!(expiry.requeued_tickets.is_empty());
+    assert!(expiry.failed_expiries.is_empty());
+    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
+    assert_eq!(
+        fixture
+            .event_count("ticket.requeued_after_lease_expiry")
+            .await,
+        0
+    );
 }
 
 #[tokio::test]

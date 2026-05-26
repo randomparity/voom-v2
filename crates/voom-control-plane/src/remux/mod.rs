@@ -62,6 +62,42 @@ pub(crate) struct ExecuteRemuxSuccess {
     pub success_event: events::RemuxSucceededEvent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ExecuteRemuxRecoveryReport {
+    pub status: &'static str,
+    pub job_id: JobId,
+    pub ticket_id: TicketId,
+    pub lease_id: LeaseId,
+    pub source_file_version_id: FileVersionId,
+    pub source_file_location_id: FileLocationId,
+    pub staged_artifact_handle_id: ArtifactHandleId,
+    pub staged_artifact_location_id: ArtifactLocationId,
+    pub verification_id: ArtifactVerificationId,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub result_file_version_id: FileVersionId,
+    pub result_file_location_id: FileLocationId,
+    pub staging_path: PathBuf,
+    pub target_path: PathBuf,
+    pub error: ExecuteRemuxRecoveryError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ExecuteRemuxRecoveryError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExecuteRemuxRecovery {
+    pub report: ExecuteRemuxRecoveryReport,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExecuteRemuxCompletion {
+    Succeeded(Box<ExecuteRemuxSuccess>),
+    Recovery(ExecuteRemuxRecovery),
+}
+
 #[async_trait]
 pub trait RemuxDispatcher: Send + Sync {
     async fn dispatch_remux(
@@ -102,9 +138,10 @@ pub(crate) async fn execute_remux_with_dispatchers(
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
 ) -> Result<ExecuteRemuxReport, VoomError> {
-    Ok(execute_remux_core(cp, input, remux, verify, true)
-        .await?
-        .report)
+    match execute_remux_core(cp, input, remux, verify, true, false).await? {
+        ExecuteRemuxCompletion::Succeeded(success) => Ok(success.report),
+        ExecuteRemuxCompletion::Recovery(recovery) => Err(recovery_error(&recovery.report)),
+    }
 }
 
 pub(crate) async fn execute_remux_with_deferred_success_event(
@@ -112,16 +149,8 @@ pub(crate) async fn execute_remux_with_deferred_success_event(
     input: ExecuteRemuxInput,
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
-) -> Result<ExecuteRemuxSuccess, VoomError> {
-    execute_remux_core(cp, input, remux, verify, false).await
-}
-
-pub(crate) fn is_post_commit_bookkeeping_error(source: &VoomError) -> bool {
-    matches!(
-        source,
-        VoomError::ExternalSystemUnavailable(message)
-            if message.starts_with("remux result snapshot failed after commit_record_id=")
-    )
+) -> Result<ExecuteRemuxCompletion, VoomError> {
+    execute_remux_core(cp, input, remux, verify, false, true).await
 }
 
 #[expect(
@@ -134,7 +163,8 @@ async fn execute_remux_core(
     remux: &dyn RemuxDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
     append_success_event: bool,
-) -> Result<ExecuteRemuxSuccess, VoomError> {
+    recover_post_commit_snapshot_failure: bool,
+) -> Result<ExecuteRemuxCompletion, VoomError> {
     let selected =
         match source::select_source(cp, input.source_file_version_id, input.source_location_id)
             .await
@@ -448,10 +478,35 @@ async fn execute_remux_core(
     let snapshot = match commit::record_result_snapshot(cp, result_file_version_id, &result).await {
         Ok(snapshot) => snapshot,
         Err(err) => {
-            return Err(VoomError::ExternalSystemUnavailable(format!(
+            let source = VoomError::ExternalSystemUnavailable(format!(
                 "remux result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
                 committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
-            )));
+            ));
+            if recover_post_commit_snapshot_failure {
+                return Ok(ExecuteRemuxCompletion::Recovery(ExecuteRemuxRecovery {
+                    report: ExecuteRemuxRecoveryReport {
+                        status: "committed_snapshot_failed",
+                        job_id: input.job_id,
+                        ticket_id: input.ticket_id,
+                        lease_id: input.lease_id,
+                        source_file_version_id: input.source_file_version_id,
+                        source_file_location_id: selected.location.id,
+                        staged_artifact_handle_id: staged.artifact_handle_id,
+                        staged_artifact_location_id: staged.artifact_location_id,
+                        verification_id: verified.verification_id,
+                        commit_record_id: committed.commit_record_id,
+                        result_file_version_id,
+                        result_file_location_id,
+                        staging_path,
+                        target_path,
+                        error: ExecuteRemuxRecoveryError {
+                            code: source.code(),
+                            message: source.to_string(),
+                        },
+                    },
+                }));
+            }
+            return Err(source);
         }
     };
     let success_event =
@@ -480,25 +535,31 @@ async fn execute_remux_core(
         .await?;
     }
 
-    Ok(ExecuteRemuxSuccess {
-        report: ExecuteRemuxReport {
-            job_id: input.job_id,
-            ticket_id: input.ticket_id,
-            lease_id: input.lease_id,
-            source_file_version_id: input.source_file_version_id,
-            source_file_location_id: selected.location.id,
-            staged_artifact_handle_id: staged.artifact_handle_id,
-            staged_artifact_location_id: staged.artifact_location_id,
-            verification_id: verified.verification_id,
-            commit_record_id: committed.commit_record_id,
-            result_file_version_id,
-            result_file_location_id,
-            result_media_snapshot_id: snapshot.id,
-            staging_path,
-            target_path,
+    Ok(ExecuteRemuxCompletion::Succeeded(Box::new(
+        ExecuteRemuxSuccess {
+            report: ExecuteRemuxReport {
+                job_id: input.job_id,
+                ticket_id: input.ticket_id,
+                lease_id: input.lease_id,
+                source_file_version_id: input.source_file_version_id,
+                source_file_location_id: selected.location.id,
+                staged_artifact_handle_id: staged.artifact_handle_id,
+                staged_artifact_location_id: staged.artifact_location_id,
+                verification_id: verified.verification_id,
+                commit_record_id: committed.commit_record_id,
+                result_file_version_id,
+                result_file_location_id,
+                result_media_snapshot_id: snapshot.id,
+                staging_path,
+                target_path,
+            },
+            success_event,
         },
-        success_event,
-    })
+    )))
+}
+
+fn recovery_error(report: &ExecuteRemuxRecoveryReport) -> VoomError {
+    VoomError::ExternalSystemUnavailable(report.error.message.clone())
 }
 
 #[expect(

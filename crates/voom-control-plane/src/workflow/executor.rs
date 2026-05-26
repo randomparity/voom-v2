@@ -35,8 +35,8 @@ use super::timing::seeded_timing;
 use crate::ControlPlane;
 use crate::cases::{begin_tx, commit_tx};
 use crate::remux::{
-    ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
-    is_post_commit_bookkeeping_error,
+    ExecuteRemuxCompletion, ExecuteRemuxInput, RemuxDispatcher,
+    execute_remux_with_deferred_success_event,
 };
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
@@ -1285,7 +1285,7 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    let success = match execute_remux_with_deferred_success_event(
+    let completion = match execute_remux_with_deferred_success_event(
         control,
         input,
         &RuntimeRemuxDispatcher {
@@ -1299,11 +1299,8 @@ async fn dispatch_control_plane_remux(
     )
     .await
     {
-        Ok(success) => success,
+        Ok(completion) => completion,
         Err(source) => {
-            if is_post_commit_bookkeeping_error(&source) {
-                return Err(source);
-            }
             return fail_lease_and_return(
                 control,
                 lease_id,
@@ -1313,9 +1310,18 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    let result = serde_json::to_value(&success.report)
-        .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
-    release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await
+    match completion {
+        ExecuteRemuxCompletion::Succeeded(success) => {
+            let result = serde_json::to_value(&success.report)
+                .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
+            release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await
+        }
+        ExecuteRemuxCompletion::Recovery(recovery) => {
+            let result = serde_json::to_value(&recovery.report)
+                .map_err(|err| VoomError::Internal(format!("encode remux recovery: {err}")))?;
+            release_lease_with_retry(control, lease_id, result).await
+        }
+    }
 }
 
 fn remux_input_for_workflow_ticket(
