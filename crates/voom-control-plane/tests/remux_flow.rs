@@ -97,13 +97,14 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     );
 
     let mut worker = RemuxWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let root = tmp.path().canonicalize().unwrap();
+    let out_dir = root.join("out");
     let executed = cp
         .execute_compliance_policy_with_options(
             policy.version.id,
             input.input_set_id,
             ComplianceExecutionOptions {
-                remux_staging_root: tmp.path().join("stage"),
+                remux_staging_root: root.join("stage"),
                 remux_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
