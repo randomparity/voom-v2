@@ -198,7 +198,7 @@ pub async fn handle_remux(
     let output_probe = identify_output(config, &output_path)
         .await
         .map_err(MkvtoolnixWorkerError::from)?;
-    validate_output_selection(request, &output_probe.mapping)?;
+    validate_output_selection(request, &input_mapping, &output_probe.mapping)?;
 
     Ok(RemuxResult {
         status: RemuxStatus::Remuxed,
@@ -236,12 +236,7 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
             "remux output container must be mkv".to_owned(),
         ));
     }
-    if request.selection.keep_streams.is_empty()
-        || !request
-            .selection
-            .track_order
-            .contains(&RemuxTrackGroup::Video)
-    {
+    if request.selection.keep_streams.is_empty() {
         return Err(config_invalid(
             "selection",
             "selection must include at least one video stream".to_owned(),
@@ -320,13 +315,24 @@ fn verify_expected_facts(
 ) -> Result<(), MkvtoolnixWorkerError> {
     if observed.size_bytes == expected.size_bytes && observed.content_hash == expected.content_hash
     {
-        Ok(())
-    } else {
-        Err(MkvtoolnixWorkerError::ArtifactChecksumMismatch {
-            message: "input facts differ from expected size/hash".to_owned(),
-            payload: serde_json::json!({"stage": stage, "expected": expected, "observed": observed}),
-        })
+        if expected.modified_at.is_some() && observed.modified_at != expected.modified_at {
+            return Err(MkvtoolnixWorkerError::ArtifactChecksumMismatch {
+                message: "input facts differ from expected modified_at".to_owned(),
+                payload: serde_json::json!({"stage": stage, "expected": expected, "observed": observed}),
+            });
+        }
+        if expected.local_file_key.is_some() && observed.local_file_key != expected.local_file_key {
+            return Err(MkvtoolnixWorkerError::ArtifactChecksumMismatch {
+                message: "input facts differ from expected local_file_key".to_owned(),
+                payload: serde_json::json!({"stage": stage, "expected": expected, "observed": observed}),
+            });
+        }
+        return Ok(());
     }
+    Err(MkvtoolnixWorkerError::ArtifactChecksumMismatch {
+        message: "input facts differ from expected size/hash".to_owned(),
+        payload: serde_json::json!({"stage": stage, "expected": expected, "observed": observed}),
+    })
 }
 
 fn verify_observed_match(
@@ -346,27 +352,65 @@ fn verify_observed_match(
 
 fn validate_output_selection(
     request: &RemuxRequest,
-    mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+    output_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
 ) -> Result<(), MkvtoolnixWorkerError> {
-    let expected_kept = request
-        .selection
-        .keep_streams
-        .iter()
-        .map(|stream| stream.snapshot_stream_id.clone())
-        .collect::<Vec<_>>();
-    let actual_kept = (0..=expected_kept.len())
-        .map_while(|index| {
-            u32::try_from(index)
-                .ok()
-                .and_then(|provider_index| mapping.track_for_provider_index(provider_index))
-                .map(|_| expected_kept.get(index).cloned().unwrap_or_default())
-        })
-        .collect::<Vec<_>>();
-    if actual_kept != expected_kept {
+    if output_mapping.track_count() != request.selection.keep_streams.len() {
         return Err(malformed_worker_result(
             "output_probe",
-            format!("selected stream mismatch: expected {expected_kept:?}, got {actual_kept:?}"),
+            format!(
+                "selected stream mismatch: expected {} output tracks, got {}",
+                request.selection.keep_streams.len(),
+                output_mapping.track_count()
+            ),
         ));
+    }
+
+    let saw_video = (0..request.selection.keep_streams.len()).any(|output_index| {
+        u32::try_from(output_index)
+            .ok()
+            .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))
+            .is_some_and(|track| track.kind.matches_group(RemuxTrackGroup::Video))
+    });
+    if !saw_video {
+        return Err(malformed_worker_result(
+            "output_probe",
+            "output must include at least one video track".to_owned(),
+        ));
+    }
+
+    for (output_index, kept_stream) in request.selection.keep_streams.iter().enumerate() {
+        let expected_track = input_mapping
+            .track_for_provider_index(kept_stream.provider_stream_index)
+            .ok_or_else(|| {
+                malformed_worker_result(
+                    "output_probe",
+                    format!(
+                        "selected stream mismatch: missing input track for provider index {}",
+                        kept_stream.provider_stream_index
+                    ),
+                )
+            })?;
+        let output_track = u32::try_from(output_index)
+            .ok()
+            .and_then(|provider_index| output_mapping.track_for_provider_index(provider_index))
+            .ok_or_else(|| {
+                malformed_worker_result(
+                    "output_probe",
+                    format!(
+                        "selected stream mismatch: missing output track at index {output_index}"
+                    ),
+                )
+            })?;
+        if output_track.kind != expected_track.kind {
+            return Err(malformed_worker_result(
+                "output_probe",
+                format!(
+                    "selected stream mismatch: expected {:?} for {}, got {:?}",
+                    expected_track.kind, kept_stream.snapshot_stream_id, output_track.kind
+                ),
+            ));
+        }
     }
 
     let expected_default = request
@@ -382,7 +426,7 @@ fn validate_output_selection(
         .enumerate()
         .filter_map(|(index, stream)| {
             let provider_index = u32::try_from(index).ok()?;
-            let track = mapping.track_for_provider_index(provider_index)?;
+            let track = output_mapping.track_for_provider_index(provider_index)?;
             track.default.then(|| stream.snapshot_stream_id.clone())
         })
         .collect::<Vec<_>>();

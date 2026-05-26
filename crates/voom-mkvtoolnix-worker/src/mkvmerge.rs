@@ -83,6 +83,10 @@ impl MkvmergeTrackMapping {
     pub(crate) fn track_for_provider_index(&self, provider_index: u32) -> Option<MkvmergeTrack> {
         self.tracks_by_provider_index.get(&provider_index).copied()
     }
+
+    pub(crate) fn track_count(&self) -> usize {
+        self.tracks_by_provider_index.len()
+    }
 }
 
 pub fn track_mapping_from_identify(
