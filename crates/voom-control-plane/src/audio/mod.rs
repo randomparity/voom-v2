@@ -7,7 +7,7 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
     MediaSnapshotId, TicketId, VoomError,
 };
-use voom_store::repo::artifacts::ArtifactVerificationStatus;
+use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 use voom_worker_protocol::{ExtractAudioResult, TranscodeAudioResult};
 
 use crate::ControlPlane;
@@ -340,43 +340,96 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
             staged.artifact_handle_id
         )));
     }
+    commit_verified_extract_audio(
+        cp,
+        ExtractCommitRequest {
+            input,
+            source_location_id: selected.location.id,
+            staged,
+            staging_path: staging.path,
+            target_path,
+            selection_role: selection.role,
+            result,
+            verification_id: verified.verification_id,
+        },
+    )
+    .await
+}
+
+struct ExtractCommitRequest {
+    input: ExecuteExtractAudioInput,
+    source_location_id: FileLocationId,
+    staged: commit::StagedAudioArtifact,
+    staging_path: PathBuf,
+    target_path: PathBuf,
+    selection_role: voom_plan::audio::AudioBundleRole,
+    result: ExtractAudioResult,
+    verification_id: ArtifactVerificationId,
+}
+
+async fn commit_verified_extract_audio(
+    cp: &ControlPlane,
+    request: ExtractCommitRequest,
+) -> Result<ExecuteExtractAudioReport, VoomError> {
     let committed = commit::commit_audio_extract_sidecar(
         cp,
         commit::CommitAudioExtractSidecarInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            verification_id: verified.verification_id,
-            source_file_version_id: input.source_file_version_id,
-            source_bundle_id: input.source_bundle_id,
-            role: selection.role,
-            staging_path: staging.path.clone(),
-            target_path: target_path.clone(),
-            output: result.output.clone(),
+            artifact_handle_id: request.staged.artifact_handle_id,
+            verification_id: request.verification_id,
+            source_file_version_id: request.input.source_file_version_id,
+            source_bundle_id: request.input.source_bundle_id,
+            role: request.selection_role,
+            staging_path: request.staging_path.clone(),
+            target_path: request.target_path.clone(),
+            output: request.result.output.clone(),
         },
     )
     .await?;
+    ensure_extract_commit_succeeded(&committed)?;
     events::record_extract_succeeded(
         cp,
-        &input,
-        selected.location.id,
-        staged.artifact_handle_id,
-        staged.artifact_location_id,
-        &result,
+        &request.input,
+        request.source_location_id,
+        request.staged.artifact_handle_id,
+        request.staged.artifact_location_id,
+        &request.result,
     )
     .await?;
-
     Ok(ExecuteExtractAudioReport {
-        job_id: input.job_id,
-        ticket_id: input.ticket_id,
-        lease_id: input.lease_id,
-        source_file_version_id: input.source_file_version_id,
-        source_file_location_id: selected.location.id,
-        staged_artifact_handle_id: staged.artifact_handle_id,
-        staged_artifact_location_id: staged.artifact_location_id,
-        verification_id: verified.verification_id,
+        job_id: request.input.job_id,
+        ticket_id: request.input.ticket_id,
+        lease_id: request.input.lease_id,
+        source_file_version_id: request.input.source_file_version_id,
+        source_file_location_id: request.source_location_id,
+        staged_artifact_handle_id: request.staged.artifact_handle_id,
+        staged_artifact_location_id: request.staged.artifact_location_id,
+        verification_id: request.verification_id,
         commit_record_id: committed.commit_record_id,
         result_file_version_id: committed.result_file_version_id,
         result_file_location_id: committed.result_file_location_id,
-        staging_path: staging.path,
-        target_path,
+        staging_path: request.staging_path,
+        target_path: request.target_path,
     })
 }
+
+fn ensure_extract_commit_succeeded(
+    report: &commit::CommitAudioExtractSidecarReport,
+) -> Result<(), VoomError> {
+    if let Some(recovery) = &report.recovery_required {
+        return Err(VoomError::CommitFailure(format!(
+            "audio extraction sidecar commit {} requires recovery: {} ({})",
+            report.commit_record_id, recovery.message, recovery.error_code
+        )));
+    }
+    if report.state != ArtifactCommitState::Committed {
+        return Err(VoomError::CommitFailure(format!(
+            "audio extraction sidecar commit {} ended in {:?}",
+            report.commit_record_id, report.state
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;
