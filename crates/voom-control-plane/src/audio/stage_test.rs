@@ -6,7 +6,7 @@ use voom_core::{ErrorCode, LeaseId, TicketId};
 
 #[tokio::test]
 async fn staging_path_includes_ticket_and_lease_under_canonical_root() {
-    let root = tempfile::tempdir().unwrap();
+    let root = stage_tempdir();
     let root_path = root.path().canonicalize().unwrap();
 
     let staging = prepare_transcode_staging_path(
@@ -27,7 +27,7 @@ async fn staging_path_includes_ticket_and_lease_under_canonical_root() {
 
 #[tokio::test]
 async fn transcode_target_is_source_stem_audio_codec_mkv() {
-    let root = tempfile::tempdir().unwrap();
+    let root = stage_tempdir();
 
     let target = transcode_target_path(root.path(), Path::new("/library/Movie.mp4"), "opus")
         .await
@@ -38,7 +38,7 @@ async fn transcode_target_is_source_stem_audio_codec_mkv() {
 
 #[tokio::test]
 async fn extraction_target_is_source_stem_sanitized_stream_id_codec_ogg() {
-    let root = tempfile::tempdir().unwrap();
+    let root = stage_tempdir();
 
     let target = extract_target_path(
         root.path(),
@@ -54,7 +54,7 @@ async fn extraction_target_is_source_stem_sanitized_stream_id_codec_ogg() {
 
 #[tokio::test]
 async fn extraction_target_ignores_title_language_and_provider_index() {
-    let root = tempfile::tempdir().unwrap();
+    let root = stage_tempdir();
 
     let target = extract_target_path(root.path(), Path::new("/library/Movie.mp4"), "sid", "opus")
         .await
@@ -68,7 +68,7 @@ async fn extraction_target_ignores_title_language_and_provider_index() {
 
 #[tokio::test]
 async fn existing_staging_and_target_paths_fail_with_config_invalid() {
-    let root = tempfile::tempdir().unwrap();
+    let root = stage_tempdir();
     let staging = prepare_transcode_staging_path(
         root.path(),
         TicketId(10),
@@ -92,7 +92,7 @@ async fn existing_staging_and_target_paths_fail_with_config_invalid() {
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
 
-    let target_dir = tempfile::tempdir().unwrap();
+    let target_dir = stage_tempdir();
     let target = target_dir.path().join("Movie.audio-aac.mkv");
     tokio::fs::write(&target, b"existing").await.unwrap();
 
@@ -101,4 +101,8 @@ async fn existing_staging_and_target_paths_fail_with_config_invalid() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+fn stage_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }

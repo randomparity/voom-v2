@@ -1140,7 +1140,7 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
 #[tokio::test]
 async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1180,7 +1180,7 @@ async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
 #[tokio::test]
 async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1218,6 +1218,10 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
             .unwrap()
             .ends_with("Movie.stream-audio-1.opus.ogg")
     );
+}
+
+fn workflow_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 #[tokio::test]

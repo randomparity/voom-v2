@@ -233,7 +233,11 @@ async fn fixture_with_dir() -> (
     tempfile::TempDir,
 ) {
     let (cp, db) = fixture().await;
-    (cp, db, tempfile::TempDir::new().unwrap())
+    (
+        cp,
+        db,
+        tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap(),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

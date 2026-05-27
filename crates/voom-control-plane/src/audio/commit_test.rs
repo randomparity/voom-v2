@@ -178,7 +178,11 @@ async fn fixture() -> (
     )
     .await
     .unwrap();
-    (cp, db, tempfile::TempDir::new().unwrap())
+    (
+        cp,
+        db,
+        tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap(),
+    )
 }
 
 async fn seed_source(cp: &crate::ControlPlane, path: PathBuf, bytes: &[u8]) -> SeededSource {
