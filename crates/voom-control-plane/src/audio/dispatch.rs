@@ -2,6 +2,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use voom_core::{LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ClientHandle, EXTRACT_AUDIO_CODEC,
@@ -330,20 +332,13 @@ pub(crate) async fn dispatch_transcode_audio_with_client_context<C>(
 where
     C: ClientHandle + ?Sized,
 {
-    let mut progress = NoopWorkerProgressHandler;
-    dispatch_operation_with_client(
+    dispatch_audio_operation_with_client_context(
         client,
         credentials,
-        WorkerOperationDispatch {
-            idempotency_key,
-            operation: OperationKind::TranscodeAudio,
-            lease_id,
-            payload: request,
-            heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
-            progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
-            labels: audio_stream_labels(),
-        },
-        &mut progress,
+        OperationKind::TranscodeAudio,
+        lease_id,
+        idempotency_key,
+        request,
     )
     .await
 }
@@ -376,13 +371,37 @@ pub(crate) async fn dispatch_extract_audio_with_client_context<C>(
 where
     C: ClientHandle + ?Sized,
 {
+    dispatch_audio_operation_with_client_context(
+        client,
+        credentials,
+        OperationKind::ExtractAudio,
+        lease_id,
+        idempotency_key,
+        request,
+    )
+    .await
+}
+
+async fn dispatch_audio_operation_with_client_context<C, Request, Response>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    operation: OperationKind,
+    lease_id: LeaseId,
+    idempotency_key: &str,
+    request: Request,
+) -> Result<Response, VoomError>
+where
+    C: ClientHandle + ?Sized,
+    Request: Serialize + Send,
+    Response: DeserializeOwned,
+{
     let mut progress = NoopWorkerProgressHandler;
     dispatch_operation_with_client(
         client,
         credentials,
         WorkerOperationDispatch {
             idempotency_key,
-            operation: OperationKind::ExtractAudio,
+            operation,
             lease_id,
             payload: request,
             heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,

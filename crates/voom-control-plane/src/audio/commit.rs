@@ -1,4 +1,3 @@
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -30,7 +29,10 @@ use voom_worker_protocol::{
 use super::selection::ExtractAudioSelectionPlan;
 use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
 use crate::ControlPlane;
-use crate::artifact::fs::observe_regular_file;
+use crate::artifact::fs::{
+    ArtifactFileFacts, canonical_new_leaf_no_symlink, promote_staged_add_only_with_temp,
+    unique_temp_sibling_path,
+};
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
 
@@ -346,8 +348,8 @@ async fn prepare_sidecar_commit(
     cp: &ControlPlane,
     input: &CommitAudioExtractSidecarInput,
 ) -> Result<PreparedSidecarCommit, VoomError> {
-    reject_existing_target(&input.target_path).await?;
-    let temp_path = unique_temp_sibling_path(&input.target_path)?;
+    let target_path = canonical_new_leaf_no_symlink(&input.target_path).await?;
+    let temp_path = canonical_new_leaf_no_symlink(unique_temp_sibling_path(&target_path)?).await?;
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let record = cp
@@ -358,7 +360,7 @@ async fn prepare_sidecar_commit(
                 artifact_handle_id: input.artifact_handle_id,
                 source_file_version_id: input.source_file_version_id,
                 verification_id: input.verification_id,
-                target_path: input.target_path.display().to_string(),
+                target_path: target_path.display().to_string(),
                 temp_path: Some(temp_path.display().to_string()),
                 report: json!({
                     "operation": "extract_audio_sidecar",
@@ -366,7 +368,7 @@ async fn prepare_sidecar_commit(
                     "source_bundle_id": input.source_bundle_id.0,
                     "role": bundle_role(input.role).as_str(),
                     "staging_path": input.staging_path.display().to_string(),
-                    "target_path": input.target_path.display().to_string(),
+                    "target_path": target_path.display().to_string(),
                     "temp_path": temp_path.display().to_string(),
                 }),
                 started_at: now,
@@ -384,7 +386,7 @@ async fn prepare_sidecar_commit(
             artifact_handle_id: input.artifact_handle_id.0,
             source_file_version_id: input.source_file_version_id.0,
             verification_id: input.verification_id.0,
-            target_path: input.target_path.display().to_string(),
+            target_path: target_path.display().to_string(),
             temp_path: temp_path.display().to_string(),
         }),
     )
@@ -393,7 +395,7 @@ async fn prepare_sidecar_commit(
     Ok(PreparedSidecarCommit {
         record,
         staging_path: input.staging_path.clone(),
-        target_path: input.target_path.clone(),
+        target_path,
         temp_path,
     })
 }
@@ -402,32 +404,19 @@ async fn promote_sidecar(
     prepared: &PreparedSidecarCommit,
     expected: &AudioObservedFacts,
 ) -> Result<(), VoomError> {
-    let staging_facts = observe_regular_file(&prepared.staging_path).await?;
-    if staging_facts.size_bytes != expected.size_bytes
-        || staging_facts.content_hash != expected.content_hash
-    {
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "staged audio sidecar facts drifted after durable prepare".to_owned(),
-        ));
-    }
-    let temp_facts = copy_regular_file_checked(&prepared.staging_path, &prepared.temp_path).await?;
-    if temp_facts.size_bytes != expected.size_bytes
-        || temp_facts.content_hash != expected.content_hash
-    {
-        let _ = remove_file_if_exists(&prepared.temp_path).await;
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "temporary audio sidecar facts do not match worker result".to_owned(),
-        ));
-    }
-    install_temp_no_replace(&prepared.temp_path, &prepared.target_path).await?;
-    let target_facts = observe_regular_file(&prepared.target_path).await?;
-    if target_facts.size_bytes != expected.size_bytes
-        || target_facts.content_hash != expected.content_hash
-    {
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "target audio sidecar facts do not match worker result".to_owned(),
-        ));
-    }
+    promote_staged_add_only_with_temp(
+        &prepared.staging_path,
+        &prepared.target_path,
+        &prepared.temp_path,
+        &ArtifactFileFacts {
+            path: prepared.staging_path.clone(),
+            size_bytes: expected.size_bytes,
+            content_hash: expected.content_hash.clone(),
+            modified_at: None,
+            local_file_key: expected.local_file_key.clone(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -570,81 +559,6 @@ fn bundle_role(role: AudioBundleRole) -> BundleMemberRole {
     match role {
         AudioBundleRole::CommentaryAudio => BundleMemberRole::CommentaryAudio,
         AudioBundleRole::ExternalAudio => BundleMemberRole::ExternalAudio,
-    }
-}
-
-async fn reject_existing_target(path: &Path) -> Result<(), VoomError> {
-    match fs::symlink_metadata(path).await {
-        Ok(_) => Err(VoomError::Config(format!(
-            "audio sidecar target already exists: {}",
-            path.display()
-        ))),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(VoomError::Config(format!(
-            "stat audio sidecar target {}: {err}",
-            path.display()
-        ))),
-    }
-}
-
-fn unique_temp_sibling_path(target_path: &Path) -> Result<PathBuf, VoomError> {
-    let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = target_path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| {
-            VoomError::Config(format!(
-                "audio sidecar target has no file name: {}",
-                target_path.display()
-            ))
-        })?;
-    Ok(parent.join(format!(".{file_name}.voom-tmp-{}", std::process::id())))
-}
-
-async fn copy_regular_file_checked(
-    from: &Path,
-    to: &Path,
-) -> Result<crate::artifact::fs::ArtifactFileFacts, VoomError> {
-    fs::copy(from, to).await.map_err(|err| {
-        VoomError::CommitFailure(format!(
-            "copy audio sidecar {} to {}: {err}",
-            from.display(),
-            to.display()
-        ))
-    })?;
-    observe_regular_file(to).await
-}
-
-async fn install_temp_no_replace(temp_path: &Path, target_path: &Path) -> Result<(), VoomError> {
-    fs::hard_link(temp_path, target_path)
-        .await
-        .map_err(|err| match err.kind() {
-            ErrorKind::AlreadyExists => VoomError::CommitFailure(format!(
-                "audio sidecar target already exists: {}",
-                target_path.display()
-            )),
-            _ => VoomError::CommitFailure(format!(
-                "cannot install audio sidecar {} to {}: {err}",
-                temp_path.display(),
-                target_path.display()
-            )),
-        })?;
-    fs::remove_file(temp_path).await.map_err(|err| {
-        VoomError::CommitFailure(format!(
-            "cannot remove temporary audio sidecar path {}: {err}",
-            temp_path.display()
-        ))
-    })
-}
-
-async fn remove_file_if_exists(path: &Path) -> Result<(), VoomError> {
-    match fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(VoomError::CommitFailure(format!(
-            "cannot remove audio sidecar path {}: {err}",
-            path.display()
-        ))),
     }
 }
 

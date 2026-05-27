@@ -216,7 +216,15 @@ async fn execute_transcode_audio_inner(
     )
     .await?;
 
-    events::record_transcode_started(cp, &input, selected.location.id, &staging.path).await?;
+    events::record_transcode_started(
+        cp,
+        &input,
+        selected.location.id,
+        snapshot.id.0,
+        &staging.path,
+        &selection,
+    )
+    .await?;
     dispatch::revalidate_source_file(&selected).await?;
     let request = dispatch::transcode_request_for(
         &selected,
@@ -243,9 +251,11 @@ async fn execute_transcode_audio_inner(
         TranscodeCommitRequest {
             input,
             source_location_id: selected.location.id,
+            source_media_snapshot_id: snapshot.id.0,
             staged,
             staging_path: staging.path,
             target_path,
+            selected_streams: events::stream_payloads(&selection.selection.selected_streams),
             result,
         },
         verify,
@@ -330,11 +340,15 @@ async fn commit_verified_transcode_audio(
     };
     if let Err(err) = events::record_transcode_succeeded(
         cp,
-        &request.input,
-        request.source_location_id,
-        request.staged.artifact_handle_id,
-        request.staged.artifact_location_id,
-        &request.result,
+        events::TranscodeSucceededEventInput {
+            input: &request.input,
+            source_location_id: request.source_location_id,
+            source_media_snapshot_id: request.source_media_snapshot_id,
+            artifact_handle_id: request.staged.artifact_handle_id,
+            artifact_location_id: request.staged.artifact_location_id,
+            selected_streams: request.selected_streams.clone(),
+            result: &request.result,
+        },
     )
     .await
     {
@@ -417,9 +431,11 @@ fn transcode_post_commit_recovery(
 struct TranscodeCommitRequest {
     input: ExecuteTranscodeAudioInput,
     source_location_id: FileLocationId,
+    source_media_snapshot_id: u64,
     staged: commit::StagedAudioArtifact,
     staging_path: PathBuf,
     target_path: PathBuf,
+    selected_streams: Vec<ArtifactAudioStreamPayload>,
     result: TranscodeAudioResult,
 }
 
@@ -493,7 +509,15 @@ async fn execute_extract_audio_inner(
     )
     .await?;
 
-    events::record_extract_started(cp, &input, selected.location.id, &staging.path).await?;
+    events::record_extract_started(
+        cp,
+        &input,
+        selected.location.id,
+        snapshot.id.0,
+        &staging.path,
+        &selection,
+    )
+    .await?;
     dispatch::revalidate_source_file(&selected).await?;
     let request = dispatch::extract_request_for(
         &selected,
@@ -536,10 +560,11 @@ async fn execute_extract_audio_inner(
         ExtractCommitRequest {
             input,
             source_location_id: selected.location.id,
+            source_media_snapshot_id: snapshot.id.0,
             staged,
             staging_path: staging.path,
             target_path,
-            selection_role: selection.role,
+            selection,
             result,
             verification_id: verified.verification_id,
         },
@@ -561,10 +586,11 @@ struct ExtractAttemptContext {
 struct ExtractCommitRequest {
     input: ExecuteExtractAudioInput,
     source_location_id: FileLocationId,
+    source_media_snapshot_id: u64,
     staged: commit::StagedAudioArtifact,
     staging_path: PathBuf,
     target_path: PathBuf,
-    selection_role: voom_plan::audio::AudioBundleRole,
+    selection: selection::ExtractAudioSelectionPlan,
     result: ExtractAudioResult,
     verification_id: ArtifactVerificationId,
 }
@@ -580,7 +606,7 @@ async fn commit_verified_extract_audio(
             verification_id: request.verification_id,
             source_file_version_id: request.input.source_file_version_id,
             source_bundle_id: request.input.source_bundle_id,
-            role: request.selection_role,
+            role: request.selection.role,
             staging_path: request.staging_path.clone(),
             target_path: request.target_path.clone(),
             output: request.result.output.clone(),
@@ -590,11 +616,15 @@ async fn commit_verified_extract_audio(
     ensure_extract_commit_succeeded(&committed)?;
     events::record_extract_succeeded(
         cp,
-        &request.input,
-        request.source_location_id,
-        request.staged.artifact_handle_id,
-        request.staged.artifact_location_id,
-        &request.result,
+        events::ExtractSucceededEventInput {
+            input: &request.input,
+            source_location_id: request.source_location_id,
+            source_media_snapshot_id: request.source_media_snapshot_id,
+            artifact_handle_id: request.staged.artifact_handle_id,
+            artifact_location_id: request.staged.artifact_location_id,
+            selection: &request.selection,
+            result: &request.result,
+        },
     )
     .await?;
     Ok(ExecuteExtractAudioReport {

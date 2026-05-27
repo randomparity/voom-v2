@@ -1329,7 +1329,7 @@ impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
         &self,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
-        let idempotency_key = format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0);
+        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1361,7 +1361,7 @@ impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
         &self,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
-        let idempotency_key = format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0);
+        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1509,6 +1509,7 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
         request: RemuxRequest,
         progress: &mut dyn crate::remux::dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, VoomError> {
+        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1517,7 +1518,7 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
             crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
-                &format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0),
+                &idempotency_key,
                 self.lease_id,
                 request,
                 progress,
@@ -1525,6 +1526,10 @@ impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
         )
         .await
     }
+}
+
+fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {
+    format!("ticket-{}-lease-{}", ticket_id.0, lease_id.0)
 }
 
 async fn dispatch_control_plane_remux(
@@ -2001,29 +2006,7 @@ fn voom_error_for_failure_class(class: FailureClass, message: String) -> VoomErr
 }
 
 fn failure_class_for_error(source: &VoomError) -> FailureClass {
-    match source.error_code() {
-        ErrorCode::WorkerTimeout => FailureClass::WorkerTimeout,
-        ErrorCode::NoEligibleWorker => FailureClass::NoEligibleWorker,
-        ErrorCode::ArtifactUnavailable => FailureClass::ArtifactUnavailable,
-        ErrorCode::ArtifactChecksumMismatch => FailureClass::ArtifactChecksumMismatch,
-        ErrorCode::ExternalSystemUnavailable => FailureClass::ExternalSystemUnavailable,
-        ErrorCode::ExternalSystemRateLimited => FailureClass::ExternalSystemRateLimited,
-        ErrorCode::VerificationFailure => FailureClass::VerificationFailure,
-        ErrorCode::BackupFailure => FailureClass::BackupFailure,
-        ErrorCode::CommitFailure => FailureClass::CommitFailure,
-        ErrorCode::PolicyParseError => FailureClass::PolicyParseError,
-        ErrorCode::PolicyValidationError => FailureClass::PolicyValidationError,
-        ErrorCode::MissingCapability => FailureClass::MissingCapability,
-        ErrorCode::MalformedWorkerResult => FailureClass::MalformedWorkerResult,
-        ErrorCode::UserCancellation => FailureClass::UserCancellation,
-        ErrorCode::StaleIdentityEvidence => FailureClass::StaleIdentityEvidence,
-        ErrorCode::ClosureResolutionIncomplete => FailureClass::ClosureResolutionIncomplete,
-        ErrorCode::BlockedByUseLease => FailureClass::BlockedByActiveUseLease,
-        ErrorCode::ApprovalRequired => FailureClass::ApprovalRequired,
-        ErrorCode::PriorityPolicyConflict => FailureClass::PriorityPolicyConflict,
-        ErrorCode::AmbiguousWorkerSelection => FailureClass::AmbiguousWorkerSelection,
-        _ => FailureClass::WorkerCrash,
-    }
+    FailureClass::from_error_code(source.error_code()).unwrap_or(FailureClass::WorkerCrash)
 }
 
 fn apply_chaos_payload_override(

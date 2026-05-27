@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, VoomError,
-};
+use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
 use voom_events::payload::{
     ArtifactRemuxFailedPayload, ArtifactRemuxProgressPayload, ArtifactRemuxStartedPayload,
     ArtifactRemuxStreamPayload, ArtifactRemuxSucceededPayload,
@@ -286,29 +284,7 @@ fn track_group_name(group: RemuxTrackGroup) -> &'static str {
 }
 
 fn failure_class_for_error(source: &VoomError) -> FailureClass {
-    match source.error_code() {
-        ErrorCode::WorkerTimeout => FailureClass::WorkerTimeout,
-        ErrorCode::NoEligibleWorker => FailureClass::NoEligibleWorker,
-        ErrorCode::ArtifactUnavailable => FailureClass::ArtifactUnavailable,
-        ErrorCode::ArtifactChecksumMismatch => FailureClass::ArtifactChecksumMismatch,
-        ErrorCode::ExternalSystemUnavailable => FailureClass::ExternalSystemUnavailable,
-        ErrorCode::ExternalSystemRateLimited => FailureClass::ExternalSystemRateLimited,
-        ErrorCode::VerificationFailure => FailureClass::VerificationFailure,
-        ErrorCode::BackupFailure => FailureClass::BackupFailure,
-        ErrorCode::CommitFailure => FailureClass::CommitFailure,
-        ErrorCode::PolicyParseError => FailureClass::PolicyParseError,
-        ErrorCode::PolicyValidationError => FailureClass::PolicyValidationError,
-        ErrorCode::MissingCapability => FailureClass::MissingCapability,
-        ErrorCode::MalformedWorkerResult => FailureClass::MalformedWorkerResult,
-        ErrorCode::UserCancellation => FailureClass::UserCancellation,
-        ErrorCode::StaleIdentityEvidence => FailureClass::StaleIdentityEvidence,
-        ErrorCode::ClosureResolutionIncomplete => FailureClass::ClosureResolutionIncomplete,
-        ErrorCode::BlockedByUseLease => FailureClass::BlockedByActiveUseLease,
-        ErrorCode::ApprovalRequired => FailureClass::ApprovalRequired,
-        ErrorCode::PriorityPolicyConflict => FailureClass::PriorityPolicyConflict,
-        ErrorCode::AmbiguousWorkerSelection => FailureClass::AmbiguousWorkerSelection,
-        _ => FailureClass::WorkerCrash,
-    }
+    FailureClass::from_error_code(source.error_code()).unwrap_or(FailureClass::WorkerCrash)
 }
 
 #[cfg(test)]

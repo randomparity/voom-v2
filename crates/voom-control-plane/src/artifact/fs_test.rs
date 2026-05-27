@@ -246,6 +246,24 @@ async fn promote_staged_add_only_returns_target_facts_after_add_only_install() {
     assert_eq!(std::fs::read(&target).unwrap(), b"final bytes");
 }
 
+#[tokio::test]
+async fn promote_staged_add_only_with_temp_uses_caller_supplied_temp_path() {
+    let dir = artifact_tempdir();
+    let staging = dir.path().join("staged.bin");
+    let target = dir.path().join("target.bin");
+    let temp = dir.path().join(".prepared-sidecar.tmp");
+    std::fs::write(&staging, b"final bytes").unwrap();
+    let expected = observe_regular_file(&staging).await.unwrap();
+
+    let report = promote_staged_add_only_with_temp(&staging, &target, &temp, &expected)
+        .await
+        .unwrap();
+
+    assert_eq!(report.temp_path, temp);
+    assert!(!temp.exists());
+    assert_eq!(std::fs::read(&target).unwrap(), b"final bytes");
+}
+
 struct RejectBeforeInstall;
 
 impl PromotionFailpoint for RejectBeforeInstall {

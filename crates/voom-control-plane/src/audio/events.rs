@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, VoomError,
-};
+use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
 use voom_events::payload::{
     ArtifactAudioDispositionPayload, ArtifactAudioExtractFailedPayload,
     ArtifactAudioExtractProgressPayload, ArtifactAudioExtractStartedPayload,
@@ -27,24 +25,16 @@ pub async fn record_transcode_started(
     cp: &ControlPlane,
     input: &ExecuteTranscodeAudioInput,
     source_location_id: FileLocationId,
+    source_media_snapshot_id: u64,
     staging_path: &Path,
+    selection: &TranscodeAudioSelectionPlan,
 ) -> Result<(), VoomError> {
-    let snapshot = super::source::read_media_snapshot(
-        cp,
-        input.source_file_version_id,
-        &input.operation_payload,
-    )
-    .await?;
-    let selection = super::selection::transcode_selection_from_payload_and_snapshot(
-        &input.operation_payload,
-        &snapshot,
-    )?;
     let payload = transcode_started_payload(
         input,
         source_location_id,
-        snapshot.id.0,
+        source_media_snapshot_id,
         staging_path.display().to_string(),
-        &selection,
+        selection,
     );
     append_audio_event(
         cp,
@@ -92,41 +82,43 @@ pub async fn record_transcode_progress(
     .await
 }
 
+#[derive(Debug)]
+pub struct TranscodeSucceededEventInput<'a> {
+    pub input: &'a ExecuteTranscodeAudioInput,
+    pub source_location_id: FileLocationId,
+    pub source_media_snapshot_id: u64,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub result: &'a TranscodeAudioResult,
+}
+
 pub async fn record_transcode_succeeded(
     cp: &ControlPlane,
-    input: &ExecuteTranscodeAudioInput,
-    source_location_id: FileLocationId,
-    artifact_handle_id: ArtifactHandleId,
-    artifact_location_id: ArtifactLocationId,
-    result: &TranscodeAudioResult,
+    event: TranscodeSucceededEventInput<'_>,
 ) -> Result<(), VoomError> {
-    let snapshot = super::source::read_media_snapshot(
-        cp,
-        input.source_file_version_id,
-        &input.operation_payload,
-    )
-    .await?;
-    let selection = super::selection::transcode_selection_from_payload_and_snapshot(
-        &input.operation_payload,
-        &snapshot,
-    )?;
-    let staging_path = result.output.local_file_key.clone().unwrap_or_default();
+    let staging_path = event
+        .result
+        .output
+        .local_file_key
+        .clone()
+        .unwrap_or_default();
     let payload = transcode_succeeded_payload(
-        input,
+        event.input,
         TranscodeSucceededContext {
-            source_location: source_location_id,
-            source_media_snapshot: snapshot.id.0,
-            artifact_handle: artifact_handle_id,
-            artifact_location: artifact_location_id,
+            source_location: event.source_location_id,
+            source_media_snapshot: event.source_media_snapshot_id,
+            artifact_handle: event.artifact_handle_id,
+            artifact_location: event.artifact_location_id,
         },
         staging_path,
-        stream_payloads(&selection.selection.selected_streams),
-        result,
+        event.selected_streams,
+        event.result,
     );
     append_audio_event(
         cp,
         SubjectType::ArtifactHandle,
-        Some(artifact_handle_id.0),
+        Some(event.artifact_handle_id.0),
         Event::ArtifactAudioTranscodeSucceeded(payload),
     )
     .await
@@ -183,24 +175,16 @@ pub async fn record_extract_started(
     cp: &ControlPlane,
     input: &ExecuteExtractAudioInput,
     source_location_id: FileLocationId,
+    source_media_snapshot_id: u64,
     staging_path: &Path,
+    selection: &ExtractAudioSelectionPlan,
 ) -> Result<(), VoomError> {
-    let snapshot = super::source::read_media_snapshot(
-        cp,
-        input.source_file_version_id,
-        &input.operation_payload,
-    )
-    .await?;
-    let selection = super::selection::extract_selection_from_payload_and_snapshot(
-        &input.operation_payload,
-        &snapshot,
-    )?;
     let payload = extract_started_payload(
         input,
         source_location_id,
-        snapshot.id.0,
+        source_media_snapshot_id,
         staging_path.display().to_string(),
-        &selection,
+        selection,
     );
     append_audio_event(
         cp,
@@ -249,47 +233,49 @@ pub async fn record_extract_progress(
     .await
 }
 
+#[derive(Debug)]
+pub struct ExtractSucceededEventInput<'a> {
+    pub input: &'a ExecuteExtractAudioInput,
+    pub source_location_id: FileLocationId,
+    pub source_media_snapshot_id: u64,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub selection: &'a ExtractAudioSelectionPlan,
+    pub result: &'a ExtractAudioResult,
+}
+
 pub async fn record_extract_succeeded(
     cp: &ControlPlane,
-    input: &ExecuteExtractAudioInput,
-    source_location_id: FileLocationId,
-    artifact_handle_id: ArtifactHandleId,
-    artifact_location_id: ArtifactLocationId,
-    result: &ExtractAudioResult,
+    event: ExtractSucceededEventInput<'_>,
 ) -> Result<(), VoomError> {
-    let snapshot = super::source::read_media_snapshot(
-        cp,
-        input.source_file_version_id,
-        &input.operation_payload,
-    )
-    .await?;
-    let selection = super::selection::extract_selection_from_payload_and_snapshot(
-        &input.operation_payload,
-        &snapshot,
-    )?;
-    let staging_path = result.output.local_file_key.clone().unwrap_or_default();
+    let staging_path = event
+        .result
+        .output
+        .local_file_key
+        .clone()
+        .unwrap_or_default();
     append_audio_event(
         cp,
         SubjectType::ArtifactHandle,
-        Some(artifact_handle_id.0),
+        Some(event.artifact_handle_id.0),
         Event::ArtifactAudioExtractSucceeded(ArtifactAudioExtractSucceededPayload {
-            job_id: input.job_id.0,
-            ticket_id: input.ticket_id.0,
-            lease_id: Some(input.lease_id.0),
-            source_file_version_id: input.source_file_version_id.0,
-            source_file_location_id: source_location_id.0,
-            source_media_snapshot_id: snapshot.id.0,
-            source_bundle_id: input.source_bundle_id.0,
-            artifact_handle_id: artifact_handle_id.0,
-            artifact_location_id: artifact_location_id.0,
+            job_id: event.input.job_id.0,
+            ticket_id: event.input.ticket_id.0,
+            lease_id: Some(event.input.lease_id.0),
+            source_file_version_id: event.input.source_file_version_id.0,
+            source_file_location_id: event.source_location_id.0,
+            source_media_snapshot_id: event.source_media_snapshot_id,
+            source_bundle_id: event.input.source_bundle_id.0,
+            artifact_handle_id: event.artifact_handle_id.0,
+            artifact_location_id: event.artifact_location_id.0,
             staging_path,
-            selected_stream: stream_payload(&selection.stream),
-            selected_snapshot_stream_id: result.selected_snapshot_stream_id.clone(),
-            role: role_name(selection.role).to_owned(),
-            output_container: result.output_container.clone(),
-            output_audio_codec: result.output_audio_codec.clone(),
-            provider: result.provider.clone(),
-            provider_version: result.provider_version.clone(),
+            selected_stream: stream_payload(&event.selection.stream),
+            selected_snapshot_stream_id: event.result.selected_snapshot_stream_id.clone(),
+            role: role_name(event.selection.role).to_owned(),
+            output_container: event.result.output_container.clone(),
+            output_audio_codec: event.result.output_audio_codec.clone(),
+            provider: event.result.provider.clone(),
+            provider_version: event.result.provider_version.clone(),
         }),
     )
     .await
@@ -562,29 +548,7 @@ fn role_name(role: AudioBundleRole) -> &'static str {
 }
 
 fn failure_class_for_error(source: &VoomError) -> FailureClass {
-    match source.error_code() {
-        ErrorCode::WorkerTimeout => FailureClass::WorkerTimeout,
-        ErrorCode::NoEligibleWorker => FailureClass::NoEligibleWorker,
-        ErrorCode::ArtifactUnavailable => FailureClass::ArtifactUnavailable,
-        ErrorCode::ArtifactChecksumMismatch => FailureClass::ArtifactChecksumMismatch,
-        ErrorCode::ExternalSystemUnavailable => FailureClass::ExternalSystemUnavailable,
-        ErrorCode::ExternalSystemRateLimited => FailureClass::ExternalSystemRateLimited,
-        ErrorCode::VerificationFailure => FailureClass::VerificationFailure,
-        ErrorCode::BackupFailure => FailureClass::BackupFailure,
-        ErrorCode::CommitFailure => FailureClass::CommitFailure,
-        ErrorCode::PolicyParseError => FailureClass::PolicyParseError,
-        ErrorCode::PolicyValidationError => FailureClass::PolicyValidationError,
-        ErrorCode::MissingCapability => FailureClass::MissingCapability,
-        ErrorCode::MalformedWorkerResult => FailureClass::MalformedWorkerResult,
-        ErrorCode::UserCancellation => FailureClass::UserCancellation,
-        ErrorCode::StaleIdentityEvidence => FailureClass::StaleIdentityEvidence,
-        ErrorCode::ClosureResolutionIncomplete => FailureClass::ClosureResolutionIncomplete,
-        ErrorCode::BlockedByUseLease => FailureClass::BlockedByActiveUseLease,
-        ErrorCode::ApprovalRequired => FailureClass::ApprovalRequired,
-        ErrorCode::PriorityPolicyConflict => FailureClass::PriorityPolicyConflict,
-        ErrorCode::AmbiguousWorkerSelection => FailureClass::AmbiguousWorkerSelection,
-        _ => FailureClass::WorkerCrash,
-    }
+    FailureClass::from_error_code(source.error_code()).unwrap_or(FailureClass::WorkerCrash)
 }
 
 #[cfg(test)]
