@@ -136,6 +136,39 @@ pub(crate) async fn execute_transcode_audio_with_dispatchers(
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
+    let failure_input = input.clone();
+    match execute_transcode_audio_inner(cp, input, transcode, verify, result_probe).await {
+        Ok(report) => Ok(report),
+        Err(err) => {
+            events::record_transcode_failed(
+                cp,
+                events::TranscodeFailedEventInput {
+                    input: &failure_input,
+                    source_location_id: None,
+                    source_media_snapshot_id: audio_payload_snapshot_id(
+                        &failure_input.operation_payload,
+                    ),
+                    artifact_handle_id: None,
+                    artifact_location_id: None,
+                    staging_path: None,
+                    selected_streams: Vec::new(),
+                    result: None,
+                    error: &err,
+                },
+            )
+            .await?;
+            Err(err)
+        }
+    }
+}
+
+async fn execute_transcode_audio_inner(
+    cp: &ControlPlane,
+    input: ExecuteTranscodeAudioInput,
+    transcode: &dyn TranscodeAudioDispatcher,
+    verify: &dyn VerifyArtifactDispatcher,
+    result_probe: &dyn commit::AudioResultProbeDispatcher,
+) -> Result<ExecuteTranscodeAudioReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
     let snapshot =
@@ -274,6 +307,38 @@ struct TranscodeCommitRequest {
 }
 
 pub(crate) async fn execute_extract_audio_with_dispatchers(
+    cp: &ControlPlane,
+    input: ExecuteExtractAudioInput,
+    extract: &dyn ExtractAudioDispatcher,
+    verify: &dyn VerifyArtifactDispatcher,
+) -> Result<ExecuteExtractAudioReport, VoomError> {
+    let failure_input = input.clone();
+    match execute_extract_audio_inner(cp, input, extract, verify).await {
+        Ok(report) => Ok(report),
+        Err(err) => {
+            events::record_extract_failed(
+                cp,
+                events::ExtractFailedEventInput {
+                    input: &failure_input,
+                    source_location_id: None,
+                    source_media_snapshot_id: audio_payload_snapshot_id(
+                        &failure_input.operation_payload,
+                    ),
+                    selection: None,
+                    staging_path: None,
+                    artifact_handle_id: None,
+                    artifact_location_id: None,
+                    result: None,
+                    error: &err,
+                },
+            )
+            .await?;
+            Err(err)
+        }
+    }
+}
+
+async fn execute_extract_audio_inner(
     cp: &ControlPlane,
     input: ExecuteExtractAudioInput,
     extract: &dyn ExtractAudioDispatcher,
@@ -428,6 +493,12 @@ fn ensure_extract_commit_succeeded(
         )));
     }
     Ok(())
+}
+
+fn audio_payload_snapshot_id(payload: &serde_json::Value) -> Option<u64> {
+    payload
+        .get("source_media_snapshot_id")
+        .and_then(serde_json::Value::as_u64)
 }
 
 #[cfg(test)]
