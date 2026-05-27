@@ -310,14 +310,34 @@ pub(crate) async fn dispatch_transcode_audio_with_client<C>(
 where
     C: ClientHandle + ?Sized,
 {
+    dispatch_transcode_audio_with_client_context(
+        client,
+        credentials,
+        LeaseId(0),
+        "transcode-audio-control-plane",
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_transcode_audio_with_client_context<C>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    lease_id: LeaseId,
+    idempotency_key: &str,
+    request: TranscodeAudioRequest,
+) -> Result<TranscodeAudioResult, VoomError>
+where
+    C: ClientHandle + ?Sized,
+{
     let mut progress = NoopWorkerProgressHandler;
     dispatch_operation_with_client(
         client,
         credentials,
         WorkerOperationDispatch {
-            idempotency_key: "transcode-audio-control-plane",
+            idempotency_key,
             operation: OperationKind::TranscodeAudio,
-            lease_id: LeaseId(0),
+            lease_id,
             payload: request,
             heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
             progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
@@ -336,14 +356,34 @@ pub(crate) async fn dispatch_extract_audio_with_client<C>(
 where
     C: ClientHandle + ?Sized,
 {
+    dispatch_extract_audio_with_client_context(
+        client,
+        credentials,
+        LeaseId(0),
+        "extract-audio-control-plane",
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_extract_audio_with_client_context<C>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    lease_id: LeaseId,
+    idempotency_key: &str,
+    request: ExtractAudioRequest,
+) -> Result<ExtractAudioResult, VoomError>
+where
+    C: ClientHandle + ?Sized,
+{
     let mut progress = NoopWorkerProgressHandler;
     dispatch_operation_with_client(
         client,
         credentials,
         WorkerOperationDispatch {
-            idempotency_key: "extract-audio-control-plane",
+            idempotency_key,
             operation: OperationKind::ExtractAudio,
-            lease_id: LeaseId(0),
+            lease_id,
             payload: request,
             heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
             progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,

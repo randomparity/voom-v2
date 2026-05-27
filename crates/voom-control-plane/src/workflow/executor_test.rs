@@ -1157,7 +1157,7 @@ async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
             "audio-worker",
             OperationKind::TranscodeAudio,
             1,
-            FakeBehavior::RequireTranscodeAudioProtocolPayload,
+            FakeBehavior::RequireCorrelatedTranscodeAudioDispatch,
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
@@ -1200,7 +1200,7 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
             "audio-worker",
             OperationKind::ExtractAudio,
             1,
-            FakeBehavior::RequireExtractAudioProtocolPayload,
+            FakeBehavior::RequireCorrelatedExtractAudioDispatch,
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
@@ -1998,8 +1998,8 @@ enum FakeBehavior {
     SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
-    RequireTranscodeAudioProtocolPayload,
-    RequireExtractAudioProtocolPayload,
+    RequireCorrelatedTranscodeAudioDispatch,
+    RequireCorrelatedExtractAudioDispatch,
 }
 
 #[async_trait]
@@ -2018,72 +2018,8 @@ impl ClientHandle for FakeClient {
         if matches!(self.behavior, FakeBehavior::DispatchError) {
             return Err(ProtocolError::InternalServerError);
         }
-        if matches!(self.behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
-            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("transcode payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::RequireRemuxProtocolPayload
-                | FakeBehavior::RequireCorrelatedRemuxDispatch
-                | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
-        ) {
-            serde_json::from_value::<RemuxRequest>(request.payload.clone()).map_err(|err| {
-                ProtocolError::InvalidPayload {
-                    detail: format!("remux payload must match worker protocol: {err}"),
-                }
-            })?;
-        }
-        if matches!(self.behavior, FakeBehavior::RequireCorrelatedRemuxDispatch) {
-            if request.lease_id != LeaseId(1) {
-                return Err(ProtocolError::InvalidPayload {
-                    detail: format!(
-                        "remux lease id must be workflow lease 1, got {:?}",
-                        request.lease_id
-                    ),
-                });
-            }
-            if _idempotency_key != "ticket-1-lease-1" {
-                return Err(ProtocolError::InvalidPayload {
-                    detail: format!(
-                        "remux idempotency key must be ticket-1-lease-1, got {_idempotency_key}"
-                    ),
-                });
-            }
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
-        ) {
-            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("transcode payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::RequireTranscodeAudioProtocolPayload
-        ) {
-            serde_json::from_value::<TranscodeAudioRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("transcode audio payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::RequireExtractAudioProtocolPayload
-        ) {
-            serde_json::from_value::<ExtractAudioRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("extract audio payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
+        require_worker_payload_shape(self.behavior, &request.payload)?;
+        require_correlated_dispatch(self.behavior, request.lease_id, _idempotency_key)?;
         self.enter_active();
         let (reader, writer) = tokio::io::duplex(16 * 1024);
         let behavior = self.behavior;
@@ -2106,6 +2042,88 @@ impl ClientHandle for FakeClient {
     }
 }
 
+fn require_worker_payload_shape(
+    behavior: FakeBehavior,
+    payload: &Value,
+) -> Result<(), ProtocolError> {
+    if matches!(behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
+        serde_json::from_value::<TranscodeVideoRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireRemuxProtocolPayload
+            | FakeBehavior::RequireCorrelatedRemuxDispatch
+            | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+    ) {
+        serde_json::from_value::<RemuxRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("remux payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
+    ) {
+        serde_json::from_value::<TranscodeVideoRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+    ) {
+        serde_json::from_value::<TranscodeAudioRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode audio payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedExtractAudioDispatch
+    ) {
+        serde_json::from_value::<ExtractAudioRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("extract audio payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn require_correlated_dispatch(
+    behavior: FakeBehavior,
+    lease_id: LeaseId,
+    idempotency_key: &str,
+) -> Result<(), ProtocolError> {
+    let label = match behavior {
+        FakeBehavior::RequireCorrelatedRemuxDispatch => "remux",
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => "audio",
+        _ => return Ok(()),
+    };
+    if lease_id != LeaseId(1) {
+        return Err(ProtocolError::InvalidPayload {
+            detail: format!("{label} lease id must be workflow lease 1, got {lease_id:?}"),
+        });
+    }
+    if idempotency_key != "ticket-1-lease-1" {
+        return Err(ProtocolError::InvalidPayload {
+            detail: format!(
+                "{label} idempotency key must be ticket-1-lease-1, got {idempotency_key}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 async fn write_behavior(
     mut writer: DuplexStream,
     request: OperationRequest,
@@ -2118,8 +2136,8 @@ async fn write_behavior(
         | FakeBehavior::RequireCorrelatedRemuxDispatch
         | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
         | FakeBehavior::SlowTranscodeResult
-        | FakeBehavior::RequireTranscodeAudioProtocolPayload
-        | FakeBehavior::RequireExtractAudioProtocolPayload => {
+        | FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => {
             let delay = match behavior {
                 FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
                 _ => Duration::from_millis(25),

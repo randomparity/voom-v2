@@ -1318,6 +1318,7 @@ async fn dispatch_control_plane_transcode(
 struct RuntimeTranscodeAudioDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
     control: &'a ControlPlane,
+    ticket_id: TicketId,
     lease_id: LeaseId,
     options: &'a WorkflowExecutorOptions,
 }
@@ -1328,14 +1329,17 @@ impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
         &self,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
+        let idempotency_key = format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
             OperationKind::TranscodeAudio,
             self.options,
-            crate::audio::dispatch::dispatch_transcode_audio_with_client(
+            crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
+                self.lease_id,
+                &idempotency_key,
                 request,
             ),
         )
@@ -1346,6 +1350,7 @@ impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
 struct RuntimeExtractAudioDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
     control: &'a ControlPlane,
+    ticket_id: TicketId,
     lease_id: LeaseId,
     options: &'a WorkflowExecutorOptions,
 }
@@ -1356,14 +1361,17 @@ impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
         &self,
         request: ExtractAudioRequest,
     ) -> Result<ExtractAudioResult, VoomError> {
+        let idempotency_key = format!("ticket-{}-lease-{}", self.ticket_id.0, self.lease_id.0);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
             OperationKind::ExtractAudio,
             self.options,
-            crate::audio::dispatch::dispatch_extract_audio_with_client(
+            crate::audio::dispatch::dispatch_extract_audio_with_client_context(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
+                self.lease_id,
+                &idempotency_key,
                 request,
             ),
         )
@@ -1400,6 +1408,7 @@ async fn dispatch_control_plane_transcode_audio(
         &RuntimeTranscodeAudioDispatcher {
             runtime,
             control,
+            ticket_id: ticket.id,
             lease_id,
             options,
         },
@@ -1455,6 +1464,7 @@ async fn dispatch_control_plane_extract_audio(
         &RuntimeExtractAudioDispatcher {
             runtime,
             control,
+            ticket_id: ticket.id,
             lease_id,
             options,
         },
