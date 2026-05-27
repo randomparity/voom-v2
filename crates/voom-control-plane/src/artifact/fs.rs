@@ -282,6 +282,43 @@ pub async fn promote_staged_add_only(
 ) -> Result<PromotionReport, VoomError> {
     let staging = staging.as_ref();
     let target = canonical_new_leaf_no_symlink(target).await?;
+    let staging_facts = require_expected_staging_facts(staging, expected).await?;
+    let temp_path = copy_to_unique_temp(staging, &target).await?;
+    promote_staged_add_only_from_temp(staging_facts, &target, temp_path, expected, failpoint).await
+}
+
+pub async fn promote_staged_add_only_with_temp(
+    staging: impl AsRef<Path>,
+    target: impl AsRef<Path>,
+    temp_path: impl AsRef<Path>,
+    expected: &ArtifactFileFacts,
+) -> Result<PromotionReport, VoomError> {
+    let staging = staging.as_ref();
+    let target = canonical_new_leaf_no_symlink(target).await?;
+    let temp_path = canonical_new_leaf_no_symlink(temp_path).await?;
+    if temp_path.parent() != target.parent() {
+        return Err(VoomError::CommitFailure(format!(
+            "temporary artifact path {} must be beside target {}",
+            temp_path.display(),
+            target.display()
+        )));
+    }
+    let staging_facts = require_expected_staging_facts(staging, expected).await?;
+    copy_regular_file_checked(staging, &temp_path).await?;
+    promote_staged_add_only_from_temp(
+        staging_facts,
+        &target,
+        temp_path,
+        expected,
+        &NoPromotionFailpoint,
+    )
+    .await
+}
+
+async fn require_expected_staging_facts(
+    staging: &Path,
+    expected: &ArtifactFileFacts,
+) -> Result<ArtifactFileFacts, VoomError> {
     let staging_facts = observe_regular_file(staging).await?;
     if !same_file_facts(&staging_facts, expected) {
         return Err(VoomError::ArtifactChecksumMismatch(format!(
@@ -289,8 +326,16 @@ pub async fn promote_staged_add_only(
             staging_facts.path.display()
         )));
     }
+    Ok(staging_facts)
+}
 
-    let temp_path = copy_to_unique_temp(staging, &target).await?;
+async fn promote_staged_add_only_from_temp(
+    staging_facts: ArtifactFileFacts,
+    target: &Path,
+    temp_path: PathBuf,
+    expected: &ArtifactFileFacts,
+    failpoint: &dyn PromotionFailpoint,
+) -> Result<PromotionReport, VoomError> {
     let temp_facts = match observe_regular_file(&temp_path).await {
         Ok(facts) => facts,
         Err(err) => return Err(remove_new_file_after_error(&temp_path, err).await),
@@ -308,22 +353,22 @@ pub async fn promote_staged_add_only(
 
     if let Err(err) = failpoint.before_install(PromotionFailpointContext {
         temp_path: &temp_path,
-        target_path: &target,
+        target_path: target,
     }) {
         return Err(remove_new_file_after_error(&temp_path, err).await);
     }
 
-    if let Err(err) = install_temp_no_replace(&temp_path, &target).await {
+    if let Err(err) = install_temp_no_replace(&temp_path, target).await {
         return Err(remove_new_file_after_error(&temp_path, err).await);
     }
 
     let target_facts = match observe_regular_file(&target).await {
         Ok(facts) => facts,
-        Err(err) => return Err(remove_new_file_after_error(&target, err).await),
+        Err(err) => return Err(remove_new_file_after_error(target, err).await),
     };
     if !same_file_facts(&target_facts, expected) {
         return Err(remove_new_file_after_error(
-            &target,
+            target,
             VoomError::ArtifactChecksumMismatch(format!(
                 "installed artifact facts do not match expected facts: {}",
                 target.display()

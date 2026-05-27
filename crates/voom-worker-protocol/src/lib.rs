@@ -13,6 +13,7 @@
 //! module skeleton so subsequent commits can fill it without
 //! disturbing the build.
 
+pub mod audio;
 pub mod credentials;
 pub mod envelope;
 pub mod handshake;
@@ -26,6 +27,14 @@ pub mod transcode_video;
 pub mod transport;
 pub mod verify_artifact;
 
+pub use audio::{
+    AudioDispositionFact, AudioExpectedFacts, AudioObservedFacts, AudioOutputStreamFact,
+    AudioStreamRef, EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER, ExtractAudioInput,
+    ExtractAudioOutput, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
+    TRANSCODE_AUDIO_CODEC_AAC, TRANSCODE_AUDIO_CODEC_OPUS, TRANSCODE_AUDIO_CONTAINER,
+    TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult,
+    TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
+};
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};

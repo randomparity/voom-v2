@@ -5,7 +5,7 @@ fn all_contains_every_operation_kind_once() {
     use std::collections::HashSet;
 
     let all = OperationKind::ALL;
-    assert_eq!(all.len(), 15);
+    assert_eq!(all.len(), 16);
     let unique = all.iter().copied().collect::<HashSet<_>>();
     assert_eq!(unique.len(), all.len());
     assert!(unique.contains(&OperationKind::ScanLibrary));
@@ -17,6 +17,7 @@ fn all_contains_every_operation_kind_once() {
     assert!(unique.contains(&OperationKind::BackUpFile));
     assert!(unique.contains(&OperationKind::Remux));
     assert!(unique.contains(&OperationKind::TranscodeVideo));
+    assert!(unique.contains(&OperationKind::TranscodeAudio));
     assert!(unique.contains(&OperationKind::EditTracks));
     assert!(unique.contains(&OperationKind::ExtractAudio));
     assert!(unique.contains(&OperationKind::TranscribeAudio));
@@ -46,6 +47,7 @@ fn every_variant_round_trips_snake_case() {
         (OperationKind::BackUpFile, "back_up_file"),
         (OperationKind::Remux, "remux"),
         (OperationKind::TranscodeVideo, "transcode_video"),
+        (OperationKind::TranscodeAudio, "transcode_audio"),
         (OperationKind::EditTracks, "edit_tracks"),
         (OperationKind::ExtractAudio, "extract_audio"),
         (OperationKind::TranscribeAudio, "transcribe_audio"),
@@ -59,6 +61,20 @@ fn every_variant_round_trips_snake_case() {
         let decoded: OperationKind = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, *variant, "decode of {expected}");
     }
+}
+
+#[test]
+fn transcode_audio_serializes_to_stable_wire_name() {
+    let json = serde_json::to_string(&OperationKind::TranscodeAudio).unwrap();
+
+    assert_eq!(json, "\"transcode_audio\"");
+}
+
+#[test]
+fn extract_audio_deserializes_from_stable_wire_name() {
+    let operation: OperationKind = serde_json::from_str("\"extract_audio\"").unwrap();
+
+    assert_eq!(operation, OperationKind::ExtractAudio);
 }
 
 #[test]

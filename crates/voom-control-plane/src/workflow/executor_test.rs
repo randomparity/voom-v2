@@ -13,19 +13,24 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock,
+    BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock,
     VoomError, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
+use voom_store::repo::identity::{
+    DiscoveredFile, FileLocationKind, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
+};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::{
-    ClientHandle, DispatchStream, HandshakeResponse, NdjsonReader, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest,
-    RemuxResult, RemuxStatus, TranscodeVideoRequest, WorkerCredentials,
+    AudioObservedFacts, AudioOutputStreamFact, ClientHandle, DispatchStream, ExtractAudioRequest,
+    ExtractAudioResult, ExtractAudioStatus, HandshakeResponse, NdjsonReader, OperationKind,
+    OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
+    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, TranscodeAudioRequest,
+    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoRequest, WorkerCredentials,
 };
 
 use super::retry_on_database_locked;
@@ -521,6 +526,91 @@ async fn policy_remux_ticket_uses_default_remux_roots() {
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
         "/tmp/voom-test/remux/output"
+    );
+}
+
+#[tokio::test]
+async fn policy_transcode_audio_root_ticket_carries_source_ids_audio_payload_and_roots() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_transcode_audio_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.audio_staging_root = PathBuf::from("/tmp/audio-stage");
+    options.audio_target_dir = PathBuf::from("/media/audio-output");
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_audio",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::TranscodeAudio);
+    assert_eq!(
+        workflow_payload.rendered_payload["operation"],
+        "transcode_audio"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["type"],
+        "transcode_audio"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["target_codec"],
+        "opus"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/audio-stage"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/media/audio-output"
+    );
+}
+
+#[tokio::test]
+async fn policy_extract_audio_root_ticket_carries_source_ids_audio_payload_and_roots() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    fixture.plan = policy_extract_audio_plan(TargetRef::FileVersion {
+        id: FileVersionId(11),
+    });
+
+    let err = fixture.run().await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::NoEligibleWorker);
+    let ticket_payload = fixture.first_ticket_payload().await;
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.extract_audio",
+        ticket_payload,
+    )
+    .unwrap();
+    assert_eq!(workflow_payload.operation, OperationKind::ExtractAudio);
+    assert_eq!(
+        workflow_payload.rendered_payload["operation"],
+        "extract_audio"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["source_file_version_id"],
+        11
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["audio"]["type"],
+        "extract_audio"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        "/tmp/voom-test/audio/staging"
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        "/tmp/voom-test/audio/output"
     );
 }
 
@@ -1045,6 +1135,93 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
     let summary = fixture.run_with_options(options).await.unwrap();
 
     assert_eq!(summary.operation_count(OperationKind::TranscodeVideo), 1);
+}
+
+#[tokio::test]
+async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = workflow_tempdir();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture.plan = policy_transcode_audio_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "audio-worker",
+            OperationKind::TranscodeAudio,
+            1,
+            FakeBehavior::RequireCorrelatedTranscodeAudioDispatch,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.audio_staging_root = dir.path().join("audio-stage");
+    options.audio_target_dir = dir.path().join("audio-out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::TranscodeAudio), 1);
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["result_file_version_id"], 2);
+    assert!(
+        result["staging_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Movie.audio-opus.mkv")
+    );
+}
+
+#[tokio::test]
+async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let dir = workflow_tempdir();
+    let source_path = dir.path().join("Movie.mkv");
+    let (source_file_version_id, _source_location_id) = fixture
+        .seed_local_source_at_path(&source_path, b"movie-bytes")
+        .await;
+    let snapshot_id = fixture.record_source_snapshot(source_file_version_id).await;
+    fixture
+        .create_primary_bundle_for_file_version(source_file_version_id)
+        .await;
+    fixture.plan = policy_extract_audio_plan_for_snapshot(
+        TargetRef::FileVersion {
+            id: source_file_version_id,
+        },
+        snapshot_id,
+    );
+    fixture
+        .register_worker(
+            "audio-worker",
+            OperationKind::ExtractAudio,
+            1,
+            FakeBehavior::RequireCorrelatedExtractAudioDispatch,
+        )
+        .await;
+    let mut options = WorkflowExecutorOptions::for_tests();
+    options.audio_staging_root = dir.path().join("audio-stage");
+    options.audio_target_dir = dir.path().join("audio-out");
+
+    let summary = fixture.run_with_options(options).await.unwrap();
+
+    assert_eq!(summary.operation_count(OperationKind::ExtractAudio), 1);
+    let result = fixture.first_ticket_result().await;
+    assert_eq!(result["result_file_version_id"], 2);
+    assert!(
+        result["target_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Movie.stream-audio-1.opus.ogg")
+    );
+}
+
+fn workflow_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -1597,6 +1774,8 @@ impl ExecutorFixture {
                 file_version_id,
                 None,
                 json!({
+                    "container": "mkv",
+                    "video_codec": "h264",
                     "streams": [
                         {
                             "id": "stream-0",
@@ -1606,13 +1785,18 @@ impl ExecutorFixture {
                             "disposition": {"default": true}
                         },
                         {
-                            "id": "stream-1",
+                            "id": "stream-audio-1",
                             "index": 1,
                             "kind": "audio",
                             "codec_name": "aac",
                             "language": "eng",
+                            "title": "Commentary",
                             "channels": 2,
-                            "disposition": {"default": false}
+                            "disposition": {
+                                "default": false,
+                                "forced": false,
+                                "commentary": true
+                            }
                         }
                     ]
                 }),
@@ -1621,6 +1805,57 @@ impl ExecutorFixture {
             .await
             .unwrap()
             .id
+    }
+
+    async fn create_primary_bundle_for_file_version(
+        &self,
+        file_version_id: FileVersionId,
+    ) -> BundleId {
+        let file_asset_id: i64 =
+            sqlx::query_scalar("SELECT file_asset_id FROM file_versions WHERE id = ?")
+                .bind(i64::try_from(file_version_id.0).unwrap())
+                .fetch_one(&self.cp.pool)
+                .await
+                .unwrap();
+        let work = self
+            .cp
+            .create_media_work(NewMediaWork {
+                kind: MediaWorkKind::Movie,
+                display_title: "Movie".to_owned(),
+                provisional: false,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        let variant = self
+            .cp
+            .create_media_variant(NewMediaVariant {
+                media_work_id: work.id,
+                label: "primary".to_owned(),
+                provisional: false,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        let bundle = self
+            .cp
+            .create_bundle(NewAssetBundle {
+                media_variant_id: variant.id,
+                display_name: "primary".to_owned(),
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .add_bundle_member(
+                bundle.id,
+                voom_core::FileAssetId(u64::try_from(file_asset_id).unwrap()),
+                BundleMemberRole::PrimaryVideo,
+                T0,
+            )
+            .await
+            .unwrap();
+        bundle.id
     }
 
     async fn first_ticket_payload(&self) -> Value {
@@ -1767,6 +2002,8 @@ enum FakeBehavior {
     SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
+    RequireCorrelatedTranscodeAudioDispatch,
+    RequireCorrelatedExtractAudioDispatch,
 }
 
 #[async_trait]
@@ -1785,52 +2022,8 @@ impl ClientHandle for FakeClient {
         if matches!(self.behavior, FakeBehavior::DispatchError) {
             return Err(ProtocolError::InternalServerError);
         }
-        if matches!(self.behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
-            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("transcode payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::RequireRemuxProtocolPayload
-                | FakeBehavior::RequireCorrelatedRemuxDispatch
-                | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
-        ) {
-            serde_json::from_value::<RemuxRequest>(request.payload.clone()).map_err(|err| {
-                ProtocolError::InvalidPayload {
-                    detail: format!("remux payload must match worker protocol: {err}"),
-                }
-            })?;
-        }
-        if matches!(self.behavior, FakeBehavior::RequireCorrelatedRemuxDispatch) {
-            if request.lease_id != LeaseId(1) {
-                return Err(ProtocolError::InvalidPayload {
-                    detail: format!(
-                        "remux lease id must be workflow lease 1, got {:?}",
-                        request.lease_id
-                    ),
-                });
-            }
-            if _idempotency_key != "ticket-1-lease-1" {
-                return Err(ProtocolError::InvalidPayload {
-                    detail: format!(
-                        "remux idempotency key must be ticket-1-lease-1, got {_idempotency_key}"
-                    ),
-                });
-            }
-        }
-        if matches!(
-            self.behavior,
-            FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
-        ) {
-            serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).map_err(
-                |err| ProtocolError::InvalidPayload {
-                    detail: format!("transcode payload must match worker protocol: {err}"),
-                },
-            )?;
-        }
+        require_worker_payload_shape(self.behavior, &request.payload)?;
+        require_correlated_dispatch(self.behavior, request.lease_id, _idempotency_key)?;
         self.enter_active();
         let (reader, writer) = tokio::io::duplex(16 * 1024);
         let behavior = self.behavior;
@@ -1853,6 +2046,88 @@ impl ClientHandle for FakeClient {
     }
 }
 
+fn require_worker_payload_shape(
+    behavior: FakeBehavior,
+    payload: &Value,
+) -> Result<(), ProtocolError> {
+    if matches!(behavior, FakeBehavior::RequireTranscodeProtocolPayload) {
+        serde_json::from_value::<TranscodeVideoRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireRemuxProtocolPayload
+            | FakeBehavior::RequireCorrelatedRemuxDispatch
+            | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
+    ) {
+        serde_json::from_value::<RemuxRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("remux payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::MalformedTranscodeResult | FakeBehavior::WrongTranscodeOutputFacts
+    ) {
+        serde_json::from_value::<TranscodeVideoRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+    ) {
+        serde_json::from_value::<TranscodeAudioRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("transcode audio payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    if matches!(
+        behavior,
+        FakeBehavior::RequireCorrelatedExtractAudioDispatch
+    ) {
+        serde_json::from_value::<ExtractAudioRequest>(payload.clone()).map_err(|err| {
+            ProtocolError::InvalidPayload {
+                detail: format!("extract audio payload must match worker protocol: {err}"),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn require_correlated_dispatch(
+    behavior: FakeBehavior,
+    lease_id: LeaseId,
+    idempotency_key: &str,
+) -> Result<(), ProtocolError> {
+    let label = match behavior {
+        FakeBehavior::RequireCorrelatedRemuxDispatch => "remux",
+        FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => "audio",
+        _ => return Ok(()),
+    };
+    if lease_id != LeaseId(1) {
+        return Err(ProtocolError::InvalidPayload {
+            detail: format!("{label} lease id must be workflow lease 1, got {lease_id:?}"),
+        });
+    }
+    if idempotency_key != "ticket-1-lease-1" {
+        return Err(ProtocolError::InvalidPayload {
+            detail: format!(
+                "{label} idempotency key must be ticket-1-lease-1, got {idempotency_key}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 async fn write_behavior(
     mut writer: DuplexStream,
     request: OperationRequest,
@@ -1864,7 +2139,9 @@ async fn write_behavior(
         | FakeBehavior::RequireRemuxProtocolPayload
         | FakeBehavior::RequireCorrelatedRemuxDispatch
         | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
-        | FakeBehavior::SlowTranscodeResult => {
+        | FakeBehavior::SlowTranscodeResult
+        | FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
+        | FakeBehavior::RequireCorrelatedExtractAudioDispatch => {
             let delay = match behavior {
                 FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
                 _ => Duration::from_millis(25),
@@ -1891,6 +2168,12 @@ async fn write_behavior(
                 {
                     write_frame(&mut writer, mkvtoolnix_unavailable_frame(&request)).await;
                     return;
+                }
+                OperationKind::TranscodeAudio => {
+                    transcode_audio_result_payload_for_request(&request).await
+                }
+                OperationKind::ExtractAudio => {
+                    extract_audio_result_payload_for_request(&request).await
                 }
                 _ => json!({"ok": true}),
             };
@@ -1988,6 +2271,100 @@ async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
             .iter()
             .map(|stream| stream.snapshot_stream_id.clone())
             .collect(),
+    })
+    .unwrap()
+}
+
+async fn transcode_audio_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<TranscodeAudioRequest>(request.payload.clone()).unwrap();
+    let output_bytes = b"audio-output!";
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
+    let input = AudioObservedFacts {
+        size_bytes: request.input.expected.size_bytes,
+        content_hash: request.input.expected.content_hash,
+        modified_at: None,
+        local_file_key: None,
+    };
+    serde_json::to_value(TranscodeAudioResult {
+        status: TranscodeAudioStatus::Transcoded,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: AudioObservedFacts {
+            size_bytes: output_bytes.len().try_into().unwrap(),
+            content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
+            modified_at: None,
+            local_file_key: None,
+        },
+        output_container: "mkv".to_owned(),
+        selected_snapshot_stream_ids: request
+            .selection
+            .selected_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        output_audio_codecs: request
+            .selection
+            .selected_streams
+            .iter()
+            .map(|_| request.audio.target_codec.clone())
+            .collect(),
+        selected_output_streams: request
+            .selection
+            .selected_streams
+            .iter()
+            .enumerate()
+            .map(|(index, stream)| AudioOutputStreamFact {
+                snapshot_stream_id: stream.snapshot_stream_id.clone(),
+                output_provider_stream_index: u32::try_from(index).unwrap(),
+                codec: request.audio.target_codec.clone(),
+                language: Some("eng".to_owned()),
+                title: Some("Commentary".to_owned()),
+                default: Some(false),
+                disposition: Some(voom_worker_protocol::AudioDispositionFact {
+                    default: Some(false),
+                    forced: Some(false),
+                    commentary: Some(true),
+                }),
+                channels: Some(2),
+            })
+            .collect(),
+    })
+    .unwrap()
+}
+
+async fn extract_audio_result_payload_for_request(request: &OperationRequest) -> Value {
+    let request = serde_json::from_value::<ExtractAudioRequest>(request.payload.clone()).unwrap();
+    let output_bytes = b"extract-output!";
+    tokio::fs::write(&request.output.path, output_bytes)
+        .await
+        .unwrap();
+    let input = AudioObservedFacts {
+        size_bytes: request.input.expected.size_bytes,
+        content_hash: request.input.expected.content_hash,
+        modified_at: None,
+        local_file_key: None,
+    };
+    serde_json::to_value(ExtractAudioResult {
+        status: ExtractAudioStatus::Extracted,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: AudioObservedFacts {
+            size_bytes: output_bytes.len().try_into().unwrap(),
+            content_hash: format!("blake3:{}", blake3::hash(output_bytes).to_hex()),
+            modified_at: None,
+            local_file_key: None,
+        },
+        output_container: "ogg".to_owned(),
+        output_audio_codec: "opus".to_owned(),
+        selected_snapshot_stream_id: request.selection.snapshot_stream_id,
+        output_language: Some("eng".to_owned()),
+        output_title: Some("Commentary".to_owned()),
     })
     .unwrap()
 }
@@ -2125,6 +2502,87 @@ fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -
         nodes: vec![WorkflowNode::Operation(OperationNode {
             id: "policy-node_remux".to_owned(),
             operation: OperationKind::Remux,
+            policy_target: Some(target),
+            operation_payload,
+            depends_on: Vec::new(),
+            depends_on_selected: Vec::new(),
+            provides_selected: None,
+        })],
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 1,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn policy_transcode_audio_plan(target: TargetRef) -> WorkflowPlan {
+    policy_transcode_audio_plan_for_snapshot(target, MediaSnapshotId(99))
+}
+
+fn policy_transcode_audio_plan_for_snapshot(
+    target: TargetRef,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    policy_audio_plan(
+        "policy-transcode-audio-test",
+        "policy-node_transcode_audio",
+        OperationKind::TranscodeAudio,
+        target,
+        json!({
+            "type": "transcode_audio",
+            "target_codec": "opus",
+            "container": "mkv",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "filter": {
+                "type": "language_in",
+                "values": ["eng"]
+            }
+        }),
+    )
+}
+
+fn policy_extract_audio_plan(target: TargetRef) -> WorkflowPlan {
+    policy_extract_audio_plan_for_snapshot(target, MediaSnapshotId(99))
+}
+
+fn policy_extract_audio_plan_for_snapshot(
+    target: TargetRef,
+    source_media_snapshot_id: MediaSnapshotId,
+) -> WorkflowPlan {
+    policy_audio_plan(
+        "policy-extract-audio-test",
+        "policy-node_extract_audio",
+        OperationKind::ExtractAudio,
+        target,
+        json!({
+            "type": "extract_audio",
+            "target_codec": "opus",
+            "container": "ogg",
+            "source_media_snapshot_id": source_media_snapshot_id.0,
+            "filter": {
+                "type": "commentary"
+            }
+        }),
+    )
+}
+
+fn policy_audio_plan(
+    id: &str,
+    node_id: &str,
+    operation: OperationKind,
+    target: TargetRef,
+    operation_payload: Value,
+) -> WorkflowPlan {
+    WorkflowPlan {
+        id: id.to_owned(),
+        seed: 12,
+        nodes: vec![WorkflowNode::Operation(OperationNode {
+            id: node_id.to_owned(),
+            operation,
             policy_target: Some(target),
             operation_payload,
             depends_on: Vec::new(),

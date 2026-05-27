@@ -22,6 +22,7 @@ pub enum OperationKind {
     /// Remux / containerize.
     Remux,
     TranscodeVideo,
+    TranscodeAudio,
     EditTracks,
     ExtractAudio,
     TranscribeAudio,
@@ -41,6 +42,7 @@ impl OperationKind {
         Self::BackUpFile,
         Self::Remux,
         Self::TranscodeVideo,
+        Self::TranscodeAudio,
         Self::EditTracks,
         Self::ExtractAudio,
         Self::TranscribeAudio,

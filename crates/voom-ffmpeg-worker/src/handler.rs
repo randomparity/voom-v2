@@ -3,14 +3,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde::{Serialize, de::DeserializeOwned};
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
-    OperationDispatch, OperationFuture, OperationHandler, OperationKind, OperationRequest,
-    OperationResponse, ProgressFrame, ProtocolError, TranscodeVideoExpectedFacts,
+    AudioExpectedFacts, AudioObservedFacts, ExtractAudioRequest, ExtractAudioResult,
+    ExtractAudioStatus, OperationDispatch, OperationFuture, OperationHandler, OperationKind,
+    OperationRequest, OperationResponse, ProgressFrame, ProtocolError, TranscodeAudioRequest,
+    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoExpectedFacts,
     TranscodeVideoObservedFacts, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
 };
 
-use crate::ffmpeg::{FfmpegConfig, FfmpegError, run_ffmpeg_transcode};
+use crate::ffmpeg::{
+    FfmpegConfig, FfmpegError, run_ffmpeg_extract_audio, run_ffmpeg_transcode,
+    run_ffmpeg_transcode_audio,
+};
 use crate::observe::{ObserveError, observe_file_facts};
 
 const PROVIDER: &str = "ffmpeg";
@@ -38,6 +44,9 @@ pub enum TranscodeVideoError {
         payload: serde_json::Value,
     },
 }
+
+pub type TranscodeAudioError = TranscodeVideoError;
+pub type ExtractAudioError = TranscodeVideoError;
 
 impl TranscodeVideoError {
     #[must_use]
@@ -109,28 +118,19 @@ fn handle_operation_with_config(
     config: Option<FfmpegConfig>,
 ) -> OperationFuture {
     Box::pin(async move {
-        if req.operation != OperationKind::TranscodeVideo {
-            return Err(ProtocolError::UnknownOperation {
-                name: format!("{:?}", req.operation),
-            });
-        }
-
         let lease_id = req.lease_id;
         let accepted_at = Utc::now();
-        let payload = match serde_json::from_value::<TranscodeVideoRequest>(req.payload) {
-            Ok(payload) => payload,
-            Err(err) => {
-                return error_dispatch(
-                    lease_id,
-                    accepted_at,
-                    &malformed_worker_result(
-                        "decode_request",
-                        format!("transcode_video payload decode: {err}"),
-                    ),
-                    0,
-                );
-            }
-        };
+        let operation = req.operation;
+        if !matches!(
+            operation,
+            OperationKind::TranscodeVideo
+                | OperationKind::TranscodeAudio
+                | OperationKind::ExtractAudio
+        ) {
+            return Err(ProtocolError::UnknownOperation {
+                name: format!("{operation:?}"),
+            });
+        }
         let Some(config) = config else {
             return error_dispatch(
                 lease_id,
@@ -140,10 +140,56 @@ fn handle_operation_with_config(
             );
         };
 
-        let started = progress_frame(lease_id, accepted_at);
-        match Box::pin(handle_transcode_video(&payload, &config)).await {
-            Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
-            Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
+        match operation {
+            OperationKind::TranscodeVideo => {
+                let payload = match decode_payload::<TranscodeVideoRequest>(
+                    req.payload,
+                    lease_id,
+                    accepted_at,
+                    "transcode_video",
+                )? {
+                    Ok(payload) => payload,
+                    Err(dispatch) => return Ok(dispatch),
+                };
+                let started = progress_frame(lease_id, accepted_at, "video transcode started");
+                match Box::pin(handle_transcode_video(&payload, &config)).await {
+                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
+                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
+                }
+            }
+            OperationKind::TranscodeAudio => {
+                let payload = match decode_payload::<TranscodeAudioRequest>(
+                    req.payload,
+                    lease_id,
+                    accepted_at,
+                    "transcode_audio",
+                )? {
+                    Ok(payload) => payload,
+                    Err(dispatch) => return Ok(dispatch),
+                };
+                let started = progress_frame(lease_id, accepted_at, "audio transcode started");
+                match Box::pin(handle_transcode_audio(&payload, &config)).await {
+                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
+                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
+                }
+            }
+            OperationKind::ExtractAudio => {
+                let payload = match decode_payload::<ExtractAudioRequest>(
+                    req.payload,
+                    lease_id,
+                    accepted_at,
+                    "extract_audio",
+                )? {
+                    Ok(payload) => payload,
+                    Err(dispatch) => return Ok(dispatch),
+                };
+                let started = progress_frame(lease_id, accepted_at, "audio extraction started");
+                match Box::pin(handle_extract_audio(&payload, &config)).await {
+                    Ok(result) => success_dispatch(lease_id, accepted_at, started, result),
+                    Err(err) => error_dispatch_with_progress(lease_id, accepted_at, started, &err),
+                }
+            }
+            _ => unreachable!("unsupported operation returned before config validation"),
         }
     })
 }
@@ -199,6 +245,93 @@ pub async fn handle_transcode_video(
     })
 }
 
+pub async fn handle_transcode_audio(
+    request: &TranscodeAudioRequest,
+    config: &FfmpegConfig,
+) -> Result<TranscodeAudioResult, TranscodeAudioError> {
+    if request.output.overwrite {
+        return Err(config_invalid(
+            "request",
+            "overwrite must be false".to_owned(),
+        ));
+    }
+    validate_transcode_audio_contract(request)?;
+    let input_path = PathBuf::from(&request.input.path);
+    let output_path = PathBuf::from(&request.output.path);
+    validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
+    validate_output_missing(&output_path).await?;
+
+    let input_pre = observe_audio_file_facts(&input_path).await?;
+    verify_audio_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    let probe = run_ffmpeg_transcode_audio(config, &input_path, &output_path, request)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    let input_post = observe_audio_file_facts(&input_path).await?;
+    verify_audio_observed_match("input_post", &input_pre, &input_post)?;
+    let output = observe_audio_file_facts(&output_path).await?;
+
+    Ok(TranscodeAudioResult {
+        status: TranscodeAudioStatus::Transcoded,
+        provider: PROVIDER.to_owned(),
+        provider_version: config.provider_version.clone(),
+        input_pre,
+        input_post,
+        output,
+        output_container: probe.container,
+        selected_snapshot_stream_ids: probe
+            .selected_output_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        output_audio_codecs: probe.audio_codecs,
+        selected_output_streams: probe.selected_output_streams,
+    })
+}
+
+pub async fn handle_extract_audio(
+    request: &ExtractAudioRequest,
+    config: &FfmpegConfig,
+) -> Result<ExtractAudioResult, ExtractAudioError> {
+    if request.output.overwrite {
+        return Err(config_invalid(
+            "request",
+            "overwrite must be false".to_owned(),
+        ));
+    }
+    validate_extract_audio_contract(request)?;
+    let input_path = PathBuf::from(&request.input.path);
+    let output_path = PathBuf::from(&request.output.path);
+    validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
+    validate_output_missing(&output_path).await?;
+
+    let input_pre = observe_audio_file_facts(&input_path).await?;
+    verify_audio_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    let probe = run_ffmpeg_extract_audio(config, &input_path, &output_path, request)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    let input_post = observe_audio_file_facts(&input_path).await?;
+    verify_audio_observed_match("input_post", &input_pre, &input_post)?;
+    let output = observe_audio_file_facts(&output_path).await?;
+
+    Ok(ExtractAudioResult {
+        status: ExtractAudioStatus::Extracted,
+        provider: PROVIDER.to_owned(),
+        provider_version: config.provider_version.clone(),
+        input_pre,
+        input_post,
+        output,
+        output_container: probe.container,
+        output_audio_codec: probe
+            .audio_codecs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| request.output.audio_codec.clone()),
+        selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
+        output_language: probe.output_language,
+        output_title: probe.output_title,
+    })
+}
+
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
     if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container)
         || !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec)
@@ -215,6 +348,51 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
         ));
     }
     Ok(())
+}
+
+fn validate_transcode_audio_contract(
+    request: &TranscodeAudioRequest,
+) -> Result<(), TranscodeAudioError> {
+    if request.output.container != "mkv" {
+        return Err(config_invalid(
+            "request",
+            "transcode_audio output must request mkv".to_owned(),
+        ));
+    }
+    if !matches!(request.audio.target_codec.as_str(), "aac" | "opus") {
+        return Err(config_invalid(
+            "request",
+            "transcode_audio target codec must be aac or opus".to_owned(),
+        ));
+    }
+    if request.selection.selected_streams.is_empty() {
+        return Err(config_invalid(
+            "request",
+            "transcode_audio must select at least one stream".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_extract_audio_contract(request: &ExtractAudioRequest) -> Result<(), ExtractAudioError> {
+    if request.output.container != "ogg" || request.output.audio_codec != "opus" {
+        return Err(config_invalid(
+            "request",
+            "extract_audio output must request opus in ogg".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_output_missing(output_path: &Path) -> Result<(), TranscodeVideoError> {
+    match tokio::fs::symlink_metadata(output_path).await {
+        Ok(_) => Err(config_invalid(
+            "output_path",
+            "output path already exists".to_owned(),
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(config_invalid("output_path", err.to_string())),
+    }
 }
 
 fn validate_staging_path(
@@ -282,14 +460,57 @@ fn verify_observed_match(
     }
 }
 
-fn success_dispatch(
+fn verify_audio_expected_facts(
+    stage: &str,
+    observed: &AudioObservedFacts,
+    expected: &AudioExpectedFacts,
+) -> Result<(), TranscodeVideoError> {
+    if observed.size_bytes == expected.size_bytes && observed.content_hash == expected.content_hash
+    {
+        Ok(())
+    } else {
+        Err(TranscodeVideoError::ArtifactChecksumMismatch {
+            message: "input facts differ from expected size/hash".to_owned(),
+            payload: serde_json::json!({"stage": stage, "expected": expected, "observed": observed}),
+        })
+    }
+}
+
+fn verify_audio_observed_match(
+    stage: &str,
+    before: &AudioObservedFacts,
+    after: &AudioObservedFacts,
+) -> Result<(), TranscodeVideoError> {
+    if before.size_bytes == after.size_bytes && before.content_hash == after.content_hash {
+        Ok(())
+    } else {
+        Err(TranscodeVideoError::ArtifactChecksumMismatch {
+            message: "input changed while audio operation was running".to_owned(),
+            payload: serde_json::json!({"stage": stage, "before": before, "after": after}),
+        })
+    }
+}
+
+async fn observe_audio_file_facts(path: &Path) -> Result<AudioObservedFacts, TranscodeVideoError> {
+    let observed = observe_file_facts(path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    Ok(AudioObservedFacts {
+        size_bytes: observed.size_bytes,
+        content_hash: observed.content_hash,
+        modified_at: observed.modified_at,
+        local_file_key: observed.local_file_key,
+    })
+}
+
+fn success_dispatch<T: Serialize>(
     lease_id: LeaseId,
     accepted_at: chrono::DateTime<chrono::Utc>,
     progress: ProgressFrame,
-    result: TranscodeVideoResult,
+    result: T,
 ) -> Result<OperationDispatch, ProtocolError> {
     let payload = serde_json::to_value(result).map_err(|err| ProtocolError::InvalidPayload {
-        detail: format!("transcode_video result encode: {err}"),
+        detail: format!("operation result encode: {err}"),
     })?;
     let result = ProgressFrame::Result {
         lease_id,
@@ -336,14 +557,36 @@ fn error_dispatch_with_progress(
     ))
 }
 
-fn progress_frame(lease_id: LeaseId, emitted_at: chrono::DateTime<chrono::Utc>) -> ProgressFrame {
+fn progress_frame(
+    lease_id: LeaseId,
+    emitted_at: chrono::DateTime<chrono::Utc>,
+    message: &str,
+) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
         seq: 0,
         emitted_at,
         percent: None,
-        message: Some("video transcode started".to_owned()),
+        message: Some(message.to_owned()),
         payload: Some(serde_json::json!({"provider": PROVIDER})),
+    }
+}
+
+fn decode_payload<T: DeserializeOwned>(
+    payload: serde_json::Value,
+    lease_id: LeaseId,
+    accepted_at: chrono::DateTime<chrono::Utc>,
+    operation: &str,
+) -> Result<Result<T, OperationDispatch>, ProtocolError> {
+    match serde_json::from_value::<T>(payload) {
+        Ok(payload) => Ok(Ok(payload)),
+        Err(err) => {
+            let worker_err = malformed_worker_result(
+                "decode_request",
+                format!("{operation} payload decode: {err}"),
+            );
+            Ok(Err(error_dispatch(lease_id, accepted_at, &worker_err, 0)?))
+        }
     }
 }
 

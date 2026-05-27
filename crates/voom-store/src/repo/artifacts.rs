@@ -6,7 +6,8 @@ use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, FileAssetId, FileLocationId, FileVersionId, VoomError,
+    WorkerId,
 };
 
 use super::Repository;
@@ -205,6 +206,24 @@ pub struct ArtifactCommitFailure {
     pub finished_at: OffsetDateTime,
 }
 
+#[derive(Debug, Clone)]
+pub struct NewSidecarArtifactCommit {
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub target_path: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub observed_at: OffsetDateTime,
+    pub finished_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct SidecarArtifactCommit {
+    pub commit_record: ArtifactCommitRecord,
+    pub file_asset_id: FileAssetId,
+    pub file_version_id: FileVersionId,
+    pub file_location_id: FileLocationId,
+}
+
 #[async_trait]
 pub trait ArtifactRepo: Repository {
     async fn create_handle_in_tx<'tx>(
@@ -304,6 +323,11 @@ pub trait ArtifactRepo: Repository {
         &self,
         handle_id: ArtifactHandleId,
     ) -> Result<Vec<ArtifactCommitRecord>, VoomError>;
+    async fn record_verified_sidecar_commit_rows_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewSidecarArtifactCommit,
+    ) -> Result<SidecarArtifactCommit, VoomError>;
 }
 
 #[derive(Debug, Clone)]
@@ -813,6 +837,111 @@ impl ArtifactRepo for SqliteArtifactRepo {
             .map_err(|e| VoomError::Database(format!("artifact_commit_records list: {e}")))?;
         rows.iter().map(row_to_commit_record).collect()
     }
+
+    async fn record_verified_sidecar_commit_rows_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewSidecarArtifactCommit,
+    ) -> Result<SidecarArtifactCommit, VoomError> {
+        let pending = get_pending_commit_record_in_tx(tx, input.commit_record_id).await?;
+        if pending.target_path != input.target_path {
+            return Err(VoomError::Conflict(format!(
+                "artifact_commit_records sidecar commit: target_path {:?} does not match pending target {:?}",
+                input.target_path, pending.target_path
+            )));
+        }
+        if input.target_path.is_empty() {
+            return Err(VoomError::Config(
+                "artifact_commit_records sidecar commit: target_path is empty".to_owned(),
+            ));
+        }
+        validate_commit_verification(
+            tx,
+            &NewArtifactCommitRecord {
+                artifact_handle_id: pending.artifact_handle_id,
+                source_file_version_id: pending.source_file_version_id,
+                verification_id: pending.verification_id,
+                target_path: pending.target_path.clone(),
+                temp_path: pending.temp_path.clone(),
+                report: pending.report.clone(),
+                started_at: pending.started_at,
+            },
+        )
+        .await?;
+
+        let created_at = iso8601(input.observed_at)?;
+        let finished_at = iso8601(input.finished_at)?;
+        let size_i64 = i64::try_from(input.size_bytes).map_err(|_| {
+            VoomError::Config(format!(
+                "file_versions: size_bytes {} overflows i64",
+                input.size_bytes
+            ))
+        })?;
+
+        let asset_res = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
+            .bind(&created_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| VoomError::Database(format!("file_assets sidecar insert: {e}")))?;
+        let file_asset_id = FileAssetId(u64_from_i64(asset_res.last_insert_rowid()));
+
+        let version_res = sqlx::query(
+            "INSERT INTO file_versions \
+             (file_asset_id, content_hash, size_bytes, produced_by, \
+              produced_from_version_id, created_at) \
+             VALUES (?, ?, ?, 'staged_commit', ?, ?)",
+        )
+        .bind(i64_from_u64(file_asset_id.0))
+        .bind(&input.content_hash)
+        .bind(size_i64)
+        .bind(i64_from_u64(pending.source_file_version_id.0))
+        .bind(&created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_versions sidecar insert: {e}")))?;
+        let file_version_id = FileVersionId(u64_from_i64(version_res.last_insert_rowid()));
+
+        let location_res = sqlx::query(
+            "INSERT INTO file_locations \
+             (file_version_id, kind, value, proof_kind, proof_value, observed_at) \
+             VALUES (?, 'local_path', ?, NULL, NULL, ?)",
+        )
+        .bind(i64_from_u64(file_version_id.0))
+        .bind(&input.target_path)
+        .bind(&created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations sidecar insert: {e}")))?;
+        let file_location_id = FileLocationId(u64_from_i64(location_res.last_insert_rowid()));
+
+        let res = sqlx::query(
+            "UPDATE artifact_commit_records \
+             SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
+                 promotion_started_at = NULL, finished_at = ? \
+             WHERE id = ? AND state = 'pending'",
+        )
+        .bind(i64_from_u64(file_version_id.0))
+        .bind(i64_from_u64(file_location_id.0))
+        .bind(&finished_at)
+        .bind(i64_from_u64(input.commit_record_id.0))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("artifact_commit_records sidecar commit: {e}")))?;
+        let commit_record = changed_commit_record(
+            tx,
+            input.commit_record_id,
+            res.rows_affected(),
+            "sidecar_commit",
+        )
+        .await?;
+
+        Ok(SidecarArtifactCommit {
+            commit_record,
+            file_asset_id,
+            file_version_id,
+            file_location_id,
+        })
+    }
 }
 
 const SELECT_ARTIFACT_VERIFICATION_COLS: &str = "SELECT v.id, v.artifact_handle_id, \
@@ -976,6 +1105,27 @@ async fn validate_committed_result(
         )));
     }
     Ok(())
+}
+
+async fn get_pending_commit_record_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    id: ArtifactCommitRecordId,
+) -> Result<ArtifactCommitRecord, VoomError> {
+    let sql = SELECT_ARTIFACT_COMMIT_RECORD_COLS.to_owned()
+        + " FROM artifact_commit_records c WHERE c.id = ? AND c.state = 'pending'";
+    let row = sqlx::query(&sql)
+        .bind(i64_from_u64(id.0))
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("artifact_commit_records pending get: {e}")))?;
+    row.as_ref()
+        .map(row_to_commit_record)
+        .transpose()?
+        .ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "artifact_commit_records sidecar commit: id={id} not pending"
+            ))
+        })
 }
 
 fn map_commit_insert_err(

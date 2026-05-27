@@ -49,6 +49,14 @@ fn each_kind_has_distinct_wire_string() {
         EventKind::ArtifactRemuxProgress,
         EventKind::ArtifactRemuxSucceeded,
         EventKind::ArtifactRemuxFailed,
+        EventKind::ArtifactAudioTranscodeStarted,
+        EventKind::ArtifactAudioTranscodeProgress,
+        EventKind::ArtifactAudioTranscodeSucceeded,
+        EventKind::ArtifactAudioTranscodeFailed,
+        EventKind::ArtifactAudioExtractStarted,
+        EventKind::ArtifactAudioExtractProgress,
+        EventKind::ArtifactAudioExtractSucceeded,
+        EventKind::ArtifactAudioExtractFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -163,6 +171,14 @@ fn every_kind_round_trips_through_as_str_and_from_str() {
         EventKind::ArtifactRemuxProgress,
         EventKind::ArtifactRemuxSucceeded,
         EventKind::ArtifactRemuxFailed,
+        EventKind::ArtifactAudioTranscodeStarted,
+        EventKind::ArtifactAudioTranscodeProgress,
+        EventKind::ArtifactAudioTranscodeSucceeded,
+        EventKind::ArtifactAudioTranscodeFailed,
+        EventKind::ArtifactAudioExtractStarted,
+        EventKind::ArtifactAudioExtractProgress,
+        EventKind::ArtifactAudioExtractSucceeded,
+        EventKind::ArtifactAudioExtractFailed,
         EventKind::IssueOpened,
         EventKind::IssueUpdated,
         EventKind::IssueResolved,
@@ -229,6 +245,49 @@ fn remux_artifact_event_kinds_use_exact_sprint_13_wire_strings() {
             "artifact.remux_succeeded",
         ),
         (EventKind::ArtifactRemuxFailed, "artifact.remux_failed"),
+    ];
+
+    for (kind, wire) in cases {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
+    }
+}
+
+#[test]
+fn audio_artifact_event_kinds_use_exact_sprint_14_wire_strings() {
+    let cases = [
+        (
+            EventKind::ArtifactAudioTranscodeStarted,
+            "artifact.audio_transcode_started",
+        ),
+        (
+            EventKind::ArtifactAudioTranscodeProgress,
+            "artifact.audio_transcode_progress",
+        ),
+        (
+            EventKind::ArtifactAudioTranscodeSucceeded,
+            "artifact.audio_transcode_succeeded",
+        ),
+        (
+            EventKind::ArtifactAudioTranscodeFailed,
+            "artifact.audio_transcode_failed",
+        ),
+        (
+            EventKind::ArtifactAudioExtractStarted,
+            "artifact.audio_extract_started",
+        ),
+        (
+            EventKind::ArtifactAudioExtractProgress,
+            "artifact.audio_extract_progress",
+        ),
+        (
+            EventKind::ArtifactAudioExtractSucceeded,
+            "artifact.audio_extract_succeeded",
+        ),
+        (
+            EventKind::ArtifactAudioExtractFailed,
+            "artifact.audio_extract_failed",
+        ),
     ];
 
     for (kind, wire) in cases {

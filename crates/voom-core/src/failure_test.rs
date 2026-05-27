@@ -130,6 +130,19 @@ fn into_error_code_round_trips() {
 }
 
 #[test]
+fn from_error_code_maps_failure_taxonomy_and_rejects_unclassified_codes() {
+    assert_eq!(
+        FailureClass::from_error_code(ErrorCode::WorkerCrash),
+        Some(FailureClass::WorkerCrash)
+    );
+    assert_eq!(
+        FailureClass::from_error_code(ErrorCode::BlockedByUseLease),
+        Some(FailureClass::BlockedByActiveUseLease)
+    );
+    assert_eq!(FailureClass::from_error_code(ErrorCode::Internal), None);
+}
+
+#[test]
 fn serde_round_trips_wire_format() {
     // The on-disk + on-wire shape is snake_case.
     let s = serde_json::to_string(&FailureClass::WorkerTimeout).unwrap();

@@ -7,6 +7,7 @@
 )]
 //! Pure Sprint 5 execution-plan projection.
 
+pub mod audio;
 pub mod compliance_hash;
 pub mod compliance_model;
 pub mod compliance_report;

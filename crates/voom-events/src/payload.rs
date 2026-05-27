@@ -472,6 +472,191 @@ pub struct ArtifactRemuxFailedPayload {
     pub provider_version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioStreamPayload {
+    pub snapshot_stream_id: String,
+    pub provider_stream_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioDispositionPayload {
+    pub default: Option<bool>,
+    pub forced: Option<bool>,
+    pub commentary: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioOutputStreamPayload {
+    pub snapshot_stream_id: String,
+    pub output_provider_stream_index: u32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub default: Option<bool>,
+    pub disposition: Option<ArtifactAudioDispositionPayload>,
+    pub channels: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioTranscodeStartedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub target_codec: String,
+    pub output_container: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioTranscodeProgressPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub percent_bps: Option<u16>,
+    pub message: Option<String>,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioTranscodeSucceededPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub staging_path: String,
+    pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub selected_snapshot_stream_ids: Vec<String>,
+    pub selected_output_streams: Vec<ArtifactAudioOutputStreamPayload>,
+    pub output_container: String,
+    pub output_audio_codecs: Vec<String>,
+    pub provider: String,
+    pub provider_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioTranscodeFailedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: Option<u64>,
+    pub source_media_snapshot_id: Option<u64>,
+    pub artifact_handle_id: Option<u64>,
+    pub artifact_location_id: Option<u64>,
+    pub staging_path: Option<String>,
+    pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub selected_output_streams: Vec<ArtifactAudioOutputStreamPayload>,
+    pub failure_class: FailureClass,
+    pub error_code: String,
+    pub message: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractStartedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub source_bundle_id: u64,
+    pub staging_path: String,
+    pub selected_stream: ArtifactAudioStreamPayload,
+    pub role: String,
+    pub target_codec: String,
+    pub output_container: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractProgressPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub source_bundle_id: u64,
+    pub staging_path: String,
+    pub selected_stream: ArtifactAudioStreamPayload,
+    pub percent_bps: Option<u16>,
+    pub message: Option<String>,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractSucceededPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: u64,
+    pub source_media_snapshot_id: u64,
+    pub source_bundle_id: u64,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub staging_path: String,
+    pub selected_stream: ArtifactAudioStreamPayload,
+    pub selected_snapshot_stream_id: String,
+    pub role: String,
+    pub output_container: String,
+    pub output_audio_codec: String,
+    pub provider: String,
+    pub provider_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractFailedPayload {
+    pub job_id: u64,
+    pub ticket_id: u64,
+    pub lease_id: Option<u64>,
+    pub source_file_version_id: u64,
+    pub source_file_location_id: Option<u64>,
+    pub source_media_snapshot_id: Option<u64>,
+    pub source_bundle_id: u64,
+    pub artifact_handle_id: Option<u64>,
+    pub artifact_location_id: Option<u64>,
+    pub staging_path: Option<String>,
+    pub selected_stream: Option<ArtifactAudioStreamPayload>,
+    pub role: Option<String>,
+    pub failure_class: FailureClass,
+    pub error_code: String,
+    pub message: String,
+    pub provider: Option<String>,
+    pub provider_version: Option<String>,
+}
+
 // --- issues ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1099,6 +1284,22 @@ pub enum Event {
     ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload),
     #[serde(rename = "artifact.remux_failed")]
     ArtifactRemuxFailed(ArtifactRemuxFailedPayload),
+    #[serde(rename = "artifact.audio_transcode_started")]
+    ArtifactAudioTranscodeStarted(ArtifactAudioTranscodeStartedPayload),
+    #[serde(rename = "artifact.audio_transcode_progress")]
+    ArtifactAudioTranscodeProgress(ArtifactAudioTranscodeProgressPayload),
+    #[serde(rename = "artifact.audio_transcode_succeeded")]
+    ArtifactAudioTranscodeSucceeded(ArtifactAudioTranscodeSucceededPayload),
+    #[serde(rename = "artifact.audio_transcode_failed")]
+    ArtifactAudioTranscodeFailed(ArtifactAudioTranscodeFailedPayload),
+    #[serde(rename = "artifact.audio_extract_started")]
+    ArtifactAudioExtractStarted(ArtifactAudioExtractStartedPayload),
+    #[serde(rename = "artifact.audio_extract_progress")]
+    ArtifactAudioExtractProgress(ArtifactAudioExtractProgressPayload),
+    #[serde(rename = "artifact.audio_extract_succeeded")]
+    ArtifactAudioExtractSucceeded(ArtifactAudioExtractSucceededPayload),
+    #[serde(rename = "artifact.audio_extract_failed")]
+    ArtifactAudioExtractFailed(ArtifactAudioExtractFailedPayload),
     #[serde(rename = "issue.opened")]
     IssueOpened(IssueLifecyclePayload),
     #[serde(rename = "issue.updated")]
@@ -1226,6 +1427,14 @@ impl Event {
             Self::ArtifactRemuxProgress(_) => EventKind::ArtifactRemuxProgress,
             Self::ArtifactRemuxSucceeded(_) => EventKind::ArtifactRemuxSucceeded,
             Self::ArtifactRemuxFailed(_) => EventKind::ArtifactRemuxFailed,
+            Self::ArtifactAudioTranscodeStarted(_) => EventKind::ArtifactAudioTranscodeStarted,
+            Self::ArtifactAudioTranscodeProgress(_) => EventKind::ArtifactAudioTranscodeProgress,
+            Self::ArtifactAudioTranscodeSucceeded(_) => EventKind::ArtifactAudioTranscodeSucceeded,
+            Self::ArtifactAudioTranscodeFailed(_) => EventKind::ArtifactAudioTranscodeFailed,
+            Self::ArtifactAudioExtractStarted(_) => EventKind::ArtifactAudioExtractStarted,
+            Self::ArtifactAudioExtractProgress(_) => EventKind::ArtifactAudioExtractProgress,
+            Self::ArtifactAudioExtractSucceeded(_) => EventKind::ArtifactAudioExtractSucceeded,
+            Self::ArtifactAudioExtractFailed(_) => EventKind::ArtifactAudioExtractFailed,
             Self::IssueOpened(_) => EventKind::IssueOpened,
             Self::IssueUpdated(_) => EventKind::IssueUpdated,
             Self::IssueResolved(_) => EventKind::IssueResolved,

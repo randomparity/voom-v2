@@ -50,11 +50,20 @@ fn accepts_sprint12_video_hevc_transcode() {
 }
 
 #[test]
-fn rejects_sprint12_unsupported_transcode_shapes() {
+fn accepts_sprint14_audio_operations() {
     assert!(
-        codes("policy \"p\" { phase a { transcode audio to opus {} } }")
-            .contains(&"unsupported_transcode_shape".to_owned())
+        compile_policy("policy \"p\" { phase a { transcode audio to aac where lang in [eng] } }")
+            .is_ok()
     );
+    assert!(
+        compile_policy("policy \"p\" { phase a { transcode audio to opus where codec in [aac] } }")
+            .is_ok()
+    );
+    assert!(compile_policy("policy \"p\" { phase a { extract audio where commentary } }").is_ok());
+}
+
+#[test]
+fn rejects_unsupported_transcode_shapes() {
     assert!(
         codes("policy \"p\" { phase a { transcode video to av1 {} } }")
             .contains(&"unsupported_transcode_shape".to_owned())
@@ -62,6 +71,18 @@ fn rejects_sprint12_unsupported_transcode_shapes() {
     assert!(
         codes("policy \"p\" { phase a { transcode video to hevc using profile \"small\" {} } }")
             .contains(&"unsupported_transcode_shape".to_owned())
+    );
+    assert!(
+        codes("policy \"p\" { phase a { transcode audio to flac where lang in [eng] } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unsupported_extract_shapes() {
+    assert!(
+        codes("policy \"p\" { phase a { extract subtitles where forced } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
 
@@ -401,6 +422,18 @@ fn accepts_channel_count_track_filter() {
 fn rejects_unknown_boolean_track_filter_branch() {
     assert!(
         codes("policy \"p\" { phase a { keep audio where lang in [eng] or banana } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_malformed_audio_filter_tails() {
+    assert!(
+        codes("policy \"p\" { phase a { transcode audio to aac where lang in [eng] garbage } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+    assert!(
+        codes("policy \"p\" { phase a { extract audio where commentary and } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }

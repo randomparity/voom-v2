@@ -36,6 +36,7 @@ fn preflight_rejects_encoder_list_without_libx265() {
         "ffmpeg",
         "ffmpeg version 7.0",
         "Encoders:\n V..... h264 encoder\n",
+        "Muxers:\n E matroska Matroska\n E ogg Ogg\n",
     );
     let ffprobe = stub_bin(
         temp.path(),
@@ -53,7 +54,8 @@ fn preflight_accepts_encoder_list_containing_libx265() {
         temp.path(),
         "ffmpeg",
         "ffmpeg version 7.0",
-        "Encoders:\n V..... libx265 H.265 / HEVC\n",
+        "Encoders:\n V..... libx265 H.265 / HEVC\n A..... aac AAC\n A..... libopus Opus\n",
+        "Muxers:\n E matroska Matroska\n E ogg Ogg\n",
     );
     let ffprobe = stub_bin(
         temp.path(),
@@ -70,12 +72,56 @@ fn preflight_accepts_encoder_list_containing_libx265() {
     assert_eq!(preflight.hevc_encoder, "libx265");
 }
 
-fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str) -> PathBuf {
+#[test]
+fn preflight_checks_aac_and_opus_encoders() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = ffmpeg_stub(
+        temp.path(),
+        "ffmpeg",
+        "ffmpeg version 7.0",
+        "Encoders:\n V..... libx265 H.265 / HEVC\n A..... aac AAC\n A..... libopus Opus\n",
+        "Muxers:\n E matroska Matroska\n E ogg Ogg\n",
+    );
+    let ffprobe = stub_bin(
+        temp.path(),
+        "ffprobe",
+        "#!/bin/sh\necho 'ffprobe version 7.0'\n",
+    );
+
+    let preflight = preflight_with_paths(&ffmpeg, &ffprobe).unwrap();
+
+    assert_eq!(preflight.aac_encoder, "aac");
+    assert_eq!(preflight.opus_encoder, "libopus");
+}
+
+#[test]
+fn preflight_checks_matroska_and_ogg_muxers() {
+    let temp = tempfile::tempdir().unwrap();
+    let ffmpeg = ffmpeg_stub(
+        temp.path(),
+        "ffmpeg",
+        "ffmpeg version 7.0",
+        "Encoders:\n V..... libx265 H.265 / HEVC\n A..... aac AAC\n A..... libopus Opus\n",
+        "Muxers:\n E matroska Matroska\n E ogg Ogg\n",
+    );
+    let ffprobe = stub_bin(
+        temp.path(),
+        "ffprobe",
+        "#!/bin/sh\necho 'ffprobe version 7.0'\n",
+    );
+
+    let preflight = preflight_with_paths(&ffmpeg, &ffprobe).unwrap();
+
+    assert_eq!(preflight.matroska_muxer, "matroska");
+    assert_eq!(preflight.ogg_muxer, "ogg");
+}
+
+fn ffmpeg_stub(dir: &Path, name: &str, version: &str, encoders: &str, muxers: &str) -> PathBuf {
     stub_bin(
         dir,
         name,
         &format!(
-            "#!/bin/sh\ncase \"$*\" in\n  *-version*) echo '{version}' ;;\n  *-encoders*) cat <<'EOF'\n{encoders}EOF\n    ;;\n  *) exit 2 ;;\nesac\n"
+            "#!/bin/sh\ncase \"$*\" in\n  *-version*) echo '{version}' ;;\n  *-encoders*) cat <<'EOF'\n{encoders}EOF\n    ;;\n  *-muxers*) cat <<'EOF'\n{muxers}EOF\n    ;;\n  *) exit 2 ;;\nesac\n"
         ),
     )
 }

@@ -116,6 +116,8 @@ fn compliance_kind(node: &PlanNode) -> &'static str {
     match (&node.status, node.operation_kind.as_str()) {
         (_, "remux") | (NodeStatus::NoOp, "set_container") => "container",
         (_, "transcode_video") => "transcode_video",
+        (_, "transcode_audio") => "transcode_audio",
+        (_, "extract_audio") => "extract_audio",
         _ => "unsupported",
     }
 }
@@ -131,19 +133,29 @@ fn check_status(node: &PlanNode) -> CheckStatus {
 fn issue_action_hint(node: &PlanNode) -> IssueActionHint {
     match (&node.status, node.operation_kind.as_str()) {
         (NodeStatus::NoOp, _) => IssueActionHint::ResolveMatching,
-        (NodeStatus::Planned, "remux" | "transcode_video") => {
-            IssueActionHint::CreateOrUpdatePlanned
-        }
-        (NodeStatus::Blocked, "remux" | "transcode_video") => IssueActionHint::CreateOrUpdateOpen,
+        (
+            NodeStatus::Planned,
+            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+        ) => IssueActionHint::CreateOrUpdatePlanned,
+        (
+            NodeStatus::Blocked,
+            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+        ) => IssueActionHint::CreateOrUpdateOpen,
         _ => IssueActionHint::None,
     }
 }
 
 fn execution_eligibility(node: &PlanNode) -> ExecutionEligibility {
     match (&node.status, node.operation_kind.as_str()) {
-        (NodeStatus::Planned, "remux" | "transcode_video") => ExecutionEligibility::Supported,
+        (
+            NodeStatus::Planned,
+            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+        ) => ExecutionEligibility::Supported,
         (NodeStatus::NoOp, _) => ExecutionEligibility::NoOp,
-        (NodeStatus::Blocked, "remux" | "transcode_video") => ExecutionEligibility::Blocked,
+        (
+            NodeStatus::Blocked,
+            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+        ) => ExecutionEligibility::Blocked,
         _ => ExecutionEligibility::Unsupported,
     }
 }

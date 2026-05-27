@@ -44,6 +44,7 @@ use voom_store::repo::{
 use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod artifact;
+pub mod audio;
 pub mod cases;
 pub mod node_auth;
 pub mod remux;

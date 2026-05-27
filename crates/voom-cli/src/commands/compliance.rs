@@ -86,11 +86,13 @@ pub async fn execute(
     let mut options = ComplianceExecutionOptions::default();
     if let Some(staging_root) = staging_root {
         options.transcode_staging_root = staging_root.clone();
-        options.remux_staging_root = staging_root;
+        options.remux_staging_root = staging_root.clone();
+        options.audio_staging_root = staging_root;
     }
     if let Some(output_dir) = output_dir {
         options.transcode_target_dir = output_dir.clone();
-        options.remux_target_dir = output_dir;
+        options.remux_target_dir = output_dir.clone();
+        options.audio_target_dir = output_dir;
     }
     match cp
         .execute_compliance_policy_with_options(

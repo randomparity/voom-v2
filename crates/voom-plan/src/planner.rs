@@ -11,7 +11,12 @@ use crate::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
     NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext, PlanningDiagnostic,
     PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
-    SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
+    SchedulingHints, TargetRef,
+    audio::{
+        AudioOperationPayload, AudioOperationType, AudioPlanShape, AudioPlanningBlock,
+        extract_audio_shape, selected_audio_streams, transcode_audio_shape,
+    },
+    edge_id, node_id, plan_hash, plan_id,
     remux::{
         RemuxDefaultAction, RemuxOperationPayload, RemuxPlanningBlock, RemuxTrackAction,
         RemuxTrackActionKind, SnapshotStreamFact, default_track_order, evaluate_filter,
@@ -276,6 +281,28 @@ impl<'a> PlanBuilder<'a> {
                 container,
                 profile,
             ),
+            CompiledOperation::TranscodeAudio {
+                target_codec,
+                container,
+                filter,
+            } => self.expand_transcode_audio_for_snapshot(
+                phase_name,
+                snapshot,
+                target_codec,
+                container,
+                filter.as_ref(),
+            ),
+            CompiledOperation::ExtractAudio {
+                target_codec,
+                container,
+                filter,
+            } => self.expand_extract_audio_for_snapshot(
+                phase_name,
+                snapshot,
+                target_codec,
+                container,
+                filter.as_ref(),
+            ),
             unsupported => {
                 let operation_kind = operation_kind(unsupported);
                 self.expand_blocked_unsupported_for_snapshot(
@@ -490,6 +517,121 @@ impl<'a> PlanBuilder<'a> {
             PlanningDiagnostic::error(code, message)
                 .with_phase(phase_name)
                 .with_operation_kind("transcode_video")
+                .with_target(snapshot.target.clone()),
+        );
+    }
+
+    fn expand_transcode_audio_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        target_codec: &str,
+        container: &str,
+        filter: Option<&TrackFilter>,
+    ) {
+        let operation_kind = "transcode_audio";
+        let payload = AudioOperationPayload {
+            operation_type: AudioOperationType::TranscodeAudio,
+            target_codec: target_codec.to_owned(),
+            container: container.to_owned(),
+            source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+            filter: filter.cloned(),
+        }
+        .into_value();
+        let observed_state = audio_observed_state(snapshot, filter);
+        let (status, status_reason, capability) =
+            match transcode_audio_shape(snapshot, target_codec, container, filter) {
+                AudioPlanShape::NoOp => (
+                    NodeStatus::NoOp,
+                    format!("selected audio is already {target_codec} in {container}"),
+                    None,
+                ),
+                AudioPlanShape::Planned => (
+                    NodeStatus::Planned,
+                    format!("selected audio will be transcoded to {target_codec} in {container}"),
+                    Some("transcode_audio".to_owned()),
+                ),
+                AudioPlanShape::Blocked(block) => {
+                    let (code, message) = audio_block_diagnostic(block, operation_kind);
+                    self.push_audio_diagnostic(code, phase_name, snapshot, operation_kind, message);
+                    (NodeStatus::Blocked, message.to_owned(), None)
+                }
+            };
+
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            operation_kind,
+            payload,
+            observed_state,
+            status,
+            status_reason,
+            capability,
+        ));
+    }
+
+    fn expand_extract_audio_for_snapshot(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        target_codec: &str,
+        container: &str,
+        filter: Option<&TrackFilter>,
+    ) {
+        let operation_kind = "extract_audio";
+        let payload = AudioOperationPayload {
+            operation_type: AudioOperationType::ExtractAudio,
+            target_codec: target_codec.to_owned(),
+            container: container.to_owned(),
+            source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+            filter: filter.cloned(),
+        }
+        .into_value();
+        let observed_state = audio_observed_state(snapshot, filter);
+        let (status, status_reason, capability) = match extract_audio_shape(snapshot, filter) {
+            AudioPlanShape::NoOp => (
+                NodeStatus::NoOp,
+                format!("selected audio is already extracted as {target_codec} in {container}"),
+                None,
+            ),
+            AudioPlanShape::Planned => (
+                NodeStatus::Planned,
+                format!("selected audio will be extracted as {target_codec} in {container}"),
+                Some("extract_audio".to_owned()),
+            ),
+            AudioPlanShape::Blocked(block) => {
+                let (code, message) = audio_block_diagnostic(block, operation_kind);
+                self.push_audio_diagnostic(code, phase_name, snapshot, operation_kind, message);
+                (NodeStatus::Blocked, message.to_owned(), None)
+            }
+        };
+
+        self.nodes.push(make_node(
+            phase_name,
+            checked_ordinal(self.nodes.len()),
+            snapshot,
+            operation_kind,
+            payload,
+            observed_state,
+            status,
+            status_reason,
+            capability,
+        ));
+    }
+
+    fn push_audio_diagnostic(
+        &mut self,
+        code: PlanningDiagnosticCode,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        operation_kind: &str,
+        message: &str,
+    ) {
+        self.diagnostics.push(
+            PlanningDiagnostic::error(code, message)
+                .with_phase(phase_name)
+                .with_operation_kind(operation_kind)
                 .with_target(snapshot.target.clone()),
         );
     }
@@ -1186,6 +1328,70 @@ fn transcode_video_observed_state(snapshot: &MediaSnapshotInput) -> Option<serde
     }
 }
 
+fn audio_observed_state(
+    snapshot: &MediaSnapshotInput,
+    filter: Option<&TrackFilter>,
+) -> Option<serde_json::Value> {
+    let mut observed = serde_json::Map::new();
+    if let Some(container) = &snapshot.container {
+        observed.insert("container".to_owned(), json!(container));
+    }
+    if let Ok(selected) = selected_audio_streams(snapshot, filter) {
+        observed.insert(
+            "selected_audio_stream_count".to_owned(),
+            json!(selected.len()),
+        );
+        let codecs = selected
+            .iter()
+            .filter_map(|stream| stream.codec.clone())
+            .collect::<Vec<_>>();
+        if !codecs.is_empty() {
+            observed.insert("audio_codecs".to_owned(), json!(codecs));
+        }
+    }
+    if observed.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(observed))
+    }
+}
+
+fn audio_block_diagnostic(
+    block: AudioPlanningBlock,
+    operation_kind: &str,
+) -> (PlanningDiagnosticCode, &'static str) {
+    match block {
+        AudioPlanningBlock::InsufficientSnapshotFacts => (
+            PlanningDiagnosticCode::InsufficientSnapshotFacts,
+            "snapshot stream facts are insufficient for audio planning",
+        ),
+        AudioPlanningBlock::UnsupportedSelector => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "audio selector is not supported by audio planning",
+        ),
+        AudioPlanningBlock::ZeroMatches => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            if operation_kind == "extract_audio" {
+                "extract_audio selector matched zero audio streams"
+            } else {
+                "transcode_audio selector matched zero audio streams"
+            },
+        ),
+        AudioPlanningBlock::MultipleMatches => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "extract_audio selector matched multiple audio streams",
+        ),
+        AudioPlanningBlock::NoVideo => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "audio planning requires at least one video stream",
+        ),
+        AudioPlanningBlock::UnsupportedMediaShape => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "media shape is not supported by audio planning",
+        ),
+    }
+}
+
 fn video_stream_count(snapshot: &MediaSnapshotInput) -> Option<u64> {
     snapshot
         .stream_summary
@@ -1580,6 +1786,8 @@ fn operation_kind(operation: &CompiledOperation) -> &'static str {
         CompiledOperation::SetTag { .. } => "set_tag",
         CompiledOperation::DeleteTag { .. } => "delete_tag",
         CompiledOperation::TranscodeVideo { .. } => "transcode_video",
+        CompiledOperation::TranscodeAudio { .. } => "transcode_audio",
+        CompiledOperation::ExtractAudio { .. } => "extract_audio",
         CompiledOperation::Conditional { .. } => "conditional",
         CompiledOperation::Rules { .. } => "rules",
     }

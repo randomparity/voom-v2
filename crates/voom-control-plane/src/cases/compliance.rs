@@ -86,6 +86,8 @@ pub struct ComplianceExecutionOptions {
     pub transcode_target_dir: PathBuf,
     pub remux_staging_root: PathBuf,
     pub remux_target_dir: PathBuf,
+    pub audio_staging_root: PathBuf,
+    pub audio_target_dir: PathBuf,
 }
 
 impl Default for ComplianceExecutionOptions {
@@ -96,6 +98,8 @@ impl Default for ComplianceExecutionOptions {
             transcode_target_dir: defaults.transcode_target_dir,
             remux_staging_root: defaults.remux_staging_root,
             remux_target_dir: defaults.remux_target_dir,
+            audio_staging_root: defaults.audio_staging_root,
+            audio_target_dir: defaults.audio_target_dir,
         }
     }
 }
@@ -456,6 +460,8 @@ impl ControlPlane {
             transcode_target_dir: options.transcode_target_dir,
             remux_staging_root: options.remux_staging_root,
             remux_target_dir: options.remux_target_dir,
+            audio_staging_root: options.audio_staging_root,
+            audio_target_dir: options.audio_target_dir,
             ..WorkflowExecutorOptions::default()
         };
         let executor = WorkflowExecutor::with_options(
@@ -558,11 +564,13 @@ impl ControlPlane {
              FROM workers w \
              JOIN worker_capabilities wc ON wc.worker_id = w.id \
              WHERE w.status IN ('registered', 'active') \
-               AND wc.operation IN (?, ?) \
+               AND wc.operation IN (?, ?, ?, ?) \
              ORDER BY w.id ASC",
         )
         .bind(operation_name(OperationKind::Remux))
         .bind(operation_name(OperationKind::TranscodeVideo))
+        .bind(operation_name(OperationKind::TranscodeAudio))
+        .bind(operation_name(OperationKind::ExtractAudio))
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;

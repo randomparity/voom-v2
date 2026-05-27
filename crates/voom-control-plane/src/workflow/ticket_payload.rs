@@ -138,6 +138,7 @@ pub(crate) fn operation_name(operation: OperationKind) -> &'static str {
         OperationKind::BackUpFile => "back_up_file",
         OperationKind::Remux => "remux",
         OperationKind::TranscodeVideo => "transcode_video",
+        OperationKind::TranscodeAudio => "transcode_audio",
         OperationKind::EditTracks => "edit_tracks",
         OperationKind::ExtractAudio => "extract_audio",
         OperationKind::TranscribeAudio => "transcribe_audio",

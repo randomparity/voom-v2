@@ -188,6 +188,34 @@ impl FailureClass {
             Self::AmbiguousWorkerSelection => ErrorCode::AmbiguousWorkerSelection,
         }
     }
+
+    #[must_use]
+    pub const fn from_error_code(code: ErrorCode) -> Option<Self> {
+        match code {
+            ErrorCode::WorkerTimeout => Some(Self::WorkerTimeout),
+            ErrorCode::WorkerCrash => Some(Self::WorkerCrash),
+            ErrorCode::NoEligibleWorker => Some(Self::NoEligibleWorker),
+            ErrorCode::ArtifactUnavailable => Some(Self::ArtifactUnavailable),
+            ErrorCode::ArtifactChecksumMismatch => Some(Self::ArtifactChecksumMismatch),
+            ErrorCode::ExternalSystemUnavailable => Some(Self::ExternalSystemUnavailable),
+            ErrorCode::ExternalSystemRateLimited => Some(Self::ExternalSystemRateLimited),
+            ErrorCode::VerificationFailure => Some(Self::VerificationFailure),
+            ErrorCode::BackupFailure => Some(Self::BackupFailure),
+            ErrorCode::CommitFailure => Some(Self::CommitFailure),
+            ErrorCode::PolicyParseError => Some(Self::PolicyParseError),
+            ErrorCode::PolicyValidationError => Some(Self::PolicyValidationError),
+            ErrorCode::MissingCapability => Some(Self::MissingCapability),
+            ErrorCode::MalformedWorkerResult => Some(Self::MalformedWorkerResult),
+            ErrorCode::UserCancellation => Some(Self::UserCancellation),
+            ErrorCode::StaleIdentityEvidence => Some(Self::StaleIdentityEvidence),
+            ErrorCode::ClosureResolutionIncomplete => Some(Self::ClosureResolutionIncomplete),
+            ErrorCode::BlockedByUseLease => Some(Self::BlockedByActiveUseLease),
+            ErrorCode::ApprovalRequired => Some(Self::ApprovalRequired),
+            ErrorCode::PriorityPolicyConflict => Some(Self::PriorityPolicyConflict),
+            ErrorCode::AmbiguousWorkerSelection => Some(Self::AmbiguousWorkerSelection),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

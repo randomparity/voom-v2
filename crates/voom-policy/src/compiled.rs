@@ -102,6 +102,16 @@ pub enum CompiledOperation {
         container: String,
         profile: String,
     },
+    TranscodeAudio {
+        target_codec: String,
+        container: String,
+        filter: Option<TrackFilter>,
+    },
+    ExtractAudio {
+        target_codec: String,
+        container: String,
+        filter: Option<TrackFilter>,
+    },
     Conditional {
         condition: CompiledCondition,
         operations: Vec<CompiledOperation>,
@@ -325,11 +335,25 @@ fn lower_operation(
         "delete_tag" => Ok(CompiledOperation::DeleteTag {
             key: quoted_value(text.as_ref()).unwrap_or_default(),
         }),
+        "transcode" if tokens.get(1).copied() == Some("audio") => {
+            Ok(CompiledOperation::TranscodeAudio {
+                target_codec: token_string(&tokens, 3, "opus"),
+                container: "mkv".to_owned(),
+                filter: track_filter(text.as_ref()),
+            })
+        }
         "transcode" => Ok(CompiledOperation::TranscodeVideo {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
             profile: "default-hevc".to_owned(),
         }),
+        "extract" if tokens.get(1).copied() == Some("audio") => {
+            Ok(CompiledOperation::ExtractAudio {
+                target_codec: "opus".to_owned(),
+                container: "ogg".to_owned(),
+                filter: track_filter(text.as_ref()),
+            })
+        }
         "when" => Ok(CompiledOperation::Conditional {
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
             operations: match statement {
@@ -584,20 +608,18 @@ fn track_filter(text: &str) -> Option<TrackFilter> {
 fn filter_from_text(text: &str) -> Option<TrackFilter> {
     let text = strip_outer_group(text.trim());
     if let Some(parts) = split_bool_filter(text, " or ") {
-        return Some(TrackFilter::Or {
-            filters: parts
-                .into_iter()
-                .filter_map(filter_from_text)
-                .collect::<Vec<_>>(),
-        });
+        let filters = parts
+            .into_iter()
+            .map(filter_from_text)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(TrackFilter::Or { filters });
     }
     if let Some(parts) = split_bool_filter(text, " and ") {
-        return Some(TrackFilter::And {
-            filters: parts
-                .into_iter()
-                .filter_map(filter_from_text)
-                .collect::<Vec<_>>(),
-        });
+        let filters = parts
+            .into_iter()
+            .map(filter_from_text)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(TrackFilter::And { filters });
     }
     if let Some(inner) = text.trim().strip_prefix("not ") {
         return filter_from_text(inner.trim()).map(|inner| TrackFilter::Not {
@@ -606,26 +628,36 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
     }
     let tokens = words(text);
     match tokens.as_slice() {
-        ["lang" | "language", "in", ..] => Some(TrackFilter::LanguageIn {
-            values: list_values(text).into_iter().map(str::to_owned).collect(),
-        }),
-        ["codec", "in", ..] => Some(TrackFilter::CodecIn {
-            values: list_values(text).into_iter().map(str::to_owned).collect(),
-        }),
+        ["lang" | "language", "in", ..]
+            if !list_values(text).is_empty()
+                && text_after_list(text).is_some_and(str::is_empty) =>
+        {
+            Some(TrackFilter::LanguageIn {
+                values: list_values(text).into_iter().map(str::to_owned).collect(),
+            })
+        }
+        ["codec", "in", ..]
+            if !list_values(text).is_empty()
+                && text_after_list(text).is_some_and(str::is_empty) =>
+        {
+            Some(TrackFilter::CodecIn {
+                values: list_values(text).into_iter().map(str::to_owned).collect(),
+            })
+        }
         ["channels", op, value] => Some(TrackFilter::Channels {
             op: comparison_op(Some(op))?,
             value: value.parse::<u64>().ok()?,
         }),
-        ["title", "contains", ..] => {
-            title_filter_value(text, "contains").map(|value| TrackFilter::TitleContains {
+        ["title", "contains", ..] => title_filter_value(text, "contains")
+            .filter(|value| is_single_value(value))
+            .map(|value| TrackFilter::TitleContains {
                 value: strip_quotes(value),
-            })
-        }
-        ["title", "matches", ..] => {
-            title_filter_value(text, "matches").map(|value| TrackFilter::TitleMatches {
+            }),
+        ["title", "matches", ..] => title_filter_value(text, "matches")
+            .filter(|value| is_single_value(value))
+            .map(|value| TrackFilter::TitleMatches {
                 value: strip_quotes(value),
-            })
-        }
+            }),
         [first, ..] => filter_predicate(Some(first)),
         [] => None,
     }
@@ -830,6 +862,12 @@ fn list_values(text: &str) -> Vec<&str> {
         .collect()
 }
 
+fn text_after_list(text: &str) -> Option<&str> {
+    let start = text.find('[')?;
+    let end = text[start + 1..].find(']')?;
+    Some(text[start + 1 + end + 1..].trim())
+}
+
 fn dependency_values(text: &str) -> Vec<String> {
     let list = list_values(text);
     if !list.is_empty() || text.contains('[') {
@@ -854,6 +892,31 @@ fn text_after_quoted_value(text: &str) -> Option<&str> {
     let start = text.find('"')?;
     let end = text[start + 1..].find('"')?;
     Some(text[start + 1 + end + 1..].trim())
+}
+
+fn is_single_value(text: &str) -> bool {
+    let text = text.trim();
+    if text.starts_with('"') {
+        return quoted_text_end(text).is_some_and(|end| text[end..].trim().is_empty());
+    }
+    words(text).len() == 1
+}
+
+fn quoted_text_end(text: &str) -> Option<usize> {
+    let mut cursor = 1usize;
+    let mut escaped = false;
+    while cursor < text.len() {
+        let ch = text[cursor..].chars().next()?;
+        cursor += ch.len_utf8();
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(cursor);
+        }
+    }
+    None
 }
 
 fn track_target(token: Option<&str>) -> Option<TrackTarget> {

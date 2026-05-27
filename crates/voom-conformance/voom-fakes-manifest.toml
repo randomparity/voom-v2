@@ -85,9 +85,14 @@ valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario =
 invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
 
 [[binaries.operations]]
+operation = "transcode_audio"
+valid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.mkv", container = "mkv", overwrite = false }, selection = { selected_streams = [{ snapshot_stream_id = "stream-1", provider_stream_index = 1 }] }, audio = { target_codec = "opus", profile = "default-opus" } }
+invalid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.mkv", container = "mkv", overwrite = false }, selection = { selected_streams = [{ snapshot_stream_id = "stream-1", provider_stream_index = 1 }] }, audio = { target_codec = "bad_codec", profile = "default-bad_codec" } }
+
+[[binaries.operations]]
 operation = "extract_audio"
-valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
-invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+valid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.ogg", container = "ogg", audio_codec = "opus", overwrite = false }, selection = { snapshot_stream_id = "stream-1", provider_stream_index = 1 } }
+invalid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.ogg", container = "ogg", audio_codec = "bad_codec", overwrite = false }, selection = { snapshot_stream_id = "stream-1", provider_stream_index = 1 } }
 
 [[binaries.operations]]
 operation = "transcribe_audio"

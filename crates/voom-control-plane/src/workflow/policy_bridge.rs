@@ -47,29 +47,25 @@ pub fn workflow_plan_from_compliance(
 
     for node in &plan.nodes {
         match node.status {
-            NodeStatus::Planned if node.operation_kind == "remux" => {
+            NodeStatus::Planned => {
+                let operation = match node.operation_kind.as_str() {
+                    "remux" => OperationKind::Remux,
+                    "transcode_video" => OperationKind::TranscodeVideo,
+                    "transcode_audio" => OperationKind::TranscodeAudio,
+                    "extract_audio" => OperationKind::ExtractAudio,
+                    _ => {
+                        return Err(VoomError::PolicyExecution(format!(
+                            "unsupported execution operation {}",
+                            node.operation_kind
+                        )));
+                    }
+                };
                 let workflow_node_id = format!("policy-node_{}", node.node_id);
                 workflow_node_ids_by_plan_node_id
                     .insert(node.node_id.clone(), workflow_node_id.clone());
                 nodes.push(WorkflowNode::Operation(OperationNode {
                     id: workflow_node_id,
-                    operation: OperationKind::Remux,
-                    policy_target: Some(node.target.clone()),
-                    operation_payload: node.operation_payload.clone(),
-                    depends_on: Vec::new(),
-                    depends_on_selected: Vec::new(),
-                    provides_selected: None,
-                }));
-                summary.submitted_node_count += 1;
-                *summary.per_operation.entry("remux".to_owned()).or_insert(0) += 1;
-            }
-            NodeStatus::Planned if node.operation_kind == "transcode_video" => {
-                let workflow_node_id = format!("policy-node_{}", node.node_id);
-                workflow_node_ids_by_plan_node_id
-                    .insert(node.node_id.clone(), workflow_node_id.clone());
-                nodes.push(WorkflowNode::Operation(OperationNode {
-                    id: workflow_node_id,
-                    operation: OperationKind::TranscodeVideo,
+                    operation,
                     policy_target: Some(node.target.clone()),
                     operation_payload: node.operation_payload.clone(),
                     depends_on: Vec::new(),
@@ -79,14 +75,8 @@ pub fn workflow_plan_from_compliance(
                 summary.submitted_node_count += 1;
                 *summary
                     .per_operation
-                    .entry("transcode_video".to_owned())
+                    .entry(node.operation_kind.clone())
                     .or_insert(0) += 1;
-            }
-            NodeStatus::Planned => {
-                return Err(VoomError::PolicyExecution(format!(
-                    "unsupported execution operation {}",
-                    node.operation_kind
-                )));
             }
             NodeStatus::NoOp => summary.skipped_no_op_count += 1,
             NodeStatus::Blocked => summary.blocked_count += 1,

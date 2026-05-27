@@ -202,6 +202,31 @@ async fn create_file_version_requires_parent_for_staged_commit() {
     assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
 }
 
+#[tokio::test]
+async fn create_file_version_in_tx_rejects_null_parent_staged_commit() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+
+    let err = repo
+        .create_file_version_in_tx(
+            &mut tx,
+            NewFileVersion {
+                file_asset_id: asset.id,
+                content_hash: "hash-staged-in-tx".to_owned(),
+                size_bytes: 7,
+                produced_by: ProducedBy::StagedCommit,
+                produced_from_version_id: None,
+                created_at: T0,
+            },
+        )
+        .await
+        .unwrap_err();
+    tx.commit().await.unwrap();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
 // ---- identity_evidence ---------------------------------------------------
 
 #[tokio::test]

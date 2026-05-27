@@ -48,6 +48,10 @@ const MIGRATION_0011_SQL: &str = include_str!("../../../migrations/0011_schedule
 const MIGRATION_0012_SQL: &str =
     include_str!("../../../migrations/0012_staged_artifact_commit.sql");
 
+/// SQL for migration 0013 (Sprint 14 audio sidecar support), embedded at
+/// compile time.
+const MIGRATION_0013_SQL: &str = include_str!("../../../migrations/0013_audio_sidecar_support.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -145,6 +149,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("staged_artifact_commit"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0012_SQL),
+            false,
+        ),
+        Migration::new(
+            13,
+            Cow::Borrowed("audio_sidecar_support"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0013_SQL),
             false,
         ),
     ]),

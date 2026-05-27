@@ -54,6 +54,38 @@ fn transcode_node(status: NodeStatus) -> PlanNode {
     }
 }
 
+fn transcode_audio_node(status: NodeStatus) -> PlanNode {
+    PlanNode {
+        operation_payload: json!({
+            "type": "transcode_audio",
+            "target_codec": "opus",
+            "container": "mkv",
+            "source_media_snapshot_id": 42
+        }),
+        observed_state: Some(json!({
+            "container": "mp4",
+            "audio_codec": "aac",
+            "selected_audio_stream_count": 1
+        })),
+        ..node(status, "transcode_audio", None)
+    }
+}
+
+fn extract_audio_node(status: NodeStatus) -> PlanNode {
+    PlanNode {
+        operation_payload: json!({
+            "type": "extract_audio",
+            "target_codec": "opus",
+            "container": "ogg",
+            "source_media_snapshot_id": 42
+        }),
+        observed_state: Some(json!({
+            "selected_audio_stream_count": 1
+        })),
+        ..node(status, "extract_audio", None)
+    }
+}
+
 fn remux_node(status: NodeStatus) -> PlanNode {
     PlanNode {
         operation_payload: json!({
@@ -198,6 +230,42 @@ fn transcode_video_blocked_node_maps_to_blocked_check() {
     assert_eq!(
         report.checks[0].execution_eligibility,
         crate::ExecutionEligibility::Blocked
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn transcode_audio_planned_node_maps_to_supported_check() {
+    let report =
+        generate_compliance_report(&plan(vec![transcode_audio_node(NodeStatus::Planned)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
+    assert_eq!(report.checks[0].compliance_kind, "transcode_audio");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Supported
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdatePlanned
+    );
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn extract_audio_planned_node_maps_to_supported_check() {
+    let report =
+        generate_compliance_report(&plan(vec![extract_audio_node(NodeStatus::Planned)])).unwrap();
+
+    assert_eq!(report.summary.status, crate::ReportStatus::Noncompliant);
+    assert_eq!(report.checks[0].compliance_kind, "extract_audio");
+    assert_eq!(
+        report.checks[0].execution_eligibility,
+        crate::ExecutionEligibility::Supported
+    );
+    assert_eq!(
+        report.checks[0].issue_action_hint,
+        crate::IssueActionHint::CreateOrUpdatePlanned
     );
     assert!(report.diagnostics.is_empty());
 }

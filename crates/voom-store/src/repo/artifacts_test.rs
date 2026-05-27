@@ -2,7 +2,7 @@ use super::*;
 
 use serde_json::json;
 use time::OffsetDateTime;
-use voom_core::{FileLocationId, FileVersionId};
+use voom_core::{FileAssetId, FileLocationId, FileVersionId};
 
 use crate::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
@@ -87,6 +87,18 @@ async fn create_staged_handle(
     let mut input = sample_new_handle();
     input.file_version_id = Some(source_version_id);
     repo.create_handle(input).await.unwrap()
+}
+
+async fn source_asset_id(
+    identity: &SqliteIdentityRepo,
+    source_version_id: FileVersionId,
+) -> FileAssetId {
+    identity
+        .get_file_version(source_version_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id
 }
 
 #[tokio::test]
@@ -1223,6 +1235,219 @@ async fn committed_record_rejects_retired_result_file_version() {
     tx.commit().await.unwrap();
 
     assert!(matches!(err, voom_core::VoomError::Conflict(_)));
+}
+
+#[tokio::test]
+async fn sidecar_commit_helper_links_staged_version_to_source_and_finalizes_pending_record() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let worker_id = verification_worker(&pool).await;
+    let (source_version_id, _source_location_id) = source_version_and_location(&pool).await;
+    let source_asset_id = source_asset_id(&identity, source_version_id).await;
+    let handle = create_staged_handle(&repo, source_version_id).await;
+    let staging_location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/audio.ogg".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            successful_verification(
+                handle.id,
+                staging_location.id,
+                worker_id,
+                &staging_location.value,
+                "sidecar",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let pending = repo
+        .create_pending_commit_in_tx(
+            &mut tx,
+            pending_commit(
+                handle.id,
+                source_version_id,
+                verification.id,
+                "/media/movie.eng.opus.ogg",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let committed = repo
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                target_path: "/media/movie.eng.opus.ogg".to_owned(),
+                content_hash: "sidecar-hash".to_owned(),
+                size_bytes: 2048,
+                observed_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(2),
+                finished_at: OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(3),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        committed.commit_record.state,
+        ArtifactCommitState::Committed
+    );
+    assert_eq!(
+        committed.commit_record.result_file_version_id,
+        Some(committed.file_version_id)
+    );
+    assert_eq!(
+        committed.commit_record.result_file_location_id,
+        Some(committed.file_location_id)
+    );
+    assert_eq!(committed.commit_record.promotion_started_at, None);
+
+    let sidecar_version = identity
+        .get_file_version(committed.file_version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(sidecar_version.file_asset_id, source_asset_id);
+    assert_eq!(sidecar_version.file_asset_id, committed.file_asset_id);
+    assert_eq!(sidecar_version.produced_by, ProducedBy::StagedCommit);
+    assert_eq!(
+        sidecar_version.produced_from_version_id,
+        Some(source_version_id)
+    );
+
+    let locations = identity
+        .list_file_locations_by_version(committed.file_version_id)
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].id, committed.file_location_id);
+    assert_eq!(locations[0].kind, FileLocationKind::LocalPath);
+    assert_eq!(locations[0].value, "/media/movie.eng.opus.ogg");
+}
+
+#[tokio::test]
+async fn sidecar_commit_helper_requires_existing_pending_lineage_record() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let worker_id = verification_worker(&pool).await;
+    let (source_version_id, _source_location_id) = source_version_and_location(&pool).await;
+    let handle = create_staged_handle(&repo, source_version_id).await;
+    let staging_location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/audio-no-pending.ogg".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let _verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            successful_verification(
+                handle.id,
+                staging_location.id,
+                worker_id,
+                &staging_location.value,
+                "sidecar-no-pending",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let err = repo
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: voom_core::ids::ArtifactCommitRecordId(404),
+                target_path: "/media/no-pending.opus.ogg".to_owned(),
+                content_hash: "sidecar-no-pending-hash".to_owned(),
+                size_bytes: 2048,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap_err();
+    tx.commit().await.unwrap();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn sidecar_commit_helper_requires_target_path_from_commit_path() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteArtifactRepo::new(pool.clone());
+    let worker_id = verification_worker(&pool).await;
+    let (source_version_id, _source_location_id) = source_version_and_location(&pool).await;
+    let handle = create_staged_handle(&repo, source_version_id).await;
+    let staging_location = repo
+        .record_location(NewArtifactLocation {
+            artifact_handle_id: handle.id,
+            kind: "staging".to_owned(),
+            value: "/staging/audio-target-mismatch.ogg".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let verification = repo
+        .record_verification_in_tx(
+            &mut tx,
+            successful_verification(
+                handle.id,
+                staging_location.id,
+                worker_id,
+                &staging_location.value,
+                "sidecar-target-mismatch",
+                1,
+            ),
+        )
+        .await
+        .unwrap();
+    let pending = repo
+        .create_pending_commit_in_tx(
+            &mut tx,
+            pending_commit(
+                handle.id,
+                source_version_id,
+                verification.id,
+                "/media/expected.opus.ogg",
+            ),
+        )
+        .await
+        .unwrap();
+
+    let err = repo
+        .record_verified_sidecar_commit_rows_in_tx(
+            &mut tx,
+            NewSidecarArtifactCommit {
+                commit_record_id: pending.id,
+                target_path: "/media/other.opus.ogg".to_owned(),
+                content_hash: "sidecar-target-mismatch-hash".to_owned(),
+                size_bytes: 2048,
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                finished_at: OffsetDateTime::UNIX_EPOCH,
+            },
+        )
+        .await
+        .unwrap_err();
+    tx.commit().await.unwrap();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
 }
 
 fn successful_verification(

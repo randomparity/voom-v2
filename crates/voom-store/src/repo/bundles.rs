@@ -16,6 +16,7 @@ use super::common::{i64_from_u64, iso8601, map_row_err, parse_iso8601, u64_from_
 pub enum BundleMemberRole {
     PrimaryVideo,
     CommentaryAudio,
+    ExternalAudio,
     ExternalSubtitle,
     Poster,
     Nfo,
@@ -31,6 +32,7 @@ impl BundleMemberRole {
         match self {
             Self::PrimaryVideo => "primary_video",
             Self::CommentaryAudio => "commentary_audio",
+            Self::ExternalAudio => "external_audio",
             Self::ExternalSubtitle => "external_subtitle",
             Self::Poster => "poster",
             Self::Nfo => "nfo",
@@ -45,6 +47,7 @@ impl BundleMemberRole {
         match s {
             "primary_video" => Ok(Self::PrimaryVideo),
             "commentary_audio" => Ok(Self::CommentaryAudio),
+            "external_audio" => Ok(Self::ExternalAudio),
             "external_subtitle" => Ok(Self::ExternalSubtitle),
             "poster" => Ok(Self::Poster),
             "nfo" => Ok(Self::Nfo),
