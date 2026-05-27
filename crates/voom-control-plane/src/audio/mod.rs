@@ -66,6 +66,19 @@ pub struct ExecuteTranscodeAudioReport {
     pub result_media_snapshot_id: MediaSnapshotId,
     pub staging_path: PathBuf,
     pub target_path: PathBuf,
+    pub commit_recovery_required: Option<TranscodePostCommitRecoveryReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TranscodePostCommitRecoveryReport {
+    pub recovery_reason: String,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub result_file_version_id: FileVersionId,
+    pub result_file_location_id: FileLocationId,
+    pub result_media_snapshot_id: Option<MediaSnapshotId>,
+    pub target_path: PathBuf,
+    pub error_code: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -286,15 +299,36 @@ async fn commit_verified_transcode_audio(
     let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
         VoomError::Internal("committed audio transcode missing result_file_location_id".to_owned())
     })?;
-    let result_snapshot = commit::record_transcode_result_snapshot_with_dispatcher(
+    let result_snapshot = match commit::record_transcode_result_snapshot_with_dispatcher(
         cp,
         result_file_version_id,
         &request.target_path,
         &request.result,
         result_probe,
     )
-    .await?;
-    events::record_transcode_succeeded(
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return Ok(transcode_report_after_commit(
+                &request,
+                &verified,
+                committed.commit_record_id,
+                result_file_version_id,
+                result_file_location_id,
+                None,
+                Some(transcode_post_commit_recovery(
+                    committed.commit_record_id,
+                    result_file_version_id,
+                    result_file_location_id,
+                    None,
+                    request.target_path.clone(),
+                    &err,
+                )),
+            ));
+        }
+    };
+    if let Err(err) = events::record_transcode_succeeded(
         cp,
         &request.input,
         request.source_location_id,
@@ -302,8 +336,46 @@ async fn commit_verified_transcode_audio(
         request.staged.artifact_location_id,
         &request.result,
     )
-    .await?;
-    Ok(ExecuteTranscodeAudioReport {
+    .await
+    {
+        return Ok(transcode_report_after_commit(
+            &request,
+            &verified,
+            committed.commit_record_id,
+            result_file_version_id,
+            result_file_location_id,
+            Some(result_snapshot.id),
+            Some(transcode_post_commit_recovery(
+                committed.commit_record_id,
+                result_file_version_id,
+                result_file_location_id,
+                Some(result_snapshot.id),
+                request.target_path.clone(),
+                &err,
+            )),
+        ));
+    }
+    Ok(transcode_report_after_commit(
+        &request,
+        &verified,
+        committed.commit_record_id,
+        result_file_version_id,
+        result_file_location_id,
+        Some(result_snapshot.id),
+        None,
+    ))
+}
+
+fn transcode_report_after_commit(
+    request: &TranscodeCommitRequest,
+    verified: &crate::artifact::verify::VerifyArtifactReport,
+    commit_record_id: ArtifactCommitRecordId,
+    result_file_version_id: FileVersionId,
+    result_file_location_id: FileLocationId,
+    result_media_snapshot_id: Option<MediaSnapshotId>,
+    recovery: Option<TranscodePostCommitRecoveryReport>,
+) -> ExecuteTranscodeAudioReport {
+    ExecuteTranscodeAudioReport {
         job_id: request.input.job_id,
         ticket_id: request.input.ticket_id,
         lease_id: request.input.lease_id,
@@ -312,13 +384,34 @@ async fn commit_verified_transcode_audio(
         staged_artifact_handle_id: request.staged.artifact_handle_id,
         staged_artifact_location_id: request.staged.artifact_location_id,
         verification_id: verified.verification_id,
-        commit_record_id: committed.commit_record_id,
+        commit_record_id,
         result_file_version_id,
         result_file_location_id,
-        result_media_snapshot_id: result_snapshot.id,
-        staging_path: request.staging_path,
-        target_path: request.target_path,
-    })
+        result_media_snapshot_id: result_media_snapshot_id.unwrap_or(MediaSnapshotId(0)),
+        staging_path: request.staging_path.clone(),
+        target_path: request.target_path.clone(),
+        commit_recovery_required: recovery,
+    }
+}
+
+fn transcode_post_commit_recovery(
+    commit_record_id: ArtifactCommitRecordId,
+    result_file_version_id: FileVersionId,
+    result_file_location_id: FileLocationId,
+    result_media_snapshot_id: Option<MediaSnapshotId>,
+    target_path: PathBuf,
+    err: &VoomError,
+) -> TranscodePostCommitRecoveryReport {
+    TranscodePostCommitRecoveryReport {
+        recovery_reason: "audio transcode post-commit reporting failed".to_owned(),
+        commit_record_id,
+        result_file_version_id,
+        result_file_location_id,
+        result_media_snapshot_id,
+        target_path,
+        error_code: err.error_code().as_str(),
+        message: err.to_string(),
+    }
 }
 
 struct TranscodeCommitRequest {
@@ -526,9 +619,6 @@ fn ensure_extract_commit_succeeded(
     report: &commit::CommitAudioExtractSidecarReport,
 ) -> Result<(), VoomError> {
     if let Some(recovery) = &report.recovery_required {
-        if recovery.target_exists {
-            return Ok(());
-        }
         return Err(VoomError::CommitFailure(format!(
             "audio extraction sidecar commit {} requires recovery: {} ({})",
             report.commit_record_id, recovery.message, recovery.error_code

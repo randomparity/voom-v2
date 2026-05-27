@@ -98,6 +98,39 @@ fn extract_audio_shape_blocks_unknown_commentary_role() {
     );
 }
 
+#[test]
+fn audio_and_filter_false_branch_beats_later_missing_fact() {
+    let mut stream = audio_fact(None);
+    stream.language = Some("jpn".to_owned());
+    let filter = TrackFilter::And {
+        filters: vec![
+            TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            TrackFilter::Commentary,
+        ],
+    };
+
+    assert_eq!(evaluate_audio_filter(&filter, &stream), Ok(false));
+}
+
+#[test]
+fn audio_or_filter_does_not_mask_unsupported_selector() {
+    let filter = TrackFilter::Or {
+        filters: vec![
+            TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            TrackFilter::Font,
+        ],
+    };
+
+    assert_eq!(
+        evaluate_audio_filter(&filter, &audio_fact(Some(false))),
+        Err(AudioPlanningBlock::UnsupportedSelector)
+    );
+}
+
 fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
         snapshot_stream_id: "stream-1".to_owned(),

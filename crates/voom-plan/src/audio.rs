@@ -223,6 +223,16 @@ pub fn evaluate_audio_filter(
     filter: &TrackFilter,
     stream: &SnapshotAudioStreamFact,
 ) -> Result<bool, AudioPlanningBlock> {
+    if audio_filter_has_unsupported_selector(filter) {
+        return Err(AudioPlanningBlock::UnsupportedSelector);
+    }
+    evaluate_supported_audio_filter(filter, stream)
+}
+
+fn evaluate_supported_audio_filter(
+    filter: &TrackFilter,
+    stream: &SnapshotAudioStreamFact,
+) -> Result<bool, AudioPlanningBlock> {
     match filter {
         TrackFilter::LanguageIn { values } => {
             let language = stream
@@ -256,18 +266,27 @@ pub fn evaluate_audio_filter(
                 .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(title.contains(value))
         }
-        TrackFilter::Not { inner } => Ok(!evaluate_audio_filter(inner, stream)?),
+        TrackFilter::Not { inner } => Ok(!evaluate_supported_audio_filter(inner, stream)?),
         TrackFilter::And { filters } => {
-            let mut matched = true;
+            let mut insufficient = false;
             for filter in filters {
-                matched = evaluate_audio_filter(filter, stream)? && matched;
+                match evaluate_supported_audio_filter(filter, stream) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(false),
+                    Err(AudioPlanningBlock::InsufficientSnapshotFacts) => insufficient = true,
+                    Err(err) => return Err(err),
+                }
             }
-            Ok(matched)
+            if insufficient {
+                Err(AudioPlanningBlock::InsufficientSnapshotFacts)
+            } else {
+                Ok(true)
+            }
         }
         TrackFilter::Or { filters } => {
             let mut insufficient = false;
             for filter in filters {
-                match evaluate_audio_filter(filter, stream) {
+                match evaluate_supported_audio_filter(filter, stream) {
                     Ok(true) => return Ok(true),
                     Ok(false) => {}
                     Err(AudioPlanningBlock::InsufficientSnapshotFacts) => insufficient = true,
@@ -283,6 +302,23 @@ pub fn evaluate_audio_filter(
         TrackFilter::Font | TrackFilter::TitleMatches { .. } => {
             Err(AudioPlanningBlock::UnsupportedSelector)
         }
+    }
+}
+
+fn audio_filter_has_unsupported_selector(filter: &TrackFilter) -> bool {
+    match filter {
+        TrackFilter::Font | TrackFilter::TitleMatches { .. } => true,
+        TrackFilter::Not { inner } => audio_filter_has_unsupported_selector(inner),
+        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+            filters.iter().any(audio_filter_has_unsupported_selector)
+        }
+        TrackFilter::LanguageIn { .. }
+        | TrackFilter::CodecIn { .. }
+        | TrackFilter::Channels { .. }
+        | TrackFilter::Commentary
+        | TrackFilter::Forced
+        | TrackFilter::Default
+        | TrackFilter::TitleContains { .. } => false,
     }
 }
 

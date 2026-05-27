@@ -143,7 +143,7 @@ async fn extract_failure_records_audio_failed_event() {
 }
 
 #[test]
-fn committed_extract_recovery_is_terminal_success_with_recovery() {
+fn committed_extract_recovery_with_target_is_not_reported_as_success() {
     let report = commit::CommitAudioExtractSidecarReport {
         commit_record_id: ArtifactCommitRecordId(9),
         result_file_version_id: FileVersionId(0),
@@ -169,7 +169,47 @@ fn committed_extract_recovery_is_terminal_success_with_recovery() {
         }),
     };
 
-    ensure_extract_commit_succeeded(&report).unwrap();
+    let err = ensure_extract_commit_succeeded(&report).unwrap_err();
+
+    assert_eq!(err.error_code(), voom_core::ErrorCode::CommitFailure);
+    assert!(err.to_string().contains("requires recovery"));
+}
+
+#[tokio::test]
+async fn transcode_post_commit_probe_failure_returns_recovery_report() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let input = transcode_input_for_source(&source, &dir);
+
+    let report = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingTranscodeDispatcher {
+            output_bytes: b"transcoded".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &FailingProbeDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.commit_record_id.0 > 0);
+    assert!(report.result_file_version_id.0 > 0);
+    assert!(report.result_file_location_id.0 > 0);
+    assert_eq!(report.result_media_snapshot_id.0, 0);
+    let recovery = report.commit_recovery_required.unwrap();
+    assert_eq!(recovery.commit_record_id, report.commit_record_id);
+    assert_eq!(
+        recovery.result_file_version_id,
+        report.result_file_version_id
+    );
+    assert_eq!(
+        recovery.result_file_location_id,
+        report.result_file_location_id
+    );
+    assert_eq!(recovery.result_media_snapshot_id, None);
+    assert_event_count(&cp, "artifact.audio_transcode_failed", 0).await;
+    assert_event_count(&cp, "artifact.audio_transcode_succeeded", 0).await;
 }
 
 async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
@@ -414,6 +454,29 @@ impl VerifyArtifactDispatcher for MismatchedVerifyDispatcher {
     }
 }
 
+struct SuccessfulVerifyDispatcher;
+
+#[async_trait]
+impl VerifyArtifactDispatcher for SuccessfulVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: request.expected.size_bytes,
+                content_hash: request.expected.content_hash,
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
+
 struct UncalledProbeDispatcher;
 
 #[async_trait]
@@ -424,6 +487,19 @@ impl commit::AudioResultProbeDispatcher for UncalledProbeDispatcher {
         _request: voom_worker_protocol::ProbeFileRequest,
     ) -> Result<commit::ProbedAudioResult, VoomError> {
         panic!("probe dispatcher should not be called")
+    }
+}
+
+struct FailingProbeDispatcher;
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for FailingProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        _cp: &crate::ControlPlane,
+        _request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        Err(VoomError::Internal("probe failed after commit".to_owned()))
     }
 }
 
