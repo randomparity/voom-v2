@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tempfile::{NamedTempFile, TempDir};
 use time::OffsetDateTime;
 use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::workflow::ticket_payload::WorkflowTicketPayload;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;
@@ -166,6 +167,71 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     insta::assert_json_snapshot!(
         "execute_scanned_remux_existing_target_outputs_failure_envelope",
         json
+    );
+}
+
+#[tokio::test]
+async fn execute_audio_uses_cli_staging_and_output_overrides() {
+    let seeded = seed_scanned_audio().await;
+    let pool = voom_store::connect(&seeded.url).await.unwrap();
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
+        pool.clone(),
+        std::sync::Arc::new(voom_core::SystemClock),
+    )
+    .await
+    .unwrap();
+    let mut provider = TestWorkerLaunch::start(
+        &cp,
+        TestWorkerConfig::synthetic(
+            cargo_bin_or_build("voom-fakes", "fake-transcoder").unwrap(),
+            "cli-compliance-audio",
+            "cli-compliance-audio-secret",
+            "transcode_audio",
+        ),
+    )
+    .await
+    .unwrap();
+    let root = seeded.dir.path().canonicalize().unwrap();
+    let staging_root = root.join("audio-stage");
+    let output_dir = root.join("audio-out");
+    let ffprobe_bin = fake_ffprobe_bin(&root);
+
+    let output = compliance_execute_command_with_dirs(
+        &seeded.url,
+        seeded.version_id,
+        seeded.input_id,
+        &staging_root,
+        &output_dir,
+        &ffprobe_bin,
+    );
+    provider.shutdown().unwrap();
+
+    let json = envelope(output.stdout);
+    assert!(
+        matches!(output.status.code(), Some(0 | 2)),
+        "stdout={} stderr={}",
+        serde_json::to_string_pretty(&json).unwrap(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let ticket_payload: String =
+        sqlx::query_scalar("SELECT payload FROM tickets WHERE kind = ? ORDER BY id ASC LIMIT 1")
+            .bind("synthetic.workflow.operation.transcode_audio")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let payload = serde_json::from_str(&ticket_payload).unwrap();
+    let workflow_payload = WorkflowTicketPayload::parse_ticket(
+        "synthetic.workflow.operation.transcode_audio",
+        payload,
+    )
+    .unwrap();
+    assert_eq!(
+        workflow_payload.rendered_payload["staging_root"],
+        staging_root.display().to_string()
+    );
+    assert_eq!(
+        workflow_payload.rendered_payload["target_dir"],
+        output_dir.display().to_string()
     );
 }
 
@@ -349,6 +415,110 @@ async fn seed_scanned_remux() -> Seeded {
         version_id: created.version.id.0,
         input_id: input.input_set_id.0,
     }
+}
+
+async fn seed_scanned_audio() -> Seeded {
+    let tmp = NamedTempFile::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = voom_control_plane::ControlPlane::open_with_pool(
+        pool,
+        std::sync::Arc::new(voom_core::SystemClock),
+    )
+    .await
+    .unwrap();
+    let created = cp
+        .create_policy_document(
+            "audio-transcode-extract",
+            &load_policy_fixture("fixtures/policies/audio-transcode-extract.voom").unwrap(),
+        )
+        .await
+        .unwrap();
+    let source = root.join("Movie.mkv");
+    let source_bytes = b"audio source bytes";
+    std::fs::write(&source, source_bytes).unwrap();
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: source.display().to_string(),
+                content_hash: blake3_checksum(source_bytes),
+                size_bytes: u64::try_from(source_bytes.len()).unwrap(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id, ..
+    } = outcome
+    else {
+        panic!("seed_scanned_audio should create a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            audio_snapshot_payload(),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "cli-scan-audio".to_owned(),
+            file_version_id,
+            media_snapshot_id: snapshot.id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    Seeded {
+        _tmp: tmp,
+        dir,
+        url,
+        version_id: created.version.id.0,
+        input_id: input.input_set_id.0,
+    }
+}
+
+fn audio_snapshot_payload() -> Value {
+    json!({
+        "streams": [
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "disposition": {"default": true}
+            },
+            audio_stream_payload("audio-1", 1, "Main", false),
+            audio_stream_payload("audio-2", 2, "Commentary", true)
+        ]
+    })
+}
+
+fn audio_stream_payload(id: &str, index: u64, title: &str, commentary: bool) -> Value {
+    json!({
+        "id": id,
+        "index": index,
+        "kind": "audio",
+        "codec_name": "opus",
+        "language": "eng",
+        "title": title,
+        "channels": 2,
+        "disposition": {
+            "default": false,
+            "forced": false,
+            "commentary": commentary
+        }
+    })
 }
 
 async fn seed_with_stale_policy() -> Seeded {
