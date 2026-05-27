@@ -865,11 +865,26 @@ async fn scanned_snapshot_with_audio(
                         "kind": "audio",
                         "codec_name": "opus",
                         "language": "eng",
+                        "title": "Main",
                         "channels": 2,
                         "disposition": {
                             "default": false,
                             "forced": false,
                             "commentary": false
+                        }
+                    },
+                    {
+                        "id": "audio-2",
+                        "index": 2,
+                        "kind": "audio",
+                        "codec_name": "opus",
+                        "language": "eng",
+                        "title": "Commentary",
+                        "channels": 2,
+                        "disposition": {
+                            "default": false,
+                            "forced": false,
+                            "commentary": true
                         }
                     }
                 ]

@@ -385,16 +385,14 @@ fn validate_extract_audio_contract(request: &ExtractAudioRequest) -> Result<(), 
 }
 
 async fn validate_output_missing(output_path: &Path) -> Result<(), TranscodeVideoError> {
-    if tokio::fs::try_exists(output_path)
-        .await
-        .map_err(|err| config_invalid("output_path", err.to_string()))?
-    {
-        return Err(config_invalid(
+    match tokio::fs::symlink_metadata(output_path).await {
+        Ok(_) => Err(config_invalid(
             "output_path",
             "output path already exists".to_owned(),
-        ));
+        )),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(config_invalid("output_path", err.to_string())),
     }
-    Ok(())
 }
 
 fn validate_staging_path(

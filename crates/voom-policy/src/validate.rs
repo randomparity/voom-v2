@@ -1209,11 +1209,17 @@ fn is_valid_track_filter(text: &str) -> bool {
 
     let tokens = words(text);
     match tokens.as_slice() {
-        ["lang" | "language" | "codec", "in", ..] => !list_values(text).is_empty(),
+        ["lang" | "language" | "codec", "in", ..] => {
+            !list_values(text).is_empty() && text_after_list(text).is_some_and(str::is_empty)
+        }
         ["channels", op, value] => is_comparison_op(op) && value.parse::<u64>().is_ok(),
         ["commentary" | "forced" | "default" | "font"] => true,
-        ["title", "contains", ..] => title_filter_value(text, "contains").is_some(),
-        ["title", "matches", ..] => title_filter_value(text, "matches").is_some(),
+        ["title", "contains", ..] => {
+            title_filter_value(text, "contains").is_some_and(is_single_value)
+        }
+        ["title", "matches", ..] => {
+            title_filter_value(text, "matches").is_some_and(is_single_value)
+        }
         _ => false,
     }
 }

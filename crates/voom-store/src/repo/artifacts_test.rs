@@ -1238,7 +1238,7 @@ async fn committed_record_rejects_retired_result_file_version() {
 }
 
 #[tokio::test]
-async fn sidecar_commit_helper_creates_null_parent_staged_version_and_finalizes_pending_record() {
+async fn sidecar_commit_helper_links_staged_version_to_source_and_finalizes_pending_record() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteArtifactRepo::new(pool.clone());
     let identity = SqliteIdentityRepo::new(pool.clone());
@@ -1321,7 +1321,10 @@ async fn sidecar_commit_helper_creates_null_parent_staged_version_and_finalizes_
     assert_ne!(sidecar_version.file_asset_id, source_asset_id);
     assert_eq!(sidecar_version.file_asset_id, committed.file_asset_id);
     assert_eq!(sidecar_version.produced_by, ProducedBy::StagedCommit);
-    assert_eq!(sidecar_version.produced_from_version_id, None);
+    assert_eq!(
+        sidecar_version.produced_from_version_id,
+        Some(source_version_id)
+    );
 
     let locations = identity
         .list_file_locations_by_version(committed.file_version_id)

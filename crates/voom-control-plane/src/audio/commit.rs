@@ -3,13 +3,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::json;
 use tokio::fs;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
 };
-use voom_events::payload::ArtifactStagedPayload;
+use voom_events::payload::{
+    ArtifactCommitCompletedPayload, ArtifactCommitRecoveryRequiredPayload,
+    ArtifactCommitStartedPayload, ArtifactStagedPayload,
+};
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
 use voom_store::repo::artifacts::{
@@ -19,8 +23,8 @@ use voom_store::repo::artifacts::{
 use voom_store::repo::bundles::{BundleMemberRole, BundleRepo, NewBundleMember};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{
-    AudioObservedFacts, ExpectedFileFacts, ExtractAudioResult, ProbeFileRequest, ProbeFileResult,
-    TranscodeAudioResult,
+    AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,
+    ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,
 };
 
 use super::selection::ExtractAudioSelectionPlan;
@@ -59,7 +63,7 @@ pub struct CommitAudioExtractSidecarReport {
     pub recovery_required: Option<AudioExtractRecoveryReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioExtractRecoveryReport {
     pub recovery_reason: String,
     pub commit_record_id: ArtifactCommitRecordId,
@@ -198,7 +202,8 @@ pub(crate) async fn record_transcode_result_snapshot_with_dispatcher(
     let probed = dispatcher.dispatch_result_probe(cp, request).await?;
     verify_probe_facts(&expected, &probed.result)
         .map_err(|err| VoomError::ArtifactChecksumMismatch(err.message().to_owned()))?;
-    let payload = snapshot_with_stream_ids(&probed.result.snapshot)?;
+    let mut payload = snapshot_with_stream_ids(&probed.result.snapshot)?;
+    merge_audio_output_facts(&mut payload, &result.selected_output_streams);
     cp.record_media_snapshot(
         file_version_id,
         Some(probed.worker_id),
@@ -206,6 +211,40 @@ pub(crate) async fn record_transcode_result_snapshot_with_dispatcher(
         cp.clock().now(),
     )
     .await
+}
+
+fn merge_audio_output_facts(payload: &mut serde_json::Value, facts: &[AudioOutputStreamFact]) {
+    let Some(streams) = payload
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for fact in facts {
+        let Some(stream) = streams.iter_mut().find(|stream| {
+            stream.get("id").and_then(serde_json::Value::as_str)
+                == Some(fact.snapshot_stream_id.as_str())
+        }) else {
+            continue;
+        };
+        if let Some(language) = &fact.language {
+            stream["language"] = serde_json::Value::String(language.clone());
+        }
+        if let Some(title) = &fact.title {
+            stream["title"] = serde_json::Value::String(title.clone());
+        }
+        if let Some(channels) = fact.channels {
+            stream["channels"] = serde_json::Value::from(channels);
+        }
+        if let Some(disposition) = &fact.disposition {
+            stream["disposition"]["default"] =
+                serde_json::Value::Bool(disposition.default.unwrap_or(false));
+            stream["disposition"]["forced"] =
+                serde_json::Value::Bool(disposition.forced.unwrap_or(false));
+            stream["disposition"]["commentary"] =
+                serde_json::Value::Bool(disposition.commentary.unwrap_or(false));
+        }
+    }
 }
 
 pub async fn commit_audio_extract_sidecar(
@@ -334,6 +373,22 @@ async fn prepare_sidecar_commit(
             },
         )
         .await?;
+    append_event(
+        &cp.events,
+        &mut tx,
+        SubjectType::ArtifactHandle,
+        Some(input.artifact_handle_id.0),
+        now,
+        Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
+            commit_record_id: record.id.0,
+            artifact_handle_id: input.artifact_handle_id.0,
+            source_file_version_id: input.source_file_version_id.0,
+            verification_id: input.verification_id.0,
+            target_path: input.target_path.display().to_string(),
+            temp_path: temp_path.display().to_string(),
+        }),
+    )
+    .await?;
     commit_tx(tx).await?;
     Ok(PreparedSidecarCommit {
         record,
@@ -407,6 +462,21 @@ async fn finalize_sidecar_commit(
             },
         )
         .await?;
+    append_event(
+        &cp.events,
+        &mut tx,
+        SubjectType::ArtifactHandle,
+        Some(input.artifact_handle_id.0),
+        now,
+        Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
+            commit_record_id: sidecar.commit_record.id.0,
+            artifact_handle_id: input.artifact_handle_id.0,
+            result_file_version_id: sidecar.file_version_id.0,
+            result_file_location_id: sidecar.file_location_id.0,
+            target_path: prepared.target_path.display().to_string(),
+        }),
+    )
+    .await?;
     commit_tx(tx).await?;
     Ok(CommitAudioExtractSidecarReport {
         commit_record_id: sidecar.commit_record.id,
@@ -441,6 +511,23 @@ async fn mark_sidecar_recovery_required(
             "audio sidecar commit failed after durable prepare".to_owned(),
         )
         .await?;
+    append_event(
+        &cp.events,
+        &mut tx,
+        SubjectType::ArtifactHandle,
+        Some(input.artifact_handle_id.0),
+        now,
+        Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
+            commit_record_id: prepared.record.id.0,
+            artifact_handle_id: input.artifact_handle_id.0,
+            target_path: prepared.target_path.display().to_string(),
+            temp_path: prepared.temp_path.display().to_string(),
+            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
+            error_code: err.error_code().as_str().to_owned(),
+            message: err.to_string(),
+        }),
+    )
+    .await?;
     commit_tx(tx).await?;
     let recovery = recovery_report(prepared, input, &err).await;
     Ok(CommitAudioExtractSidecarReport {

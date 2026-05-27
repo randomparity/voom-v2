@@ -1093,10 +1093,15 @@ fn audio_stream(
         "kind": "audio",
         "codec_name": codec,
         "language": language,
+        "title": format!("Audio {index}"),
         "channels": 2
     });
     if let Some(commentary) = commentary {
-        stream["disposition"] = serde_json::json!({ "commentary": commentary });
+        stream["disposition"] = serde_json::json!({
+            "default": false,
+            "forced": false,
+            "commentary": commentary
+        });
     }
     stream
 }

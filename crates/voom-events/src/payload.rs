@@ -481,6 +481,27 @@ pub struct ArtifactAudioStreamPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactAudioDispositionPayload {
+    pub default: Option<bool>,
+    pub forced: Option<bool>,
+    pub commentary: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactAudioOutputStreamPayload {
+    pub snapshot_stream_id: String,
+    pub output_provider_stream_index: u32,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub default: Option<bool>,
+    pub disposition: Option<ArtifactAudioDispositionPayload>,
+    pub channels: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactAudioTranscodeStartedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -527,6 +548,7 @@ pub struct ArtifactAudioTranscodeSucceededPayload {
     pub staging_path: String,
     pub selected_streams: Vec<ArtifactAudioStreamPayload>,
     pub selected_snapshot_stream_ids: Vec<String>,
+    pub selected_output_streams: Vec<ArtifactAudioOutputStreamPayload>,
     pub output_container: String,
     pub output_audio_codecs: Vec<String>,
     pub provider: String,
@@ -546,6 +568,7 @@ pub struct ArtifactAudioTranscodeFailedPayload {
     pub artifact_location_id: Option<u64>,
     pub staging_path: Option<String>,
     pub selected_streams: Vec<ArtifactAudioStreamPayload>,
+    pub selected_output_streams: Vec<ArtifactAudioOutputStreamPayload>,
     pub failure_class: FailureClass,
     pub error_code: String,
     pub message: String,

@@ -2,16 +2,19 @@ use super::*;
 
 use async_trait::async_trait;
 use sqlx::Row;
+use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, BundleId};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
-    ExtractAudioRequest, ExtractAudioResult, TranscodeAudioRequest, TranscodeAudioResult,
-    VerifyArtifactRequest, VerifyArtifactResult,
+    AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest, ExtractAudioResult,
+    TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
+    VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };
 
 #[test]
-fn extract_commit_recovery_required_is_not_reported_as_success() {
+fn extract_commit_recovery_without_target_is_not_reported_as_success() {
     let report = commit::CommitAudioExtractSidecarReport {
         commit_record_id: ArtifactCommitRecordId(9),
         result_file_version_id: FileVersionId(0),
@@ -25,7 +28,7 @@ fn extract_commit_recovery_required_is_not_reported_as_success() {
             source_bundle_id: BundleId(7),
             role: "commentary_audio",
             target_path: PathBuf::from("/tmp/target.ogg"),
-            target_exists: true,
+            target_exists: false,
             temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
             temp_exists: false,
             staging_path: PathBuf::from("/tmp/staged.ogg"),
@@ -82,6 +85,46 @@ async fn transcode_failure_records_audio_failed_event() {
 }
 
 #[tokio::test]
+async fn late_transcode_failure_event_keeps_attempt_context_and_worker_result() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let input = transcode_input_for_source(&source, &dir);
+
+    let err = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingTranscodeDispatcher {
+            output_bytes: b"transcoded".to_vec(),
+        },
+        &MismatchedVerifyDispatcher,
+        &UncalledProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), voom_core::ErrorCode::VerificationFailure);
+    let payload = latest_event_payload(&cp, "artifact.audio_transcode_failed").await;
+    assert_eq!(payload["source_file_version_id"], source.version.0);
+    assert_eq!(payload["source_file_location_id"], source.location.0);
+    assert_eq!(payload["source_media_snapshot_id"], source.snapshot);
+    assert!(payload["artifact_handle_id"].as_u64().is_some());
+    assert!(payload["artifact_location_id"].as_u64().is_some());
+    assert!(
+        payload["staging_path"]
+            .as_str()
+            .unwrap()
+            .contains("voom-audio-stage")
+    );
+    assert_eq!(payload["selected_streams"][0]["snapshot_stream_id"], "a-1");
+    assert_eq!(
+        payload["selected_output_streams"][0]["output_provider_stream_index"],
+        0
+    );
+    assert_eq!(payload["provider"], "ffmpeg");
+    assert_eq!(payload["provider_version"], "test");
+}
+
+#[tokio::test]
 async fn extract_failure_records_audio_failed_event() {
     let (cp, _db) = fixture().await;
     let input = extract_input();
@@ -99,6 +142,36 @@ async fn extract_failure_records_audio_failed_event() {
     assert_event_count(&cp, "artifact.audio_extract_failed", 1).await;
 }
 
+#[test]
+fn committed_extract_recovery_is_terminal_success_with_recovery() {
+    let report = commit::CommitAudioExtractSidecarReport {
+        commit_record_id: ArtifactCommitRecordId(9),
+        result_file_version_id: FileVersionId(0),
+        result_file_location_id: FileLocationId(0),
+        state: ArtifactCommitState::RecoveryRequired,
+        target_path: PathBuf::from("/tmp/target.ogg"),
+        temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
+        recovery_required: Some(commit::AudioExtractRecoveryReport {
+            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
+            commit_record_id: ArtifactCommitRecordId(9),
+            source_bundle_id: BundleId(7),
+            role: "commentary_audio",
+            target_path: PathBuf::from("/tmp/target.ogg"),
+            target_exists: true,
+            temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
+            temp_exists: false,
+            staging_path: PathBuf::from("/tmp/staged.ogg"),
+            staging_exists: true,
+            result_file_version_id: None,
+            result_file_location_id: None,
+            error_code: "CONFLICT",
+            message: "bundle membership conflict".to_owned(),
+        }),
+    };
+
+    ensure_extract_commit_succeeded(&report).unwrap();
+}
+
 async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     let db = tempfile::NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
@@ -112,6 +185,91 @@ async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     .await
     .unwrap();
     (cp, db)
+}
+
+async fn fixture_with_dir() -> (
+    crate::ControlPlane,
+    tempfile::NamedTempFile,
+    tempfile::TempDir,
+) {
+    let (cp, db) = fixture().await;
+    (cp, db, tempfile::TempDir::new().unwrap())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeededAudioSource {
+    version: FileVersionId,
+    location: FileLocationId,
+    snapshot: u64,
+}
+
+async fn seed_audio_source(
+    cp: &crate::ControlPlane,
+    dir: &tempfile::TempDir,
+    bytes: &[u8],
+) -> SeededAudioSource {
+    let source_path = dir.path().join("source.mkv");
+    std::fs::write(&source_path, bytes).unwrap();
+    let outcome = cp
+        .record_discovered_file(
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value: source_path.display().to_string(),
+                content_hash: blake3_checksum(bytes),
+                size_bytes: u64::try_from(bytes.len()).unwrap(),
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+                proof: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let IngestOutcome::NewFileAsset {
+        file_version_id,
+        file_location_id,
+        ..
+    } = outcome
+    else {
+        panic!("seed_audio_source should create a new file asset");
+    };
+    let snapshot = cp
+        .record_media_snapshot(
+            file_version_id,
+            None,
+            serde_json::json!({
+                "container": "mkv",
+                "streams": [
+                    {
+                        "id": "v-1",
+                        "index": 0,
+                        "kind": "video",
+                        "codec_name": "h264"
+                    },
+                    {
+                        "id": "a-1",
+                        "index": 1,
+                        "kind": "audio",
+                        "codec_name": "aac",
+                        "language": "eng",
+                        "title": "Main",
+                        "channels": 2,
+                        "disposition": {
+                            "default": true,
+                            "forced": false,
+                            "commentary": false
+                        }
+                    }
+                ]
+            }),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    SeededAudioSource {
+        version: file_version_id,
+        location: file_location_id,
+        snapshot: snapshot.id.0,
+    }
 }
 
 fn transcode_input() -> ExecuteTranscodeAudioInput {
@@ -130,6 +288,28 @@ fn transcode_input() -> ExecuteTranscodeAudioInput {
         }),
         staging_root: PathBuf::from("/tmp/voom-audio-stage"),
         target_dir: PathBuf::from("/tmp/voom-audio-out"),
+    }
+}
+
+fn transcode_input_for_source(
+    source: &SeededAudioSource,
+    dir: &tempfile::TempDir,
+) -> ExecuteTranscodeAudioInput {
+    ExecuteTranscodeAudioInput {
+        job_id: JobId(1),
+        ticket_id: TicketId(2),
+        lease_id: LeaseId(3),
+        source_file_version_id: source.version,
+        source_location_id: Some(source.location),
+        operation_payload: serde_json::json!({
+            "type": "transcode_audio",
+            "target_codec": "aac",
+            "container": "mkv",
+            "source_media_snapshot_id": source.snapshot,
+            "filter": null
+        }),
+        staging_root: dir.path().join("voom-audio-stage"),
+        target_dir: dir.path().join("voom-audio-out"),
     }
 }
 
@@ -161,6 +341,17 @@ async fn assert_event_count(cp: &crate::ControlPlane, kind: &str, expected: i64)
         .unwrap();
     let count: i64 = row.try_get("count").unwrap();
     assert_eq!(count, expected);
+}
+
+async fn latest_event_payload(cp: &crate::ControlPlane, kind: &str) -> serde_json::Value {
+    let row =
+        sqlx::query("SELECT payload FROM events WHERE kind = ? ORDER BY event_id DESC LIMIT 1")
+            .bind(kind)
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let payload: String = row.try_get("payload").unwrap();
+    serde_json::from_str(&payload).unwrap()
 }
 
 struct UncalledTranscodeDispatcher;
@@ -200,6 +391,29 @@ impl VerifyArtifactDispatcher for UncalledVerifyDispatcher {
     }
 }
 
+struct MismatchedVerifyDispatcher;
+
+#[async_trait]
+impl VerifyArtifactDispatcher for MismatchedVerifyDispatcher {
+    async fn dispatch_verify_artifact(
+        &self,
+        _worker_id: voom_core::WorkerId,
+        _request: VerifyArtifactRequest,
+    ) -> Result<VerifyArtifactResult, crate::artifact::worker::VerifyWorkerError> {
+        Ok(VerifyArtifactResult {
+            status: VerifyArtifactStatus::Verified,
+            provider: "test-verify".to_owned(),
+            provider_version: "test".to_owned(),
+            observed: VerifyArtifactObservedFacts {
+                size_bytes: 1,
+                content_hash: "blake3:mismatch".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        })
+    }
+}
+
 struct UncalledProbeDispatcher;
 
 #[async_trait]
@@ -211,4 +425,68 @@ impl commit::AudioResultProbeDispatcher for UncalledProbeDispatcher {
     ) -> Result<commit::ProbedAudioResult, VoomError> {
         panic!("probe dispatcher should not be called")
     }
+}
+
+struct WritingTranscodeDispatcher {
+    output_bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl TranscodeAudioDispatcher for WritingTranscodeDispatcher {
+    async fn dispatch_transcode_audio(
+        &self,
+        request: TranscodeAudioRequest,
+    ) -> Result<TranscodeAudioResult, VoomError> {
+        tokio::fs::write(&request.output.path, &self.output_bytes)
+            .await
+            .unwrap();
+        let output_hash = blake3_checksum(&self.output_bytes);
+        Ok(TranscodeAudioResult {
+            status: voom_worker_protocol::TranscodeAudioStatus::Transcoded,
+            provider: "ffmpeg".to_owned(),
+            provider_version: "test".to_owned(),
+            input_pre: observed(
+                request.input.expected.size_bytes,
+                &request.input.expected.content_hash,
+            ),
+            input_post: observed(
+                request.input.expected.size_bytes,
+                &request.input.expected.content_hash,
+            ),
+            output: observed(
+                u64::try_from(self.output_bytes.len()).unwrap(),
+                &output_hash,
+            ),
+            output_container: "mkv".to_owned(),
+            selected_snapshot_stream_ids: vec!["a-1".to_owned()],
+            output_audio_codecs: vec!["aac".to_owned()],
+            selected_output_streams: vec![AudioOutputStreamFact {
+                snapshot_stream_id: "a-1".to_owned(),
+                output_provider_stream_index: 0,
+                codec: "aac".to_owned(),
+                language: Some("eng".to_owned()),
+                title: Some("Main".to_owned()),
+                default: Some(true),
+                disposition: Some(voom_worker_protocol::AudioDispositionFact {
+                    default: Some(true),
+                    forced: Some(false),
+                    commentary: Some(false),
+                }),
+                channels: Some(2),
+            }],
+        })
+    }
+}
+
+fn observed(size_bytes: u64, content_hash: &str) -> AudioObservedFacts {
+    AudioObservedFacts {
+        size_bytes,
+        content_hash: content_hash.to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
+}
+
+fn blake3_checksum(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }

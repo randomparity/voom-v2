@@ -4,15 +4,19 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, VoomError,
 };
 use voom_events::payload::{
-    ArtifactAudioExtractFailedPayload, ArtifactAudioExtractProgressPayload,
-    ArtifactAudioExtractStartedPayload, ArtifactAudioExtractSucceededPayload,
+    ArtifactAudioDispositionPayload, ArtifactAudioExtractFailedPayload,
+    ArtifactAudioExtractProgressPayload, ArtifactAudioExtractStartedPayload,
+    ArtifactAudioExtractSucceededPayload, ArtifactAudioOutputStreamPayload,
     ArtifactAudioStreamPayload, ArtifactAudioTranscodeFailedPayload,
     ArtifactAudioTranscodeProgressPayload, ArtifactAudioTranscodeStartedPayload,
     ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
-use voom_worker_protocol::{AudioStreamRef, ExtractAudioResult, PercentBps, TranscodeAudioResult};
+use voom_worker_protocol::{
+    AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioResult, PercentBps,
+    TranscodeAudioResult,
+};
 
 use super::selection::{ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan};
 use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
@@ -158,23 +162,19 @@ pub async fn record_transcode_failed(
         cp,
         subject_type,
         subject_id,
-        Event::ArtifactAudioTranscodeFailed(ArtifactAudioTranscodeFailedPayload {
-            job_id: event.input.job_id.0,
-            ticket_id: event.input.ticket_id.0,
-            lease_id: Some(event.input.lease_id.0),
-            source_file_version_id: event.input.source_file_version_id.0,
-            source_file_location_id: event.source_location_id.map(|id| id.0),
-            source_media_snapshot_id: event.source_media_snapshot_id,
-            artifact_handle_id: event.artifact_handle_id.map(|id| id.0),
-            artifact_location_id: event.artifact_location_id.map(|id| id.0),
-            staging_path: event.staging_path.map(|path| path.display().to_string()),
-            selected_streams: event.selected_streams,
-            failure_class: failure_class_for_error(event.error),
-            error_code: event.error.code().to_owned(),
-            message: event.error.to_string(),
-            provider: event.result.map(|result| result.provider.clone()),
-            provider_version: event.result.map(|result| result.provider_version.clone()),
-        }),
+        Event::ArtifactAudioTranscodeFailed(transcode_failed_payload(
+            TranscodeFailedEventPayloadInput {
+                input: event.input,
+                source_location_id: event.source_location_id,
+                source_media_snapshot_id: event.source_media_snapshot_id,
+                artifact_handle_id: event.artifact_handle_id,
+                artifact_location_id: event.artifact_location_id,
+                staging_path: event.staging_path.map(|path| path.display().to_string()),
+                selected_streams: event.selected_streams,
+                result: event.result,
+                error: event.error,
+            },
+        )),
     )
     .await
 }
@@ -388,10 +388,49 @@ fn transcode_succeeded_payload(
         staging_path,
         selected_streams,
         selected_snapshot_stream_ids: result.selected_snapshot_stream_ids.clone(),
+        selected_output_streams: output_stream_payloads(&result.selected_output_streams),
         output_container: result.output_container.clone(),
         output_audio_codecs: result.output_audio_codecs.clone(),
         provider: result.provider.clone(),
         provider_version: result.provider_version.clone(),
+    }
+}
+
+struct TranscodeFailedEventPayloadInput<'a> {
+    input: &'a ExecuteTranscodeAudioInput,
+    source_location_id: Option<FileLocationId>,
+    source_media_snapshot_id: Option<u64>,
+    artifact_handle_id: Option<ArtifactHandleId>,
+    artifact_location_id: Option<ArtifactLocationId>,
+    staging_path: Option<String>,
+    selected_streams: Vec<ArtifactAudioStreamPayload>,
+    result: Option<&'a TranscodeAudioResult>,
+    error: &'a VoomError,
+}
+
+fn transcode_failed_payload(
+    event: TranscodeFailedEventPayloadInput<'_>,
+) -> ArtifactAudioTranscodeFailedPayload {
+    ArtifactAudioTranscodeFailedPayload {
+        job_id: event.input.job_id.0,
+        ticket_id: event.input.ticket_id.0,
+        lease_id: Some(event.input.lease_id.0),
+        source_file_version_id: event.input.source_file_version_id.0,
+        source_file_location_id: event.source_location_id.map(|id| id.0),
+        source_media_snapshot_id: event.source_media_snapshot_id,
+        artifact_handle_id: event.artifact_handle_id.map(|id| id.0),
+        artifact_location_id: event.artifact_location_id.map(|id| id.0),
+        staging_path: event.staging_path,
+        selected_streams: event.selected_streams,
+        selected_output_streams: event
+            .result
+            .map(|result| output_stream_payloads(&result.selected_output_streams))
+            .unwrap_or_default(),
+        failure_class: failure_class_for_error(event.error),
+        error_code: event.error.code().to_owned(),
+        message: event.error.to_string(),
+        provider: event.result.map(|result| result.provider.clone()),
+        provider_version: event.result.map(|result| result.provider_version.clone()),
     }
 }
 
@@ -477,7 +516,7 @@ async fn append_audio_event(
     commit_tx(tx).await
 }
 
-fn stream_payloads(streams: &[AudioStreamRef]) -> Vec<ArtifactAudioStreamPayload> {
+pub(crate) fn stream_payloads(streams: &[AudioStreamRef]) -> Vec<ArtifactAudioStreamPayload> {
     streams.iter().map(stream_payload).collect()
 }
 
@@ -485,6 +524,33 @@ fn stream_payload(stream: &AudioStreamRef) -> ArtifactAudioStreamPayload {
     ArtifactAudioStreamPayload {
         snapshot_stream_id: stream.snapshot_stream_id.clone(),
         provider_stream_index: stream.provider_stream_index,
+    }
+}
+
+fn output_stream_payloads(
+    streams: &[AudioOutputStreamFact],
+) -> Vec<ArtifactAudioOutputStreamPayload> {
+    streams.iter().map(output_stream_payload).collect()
+}
+
+fn output_stream_payload(stream: &AudioOutputStreamFact) -> ArtifactAudioOutputStreamPayload {
+    ArtifactAudioOutputStreamPayload {
+        snapshot_stream_id: stream.snapshot_stream_id.clone(),
+        output_provider_stream_index: stream.output_provider_stream_index,
+        codec: stream.codec.clone(),
+        language: stream.language.clone(),
+        title: stream.title.clone(),
+        default: stream.default,
+        disposition: stream.disposition.as_ref().map(disposition_payload),
+        channels: stream.channels,
+    }
+}
+
+fn disposition_payload(disposition: &AudioDispositionFact) -> ArtifactAudioDispositionPayload {
+    ArtifactAudioDispositionPayload {
+        default: disposition.default,
+        forced: disposition.forced,
+        commentary: disposition.commentary,
     }
 }
 

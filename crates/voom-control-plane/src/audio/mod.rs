@@ -7,6 +7,7 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, JobId, LeaseId,
     MediaSnapshotId, TicketId, VoomError,
 };
+use voom_events::payload::ArtifactAudioStreamPayload;
 use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 use voom_worker_protocol::{ExtractAudioResult, TranscodeAudioResult};
 
@@ -82,6 +83,7 @@ pub struct ExecuteExtractAudioReport {
     pub result_file_location_id: FileLocationId,
     pub staging_path: PathBuf,
     pub target_path: PathBuf,
+    pub commit_recovery_required: Option<commit::AudioExtractRecoveryReport>,
 }
 
 #[async_trait]
@@ -137,22 +139,25 @@ pub(crate) async fn execute_transcode_audio_with_dispatchers(
     result_probe: &dyn commit::AudioResultProbeDispatcher,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
     let failure_input = input.clone();
-    match execute_transcode_audio_inner(cp, input, transcode, verify, result_probe).await {
+    let mut context = TranscodeAttemptContext::default();
+    match execute_transcode_audio_inner(cp, input, transcode, verify, result_probe, &mut context)
+        .await
+    {
         Ok(report) => Ok(report),
         Err(err) => {
             events::record_transcode_failed(
                 cp,
                 events::TranscodeFailedEventInput {
                     input: &failure_input,
-                    source_location_id: None,
-                    source_media_snapshot_id: audio_payload_snapshot_id(
-                        &failure_input.operation_payload,
-                    ),
-                    artifact_handle_id: None,
-                    artifact_location_id: None,
-                    staging_path: None,
-                    selected_streams: Vec::new(),
-                    result: None,
+                    source_location_id: context.source_location_id,
+                    source_media_snapshot_id: context
+                        .source_media_snapshot_id
+                        .or_else(|| audio_payload_snapshot_id(&failure_input.operation_payload)),
+                    artifact_handle_id: context.artifact_handle_id,
+                    artifact_location_id: context.artifact_location_id,
+                    staging_path: context.staging_path.as_deref(),
+                    selected_streams: context.selected_streams,
+                    result: context.result.as_ref(),
                     error: &err,
                 },
             )
@@ -168,16 +173,20 @@ async fn execute_transcode_audio_inner(
     transcode: &dyn TranscodeAudioDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
     result_probe: &dyn commit::AudioResultProbeDispatcher,
+    context: &mut TranscodeAttemptContext,
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
+    context.source_location_id = Some(selected.location.id);
     let snapshot =
         source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
             .await?;
+    context.source_media_snapshot_id = Some(snapshot.id.0);
     let selection = selection::transcode_selection_from_payload_and_snapshot(
         &input.operation_payload,
         &snapshot,
     )?;
+    context.selected_streams = events::stream_payloads(&selection.selection.selected_streams);
     let staging = stage::prepare_transcode_staging_path(
         &input.staging_root,
         input.ticket_id,
@@ -186,6 +195,7 @@ async fn execute_transcode_audio_inner(
         &selection.target_codec,
     )
     .await?;
+    context.staging_path = Some(staging.path.clone());
     let target_path = stage::transcode_target_path(
         &input.target_dir,
         std::path::Path::new(&selected.location.value),
@@ -202,6 +212,7 @@ async fn execute_transcode_audio_inner(
         &staging.path,
     )?;
     let result = transcode.dispatch_transcode_audio(request).await?;
+    context.result = Some(result.clone());
     dispatch::validate_transcode_result(&selected, &selection, &result)?;
     dispatch::require_transcode_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_transcode(
@@ -212,6 +223,8 @@ async fn execute_transcode_audio_inner(
         &result,
     )
     .await?;
+    context.artifact_handle_id = Some(staged.artifact_handle_id);
+    context.artifact_location_id = Some(staged.artifact_location_id);
     commit_verified_transcode_audio(
         cp,
         TranscodeCommitRequest {
@@ -226,6 +239,17 @@ async fn execute_transcode_audio_inner(
         result_probe,
     )
     .await
+}
+
+#[derive(Debug, Default)]
+struct TranscodeAttemptContext {
+    source_location_id: Option<FileLocationId>,
+    source_media_snapshot_id: Option<u64>,
+    staging_path: Option<PathBuf>,
+    selected_streams: Vec<ArtifactAudioStreamPayload>,
+    artifact_handle_id: Option<ArtifactHandleId>,
+    artifact_location_id: Option<ArtifactLocationId>,
+    result: Option<TranscodeAudioResult>,
 }
 
 async fn commit_verified_transcode_audio(
@@ -313,22 +337,23 @@ pub(crate) async fn execute_extract_audio_with_dispatchers(
     verify: &dyn VerifyArtifactDispatcher,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let failure_input = input.clone();
-    match execute_extract_audio_inner(cp, input, extract, verify).await {
+    let mut context = ExtractAttemptContext::default();
+    match execute_extract_audio_inner(cp, input, extract, verify, &mut context).await {
         Ok(report) => Ok(report),
         Err(err) => {
             events::record_extract_failed(
                 cp,
                 events::ExtractFailedEventInput {
                     input: &failure_input,
-                    source_location_id: None,
-                    source_media_snapshot_id: audio_payload_snapshot_id(
-                        &failure_input.operation_payload,
-                    ),
-                    selection: None,
-                    staging_path: None,
-                    artifact_handle_id: None,
-                    artifact_location_id: None,
-                    result: None,
+                    source_location_id: context.source_location_id,
+                    source_media_snapshot_id: context
+                        .source_media_snapshot_id
+                        .or_else(|| audio_payload_snapshot_id(&failure_input.operation_payload)),
+                    selection: context.selection.as_ref(),
+                    staging_path: context.staging_path.as_deref(),
+                    artifact_handle_id: context.artifact_handle_id,
+                    artifact_location_id: context.artifact_location_id,
+                    result: context.result.as_ref(),
                     error: &err,
                 },
             )
@@ -343,16 +368,20 @@ async fn execute_extract_audio_inner(
     input: ExecuteExtractAudioInput,
     extract: &dyn ExtractAudioDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
+    context: &mut ExtractAttemptContext,
 ) -> Result<ExecuteExtractAudioReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
+    context.source_location_id = Some(selected.location.id);
     let snapshot =
         source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
             .await?;
+    context.source_media_snapshot_id = Some(snapshot.id.0);
     let selection = selection::extract_selection_from_payload_and_snapshot(
         &input.operation_payload,
         &snapshot,
     )?;
+    context.selection = Some(selection.clone());
     let staging = stage::prepare_extract_staging_path(
         &input.staging_root,
         input.ticket_id,
@@ -362,6 +391,7 @@ async fn execute_extract_audio_inner(
         &selection.target_codec,
     )
     .await?;
+    context.staging_path = Some(staging.path.clone());
     let target_path = stage::extract_target_path(
         &input.target_dir,
         std::path::Path::new(&selected.location.value),
@@ -379,6 +409,7 @@ async fn execute_extract_audio_inner(
         &staging.path,
     )?;
     let result = extract.dispatch_extract_audio(request).await?;
+    context.result = Some(result.clone());
     dispatch::validate_extract_result(&selected, &selection, &result)?;
     dispatch::require_extract_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_extract(
@@ -390,6 +421,8 @@ async fn execute_extract_audio_inner(
         &result,
     )
     .await?;
+    context.artifact_handle_id = Some(staged.artifact_handle_id);
+    context.artifact_location_id = Some(staged.artifact_location_id);
     let verified = verify_artifact_with_dispatcher(
         cp,
         VerifyArtifactInput {
@@ -419,6 +452,17 @@ async fn execute_extract_audio_inner(
         },
     )
     .await
+}
+
+#[derive(Debug, Default)]
+struct ExtractAttemptContext {
+    source_location_id: Option<FileLocationId>,
+    source_media_snapshot_id: Option<u64>,
+    staging_path: Option<PathBuf>,
+    selection: Option<selection::ExtractAudioSelectionPlan>,
+    artifact_handle_id: Option<ArtifactHandleId>,
+    artifact_location_id: Option<ArtifactLocationId>,
+    result: Option<ExtractAudioResult>,
 }
 
 struct ExtractCommitRequest {
@@ -474,6 +518,7 @@ async fn commit_verified_extract_audio(
         result_file_location_id: committed.result_file_location_id,
         staging_path: request.staging_path,
         target_path: request.target_path,
+        commit_recovery_required: committed.recovery_required,
     })
 }
 
@@ -481,6 +526,9 @@ fn ensure_extract_commit_succeeded(
     report: &commit::CommitAudioExtractSidecarReport,
 ) -> Result<(), VoomError> {
     if let Some(recovery) = &report.recovery_required {
+        if recovery.target_exists {
+            return Ok(());
+        }
         return Err(VoomError::CommitFailure(format!(
             "audio extraction sidecar commit {} requires recovery: {} ({})",
             report.commit_record_id, recovery.message, recovery.error_code

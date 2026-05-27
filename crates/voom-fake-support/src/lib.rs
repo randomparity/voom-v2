@@ -24,9 +24,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
 use voom_worker_protocol::{
-    HttpServer, OperationDispatch, OperationFuture, OperationKind, OperationRequest,
-    OperationResponse, PercentBps, ProgressFrame, ProtocolError, RemuxObservedFacts, RemuxRequest,
-    RemuxResult, RemuxStatus, ServerHandle, WorkerCredentials,
+    AudioDispositionFact, AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest,
+    ExtractAudioResult, ExtractAudioStatus, HttpServer, OperationDispatch, OperationFuture,
+    OperationKind, OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
+    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, ServerHandle,
+    TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioStatus, WorkerCredentials,
 };
 
 const MAX_FAKE_DURATION_MS: u64 = 30_000;
@@ -464,17 +466,28 @@ fn validate_payload(kind: ProviderKind, req: &OperationRequest) -> Result<(), Pr
         | ProviderKind::IdentityProvider => {
             require_path(&req.payload)?;
         }
-        ProviderKind::Transcoder => {
-            require_path(&req.payload)?;
-            match req.operation {
-                OperationKind::TranscodeAudio => {
+        ProviderKind::Transcoder => match req.operation {
+            OperationKind::TranscodeAudio => {
+                if let Some(request) = transcode_audio_protocol_payload(&req.payload)? {
+                    validate_transcode_audio_request(&request)?;
+                } else {
+                    require_path(&req.payload)?;
                     require_one_of(&req.payload, "target_codec", &["aac", "opus"])?;
                 }
-                _ => {
+            }
+            OperationKind::ExtractAudio => {
+                if let Some(request) = extract_audio_protocol_payload(&req.payload)? {
+                    validate_extract_audio_request(&request)?;
+                } else {
+                    require_path(&req.payload)?;
                     require_field(&req.payload, "target_codec", "h265")?;
                 }
             }
-        }
+            _ => {
+                require_path(&req.payload)?;
+                require_field(&req.payload, "target_codec", "h265")?;
+            }
+        },
         ProviderKind::Remuxer => {
             if let Some(request) = remux_protocol_payload(&req.payload)? {
                 if request.input.path.trim().is_empty() {
@@ -577,6 +590,66 @@ fn remux_protocol_payload(
         .map_err(|err| invalid(format!("remux protocol payload invalid: {err}")))
 }
 
+fn transcode_audio_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<TranscodeAudioRequest>, ProtocolError> {
+    if !(payload.get("input").is_some()
+        && payload.get("output").is_some()
+        && payload.get("selection").is_some()
+        && payload.get("audio").is_some())
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(payload.clone())
+        .map(Some)
+        .map_err(|err| invalid(format!("transcode_audio protocol payload invalid: {err}")))
+}
+
+fn extract_audio_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<ExtractAudioRequest>, ProtocolError> {
+    if !(payload.get("input").is_some()
+        && payload.get("output").is_some()
+        && payload.get("selection").is_some())
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(payload.clone())
+        .map(Some)
+        .map_err(|err| invalid(format!("extract_audio protocol payload invalid: {err}")))
+}
+
+fn validate_transcode_audio_request(request: &TranscodeAudioRequest) -> Result<(), ProtocolError> {
+    if request.input.path.trim().is_empty() {
+        return Err(invalid("transcode_audio input.path must not be empty"));
+    }
+    if request.output.container != "mkv" {
+        return Err(invalid("transcode_audio output.container must be mkv"));
+    }
+    if !matches!(request.audio.target_codec.as_str(), "aac" | "opus") {
+        return Err(invalid(
+            "transcode_audio audio.target_codec must be aac or opus",
+        ));
+    }
+    if request.selection.selected_streams.is_empty() {
+        return Err(invalid("transcode_audio selection must not be empty"));
+    }
+    Ok(())
+}
+
+fn validate_extract_audio_request(request: &ExtractAudioRequest) -> Result<(), ProtocolError> {
+    if request.input.path.trim().is_empty() {
+        return Err(invalid("extract_audio input.path must not be empty"));
+    }
+    if request.output.container != "ogg" || request.output.audio_codec != "opus" {
+        return Err(invalid("extract_audio output must be opus in ogg"));
+    }
+    if request.selection.snapshot_stream_id.trim().is_empty() {
+        return Err(invalid("extract_audio selection must not be empty"));
+    }
+    Ok(())
+}
+
 fn fake_remux_result(request: &RemuxRequest) -> Result<RemuxResult, ProtocolError> {
     let bytes = include_bytes!("../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     std::fs::write(&request.output.path, bytes)
@@ -617,6 +690,106 @@ fn fake_remux_result(request: &RemuxRequest) -> Result<RemuxResult, ProtocolErro
             .map(|stream| stream.snapshot_stream_id.clone())
             .collect(),
     })
+}
+
+fn fake_transcode_audio_result(
+    provider: &str,
+    request: &TranscodeAudioRequest,
+) -> Result<TranscodeAudioResult, ProtocolError> {
+    let output = fake_audio_output_facts(&request.output.path)?;
+    let input = audio_observed_from_expected(
+        request.input.expected.size_bytes,
+        &request.input.expected.content_hash,
+    );
+    let selected_output_streams = request
+        .selection
+        .selected_streams
+        .iter()
+        .enumerate()
+        .map(|(ordinal, stream)| AudioOutputStreamFact {
+            snapshot_stream_id: stream.snapshot_stream_id.clone(),
+            output_provider_stream_index: u32::try_from(ordinal).unwrap_or(0),
+            codec: request.audio.target_codec.clone(),
+            language: None,
+            title: None,
+            default: Some(false),
+            disposition: Some(AudioDispositionFact {
+                default: Some(false),
+                forced: Some(false),
+                commentary: Some(false),
+            }),
+            channels: None,
+        })
+        .collect::<Vec<_>>();
+    Ok(TranscodeAudioResult {
+        status: TranscodeAudioStatus::Transcoded,
+        provider: provider.to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output,
+        output_container: request.output.container.clone(),
+        selected_snapshot_stream_ids: request
+            .selection
+            .selected_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.clone())
+            .collect(),
+        output_audio_codecs: selected_output_streams
+            .iter()
+            .map(|stream| stream.codec.clone())
+            .collect(),
+        selected_output_streams,
+    })
+}
+
+fn fake_extract_audio_result(
+    provider: &str,
+    request: &ExtractAudioRequest,
+) -> Result<ExtractAudioResult, ProtocolError> {
+    let output = fake_audio_output_facts(&request.output.path)?;
+    let input = audio_observed_from_expected(
+        request.input.expected.size_bytes,
+        &request.input.expected.content_hash,
+    );
+    Ok(ExtractAudioResult {
+        status: ExtractAudioStatus::Extracted,
+        provider: provider.to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output,
+        output_container: request.output.container.clone(),
+        output_audio_codec: request.output.audio_codec.clone(),
+        selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
+        output_language: None,
+        output_title: None,
+    })
+}
+
+fn fake_audio_output_facts(path: &str) -> Result<AudioObservedFacts, ProtocolError> {
+    let bytes = include_bytes!("../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| invalid(format!("fake audio output parent create failed: {err}")))?;
+    }
+    std::fs::write(path, bytes)
+        .map_err(|err| invalid(format!("fake audio output write failed: {err}")))?;
+    Ok(AudioObservedFacts {
+        size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
+        content_hash: blake3_checksum(bytes),
+        modified_at: None,
+        local_file_key: Some(path.to_owned()),
+    })
+}
+
+fn audio_observed_from_expected(size_bytes: u64, content_hash: &str) -> AudioObservedFacts {
+    AudioObservedFacts {
+        size_bytes,
+        content_hash: content_hash.to_owned(),
+        modified_at: None,
+        local_file_key: None,
+    }
 }
 
 fn blake3_checksum(bytes: &[u8]) -> String {
@@ -678,17 +851,11 @@ fn result_payload(
             object.insert("hash".to_owned(), serde_json::json!("sha256:fake-prober"));
         }
         "fake-transcoder" => {
-            object.insert(
-                "output_path".to_owned(),
-                serde_json::json!(transform_output_path(payload, "h265")),
-            );
-            object.insert(
-                "target_codec".to_owned(),
-                payload
-                    .get("target_codec")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!("h265")),
-            );
+            if let Some(audio_result) = fake_transcoder_audio_payload(provider, operation, payload)?
+            {
+                return Ok(audio_result);
+            }
+            fake_transcoder_legacy_payload(object, payload);
         }
         "fake-remuxer" => {
             if let Some(request) = remux_protocol_payload(payload)? {
@@ -748,6 +915,45 @@ fn result_payload(
         object.insert(key.clone(), value.clone());
     }
     Ok(result)
+}
+
+fn fake_transcoder_audio_payload(
+    provider: &str,
+    operation: OperationKind,
+    payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, ProtocolError> {
+    if operation == OperationKind::TranscodeAudio
+        && let Some(request) = transcode_audio_protocol_payload(payload)?
+    {
+        return serde_json::to_value(fake_transcode_audio_result(provider, &request)?)
+            .map(Some)
+            .map_err(|err| invalid(format!("fake transcode_audio result encode failed: {err}")));
+    }
+    if operation == OperationKind::ExtractAudio
+        && let Some(request) = extract_audio_protocol_payload(payload)?
+    {
+        return serde_json::to_value(fake_extract_audio_result(provider, &request)?)
+            .map(Some)
+            .map_err(|err| invalid(format!("fake extract_audio result encode failed: {err}")));
+    }
+    Ok(None)
+}
+
+fn fake_transcoder_legacy_payload(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    payload: &serde_json::Value,
+) {
+    object.insert(
+        "output_path".to_owned(),
+        serde_json::json!(transform_output_path(payload, "h265")),
+    );
+    object.insert(
+        "target_codec".to_owned(),
+        payload
+            .get("target_codec")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("h265")),
+    );
 }
 
 fn advertised_access_modes<'a>(

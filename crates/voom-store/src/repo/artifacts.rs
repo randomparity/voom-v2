@@ -889,11 +889,12 @@ impl ArtifactRepo for SqliteArtifactRepo {
             "INSERT INTO file_versions \
              (file_asset_id, content_hash, size_bytes, produced_by, \
               produced_from_version_id, created_at) \
-             VALUES (?, ?, ?, 'staged_commit', NULL, ?)",
+             VALUES (?, ?, ?, 'staged_commit', ?, ?)",
         )
         .bind(i64_from_u64(file_asset_id.0))
         .bind(&input.content_hash)
         .bind(size_i64)
+        .bind(i64_from_u64(pending.source_file_version_id.0))
         .bind(&created_at)
         .execute(&mut **tx)
         .await

@@ -7,7 +7,9 @@ use voom_core::rng_test_support::FrozenRng;
 use voom_store::repo::artifacts::{
     ArtifactRepo, ArtifactVerificationStatus, NewArtifactVerification,
 };
+use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_worker_protocol::{
     ExtractAudioResult, ExtractAudioStatus, TranscodeAudioResult, TranscodeAudioStatus,
@@ -101,6 +103,59 @@ async fn sidecar_prepare_records_pending_before_promotion_failure_marks_recovery
     assert!(!recovery.staging_exists);
 }
 
+#[tokio::test]
+async fn sidecar_commit_emits_standard_artifact_commit_events() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"sidecar").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result_with_bytes(b"sidecar"),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    let report = commit_audio_extract_sidecar(
+        &cp,
+        CommitAudioExtractSidecarInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            verification_id: verification,
+            source_file_version_id: source.file_version_id,
+            source_bundle_id: bundle.id,
+            role: voom_plan::audio::AudioBundleRole::ExternalAudio,
+            staging_path: staging_path.clone(),
+            target_path: dir.path().join("target.ogg"),
+            output: observed(
+                u64::try_from(b"sidecar".len()).unwrap(),
+                &blake3_checksum(b"sidecar"),
+            ),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    assert_eq!(event_count(&cp, "artifact.commit_started").await, 1);
+    assert_eq!(event_count(&cp, "artifact.commit_completed").await, 1);
+    let completed = latest_event_payload(&cp, "artifact.commit_completed").await;
+    assert_eq!(completed["commit_record_id"], report.commit_record_id.0);
+    assert_eq!(
+        completed["result_file_version_id"],
+        report.result_file_version_id.0
+    );
+    assert_eq!(
+        completed["result_file_location_id"],
+        report.result_file_location_id.0
+    );
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SeededSource {
     file_version_id: FileVersionId,
@@ -154,6 +209,34 @@ async fn seed_source(cp: &crate::ControlPlane, path: PathBuf, bytes: &[u8]) -> S
         file_version_id,
         file_location_id,
     }
+}
+
+async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
+    let work = cp
+        .create_media_work(NewMediaWork {
+            kind: MediaWorkKind::Movie,
+            display_title: "movie".to_owned(),
+            provisional: true,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let variant = cp
+        .create_media_variant(NewMediaVariant {
+            media_work_id: work.id,
+            label: "main".to_owned(),
+            provisional: true,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    cp.create_bundle(NewAssetBundle {
+        media_variant_id: variant.id,
+        display_name: "bundle".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    })
+    .await
+    .unwrap()
 }
 
 async fn source_lineage(cp: &crate::ControlPlane, id: ArtifactHandleId) -> serde_json::Value {
@@ -296,6 +379,13 @@ fn extract_result() -> ExtractAudioResult {
     }
 }
 
+fn extract_result_with_bytes(bytes: &[u8]) -> ExtractAudioResult {
+    let mut result = extract_result();
+    result.output.size_bytes = u64::try_from(bytes.len()).unwrap();
+    result.output.content_hash = blake3_checksum(bytes);
+    result
+}
+
 fn observed(size_bytes: u64, content_hash: &str) -> voom_worker_protocol::AudioObservedFacts {
     voom_worker_protocol::AudioObservedFacts {
         size_bytes,
@@ -307,4 +397,24 @@ fn observed(size_bytes: u64, content_hash: &str) -> voom_worker_protocol::AudioO
 
 fn blake3_checksum(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+async fn event_count(cp: &crate::ControlPlane, kind: &str) -> i64 {
+    let row = sqlx::query("SELECT COUNT(*) AS count FROM events WHERE kind = ?")
+        .bind(kind)
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    row.try_get("count").unwrap()
+}
+
+async fn latest_event_payload(cp: &crate::ControlPlane, kind: &str) -> serde_json::Value {
+    let row =
+        sqlx::query("SELECT payload FROM events WHERE kind = ? ORDER BY event_id DESC LIMIT 1")
+            .bind(kind)
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+    let payload: String = row.try_get("payload").unwrap();
+    serde_json::from_str(&payload).unwrap()
 }

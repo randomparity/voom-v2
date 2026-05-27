@@ -42,7 +42,6 @@ CREATE TABLE file_versions (
     epoch                       INTEGER NOT NULL DEFAULT 0,
     CHECK (
            (produced_by IN ('ingest','external_observed'))
-        OR (produced_by = 'staged_commit')
         OR produced_from_version_id IS NOT NULL
     )
 ) STRICT;

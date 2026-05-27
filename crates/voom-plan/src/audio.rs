@@ -306,6 +306,12 @@ pub fn transcode_audio_shape(
     if selected.iter().any(|stream| stream.codec.is_none()) {
         return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
     }
+    if selected
+        .iter()
+        .any(|stream| !has_transcode_preservation_facts(stream))
+    {
+        return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
+    }
 
     if current_container.eq_ignore_ascii_case(container)
         && selected
@@ -329,7 +335,12 @@ pub fn extract_audio_shape(
     };
     match selected.len() {
         0 => AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches),
-        1 => AudioPlanShape::Planned,
+        1 => match extraction_role(&selected[0]) {
+            Ok(AudioBundleRole::CommentaryAudio | AudioBundleRole::ExternalAudio) => {
+                AudioPlanShape::Planned
+            }
+            Err(block) => AudioPlanShape::Blocked(block),
+        },
         _ => AudioPlanShape::Blocked(AudioPlanningBlock::MultipleMatches),
     }
 }
@@ -365,6 +376,13 @@ pub fn selected_audio_streams(
     Ok(selected)
 }
 
+fn has_transcode_preservation_facts(stream: &SnapshotAudioStreamFact) -> bool {
+    stream.language.is_some()
+        && stream.title.is_some()
+        && stream.channels.is_some()
+        && stream.disposition.commentary.is_some()
+}
+
 fn video_stream_count(snapshot: &MediaSnapshotInput) -> Result<u64, AudioPlanningBlock> {
     snapshot
         .stream_summary
@@ -391,7 +409,7 @@ fn audio_disposition(disposition: Option<&Value>) -> AudioDispositionFact {
         forced: disposition_flag(disposition, "forced"),
         commentary: disposition
             .and_then(Value::as_object)
-            .and_then(|object| object.get("commentary"))
+            .and_then(|object| object.get("commentary").or_else(|| object.get("comment")))
             .and_then(Value::as_bool),
     }
 }

@@ -469,6 +469,20 @@ fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provid
             provider_stream_index: 7,
         }],
         selected_snapshot_stream_ids: vec!["audio-1".to_owned()],
+        selected_output_streams: vec![ArtifactAudioOutputStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            output_provider_stream_index: 0,
+            codec: "aac".to_owned(),
+            language: Some("eng".to_owned()),
+            title: Some("Main".to_owned()),
+            default: Some(true),
+            disposition: Some(ArtifactAudioDispositionPayload {
+                default: Some(true),
+                forced: Some(false),
+                commentary: Some(false),
+            }),
+            channels: Some(2),
+        }],
         output_container: "mkv".to_owned(),
         output_audio_codecs: vec!["aac".to_owned()],
         provider: "ffmpeg".to_owned(),
@@ -487,6 +501,14 @@ fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provid
     assert_eq!(
         json["payload"]["output_audio_codecs"],
         serde_json::json!(["aac"])
+    );
+    assert_eq!(
+        json["payload"]["selected_output_streams"][0]["output_provider_stream_index"],
+        0
+    );
+    assert_eq!(
+        json["payload"]["selected_output_streams"][0]["disposition"]["forced"],
+        false
     );
 
     let back: Event = serde_json::from_value(json).unwrap();
@@ -509,6 +531,16 @@ fn artifact_audio_transcode_failed_payload_carries_public_error_code_and_known_i
             snapshot_stream_id: "audio-1".to_owned(),
             provider_stream_index: 7,
         }],
+        selected_output_streams: vec![ArtifactAudioOutputStreamPayload {
+            snapshot_stream_id: "audio-1".to_owned(),
+            output_provider_stream_index: 0,
+            codec: "aac".to_owned(),
+            language: Some("eng".to_owned()),
+            title: Some("Main".to_owned()),
+            default: Some(true),
+            disposition: None,
+            channels: Some(2),
+        }],
         failure_class: FailureClass::PolicyValidationError,
         error_code: "CONFIG_INVALID".to_owned(),
         message: "unsupported audio codec".to_owned(),
@@ -522,6 +554,10 @@ fn artifact_audio_transcode_failed_payload_carries_public_error_code_and_known_i
     assert_eq!(json["payload"]["error_code"], "CONFIG_INVALID");
     assert_eq!(json["payload"]["artifact_handle_id"], 8);
     assert_eq!(json["payload"]["artifact_location_id"], 9);
+    assert_eq!(
+        json["payload"]["selected_output_streams"][0]["codec"],
+        "aac"
+    );
 
     let back: Event = serde_json::from_value(json).unwrap();
     assert!(matches!(back, Event::ArtifactAudioTranscodeFailed(q) if q == p));

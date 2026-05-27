@@ -67,3 +67,17 @@ fn compiles_sprint14_audio_extract_operation() {
         }
     );
 }
+
+#[test]
+fn rejects_invalid_boolean_audio_filter_children() {
+    let err = crate::compile_policy(
+        "policy \"p\" { phase a { transcode audio to aac where lang in [eng] or banana } }",
+    )
+    .unwrap_err();
+
+    assert!(
+        err.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_str() == "unknown_phase_statement_or_operation"
+        })
+    );
+}

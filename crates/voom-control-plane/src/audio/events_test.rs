@@ -51,9 +51,67 @@ fn transcode_succeeded_payload_carries_result_and_source_ids() {
     assert_eq!(payload.artifact_location_id, 9);
     assert_eq!(payload.selected_streams[0].provider_stream_index, 7);
     assert_eq!(payload.selected_snapshot_stream_ids, ["audio-1"]);
+    assert_eq!(
+        payload.selected_output_streams[0].snapshot_stream_id,
+        "audio-1"
+    );
+    assert_eq!(
+        payload.selected_output_streams[0].output_provider_stream_index,
+        0
+    );
+    assert_eq!(payload.selected_output_streams[0].codec, "aac");
+    assert_eq!(
+        payload.selected_output_streams[0]
+            .disposition
+            .as_ref()
+            .and_then(|disposition| disposition.forced),
+        Some(false)
+    );
     assert_eq!(payload.output_audio_codecs, ["aac"]);
     assert_eq!(payload.provider, "ffmpeg");
     assert_eq!(payload.provider_version, "6.1");
+}
+
+#[test]
+fn transcode_failed_payload_carries_worker_output_streams_when_result_exists() {
+    let input = transcode_input();
+    let result = transcode_result();
+    let error = VoomError::MalformedWorkerResult("worker result drift".to_owned());
+
+    let payload = transcode_failed_payload(TranscodeFailedEventPayloadInput {
+        input: &input,
+        source_location_id: Some(FileLocationId(5)),
+        source_media_snapshot_id: Some(6),
+        artifact_handle_id: Some(ArtifactHandleId(8)),
+        artifact_location_id: Some(ArtifactLocationId(9)),
+        staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
+        selected_streams: stream_payloads(&[AudioStreamRef {
+            snapshot_stream_id: "audio-1".to_owned(),
+            provider_stream_index: 7,
+        }]),
+        result: Some(&result),
+        error: &error,
+    });
+
+    assert_eq!(payload.source_file_location_id, Some(5));
+    assert_eq!(payload.source_media_snapshot_id, Some(6));
+    assert_eq!(payload.artifact_handle_id, Some(8));
+    assert_eq!(payload.artifact_location_id, Some(9));
+    assert_eq!(
+        payload.staging_path.as_deref(),
+        Some("/tmp/voom-stage/2/3/out.mkv")
+    );
+    assert_eq!(payload.selected_streams[0].snapshot_stream_id, "audio-1");
+    assert_eq!(
+        payload.selected_output_streams[0].snapshot_stream_id,
+        "audio-1"
+    );
+    assert_eq!(
+        payload.selected_output_streams[0].output_provider_stream_index,
+        0
+    );
+    assert_eq!(payload.provider.as_deref(), Some("ffmpeg"));
+    assert_eq!(payload.provider_version.as_deref(), Some("6.1"));
 }
 
 #[test]
@@ -131,7 +189,11 @@ fn transcode_result() -> TranscodeAudioResult {
             language: Some("eng".to_owned()),
             title: Some("Main".to_owned()),
             default: Some(true),
-            disposition: None,
+            disposition: Some(voom_worker_protocol::AudioDispositionFact {
+                default: Some(true),
+                forced: Some(false),
+                commentary: Some(false),
+            }),
             channels: Some(2),
         }],
     }

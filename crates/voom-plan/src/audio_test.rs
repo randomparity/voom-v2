@@ -1,8 +1,9 @@
 use voom_policy::{MediaSnapshotInput, TargetKind, TargetRef, TrackFilter};
 
 use super::{
-    AudioBundleRole, AudioPlanningBlock, SnapshotAudioStreamFact, evaluate_audio_filter,
-    extraction_role, stream_facts,
+    AUDIO_TRANSCODE_CONTAINER, AudioBundleRole, AudioPlanShape, AudioPlanningBlock,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
+    stream_facts, transcode_audio_shape,
 };
 
 #[test]
@@ -19,7 +20,7 @@ fn stream_facts_parse_audio_streams_with_disposition_commentary() {
             "disposition": {
                 "default": true,
                 "forced": false,
-                "commentary": true
+                "comment": true
             }
         }
     ])))
@@ -75,13 +76,35 @@ fn extraction_role_maps_known_commentary_and_blocks_unknown_commentary() {
     );
 }
 
+#[test]
+fn transcode_audio_shape_blocks_missing_preservation_facts() {
+    let mut stream = audio_fact(Some(false));
+    stream.title = None;
+    let snapshot = snapshot_with_audio_facts(vec![stream]);
+
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "opus", AUDIO_TRANSCODE_CONTAINER, None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
+fn extract_audio_shape_blocks_unknown_commentary_role() {
+    let snapshot = snapshot_with_audio_facts(vec![audio_fact(None)]);
+
+    assert_eq!(
+        extract_audio_shape(&snapshot, None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
 fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
         snapshot_stream_id: "stream-1".to_owned(),
         provider_stream_index: 1,
         codec: Some("aac".to_owned()),
         language: Some("eng".to_owned()),
-        title: None,
+        title: Some("Main".to_owned()),
         channels: Some(2),
         default: false,
         disposition: super::AudioDispositionFact {
@@ -91,6 +114,38 @@ fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
         },
         commentary,
     }
+}
+
+fn snapshot_with_audio_facts(streams: Vec<SnapshotAudioStreamFact>) -> MediaSnapshotInput {
+    let json_streams = streams
+        .into_iter()
+        .map(|stream| {
+            serde_json::json!({
+                "id": stream.snapshot_stream_id,
+                "index": stream.provider_stream_index,
+                "kind": "audio",
+                "codec_name": stream.codec,
+                "language": stream.language,
+                "title": stream.title,
+                "channels": stream.channels,
+                "disposition": {
+                    "default": stream.disposition.default,
+                    "forced": stream.disposition.forced,
+                    "commentary": stream.disposition.commentary
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut all_streams = vec![serde_json::json!({
+        "id": "video-1",
+        "index": 0,
+        "kind": "video",
+        "codec_name": "h264"
+    })];
+    all_streams.extend(json_streams);
+    let mut snapshot = snapshot_with_streams(&serde_json::Value::Array(all_streams));
+    snapshot.stream_summary["video_stream_count"] = serde_json::json!(1);
+    snapshot
 }
 
 fn snapshot_with_streams(streams: &serde_json::Value) -> MediaSnapshotInput {

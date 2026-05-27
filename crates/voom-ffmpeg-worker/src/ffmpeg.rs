@@ -352,18 +352,12 @@ async fn probe_audio_output(
         )));
     }
     let audio_streams: Vec<&Value> = audio_stream_values(&json).collect();
-    let audio_codecs = audio_streams
-        .iter()
-        .map(|stream| {
-            stream
-                .get("codec_name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect();
     let selected_output_streams =
         selected_output_streams(&audio_streams, selected_refs, expected_codec);
+    let audio_codecs = selected_output_streams
+        .iter()
+        .map(|stream| stream.codec.clone())
+        .collect();
     let first_selected = selected_output_streams.first();
     Ok(AudioOutputProbe {
         container: expected_container.to_owned(),
@@ -512,11 +506,30 @@ fn append_audio_metadata(
             .arg(format!("-metadata:s:a:{output_audio_ordinal}"))
             .arg(format!("snapshot_stream_id={snapshot_stream_id}"));
     }
-    if let Some(default) = source.default {
+    if let Some(disposition) = audio_disposition_arg(source) {
         command
             .arg(format!("-disposition:a:{output_audio_ordinal}"))
-            .arg(if default { "default" } else { "0" });
+            .arg(disposition);
     }
+}
+
+fn audio_disposition_arg(source: &SourceAudioFact) -> Option<String> {
+    let disposition = source.disposition.as_ref()?;
+    let mut flags = Vec::new();
+    if disposition.default == Some(true) || source.default == Some(true) {
+        flags.push("default");
+    }
+    if disposition.forced == Some(true) {
+        flags.push("forced");
+    }
+    if disposition.commentary == Some(true) {
+        flags.push("comment");
+    }
+    Some(if flags.is_empty() {
+        "0".to_owned()
+    } else {
+        flags.join("+")
+    })
 }
 
 fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
@@ -642,6 +655,11 @@ fn verify_preserved_audio_metadata(
     if source.default != output.default {
         return Err(FfmpegError::OutputFactsMismatch(
             "selected audio default disposition mismatch".to_owned(),
+        ));
+    }
+    if source.disposition != output.disposition {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "selected audio disposition mismatch".to_owned(),
         ));
     }
     if source.channels.is_some() && source.channels != output.channels {

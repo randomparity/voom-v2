@@ -427,6 +427,18 @@ fn rejects_unknown_boolean_track_filter_branch() {
 }
 
 #[test]
+fn rejects_malformed_audio_filter_tails() {
+    assert!(
+        codes("policy \"p\" { phase a { transcode audio to aac where lang in [eng] garbage } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+    assert!(
+        codes("policy \"p\" { phase a { extract audio where commentary and } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_invalid_exists_condition_target() {
     assert!(
         codes("policy \"p\" { phase a { when exists banana { container mkv } } }")
