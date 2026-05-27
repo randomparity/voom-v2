@@ -50,7 +50,7 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
     cargo_build_package("voom-ffmpeg-worker").unwrap();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
     generate_audio_extract_fixture(&source, CommentaryFixture::SingleMatch);
 
@@ -122,7 +122,7 @@ async fn audio_extract_multi_match_blocks_before_sidecar_commit() {
     cargo_build_package("voom-ffprobe-worker").unwrap();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
     generate_audio_extract_fixture(&source, CommentaryFixture::SingleMatch);
 
@@ -168,6 +168,10 @@ async fn audio_extract_multi_match_blocks_before_sidecar_commit() {
     );
     assert_table_count(&pool, "artifact_commit_records", 0).await;
     assert!(!tmp.path().join("out").exists());
+}
+
+fn tempdir_in_repo() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 struct ScannedSource {

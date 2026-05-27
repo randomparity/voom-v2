@@ -39,7 +39,7 @@ async fn audio_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
     generate_audio_fixture(&source);
 
@@ -114,7 +114,7 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
     generate_audio_fixture(&source);
 
@@ -170,6 +170,10 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
             .iter()
             .any(|ticket| ticket.operation == "transcode_audio" && ticket.state == "succeeded")
     );
+}
+
+fn tempdir_in_repo() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 struct ScannedFixture {
