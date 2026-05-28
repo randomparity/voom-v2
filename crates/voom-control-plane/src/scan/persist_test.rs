@@ -1,4 +1,6 @@
-use super::{ObservedCandidateFacts, ScanPersistError, persist_scanned_media_snapshot};
+use super::{
+    ObservedCandidateFacts, ScanPersistError, persist_scanned_media_snapshot, verify_probe_facts,
+};
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -187,6 +189,49 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     assert_eq!(table_count(&cp, "file_assets").await, 0);
     assert_eq!(table_count(&cp, "media_snapshots").await, 0);
     assert!(state_transition_event_kinds(&cp).await.is_empty());
+}
+
+// `verify_probe_facts` AND-chains four equalities (pre/post size, pre/post
+// hash) into one content-drift error. A regression to a subset (e.g. dropping
+// a `&&` term) would still pass the integration drift test, which only mutates
+// post_probe.content_hash. These pin each of the other three terms in
+// isolation so the guard cannot silently narrow.
+
+#[test]
+fn verify_probe_facts_accepts_fully_matching_result() {
+    let candidate = candidate_facts(123, "blake3:abc");
+    let result = matching_probe_result(&candidate);
+    assert!(verify_probe_facts(&candidate, &result).is_ok());
+}
+
+#[test]
+fn verify_probe_facts_rejects_pre_probe_size_mismatch() {
+    let candidate = candidate_facts(123, "blake3:abc");
+    let mut result = matching_probe_result(&candidate);
+    result.pre_probe.size_bytes = candidate.size_bytes + 1;
+    let err = verify_probe_facts(&candidate, &result).unwrap_err();
+    assert_eq!(err.status(), ScanReportFileStatus::FailedContentDrift);
+    assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
+}
+
+#[test]
+fn verify_probe_facts_rejects_post_probe_size_mismatch() {
+    let candidate = candidate_facts(123, "blake3:abc");
+    let mut result = matching_probe_result(&candidate);
+    result.post_probe.size_bytes = candidate.size_bytes + 1;
+    let err = verify_probe_facts(&candidate, &result).unwrap_err();
+    assert_eq!(err.status(), ScanReportFileStatus::FailedContentDrift);
+    assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
+}
+
+#[test]
+fn verify_probe_facts_rejects_pre_probe_hash_mismatch() {
+    let candidate = candidate_facts(123, "blake3:abc");
+    let mut result = matching_probe_result(&candidate);
+    result.pre_probe.content_hash = "blake3:changed".to_owned();
+    let err = verify_probe_facts(&candidate, &result).unwrap_err();
+    assert_eq!(err.status(), ScanReportFileStatus::FailedContentDrift);
+    assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
 }
 
 fn candidate_facts(size_bytes: u64, content_hash: &str) -> ObservedCandidateFacts {
