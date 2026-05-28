@@ -99,6 +99,48 @@ async fn tail_returns_non_null_cursor_at_end_of_stream() {
 }
 
 #[tokio::test]
+async fn list_cursor_signals_exhaustion_with_none() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    // init() seeds one schema.initialized event; append one more → 2 rows.
+    let mut tx = pool.begin().await.unwrap();
+    repo.append_in_tx(&mut tx, sample_envelope()).await.unwrap();
+    tx.commit().await.unwrap();
+
+    // First page covers every event.
+    let first = repo
+        .list(
+            EventFilter::default(),
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.items.len(), 2);
+    let cursor = first.next_cursor.expect("cursor after a non-empty page");
+
+    // Second page starts past the last event: it is empty and must signal
+    // exhaustion with next_cursor == None, not echo back the caller's cursor.
+    let second = repo
+        .list(
+            EventFilter::default(),
+            Page {
+                limit: 10,
+                cursor: Some(cursor),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(second.items.is_empty(), "second page should be empty");
+    assert_eq!(
+        second.next_cursor, None,
+        "exhausted list must return next_cursor None"
+    );
+}
+
+#[tokio::test]
 async fn append_then_get_round_trips_every_m1_kind() {
     use voom_events::payload::{
         ArtifactHandleCreatedPayload, ArtifactLineageRecordedPayload,

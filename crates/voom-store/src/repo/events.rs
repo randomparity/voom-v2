@@ -166,7 +166,14 @@ async fn page_query(
         .map_err(|e| VoomError::Database(format!("events list: {e}")))?;
     let items: Vec<EventRow> = rows.iter().map(row_to_event).collect::<Result<_, _>>()?;
 
-    let next_cursor = items.last().map(|r| r.id.0).or(page.cursor);
+    // Forward `list` must signal exhaustion: an empty page returns None so
+    // pollers stop. `tail` (live polling) keeps the caller's cursor alive
+    // across empty pages so a follower can resume when new events arrive.
+    let next_cursor = if tail {
+        items.last().map(|r| r.id.0).or(page.cursor)
+    } else {
+        items.last().map(|r| r.id.0)
+    };
     Ok(EventPage { items, next_cursor })
 }
 
