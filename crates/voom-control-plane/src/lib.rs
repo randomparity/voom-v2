@@ -181,7 +181,7 @@ impl ControlPlane {
             }
             SchemaState::Uninitialized | SchemaState::Partial { .. } => {
                 return Err(VoomError::Migration(format!(
-                    "ControlPlane requires a Current schema; got {probe:?} (run `voom init`)"
+                    "ControlPlane requires a Current schema; got {probe:?}"
                 )));
             }
         }
