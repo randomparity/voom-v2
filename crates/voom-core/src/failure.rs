@@ -157,8 +157,13 @@ impl FailureClass {
     }
 
     /// Maps to the `ErrorCode` the CLI envelope surfaces on a
-    /// `ticket.failed_terminal` path (§12.1). One variant per class
-    /// preserves the round-trip from failure source → wire string.
+    /// `ticket.failed_terminal` path (§12.1). Most variants map 1:1 to a
+    /// dedicated `ErrorCode`, so [`Self::from_error_code`] recovers them
+    /// exactly. The one intentional exception is [`Self::ProgressTimeout`]:
+    /// it has no dedicated `ErrorCode` and aliases [`ErrorCode::WorkerTimeout`]
+    /// on the wire, so a `ProgressTimeout` failure round-trips back as
+    /// [`Self::WorkerTimeout`] (lossy by design — see
+    /// `from_error_code_worker_timeout_returns_worker_timeout_not_progress_timeout`).
     #[must_use]
     pub const fn into_error_code(self) -> ErrorCode {
         match self {

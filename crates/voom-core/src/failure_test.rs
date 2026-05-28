@@ -130,6 +130,26 @@ fn into_error_code_round_trips() {
 }
 
 #[test]
+fn from_error_code_worker_timeout_returns_worker_timeout_not_progress_timeout() {
+    // ProgressTimeout has no dedicated ErrorCode; it intentionally aliases
+    // WorkerTimeout on the wire. The round-trip is therefore lossy by design:
+    // a ProgressTimeout failure surfaces as WORKER_TIMEOUT and cannot be
+    // recovered as ProgressTimeout from the code alone.
+    assert_eq!(
+        FailureClass::ProgressTimeout.into_error_code(),
+        ErrorCode::WorkerTimeout
+    );
+    assert_eq!(
+        FailureClass::WorkerTimeout.into_error_code(),
+        ErrorCode::WorkerTimeout
+    );
+    assert_eq!(
+        FailureClass::from_error_code(ErrorCode::WorkerTimeout),
+        Some(FailureClass::WorkerTimeout)
+    );
+}
+
+#[test]
 fn from_error_code_maps_failure_taxonomy_and_rejects_unclassified_codes() {
     assert_eq!(
         FailureClass::from_error_code(ErrorCode::WorkerCrash),
