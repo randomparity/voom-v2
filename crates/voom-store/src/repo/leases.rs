@@ -975,10 +975,14 @@ async fn process_expired_lease(
         ))
     })?;
     if attempt < max_attempts {
+        // Reset next_eligible_at to now so the requeued ticket is immediately
+        // eligible, matching force_release and fail_retriable. Omitting it
+        // leaves a stale backoff timestamp from a prior fail_retriable.
         let ticket_res = sqlx::query(
             "UPDATE tickets SET state = 'ready', state_changed_at = ?, \
-             epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
+             next_eligible_at = ?, epoch = epoch + 1 WHERE id = ? AND state = 'leased'",
         )
+        .bind(now_str)
         .bind(now_str)
         .bind(ticket_id_i)
         .execute(&mut **tx)
