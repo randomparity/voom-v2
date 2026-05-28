@@ -657,6 +657,54 @@ fn idempotency_cache_evicts_oldest_after_capacity() {
 }
 
 #[test]
+fn idempotency_cache_does_not_exceed_capacity_under_all_active() {
+    let mut cache = IdempotencyCache::new(2);
+    assert!(matches!(
+        cache.begin("a".to_owned(), [1; 32]),
+        IdempotencyBegin::Started
+    ));
+    assert!(matches!(
+        cache.begin("b".to_owned(), [2; 32]),
+        IdempotencyBegin::Started
+    ));
+    // Both entries are in-flight (Active); a third cannot be admitted without
+    // either growing past capacity or dropping a tracked entry, so the cache
+    // refuses it with backpressure rather than admitting it untracked.
+    assert!(matches!(
+        cache.begin("c".to_owned(), [3; 32]),
+        IdempotencyBegin::AtCapacity
+    ));
+    assert_eq!(cache.entries.len(), 2);
+}
+
+#[test]
+fn idempotency_cache_make_room_evicts_completed_behind_active() {
+    let mut cache = IdempotencyCache::new(2);
+    let response = CachedResponse {
+        response: OperationResponse {
+            lease_id: LeaseId(1),
+            accepted_at: fixed_time(),
+        },
+        body: vec![b'1'],
+    };
+    // `a` stays Active (in-flight) and is the oldest; `b` completes. At
+    // capacity, admitting `c` must scan past the older Active `a` to evict the
+    // newer Completed `b`, never evicting the in-flight entry.
+    cache.begin("a".to_owned(), [1; 32]);
+    cache.begin("b".to_owned(), [2; 32]);
+    cache.complete("b", [2; 32], response);
+
+    assert!(matches!(
+        cache.begin("c".to_owned(), [3; 32]),
+        IdempotencyBegin::Started
+    ));
+    assert_eq!(cache.entries.len(), 2);
+    assert!(cache.entries.contains_key("a"));
+    assert!(!cache.entries.contains_key("b"));
+    assert!(cache.entries.contains_key("c"));
+}
+
+#[test]
 fn status_code_dependency_stays_used() {
     assert_eq!(StatusCode::OK.as_u16(), 200);
 }

@@ -181,6 +181,8 @@ pub enum ProtocolError {
     HeaderBodyKeyMismatch,
     #[error("internal server error")]
     InternalServerError,
+    #[error("service at capacity: too many in-flight operations")]
+    ServiceAtCapacity,
 }
 
 #[cfg(test)]
