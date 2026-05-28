@@ -29,6 +29,17 @@ fn duplicate_idempotency_key_maps_to_worker_crash_not_malformed() {
     assert!(err.failure_class().is_retriable());
 }
 
+#[test]
+fn service_at_capacity_maps_to_worker_crash_not_malformed() {
+    // A worker reporting its idempotency cache is saturated is transient
+    // backpressure, not a corrupt result. It must map to a retriable
+    // WorkerCrash so the dispatch is rescheduled, never terminal
+    // MalformedWorkerResult.
+    let err = map_dispatch_protocol_error(&ProtocolError::ServiceAtCapacity);
+    assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+    assert!(err.failure_class().is_retriable());
+}
+
 #[tokio::test]
 async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() {
     let dir = tempfile::tempdir().unwrap();

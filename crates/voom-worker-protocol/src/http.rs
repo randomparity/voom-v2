@@ -51,6 +51,10 @@ const WORKER_EPOCH_HEADER: &str = "x-voom-worker-epoch";
 const IDEMPOTENCY_KEY_HEADER: &str = "x-voom-idempotency-key";
 
 const MAX_BODY_BYTES: usize = 1 << 20; // 1 MiB
+// Bounds the idempotency cache. Because in-flight (Active) entries are never
+// evicted and `begin` refuses new work once the cache is full of them (503
+// ServiceAtCapacity), this also caps concurrent in-flight operations per
+// worker. Keep it comfortably above the expected concurrent lease count.
 const IDEMPOTENCY_CACHE_CAPACITY: usize = 1024;
 
 pub(crate) type ResponseBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
@@ -515,6 +519,12 @@ async fn handle_operations(
                 },
             );
         }
+        IdempotencyBegin::AtCapacity => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &ProtocolError::ServiceAtCapacity,
+            );
+        }
         IdempotencyBegin::Started => {}
     }
 
@@ -696,6 +706,7 @@ enum IdempotencyBegin {
         original_status: String,
     },
     Started,
+    AtCapacity,
 }
 
 #[derive(Debug)]
@@ -758,7 +769,14 @@ impl IdempotencyCache {
         if self.capacity == 0 {
             return IdempotencyBegin::Started;
         }
-        self.make_room();
+        if !self.make_room() {
+            // Cache is full of in-flight entries and nothing is evictable.
+            // Refuse the new operation rather than admit it untracked: an
+            // untracked key loses in-flight duplicate rejection, which would
+            // let a concurrent duplicate execute twice. Returning capacity
+            // backpressure keeps memory bounded and the dedup guarantee intact.
+            return IdempotencyBegin::AtCapacity;
+        }
         self.order.push_back(key.clone());
         self.entries.insert(
             key,
@@ -788,7 +806,9 @@ impl IdempotencyCache {
             }
             return;
         }
-        self.make_room();
+        if !self.make_room() {
+            return;
+        }
         let key = key.to_owned();
         self.order.push_back(key.clone());
         self.entries.insert(
@@ -814,22 +834,31 @@ impl IdempotencyCache {
         }
     }
 
-    fn make_room(&mut self) {
-        while self.entries.len() >= self.capacity {
+    /// Evicts completed entries oldest-first until the cache is below capacity.
+    ///
+    /// Active (in-flight) entries are never evicted; they are skipped so a
+    /// completed entry behind them can still be reclaimed. Returns `true` when
+    /// there is room for a new entry, and `false` when the cache is full of
+    /// in-flight entries and nothing could be evicted — callers must not insert
+    /// in that case, or `IDEMPOTENCY_CACHE_CAPACITY` is defeated.
+    fn make_room(&mut self) -> bool {
+        let mut active_seen = 0;
+        while self.entries.len() >= self.capacity && active_seen < self.order.len() {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
-            let remove = self
-                .entries
-                .get(&oldest)
-                .is_some_and(|entry| matches!(entry.status, IdempotencyStatus::Completed { .. }));
-            if remove {
-                self.entries.remove(&oldest);
-            } else {
-                self.order.push_back(oldest);
-                break;
+            match self.entries.get(&oldest) {
+                Some(entry) if matches!(entry.status, IdempotencyStatus::Completed { .. }) => {
+                    self.entries.remove(&oldest);
+                }
+                Some(_) => {
+                    self.order.push_back(oldest);
+                    active_seen += 1;
+                }
+                None => {}
             }
         }
+        self.entries.len() < self.capacity
     }
 }
 
