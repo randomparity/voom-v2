@@ -395,6 +395,65 @@ async fn expire_due_requeues_overdue_leases() {
 }
 
 #[tokio::test]
+async fn expire_due_requeue_resets_next_eligible_at() {
+    // A retriable failure leaves a future next_eligible_at (backoff). When
+    // the *next* lease later expires, expire_due must reset next_eligible_at
+    // to the expiry `now` — like force_release and fail_retriable do — so the
+    // requeued ticket is immediately eligible and never carries a stale value.
+    let (_pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+
+    // First attempt: fail retriable at T0+10 with ceiling jitter → ticket
+    // requeued with next_eligible_at = T0+20 (a 10s backoff window).
+    let l1 = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(10),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    lrepo
+        .fail(
+            l1.id,
+            FailureClass::WorkerTimeout,
+            T0 + Duration::seconds(10),
+            &test_clock(),
+            &mut ceiling_rng(),
+        )
+        .await
+        .unwrap();
+    let backed_off = trepo.get(tid).await.unwrap().unwrap();
+    assert_eq!(
+        backed_off.next_eligible_at,
+        T0 + Duration::seconds(20),
+        "precondition: retriable failure set a future backoff"
+    );
+
+    // Second attempt: acquire once eligible (acquire does not touch
+    // next_eligible_at), then let this lease expire.
+    let _l2 = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(10),
+            now: T0 + Duration::seconds(20),
+        })
+        .await
+        .unwrap();
+    let expire_now = T0 + Duration::seconds(31);
+    let report = lrepo.expire_due(expire_now).await.unwrap();
+    assert_eq!(report.requeued_tickets, vec![tid]);
+
+    let requeued = trepo.get(tid).await.unwrap().unwrap();
+    assert_eq!(requeued.state, TicketState::Ready);
+    assert_eq!(
+        requeued.next_eligible_at, expire_now,
+        "expire_due must reset next_eligible_at to now, not keep the stale backoff"
+    );
+}
+
+#[tokio::test]
 async fn expire_due_second_call_is_a_no_op() {
     let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let _l = lrepo
