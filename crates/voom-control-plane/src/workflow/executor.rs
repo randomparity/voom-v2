@@ -50,6 +50,7 @@ use crate::transcode::{
 };
 
 const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
+const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -413,50 +414,63 @@ where
             if !node.depends_on().is_empty() || !node.depends_on_selected().is_empty() {
                 continue;
             }
-            let operation = node.operation();
-            let branch = BranchContext {
-                branch_id: "root".to_owned(),
-                path: "/library/root.mkv".to_owned(),
-                probe_codec: Some("h264".to_owned()),
-                source_file: None,
-            };
-            let timing = seeded_timing(
-                plan.seed,
-                node.id(),
-                &branch.branch_id,
-                plan.timing.base_duration_ms,
-                plan.timing.jitter_ms,
-            );
-            let rendered_payload = self
-                .render_root_payload(plan, node, &branch, timing)
-                .await?;
-            let payload = WorkflowTicketPayload {
-                workflow_id: workflow_id.to_owned(),
-                plan_id: plan.id.clone(),
-                node_id: node.id().to_owned(),
-                branch_id: branch.branch_id.clone(),
-                operation,
-                rendered_payload,
-                timing,
-                source_file: None,
-            }
-            .to_ticket_payload()
-            .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
-            let ticket = self
-                .control_plane
-                .create_ticket(NewTicket {
-                    job_id: Some(job_id),
-                    kind: ticket_kind(operation),
-                    priority: 0,
-                    payload,
-                    max_attempts: self.options.max_attempts,
-                    created_at: now,
-                })
-                .await?;
-            self.control_plane
-                .mark_ready_if_unblocked(ticket.id, now)
+            self.create_node_ticket(plan, node, workflow_id, job_id, now)
                 .await?;
         }
+        Ok(())
+    }
+
+    async fn create_node_ticket(
+        &self,
+        plan: &WorkflowPlan,
+        node: &WorkflowNode,
+        workflow_id: &str,
+        job_id: JobId,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let operation = node.operation();
+        let branch = BranchContext {
+            branch_id: "root".to_owned(),
+            path: "/library/root.mkv".to_owned(),
+            probe_codec: Some("h264".to_owned()),
+            source_file: None,
+        };
+        let timing = seeded_timing(
+            plan.seed,
+            node.id(),
+            &branch.branch_id,
+            plan.timing.base_duration_ms,
+            plan.timing.jitter_ms,
+        );
+        let rendered_payload = self
+            .render_root_payload(plan, node, &branch, timing)
+            .await?;
+        let payload = WorkflowTicketPayload {
+            workflow_id: workflow_id.to_owned(),
+            plan_id: plan.id.clone(),
+            node_id: node.id().to_owned(),
+            branch_id: branch.branch_id.clone(),
+            operation,
+            rendered_payload,
+            timing,
+            source_file: None,
+        }
+        .to_ticket_payload()
+        .map_err(|e| VoomError::Config(format!("workflow ticket payload encode: {e}")))?;
+        let ticket = self
+            .control_plane
+            .create_ticket(NewTicket {
+                job_id: Some(job_id),
+                kind: ticket_kind(operation),
+                priority: 0,
+                payload,
+                max_attempts: self.options.max_attempts,
+                created_at: now,
+            })
+            .await?;
+        self.control_plane
+            .mark_ready_if_unblocked(ticket.id, now)
+            .await?;
         Ok(())
     }
 
@@ -743,9 +757,102 @@ where
             "backup" => {
                 expand_backup_completion(&ctx, &payload.branch_id, &ticket).await?;
             }
+            node_id if node_id.starts_with(POLICY_NODE_ID_PREFIX) => {
+                self.expand_policy_node_completion(plan, workflow_id, job_id, node_id)
+                    .await?;
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Dynamically expands the dependents of a just-succeeded policy-bridge node.
+    ///
+    /// Policy plans (node ids prefixed `policy-node_`) can be arbitrary DAGs whose
+    /// edges are declared via [`WorkflowNode::depends_on`]. Workflow tickets do not
+    /// use the store's declarative dependency table, so each downstream node's
+    /// ticket must be created here once all of its parents have succeeded.
+    async fn expand_policy_node_completion(
+        &self,
+        plan: &WorkflowPlan,
+        workflow_id: &str,
+        job_id: JobId,
+        completed_node_id: &str,
+    ) -> Result<(), VoomError> {
+        let succeeded = self.succeeded_node_ids(job_id, workflow_id).await?;
+        let now = self.control_plane.clock().now();
+        for node in &plan.nodes {
+            if !depends_on_node(node, completed_node_id) {
+                continue;
+            }
+            if self
+                .node_ticket_exists(job_id, workflow_id, node.id())
+                .await?
+            {
+                continue;
+            }
+            if !all_dependencies_succeeded(node, &succeeded) {
+                continue;
+            }
+            self.create_node_ticket(plan, node, workflow_id, job_id, now)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Returns the set of node ids whose tickets are in the `succeeded` state for
+    /// this workflow. Used to decide whether a join node's parents have all
+    /// completed.
+    async fn succeeded_node_ids(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<HashSet<String>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT json_extract(payload, '$.node_id') AS node_id FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'succeeded' \
+               AND json_extract(payload, '$.workflow_id') = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
+        .fetch_all(&self.control_plane.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("workflow succeeded node ids: {e}")))?;
+        let mut node_ids = HashSet::new();
+        for row in rows {
+            let node_id: Option<String> = row
+                .try_get("node_id")
+                .map_err(|e| VoomError::Database(format!("succeeded node id row: {e}")))?;
+            if let Some(node_id) = node_id {
+                node_ids.insert(node_id);
+            }
+        }
+        Ok(node_ids)
+    }
+
+    /// Reports whether a ticket already exists for the given node id in this
+    /// workflow, in any state. Guards against creating duplicate tickets for a
+    /// join node when more than one parent succeeds.
+    async fn node_ticket_exists(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+        node_id: &str,
+    ) -> Result<bool, VoomError> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tickets \
+             WHERE job_id = ? \
+               AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.node_id') = ?",
+        )
+        .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
+        .bind(node_id)
+        .fetch_one(&self.control_plane.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("workflow node ticket exists: {e}")))?;
+        Ok(count > 0)
     }
 
     async fn next_ready_workflow_ticket(&self, job_id: JobId, workflow_id: &str) -> Option<Ticket> {
@@ -1934,6 +2041,25 @@ fn parse_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, VoomError> {
 
 fn ticket_kind(operation: OperationKind) -> String {
     format!("synthetic.workflow.operation.{}", operation_name(operation))
+}
+
+/// Reports whether `node` lists `parent_id` among its direct dependencies.
+///
+/// Only `depends_on` (node ids) is consulted. `depends_on_selected` holds
+/// dependency-*group* names resolved through [`WorkflowNode::provides_selected`],
+/// not node ids, and no policy plan currently emits selected dependencies; their
+/// completion gating is therefore left undefined here rather than guessed.
+fn depends_on_node(node: &WorkflowNode, parent_id: &str) -> bool {
+    node.depends_on().iter().any(|id| id == parent_id)
+}
+
+/// Reports whether every direct dependency of `node` has a succeeded ticket. A
+/// join node is created only once all of its parents are present in `succeeded`,
+/// so the last parent to finish triggers creation exactly once.
+fn all_dependencies_succeeded(node: &WorkflowNode, succeeded: &HashSet<String>) -> bool {
+    node.depends_on()
+        .iter()
+        .all(|dependency| succeeded.contains(dependency))
 }
 
 fn selector_failure_class(source: &VoomError) -> Result<FailureClass, VoomError> {

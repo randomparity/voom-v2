@@ -1601,6 +1601,15 @@ impl ExecutorFixture {
             .await
     }
 
+    async fn run_plan(
+        &self,
+        plan: WorkflowPlan,
+    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
+        self.executor_with_options(WorkflowExecutorOptions::for_tests())
+            .submit_and_run(plan)
+            .await
+    }
+
     fn executor_with_options(
         &self,
         options: WorkflowExecutorOptions,
@@ -2638,4 +2647,99 @@ fn operation_name(operation: OperationKind) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn policy_hash_node(id: &str, depends_on: &[&str]) -> WorkflowNode {
+    WorkflowNode::Operation(OperationNode {
+        id: id.to_owned(),
+        operation: OperationKind::HashFile,
+        policy_target: None,
+        operation_payload: Value::Null,
+        depends_on: depends_on.iter().map(ToString::to_string).collect(),
+        depends_on_selected: Vec::new(),
+        provides_selected: None,
+    })
+}
+
+fn policy_chain_plan(nodes: Vec<WorkflowNode>) -> WorkflowPlan {
+    WorkflowPlan {
+        id: "policy-node-expansion-test".to_owned(),
+        seed: 7,
+        nodes,
+        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 4,
+        },
+        timing: crate::workflow::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+#[tokio::test]
+async fn expand_successful_ticket_handles_policy_node_ids() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let worker_id = fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            4,
+            FakeBehavior::Success,
+        )
+        .await;
+    fixture.first_worker_id = Some(worker_id);
+
+    let plan = policy_chain_plan(vec![
+        policy_hash_node("policy-node_node_remux_first", &[]),
+        policy_hash_node(
+            "policy-node_node_remux_second",
+            &["policy-node_node_remux_first"],
+        ),
+    ]);
+
+    let summary = fixture.run_plan(plan).await.unwrap();
+
+    // Both the root node (A) and its dependent (B) must run. Before the fix the
+    // dependent node's ticket was never created, so only A ran.
+    assert_eq!(summary.operation_count(OperationKind::HashFile), 2);
+    assert_eq!(summary.dispatch_count, 2);
+}
+
+#[tokio::test]
+async fn expand_successful_ticket_join_node_waits_for_all_parents() {
+    let mut fixture = ExecutorFixture::without_workers(0).await;
+    let worker_id = fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    fixture.first_worker_id = Some(worker_id);
+
+    // Diamond: A -> B, A -> C, (B, C) -> D. D is a join node and must be created
+    // exactly once, only after BOTH B and C succeed.
+    let plan = policy_chain_plan(vec![
+        policy_hash_node("policy-node_a", &[]),
+        policy_hash_node("policy-node_b", &["policy-node_a"]),
+        policy_hash_node("policy-node_c", &["policy-node_a"]),
+        policy_hash_node("policy-node_d", &["policy-node_b", "policy-node_c"]),
+    ]);
+
+    let summary = fixture.run_plan(plan).await.unwrap();
+
+    // All four nodes run, and D runs exactly once (no duplicate join ticket).
+    assert_eq!(summary.operation_count(OperationKind::HashFile), 4);
+    assert_eq!(summary.dispatch_count, 4);
+
+    let ticket_total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tickets WHERE json_extract(payload, '$.node_id') = ?",
+    )
+    .bind("policy-node_d")
+    .fetch_one(&fixture.cp.pool)
+    .await
+    .unwrap();
+    assert_eq!(ticket_total, 1);
 }
