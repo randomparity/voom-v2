@@ -125,8 +125,10 @@ impl ControlPlane {
     /// (`/health` on a non-Current DB) must use [`HealthPlane::open`] instead.
     ///
     /// # Errors
-    /// Returns `VoomError::Database` if the pool cannot be opened, or
-    /// `VoomError::Migration` if the schema probe is not `Current`.
+    /// Returns `VoomError::Database` if the pool cannot be opened. If the
+    /// schema probe is not `Current` it returns the variant matching the
+    /// probe state: `SchemaTooNew` for `TooNew`, `DirtyMigration` for
+    /// `Dirty`, otherwise `Migration` (uninitialized / partial).
     pub async fn open(database_url: &str) -> Result<Self, VoomError> {
         let pool = connect(database_url).await?;
         Self::open_with_pool_and_rng(pool, Arc::new(SystemClock), production_rng()).await
@@ -134,12 +136,13 @@ impl ControlPlane {
 
     /// Wrap an already-connected pool with the supplied clock. The DB MUST
     /// already be at the current schema (use `voom_store::init` on first boot);
-    /// any other state is rejected with `VoomError::Migration`. Use-case
-    /// methods on `ControlPlane` assume the full M1 schema is present.
+    /// any other state is rejected. Use-case methods on `ControlPlane` assume
+    /// the full M1 schema is present.
     ///
     /// # Errors
-    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
-    /// or whatever error `probe_schema` itself produces.
+    /// If the schema probe is not `Current`, returns the variant matching the
+    /// probe state (`SchemaTooNew`, `DirtyMigration`, or `Migration`), or
+    /// whatever error `probe_schema` itself produces.
     pub async fn open_with_pool(
         pool: SqlitePool,
         clock: Arc<dyn Clock>,
@@ -153,18 +156,34 @@ impl ControlPlane {
     /// `open_with_pool` which seeds a `StdRng` from OS randomness.
     ///
     /// # Errors
-    /// Returns `VoomError::Migration` if the schema probe is not `Current`,
-    /// or whatever error `probe_schema` itself produces.
+    /// If the schema probe is not `Current`, returns the variant matching the
+    /// probe state (`SchemaTooNew`, `DirtyMigration`, or `Migration`), or
+    /// whatever error `probe_schema` itself produces.
     pub async fn open_with_pool_and_rng(
         pool: SqlitePool,
         clock: Arc<dyn Clock>,
         rng: SharedRng,
     ) -> Result<Self, VoomError> {
         let probe = probe_schema(&pool).await?;
-        if !matches!(probe, SchemaState::Current { .. }) {
-            return Err(VoomError::Migration(format!(
-                "ControlPlane requires a Current schema; got {probe:?}"
-            )));
+        match probe {
+            SchemaState::Current { .. } => {}
+            SchemaState::TooNew { applied, expected } => {
+                return Err(VoomError::SchemaTooNew(format!(
+                    "DB has {applied} migrations applied but this binary only ships \
+                     {expected}; upgrade the voom binary to one that knows this schema"
+                )));
+            }
+            SchemaState::Dirty { failed_version, .. } => {
+                return Err(VoomError::DirtyMigration(format!(
+                    "migration version {failed_version} is recorded with success=0; \
+                     remove the failed row from _sqlx_migrations or restore from backup"
+                )));
+            }
+            SchemaState::Uninitialized | SchemaState::Partial { .. } => {
+                return Err(VoomError::Migration(format!(
+                    "ControlPlane requires a Current schema; got {probe:?}"
+                )));
+            }
         }
         Ok(Self::new_unchecked(pool, clock, rng))
     }

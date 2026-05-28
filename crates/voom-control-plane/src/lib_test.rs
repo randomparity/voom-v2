@@ -134,6 +134,44 @@ async fn control_plane_open_rejects_uninitialized_db() {
 }
 
 #[tokio::test]
+async fn control_plane_open_rejects_too_new_schema() {
+    let (_keep, url) = fresh_url();
+    voom_store::init(&url).await.unwrap();
+
+    {
+        let pool = voom_store::connect(&url).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, installed_on, success, checksum, execution_time) \
+             VALUES (99999, 'synthetic-future', strftime('%s','now'), 1, X'00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let err = ControlPlane::open(&url).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::DbSchemaTooNew);
+}
+
+#[tokio::test]
+async fn control_plane_open_rejects_dirty_schema() {
+    let (_keep, url) = fresh_url();
+    voom_store::init(&url).await.unwrap();
+
+    {
+        let pool = voom_store::connect(&url).await.unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET success = 0 WHERE version = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    let err = ControlPlane::open(&url).await.unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::DbDirtyMigration);
+}
+
+#[tokio::test]
 async fn health_plane_open_succeeds_on_uninitialized_db() {
     let (_keep, url) = fresh_url();
     voom_store::connect_or_create(&url).await.unwrap();
