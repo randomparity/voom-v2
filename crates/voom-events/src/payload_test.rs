@@ -859,18 +859,132 @@ fn artifact_commit_recovery_required_payload_round_trip() {
     );
 }
 
+/// Compile-time exhaustiveness guard for the serde-tag test below.
+///
+/// This match names every `Event` variant, so adding a new variant is a
+/// compile error here until the arm is added. When you add an arm, you
+/// MUST also add a matching sample to the `events` list in
+/// `event_kind_matches_serde_tag` so the new variant's serde tag is
+/// actually asserted — the guard proves the list *should* cover every
+/// variant, but only the list's per-variant assertion proves it *does*.
+#[expect(
+    clippy::match_same_arms,
+    reason = "one arm per Event variant — a new variant must fail to compile here; \
+              identical empty bodies are intentional, never collapse them"
+)]
+fn _event_variants_are_exhaustive(e: &Event) {
+    match e {
+        Event::SchemaInitialized(_) => {}
+        Event::JobOpened(_) => {}
+        Event::JobSucceeded(_) => {}
+        Event::JobFailed(_) => {}
+        Event::JobCancelled(_) => {}
+        Event::TicketCreated(_) => {}
+        Event::TicketReady(_) => {}
+        Event::TicketLeased(_) => {}
+        Event::TicketSucceeded(_) => {}
+        Event::TicketFailedRetriable(_) => {}
+        Event::TicketFailedTerminal(_) => {}
+        Event::TicketRequeuedAfterLeaseExpiry(_) => {}
+        Event::TicketRequeuedAfterForceRelease(_) => {}
+        Event::LeaseAcquired(_) => {}
+        Event::LeaseReleased(_) => {}
+        Event::LeaseExpired(_) => {}
+        Event::LeaseForceReleased(_) => {}
+        Event::NodeRegistered(_) => {}
+        Event::NodeHeartbeatRecorded(_) => {}
+        Event::NodeMarkedStale(_) => {}
+        Event::NodeRetired(_) => {}
+        Event::WorkerRegistered(_) => {}
+        Event::WorkerLinkedToNode(_) => {}
+        Event::WorkerCapabilityRecorded(_) => {}
+        Event::WorkerGrantRecorded(_) => {}
+        Event::WorkerRetired(_) => {}
+        Event::ArtifactHandleCreated(_) => {}
+        Event::ArtifactLocationRecorded(_) => {}
+        Event::ArtifactLocationRetired(_) => {}
+        Event::ArtifactLineageRecorded(_) => {}
+        Event::ArtifactStaged(_) => {}
+        Event::ArtifactVerificationStarted(_) => {}
+        Event::ArtifactVerificationSucceeded(_) => {}
+        Event::ArtifactVerificationFailed(_) => {}
+        Event::ArtifactCommitStarted(_) => {}
+        Event::ArtifactCommitCompleted(_) => {}
+        Event::ArtifactCommitFailedPreMutation(_) => {}
+        Event::ArtifactCommitRecoveryRequired(_) => {}
+        Event::ArtifactTranscodeStarted(_) => {}
+        Event::ArtifactTranscodeProgress(_) => {}
+        Event::ArtifactTranscodeSucceeded(_) => {}
+        Event::ArtifactTranscodeFailed(_) => {}
+        Event::ArtifactRemuxStarted(_) => {}
+        Event::ArtifactRemuxProgress(_) => {}
+        Event::ArtifactRemuxSucceeded(_) => {}
+        Event::ArtifactRemuxFailed(_) => {}
+        Event::ArtifactAudioTranscodeStarted(_) => {}
+        Event::ArtifactAudioTranscodeProgress(_) => {}
+        Event::ArtifactAudioTranscodeSucceeded(_) => {}
+        Event::ArtifactAudioTranscodeFailed(_) => {}
+        Event::ArtifactAudioExtractStarted(_) => {}
+        Event::ArtifactAudioExtractProgress(_) => {}
+        Event::ArtifactAudioExtractSucceeded(_) => {}
+        Event::ArtifactAudioExtractFailed(_) => {}
+        Event::IssueOpened(_) => {}
+        Event::IssueUpdated(_) => {}
+        Event::IssueResolved(_) => {}
+        Event::MediaWorkCreated(_) => {}
+        Event::MediaVariantCreated(_) => {}
+        Event::AssetBundleCreated(_) => {}
+        Event::AssetBundleMemberAdded(_) => {}
+        Event::AssetBundleMemberRemoved(_) => {}
+        Event::FileAssetCreated(_) => {}
+        Event::FileVersionCreated(_) => {}
+        Event::FileLocationRecorded(_) => {}
+        Event::FileLocationAliased(_) => {}
+        Event::FileLocationRetiredByMove(_) => {}
+        Event::FileLocationRecordedByMove(_) => {}
+        Event::IdentityEvidenceRecorded(_) => {}
+        Event::IdentityEvidenceAccepted(_) => {}
+        Event::IdentityEvidenceSuperseded(_) => {}
+        Event::MediaSnapshotRecorded(_) => {}
+        Event::UseLeaseAcquired(_) => {}
+        Event::UseLeaseReleased(_) => {}
+        Event::UseLeaseExpired(_) => {}
+        Event::UseLeaseForceReleased(_) => {}
+        Event::UseLeaseRecoveredStaleIssuer(_) => {}
+        Event::UseLeaseReanchoredByMove(_) => {}
+        Event::CommitIntentRecorded(_) => {}
+        Event::CommitAbortedByUseLease(_) => {}
+        Event::CommitAbortedByStaleEvidence(_) => {}
+        Event::CommitAbortedByClosureIncomplete(_) => {}
+        Event::CommitAbortedByPendingCommit(_) => {}
+        Event::CommitAuthorized(_) => {}
+        Event::CommitAbortedByClosureGrew(_) => {}
+        Event::CommitCompleted(_) => {}
+        Event::CommitAbortedPreMutation(_) => {}
+        Event::CommitAbortedPostMutation(_) => {}
+        Event::CommitRecoveryRequired(_) => {}
+        Event::CommitForcedOverride(_) => {}
+    }
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "exhaustive Event list — a new variant must fail to compile here"
+    reason = "one sample per Event variant — the list must stay exhaustive"
 )]
 fn event_kind_matches_serde_tag() {
     use time::OffsetDateTime;
 
-    // Exhaustive list of Event variants. The compiler enforces this stays
-    // in sync with `Event::kind()` — a new variant breaks the match there
-    // and surfaces in CI. Any drift between `Event::kind().as_str()` and
-    // the per-variant `#[serde(rename = "...")]` table also breaks here.
+    // Exactly one constructed sample per Event variant. For each sample we
+    // assert the serde tag (`to_value(..)["kind"]`) equals
+    // `event.kind().as_str()`, catching any drift between the per-variant
+    // `#[serde(rename = "...")]` table and `Event::kind()`.
+    //
+    // The Vec literal does NOT enforce exhaustiveness on its own — a
+    // missing variant simply goes untested. The compile-time guard
+    // `_event_variants_are_exhaustive` provides that check: a new variant
+    // fails to compile there, prompting a maintainer to add both an arm
+    // and a sample here.
     let events: Vec<Event> = vec![
         Event::SchemaInitialized(SchemaInitializedPayload {
             migrations_applied: 1,
@@ -1082,9 +1196,507 @@ fn event_kind_matches_serde_tag() {
             error_code: "PROMOTION_FAILED".to_owned(),
             message: "promotion failed".to_owned(),
         }),
+        Event::ArtifactTranscodeStarted(ArtifactTranscodeStartedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactTranscodeProgress(ArtifactTranscodeProgressPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            percent_bps: None,
+            message: None,
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactTranscodeSucceeded(ArtifactTranscodeSucceededPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            output_container: "mkv".to_owned(),
+            output_video_codec: "h264".to_owned(),
+            provider: "ffmpeg".to_owned(),
+            provider_version: "1".to_owned(),
+        }),
+        Event::ArtifactTranscodeFailed(ArtifactTranscodeFailedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: None,
+            staging_path: None,
+            failure_class: FailureClass::WorkerCrash,
+            error_code: "TRANSCODE_FAILED".to_owned(),
+            message: "m".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactRemuxStarted(ArtifactRemuxStartedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            default_streams: Vec::new(),
+            clear_default_streams: Vec::new(),
+            track_order: Vec::new(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactRemuxProgress(ArtifactRemuxProgressPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            default_streams: Vec::new(),
+            clear_default_streams: Vec::new(),
+            percent_bps: None,
+            message: None,
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactRemuxSucceeded(ArtifactRemuxSucceededPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            default_streams: Vec::new(),
+            clear_default_streams: Vec::new(),
+            kept_snapshot_stream_ids: Vec::new(),
+            default_snapshot_stream_ids: Vec::new(),
+            output_container: "mkv".to_owned(),
+            provider: "ffmpeg".to_owned(),
+            provider_version: "1".to_owned(),
+        }),
+        Event::ArtifactRemuxFailed(ArtifactRemuxFailedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: None,
+            artifact_handle_id: None,
+            artifact_location_id: None,
+            staging_path: None,
+            selected_streams: Vec::new(),
+            default_streams: Vec::new(),
+            clear_default_streams: Vec::new(),
+            failure_class: FailureClass::WorkerCrash,
+            error_code: "REMUX_FAILED".to_owned(),
+            message: "m".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioTranscodeStarted(ArtifactAudioTranscodeStartedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            target_codec: "aac".to_owned(),
+            output_container: "mka".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioTranscodeProgress(ArtifactAudioTranscodeProgressPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            percent_bps: None,
+            message: None,
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioTranscodeSucceeded(ArtifactAudioTranscodeSucceededPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_streams: Vec::new(),
+            selected_snapshot_stream_ids: Vec::new(),
+            selected_output_streams: Vec::new(),
+            output_container: "mka".to_owned(),
+            output_audio_codecs: Vec::new(),
+            provider: "ffmpeg".to_owned(),
+            provider_version: "1".to_owned(),
+        }),
+        Event::ArtifactAudioTranscodeFailed(ArtifactAudioTranscodeFailedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: None,
+            source_media_snapshot_id: None,
+            artifact_handle_id: None,
+            artifact_location_id: None,
+            staging_path: None,
+            selected_streams: Vec::new(),
+            selected_output_streams: Vec::new(),
+            failure_class: FailureClass::WorkerCrash,
+            error_code: "AUDIO_TRANSCODE_FAILED".to_owned(),
+            message: "m".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioExtractStarted(ArtifactAudioExtractStartedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            source_bundle_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_stream: ArtifactAudioStreamPayload {
+                snapshot_stream_id: "s1".to_owned(),
+                provider_stream_index: 1,
+            },
+            role: "primary".to_owned(),
+            target_codec: "aac".to_owned(),
+            output_container: "mka".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioExtractProgress(ArtifactAudioExtractProgressPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            source_bundle_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_stream: ArtifactAudioStreamPayload {
+                snapshot_stream_id: "s1".to_owned(),
+                provider_stream_index: 1,
+            },
+            percent_bps: None,
+            message: None,
+            provider: None,
+            provider_version: None,
+        }),
+        Event::ArtifactAudioExtractSucceeded(ArtifactAudioExtractSucceededPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: 1,
+            source_media_snapshot_id: 1,
+            source_bundle_id: 1,
+            artifact_handle_id: 1,
+            artifact_location_id: 1,
+            staging_path: "/staging/x".to_owned(),
+            selected_stream: ArtifactAudioStreamPayload {
+                snapshot_stream_id: "s1".to_owned(),
+                provider_stream_index: 1,
+            },
+            selected_snapshot_stream_id: "s1".to_owned(),
+            role: "primary".to_owned(),
+            output_container: "mka".to_owned(),
+            output_audio_codec: "aac".to_owned(),
+            provider: "ffmpeg".to_owned(),
+            provider_version: "1".to_owned(),
+        }),
+        Event::ArtifactAudioExtractFailed(ArtifactAudioExtractFailedPayload {
+            job_id: 1,
+            ticket_id: 1,
+            lease_id: None,
+            source_file_version_id: 1,
+            source_file_location_id: None,
+            source_media_snapshot_id: None,
+            source_bundle_id: 1,
+            artifact_handle_id: None,
+            artifact_location_id: None,
+            staging_path: None,
+            selected_stream: None,
+            role: None,
+            failure_class: FailureClass::WorkerCrash,
+            error_code: "AUDIO_EXTRACT_FAILED".to_owned(),
+            message: "m".to_owned(),
+            provider: None,
+            provider_version: None,
+        }),
         Event::IssueOpened(issue_payload("planned")),
         Event::IssueUpdated(issue_payload("open")),
         Event::IssueResolved(issue_payload("resolved")),
+        Event::MediaWorkCreated(MediaWorkCreatedPayload {
+            media_work_id: 1,
+            kind: "movie".to_owned(),
+            display_title: "x".to_owned(),
+            provisional: false,
+        }),
+        Event::MediaVariantCreated(MediaVariantCreatedPayload {
+            media_variant_id: 1,
+            media_work_id: 1,
+            label: "x".to_owned(),
+            provisional: false,
+        }),
+        Event::AssetBundleCreated(AssetBundleCreatedPayload {
+            bundle_id: 1,
+            media_variant_id: 1,
+            display_name: "x".to_owned(),
+        }),
+        Event::AssetBundleMemberAdded(AssetBundleMemberAddedPayload {
+            bundle_id: 1,
+            file_asset_id: 1,
+            role: "primary".to_owned(),
+        }),
+        Event::AssetBundleMemberRemoved(AssetBundleMemberRemovedPayload {
+            bundle_id: 1,
+            file_asset_id: 1,
+            role: "primary".to_owned(),
+        }),
+        Event::FileAssetCreated(FileAssetCreatedPayload { file_asset_id: 1 }),
+        Event::FileVersionCreated(FileVersionCreatedPayload {
+            file_version_id: 1,
+            file_asset_id: 1,
+            content_hash: "blake3:1".to_owned(),
+            size_bytes: 1,
+            produced_by: "x".to_owned(),
+            produced_from_version_id: None,
+        }),
+        Event::FileLocationRecorded(FileLocationRecordedPayload {
+            file_location_id: 1,
+            file_version_id: 1,
+            kind: "local_path".to_owned(),
+            value: "/tmp/x".to_owned(),
+        }),
+        Event::FileLocationAliased(FileLocationAliasedPayload {
+            file_location_id: 1,
+            file_version_id: 1,
+            kind: "local_path".to_owned(),
+            value: "/tmp/x".to_owned(),
+        }),
+        Event::FileLocationRetiredByMove(FileLocationRetiredByMovePayload {
+            file_location_id: 1,
+            file_version_id: 1,
+            retired_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::FileLocationRecordedByMove(FileLocationRecordedByMovePayload {
+            retired_file_location_id: 1,
+            new_file_location_id: 2,
+            file_version_id: 1,
+            kind: "local_path".to_owned(),
+            value: "/tmp/x".to_owned(),
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::IdentityEvidenceRecorded(IdentityEvidenceRecordedPayload {
+            evidence_id: 1,
+            target_type: "file_version".to_owned(),
+            target_id: 1,
+            assertion_type: "hash".to_owned(),
+            provider: "x".to_owned(),
+            provider_version: "1".to_owned(),
+            confidence: 1.0,
+            observed_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::IdentityEvidenceAccepted(IdentityEvidenceAcceptedPayload {
+            evidence_id: 1,
+            target_type: "file_version".to_owned(),
+            target_id: 1,
+            accepted_user_id: None,
+            accepted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::IdentityEvidenceSuperseded(IdentityEvidenceSupersededPayload {
+            superseded_evidence_id: 1,
+            superseded_by_evidence_id: 2,
+            target_type: "file_version".to_owned(),
+            target_id: 1,
+            superseded_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
+            media_snapshot_id: 1,
+            file_version_id: 1,
+            probed_by_worker_id: None,
+            probed_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::UseLeaseAcquired(UseLeaseAcquiredPayload {
+            lease_id: 1,
+            kind: "playback".to_owned(),
+            scope_type: "asset".to_owned(),
+            scope_id: 1,
+            issuer_kind: "user".to_owned(),
+            issuer_ref: "u1".to_owned(),
+            blocking_mode: "blocking".to_owned(),
+            ttl_bound: false,
+            acquired_at: OffsetDateTime::UNIX_EPOCH,
+            expires_at: None,
+        }),
+        Event::UseLeaseReleased(UseLeaseReleasedPayload {
+            lease_id: 1,
+            release_reason: "released".to_owned(),
+            released_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::UseLeaseExpired(UseLeaseExpiredPayload {
+            lease_id: 1,
+            released_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::UseLeaseForceReleased(UseLeaseForceReleasedPayload {
+            lease_id: 1,
+            actor: "a".to_owned(),
+            reason: "r".to_owned(),
+            released_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::UseLeaseRecoveredStaleIssuer(UseLeaseRecoveredStaleIssuerPayload {
+            lease_id: 1,
+            actor: "a".to_owned(),
+            reason: "r".to_owned(),
+            released_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::UseLeaseReanchoredByMove(UseLeaseReanchoredByMovePayload {
+            lease_id: 1,
+            retired_location_id: 1,
+            new_location_id: 2,
+            reanchored_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitIntentRecorded(CommitIntentRecordedPayload {
+            commit_id: voom_core::CommitId(1),
+            target_kind: "delete_file_location".to_owned(),
+            closure_asset_count: 1,
+            closure_bundle_count: 1,
+            closure_version_count: 1,
+            closure_location_count: 1,
+            accepted_evidence_count: 1,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedByUseLease(CommitAbortedByUseLeasePayload {
+            commit_id: voom_core::CommitId(1),
+            lease_id: voom_core::UseLeaseId(1),
+            lease_scope_type: "asset".to_owned(),
+            lease_scope_id: 1,
+            phase: "prepare".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedByStaleEvidence(CommitAbortedByStaleEvidencePayload {
+            commit_id: voom_core::CommitId(1),
+            evidence_id: voom_core::EvidenceId(1),
+            drift_kind: "pinned_hash_differs".to_owned(),
+            phase: "prepare".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedByClosureIncomplete(CommitAbortedByClosureIncompletePayload {
+            commit_id: voom_core::CommitId(1),
+            phase: "prepare".to_owned(),
+            message: "m".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedByPendingCommit(CommitAbortedByPendingCommitPayload {
+            commit_id: voom_core::CommitId(1),
+            pending_commit_id: voom_core::CommitId(2),
+            scope_type: "asset".to_owned(),
+            scope_id: 1,
+            phase: "prepare".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAuthorized(CommitAuthorizedPayload {
+            commit_id: voom_core::CommitId(1),
+            closure_asset_count: 1,
+            closure_bundle_count: 1,
+            closure_version_count: 1,
+            closure_location_count: 1,
+            target_row_epoch_count: 1,
+            authorized_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedByClosureGrew(CommitAbortedByClosureGrewPayload {
+            commit_id: voom_core::CommitId(1),
+            added_asset_count: 1,
+            added_bundle_count: 0,
+            added_version_count: 0,
+            added_location_count: 0,
+            removed_asset_count: 0,
+            removed_bundle_count: 0,
+            removed_version_count: 0,
+            removed_location_count: 0,
+            phase: "authorize".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitCompleted(CommitCompletedPayload {
+            commit_id: voom_core::CommitId(1),
+            target_kind: "delete_file_location".to_owned(),
+            closure_asset_count: 1,
+            closure_bundle_count: 1,
+            closure_version_count: 1,
+            closure_location_count: 1,
+            finalized_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedPreMutation(CommitAbortedPreMutationPayload {
+            commit_id: voom_core::CommitId(1),
+            prior_state: "pending".to_owned(),
+            reason: "operator_cancel".to_owned(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitAbortedPostMutation(CommitAbortedPostMutationPayload {
+            commit_id: voom_core::CommitId(1),
+            reason: "closure_grew".to_owned(),
+            added_asset_count: 1,
+            added_bundle_count: 0,
+            added_version_count: 0,
+            added_location_count: 0,
+            removed_asset_count: 0,
+            removed_bundle_count: 0,
+            removed_version_count: 0,
+            removed_location_count: 0,
+            fresh_lease_ids: Vec::new(),
+            target_epoch_drift: Vec::new(),
+            aborted_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitRecoveryRequired(CommitRecoveryRequiredPayload {
+            commit_id: voom_core::CommitId(1),
+            recovery_reason: "closure_grew".to_owned(),
+            added_asset_count: 1,
+            added_bundle_count: 0,
+            added_version_count: 0,
+            added_location_count: 0,
+            removed_asset_count: 0,
+            removed_bundle_count: 0,
+            removed_version_count: 0,
+            removed_location_count: 0,
+            fresh_lease_ids: Vec::new(),
+            target_epoch_drift: Vec::new(),
+            recorded_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::CommitForcedOverride(CommitForcedOverridePayload {
+            commit_id: voom_core::CommitId(1),
+            actor: "a".to_owned(),
+            reason: "r".to_owned(),
+            bypass: Vec::new(),
+            recorded_at: OffsetDateTime::UNIX_EPOCH,
+        }),
     ];
 
     for event in events {
