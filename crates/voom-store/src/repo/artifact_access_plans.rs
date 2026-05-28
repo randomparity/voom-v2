@@ -455,8 +455,11 @@ async fn validate_plan_coherence_in_tx(
         .try_get("worker_node_id")
         .map_err(|e| map_row_err("artifact_access_plans coherence", &e))?;
     let Some(worker_node_id) = worker_node_id else {
-        return Err(VoomError::NotFound(format!(
-            "workers id={} not found",
+        // The LEFT JOIN found the worker row (the lease FK guarantees it), but
+        // its node_id is NULL. A live lease pointing at a node-less worker is a
+        // data-integrity violation, not a missing worker — surface Internal.
+        return Err(VoomError::Internal(format!(
+            "artifact_access_plans coherence: worker_id={} has no node_id assigned",
             input.worker_id.0
         )));
     };
