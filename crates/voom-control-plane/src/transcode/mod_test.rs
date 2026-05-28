@@ -51,6 +51,15 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
         count_events(&cp, EventKind::ArtifactTranscodeSucceeded).await,
         1
     );
+    let recorded_staging_path = succeeded_staging_path(&cp).await;
+    assert!(
+        recorded_staging_path.ends_with("ticket-2/lease-3/Movie.hevc.mkv"),
+        "succeeded event recorded an empty/wrong staging_path: {recorded_staging_path:?}"
+    );
+    assert_eq!(
+        recorded_staging_path,
+        report.staging_path.display().to_string()
+    );
 }
 
 #[tokio::test]
@@ -252,6 +261,27 @@ async fn seed_source(
         panic!("seed_source should create a new file asset");
     };
     (file_version_id, file_location_id)
+}
+
+async fn succeeded_staging_path(cp: &crate::ControlPlane) -> String {
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::ArtifactTranscodeSucceeded),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 100,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    match &page.items[0].envelope.payload {
+        voom_events::Event::ArtifactTranscodeSucceeded(p) => p.staging_path.clone(),
+        other => panic!("expected ArtifactTranscodeSucceeded, got {other:?}"),
+    }
 }
 
 async fn count_events(cp: &crate::ControlPlane, kind: EventKind) -> usize {

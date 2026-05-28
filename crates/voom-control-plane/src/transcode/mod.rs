@@ -143,6 +143,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         selected.location.id,
         staged.artifact_handle_id,
         staged.artifact_location_id,
+        &staging_path,
         &result,
     )
     .await?;
