@@ -244,6 +244,46 @@ async fn binary_prints_bound_address_and_stops_on_stdin_close() {
     }
 }
 
+#[tokio::test]
+async fn malformed_payload_returns_terminal_domain_error_over_http_success() {
+    let config =
+        FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, std::ffi::OsStr::new("/nonexistent"))]);
+    let (addr, running) = running_server(config).await.expect("server starts");
+    let client = HttpClient::new(addr);
+
+    // `path` must be a string; an integer makes ProbeFileRequest decoding
+    // fail. The worker must answer HTTP 200 with a terminal
+    // MalformedWorkerResult frame, not an HTTP 400 transport error.
+    let request = OperationRequest {
+        operation: OperationKind::ProbeFile,
+        lease_id: LeaseId(42),
+        payload: serde_json::json!({"path": 12}),
+        heartbeat_deadline_ms: 1_000,
+        progress_idle_deadline_ms: 1_000,
+    };
+    let dispatch_result = client
+        .dispatch(&credentials(), "malformed-payload", request)
+        .await;
+    assert!(
+        dispatch_result.is_ok(),
+        "malformed payload must not become a transport error: {dispatch_result:?}"
+    );
+    let mut dispatch = dispatch_result.expect("dispatch ok");
+    let terminal = dispatch.frames.next_frame().await.expect("terminal frame");
+    stop_server(running).await;
+    match terminal {
+        NdjsonOutcome::Terminated(frame) => assert_terminal_error(
+            frame,
+            FailureClass::MalformedWorkerResult,
+            ErrorCode::MalformedWorkerResult,
+        ),
+        other => assert!(
+            matches!(other, NdjsonOutcome::Terminated(_)),
+            "expected terminal error frame, got {other:?}"
+        ),
+    }
+}
+
 async fn dispatch_terminal_frame(
     media_path: &Path,
     config: FfprobeConfig,

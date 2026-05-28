@@ -189,10 +189,21 @@ fn handle_operation_with_config(req: OperationRequest, config: FfprobeConfig) ->
 
         let lease_id = req.lease_id;
         let accepted_at = Utc::now();
-        let payload: ProbeFileRequest =
-            serde_json::from_value(req.payload).map_err(|err| ProtocolError::InvalidPayload {
-                detail: format!("probe_file payload decode: {err}"),
-            })?;
+        // A malformed payload is a worker-domain result, not a transport
+        // error: emit a terminal ProgressFrame::Error (MalformedWorkerResult)
+        // on the HTTP 200 path so retries replay it, matching the ffmpeg
+        // worker. Returning a ProtocolError here would instead surface HTTP
+        // 400 and evict the idempotency entry, diverging from the contract.
+        let payload: ProbeFileRequest = match serde_json::from_value(req.payload) {
+            Ok(payload) => payload,
+            Err(err) => {
+                let worker_err = malformed_worker_result(
+                    "decode_request",
+                    format!("probe_file payload decode: {err}"),
+                );
+                return error_dispatch(lease_id, accepted_at, &worker_err);
+            }
+        };
 
         match Box::pin(probe_file(&payload, &config)).await {
             Ok(result) => success_dispatch(lease_id, accepted_at, result),
