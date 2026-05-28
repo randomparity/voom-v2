@@ -57,6 +57,26 @@ fn result_frame(lease_id: LeaseId, seq: u64) -> ProgressFrame {
     }
 }
 
+#[test]
+fn streaming_writer_rejects_second_terminal_frame() {
+    let (mut writer, _dispatch) = OperationDispatch::streaming(OperationResponse {
+        lease_id: LeaseId(1),
+        accepted_at: fixed_time(),
+    });
+    // First terminal frame is accepted.
+    writer.write_frame(&result_frame(LeaseId(1), 0)).unwrap();
+    // A second terminal frame must be rejected, not appended — appending it
+    // would concatenate two terminal frames into the buffered body and
+    // corrupt the idempotency-cache entry on replay.
+    let err = writer
+        .write_frame(&result_frame(LeaseId(1), 1))
+        .unwrap_err();
+    assert!(
+        matches!(err, ProtocolError::MalformedFrame { .. }),
+        "expected MalformedFrame for a second terminal frame, got {err:?}"
+    );
+}
+
 fn ndjson_bytes(frames: &[ProgressFrame]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for frame in frames {
