@@ -129,6 +129,20 @@ async fn retire_with_stale_epoch_returns_conflict() {
 }
 
 #[tokio::test]
+async fn retire_missing_worker_returns_not_found() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool.clone());
+    let err = repo
+        .retire(WorkerId(424_242), 0, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, VoomError::NotFound(_)),
+        "expected NotFound for a missing worker, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn list_by_status_filters_correctly() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());

@@ -379,6 +379,21 @@ impl WorkerRepo for SqliteWorkerRepo {
         expected_epoch: u64,
         now: OffsetDateTime,
     ) -> Result<Worker, VoomError> {
+        let current = get_in_tx(tx, id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("workers retire: id={id} not found")))?;
+        if current.status == WorkerStatus::Retired {
+            return Err(VoomError::Conflict(format!(
+                "workers retire rejected: id={id} already retired"
+            )));
+        }
+        if current.epoch != expected_epoch {
+            return Err(VoomError::Conflict(format!(
+                "workers retire rejected: id={id} expected_epoch={expected_epoch} \
+                 actual_epoch={}",
+                current.epoch
+            )));
+        }
         let ts = iso8601(now)?;
         let res = sqlx::query(
             "UPDATE workers \
@@ -395,7 +410,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "workers retire rejected: id={id} expected_epoch={expected_epoch} \
-                 (row missing, wrong epoch, or already retired)"
+                 changed during update"
             )));
         }
         // Re-read inside the same transaction so the caller sees the updated
