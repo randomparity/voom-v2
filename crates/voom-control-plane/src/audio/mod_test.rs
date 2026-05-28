@@ -6,7 +6,9 @@ use time::OffsetDateTime;
 use voom_core::ids::{ArtifactCommitRecordId, BundleId};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
+use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest, ExtractAudioResult,
     TranscodeAudioRequest, TranscodeAudioResult, VerifyArtifactObservedFacts,
@@ -212,6 +214,56 @@ async fn transcode_post_commit_probe_failure_returns_recovery_report() {
     assert_event_count(&cp, "artifact.audio_transcode_succeeded", 0).await;
 }
 
+#[tokio::test]
+async fn test_extract_post_commit_succeeded_event_failure_returns_ok_with_context() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let input = extract_input_for_source(&source, bundle.id, &dir);
+
+    sqlx::query(
+        "CREATE TRIGGER fail_extract_succeeded BEFORE INSERT ON events \
+         WHEN NEW.kind = 'artifact.audio_extract_succeeded' \
+         BEGIN SELECT RAISE(ABORT, 'injected post-commit event failure'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let report = execute_extract_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingExtractDispatcher {
+            output_bytes: b"extracted".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+    )
+    .await
+    .unwrap();
+
+    assert!(report.commit_record_id.0 > 0);
+    assert!(report.result_file_version_id.0 > 0);
+    assert!(report.result_file_location_id.0 > 0);
+    let recovery = report.commit_recovery_required.unwrap();
+    assert_eq!(recovery.commit_record_id, report.commit_record_id);
+    assert_eq!(
+        recovery.result_file_version_id,
+        Some(report.result_file_version_id)
+    );
+    assert_eq!(
+        recovery.result_file_location_id,
+        Some(report.result_file_location_id)
+    );
+    assert_eq!(
+        recovery.recovery_reason,
+        "audio extract post-commit reporting failed"
+    );
+    assert!(recovery.target_exists);
+    assert_event_count(&cp, "artifact.audio_extract_failed", 0).await;
+    assert_event_count(&cp, "artifact.audio_extract_succeeded", 0).await;
+    assert_event_count(&cp, "artifact.commit_completed", 1).await;
+}
+
 async fn fixture() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     let db = tempfile::NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
@@ -316,6 +368,34 @@ async fn seed_audio_source(
     }
 }
 
+async fn seed_bundle(cp: &crate::ControlPlane) -> voom_store::repo::bundles::AssetBundle {
+    let work = cp
+        .create_media_work(NewMediaWork {
+            kind: MediaWorkKind::Movie,
+            display_title: "movie".to_owned(),
+            provisional: true,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    let variant = cp
+        .create_media_variant(NewMediaVariant {
+            media_work_id: work.id,
+            label: "main".to_owned(),
+            provisional: true,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    cp.create_bundle(NewAssetBundle {
+        media_variant_id: variant.id,
+        display_name: "bundle".to_owned(),
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    })
+    .await
+    .unwrap()
+}
+
 fn transcode_input() -> ExecuteTranscodeAudioInput {
     ExecuteTranscodeAudioInput {
         job_id: JobId(1),
@@ -374,6 +454,31 @@ fn extract_input() -> ExecuteExtractAudioInput {
         }),
         staging_root: PathBuf::from("/tmp/voom-audio-stage"),
         target_dir: PathBuf::from("/tmp/voom-audio-out"),
+    }
+}
+
+fn extract_input_for_source(
+    source: &SeededAudioSource,
+    source_bundle_id: BundleId,
+    dir: &tempfile::TempDir,
+) -> ExecuteExtractAudioInput {
+    ExecuteExtractAudioInput {
+        job_id: JobId(1),
+        ticket_id: TicketId(2),
+        lease_id: LeaseId(3),
+        source_file_version_id: source.version,
+        source_location_id: Some(source.location),
+        source_bundle_id,
+        operation_payload: serde_json::json!({
+            "type": "extract_audio",
+            "target_codec": "opus",
+            "container": "ogg",
+            "source_media_snapshot_id": source.snapshot,
+            "snapshot_stream_id": "a-1",
+            "filter": null
+        }),
+        staging_root: dir.path().join("voom-audio-stage"),
+        target_dir: dir.path().join("voom-audio-out"),
     }
 }
 
@@ -554,6 +659,45 @@ impl TranscodeAudioDispatcher for WritingTranscodeDispatcher {
                 }),
                 channels: Some(2),
             }],
+        })
+    }
+}
+
+struct WritingExtractDispatcher {
+    output_bytes: Vec<u8>,
+}
+
+#[async_trait]
+impl ExtractAudioDispatcher for WritingExtractDispatcher {
+    async fn dispatch_extract_audio(
+        &self,
+        request: ExtractAudioRequest,
+    ) -> Result<ExtractAudioResult, VoomError> {
+        tokio::fs::write(&request.output.path, &self.output_bytes)
+            .await
+            .unwrap();
+        let output_hash = blake3_checksum(&self.output_bytes);
+        Ok(ExtractAudioResult {
+            status: voom_worker_protocol::ExtractAudioStatus::Extracted,
+            provider: "ffmpeg".to_owned(),
+            provider_version: "test".to_owned(),
+            input_pre: observed(
+                request.input.expected.size_bytes,
+                &request.input.expected.content_hash,
+            ),
+            input_post: observed(
+                request.input.expected.size_bytes,
+                &request.input.expected.content_hash,
+            ),
+            output: observed(
+                u64::try_from(self.output_bytes.len()).unwrap(),
+                &output_hash,
+            ),
+            output_container: "ogg".to_owned(),
+            output_audio_codec: "opus".to_owned(),
+            selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
+            output_language: Some("eng".to_owned()),
+            output_title: Some("Main".to_owned()),
         })
     }
 }

@@ -532,6 +532,31 @@ async fn mark_sidecar_recovery_required(
     })
 }
 
+pub(super) async fn extract_post_commit_recovery(
+    committed: &CommitAudioExtractSidecarReport,
+    source_bundle_id: BundleId,
+    role: AudioBundleRole,
+    staging_path: &Path,
+    err: &VoomError,
+) -> AudioExtractRecoveryReport {
+    AudioExtractRecoveryReport {
+        recovery_reason: "audio extract post-commit reporting failed".to_owned(),
+        commit_record_id: committed.commit_record_id,
+        source_bundle_id,
+        role: bundle_role(role).as_str(),
+        target_path: committed.target_path.clone(),
+        target_exists: path_exists(&committed.target_path).await,
+        temp_path: committed.temp_path.clone(),
+        temp_exists: path_exists(&committed.temp_path).await,
+        staging_path: staging_path.to_path_buf(),
+        staging_exists: path_exists(staging_path).await,
+        result_file_version_id: Some(committed.result_file_version_id),
+        result_file_location_id: Some(committed.result_file_location_id),
+        error_code: err.error_code().as_str(),
+        message: err.to_string(),
+    }
+}
+
 async fn recovery_report(
     prepared: &PreparedSidecarCommit,
     input: &CommitAudioExtractSidecarInput,

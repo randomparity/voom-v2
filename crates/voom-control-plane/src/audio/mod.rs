@@ -614,7 +614,7 @@ async fn commit_verified_extract_audio(
     )
     .await?;
     ensure_extract_commit_succeeded(&committed)?;
-    events::record_extract_succeeded(
+    let commit_recovery_required = match events::record_extract_succeeded(
         cp,
         events::ExtractSucceededEventInput {
             input: &request.input,
@@ -626,7 +626,20 @@ async fn commit_verified_extract_audio(
             result: &request.result,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(()) => committed.recovery_required.clone(),
+        Err(err) => Some(
+            commit::extract_post_commit_recovery(
+                &committed,
+                request.input.source_bundle_id,
+                request.selection.role,
+                &request.staging_path,
+                &err,
+            )
+            .await,
+        ),
+    };
     Ok(ExecuteExtractAudioReport {
         job_id: request.input.job_id,
         ticket_id: request.input.ticket_id,
@@ -641,7 +654,7 @@ async fn commit_verified_extract_audio(
         result_file_location_id: committed.result_file_location_id,
         staging_path: request.staging_path,
         target_path: request.target_path,
-        commit_recovery_required: committed.recovery_required,
+        commit_recovery_required,
     })
 }
 
