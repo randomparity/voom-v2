@@ -33,7 +33,8 @@ impl IssueSeverity {
     /// Parse a TEXT column value back to the enum.
     ///
     /// # Errors
-    /// Returns `VoomError::Database` if the string is not in the vocab.
+    /// Returns `VoomError::Internal` if the string is not in the vocab — an
+    /// unrecognized stored value is data corruption, not a connectivity fault.
     pub fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "critical" => Ok(Self::Critical),
@@ -41,7 +42,7 @@ impl IssueSeverity {
             "medium" => Ok(Self::Medium),
             "low" => Ok(Self::Low),
             "info" => Ok(Self::Info),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::Internal(format!(
                 "issues.severity {other:?} not in vocab"
             ))),
         }
@@ -81,7 +82,8 @@ impl IssuePriority {
     /// Parse a TEXT column value back to the enum.
     ///
     /// # Errors
-    /// Returns `VoomError::Database` if the string is not in the vocab.
+    /// Returns `VoomError::Internal` if the string is not in the vocab — an
+    /// unrecognized stored value is data corruption, not a connectivity fault.
     pub fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "urgent" => Ok(Self::Urgent),
@@ -89,7 +91,7 @@ impl IssuePriority {
             "normal" => Ok(Self::Normal),
             "low" => Ok(Self::Low),
             "someday" => Ok(Self::Someday),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::Internal(format!(
                 "issues.priority {other:?} not in vocab"
             ))),
         }
