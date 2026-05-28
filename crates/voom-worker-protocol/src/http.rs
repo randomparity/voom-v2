@@ -122,6 +122,15 @@ pub struct StreamingFrameWriter {
 
 impl StreamingFrameWriter {
     pub fn write_frame(&mut self, frame: &ProgressFrame) -> Result<(), ProtocolError> {
+        // Reject any frame once a terminal has been sent. Without this guard a
+        // second terminal frame is appended to the cached body, concatenating
+        // two terminal frames and corrupting the idempotency-cache entry on
+        // replay. Mirrors NdjsonWriter::emit.
+        if self.shared.terminal_sent.load(Ordering::SeqCst) {
+            return Err(ProtocolError::MalformedFrame {
+                detail: "second terminal frame".to_owned(),
+            });
+        }
         let terminal = frame.is_terminal();
         let mut bytes = serde_json::to_vec(&frame).map_err(|e| ProtocolError::MalformedFrame {
             detail: format!("json encode: {e}"),
