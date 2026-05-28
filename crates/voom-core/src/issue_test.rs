@@ -36,6 +36,18 @@ fn parse_rejects_unknown_string() {
 }
 
 #[test]
+fn severity_parse_unknown_emits_internal() {
+    let err = IssueSeverity::parse("nope").unwrap_err();
+    assert_eq!(err.error_code(), crate::ErrorCode::Internal);
+}
+
+#[test]
+fn priority_parse_unknown_emits_internal() {
+    let err = IssuePriority::parse("now").unwrap_err();
+    assert_eq!(err.error_code(), crate::ErrorCode::Internal);
+}
+
+#[test]
 fn serde_uses_snake_case_wire_format() {
     let s = serde_json::to_string(&IssueSeverity::Critical).unwrap();
     assert_eq!(s, "\"critical\"");
