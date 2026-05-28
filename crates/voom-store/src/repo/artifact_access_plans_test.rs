@@ -385,3 +385,105 @@ async fn create_selected_rejects_ticket_worker_node_coherence_mismatches() {
     let err = fixture.repo.create_selected(wrong_node).await.unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
+
+#[tokio::test]
+async fn create_selected_with_null_worker_node_id_is_internal() {
+    // workers.node_id is nullable (migration 0009). A live lease whose worker
+    // has no node assigned is a data-integrity violation, not a "missing
+    // worker" — the LEFT JOIN found the row, it just has a NULL node_id. The
+    // coherence guard must surface Internal, not the misleading NotFound.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
+        .await
+        .unwrap();
+    let repo = SqliteArtifactAccessPlanRepo::new(pool.clone());
+
+    let node_id = NodeId(
+        sqlx::query(
+            "INSERT INTO nodes \
+             (name, kind, status, registered_at, last_seen_at, heartbeat_ttl_seconds, \
+              auth_token_hash, auth_token_hint, metadata) \
+             VALUES ('node-1', 'synthetic', 'registered', '1970-01-01T00:00:00Z', \
+                     '1970-01-01T00:00:00Z', 60, 'token-hash', 'hint', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+        .try_into()
+        .unwrap(),
+    );
+    // Worker with NULL node_id (legacy / pre-0009 row).
+    let worker_id = WorkerId(
+        sqlx::query(
+            "INSERT INTO workers (name, kind, status, node_id, registered_at, last_seen_at) \
+             VALUES ('worker-null', 'remote', 'registered', NULL, \
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+        .try_into()
+        .unwrap(),
+    );
+    let job_id: i64 = sqlx::query(
+        "INSERT INTO jobs (kind, state, priority, created_at, updated_at) \
+         VALUES ('artifact-access-test', 'open', 0, '1970-01-01T00:00:00Z', \
+                 '1970-01-01T00:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let ticket_id = TicketId(
+        sqlx::query(
+            "INSERT INTO tickets \
+             (job_id, kind, state, priority, payload, attempt, max_attempts, next_eligible_at, \
+              created_at, state_changed_at) \
+             VALUES (?, 'artifact-access-test', 'leased', 0, '{}', 1, 3, \
+                     '1970-01-01T00:00:00Z', '1970-01-01T00:00:00Z', \
+                     '1970-01-01T00:00:00Z')",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+        .try_into()
+        .unwrap(),
+    );
+    let lease_id = LeaseId(
+        sqlx::query(
+            "INSERT INTO leases \
+             (ticket_id, worker_id, state, acquired_at, expires_at, last_heartbeat_at, \
+              ttl_seconds) \
+             VALUES (?, ?, 'held', '1970-01-01T00:00:00Z', '1970-01-01T00:01:00Z', \
+                     '1970-01-01T00:00:00Z', 60)",
+        )
+        .bind(i64::try_from(ticket_id.0).unwrap())
+        .bind(i64::try_from(worker_id.0).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+        .try_into()
+        .unwrap(),
+    );
+
+    let err = repo
+        .create_selected(NewArtifactAccessPlan {
+            lease_id,
+            ticket_id,
+            worker_id,
+            node_id,
+            input_handles: vec!["handle:input:1".to_owned()],
+            output_handles: vec!["handle:output:1".to_owned()],
+            selected_access_mode: ArtifactAccessMode::SharedMount,
+            evidence: json!({"selected_by":"remote_acquire"}),
+            now: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Internal(_)), "got {err:?}");
+}
