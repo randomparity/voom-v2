@@ -44,6 +44,7 @@ pub async fn record_succeeded(
     source_location_id: FileLocationId,
     artifact_handle_id: ArtifactHandleId,
     artifact_location_id: ArtifactLocationId,
+    staging_path: &Path,
     result: &TranscodeVideoResult,
 ) -> Result<(), VoomError> {
     let mut tx = begin_tx(&cp.pool).await?;
@@ -62,7 +63,7 @@ pub async fn record_succeeded(
             source_file_location_id: source_location_id.0,
             artifact_handle_id: artifact_handle_id.0,
             artifact_location_id: artifact_location_id.0,
-            staging_path: result.output.local_file_key.clone().unwrap_or_default(),
+            staging_path: staging_path.display().to_string(),
             output_container: result.output_container.clone(),
             output_video_codec: result.output_video_codec.clone(),
             provider: result.provider.clone(),
