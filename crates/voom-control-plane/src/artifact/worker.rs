@@ -652,6 +652,12 @@ fn map_dispatch_protocol_error(err: &ProtocolError) -> VerifyWorkerError {
         {
             VerifyWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
         }
+        // A duplicate idempotency key is a transient conflict from a raced
+        // dispatch, not a corrupt result — map it to a retriable WorkerCrash
+        // rather than the terminal MalformedWorkerResult catch-all.
+        ProtocolError::DuplicateIdempotencyKey { .. } => {
+            VerifyWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
+        }
         _ => VerifyWorkerError::malformed_worker_result(format!("worker dispatch failed: {err}")),
     }
 }

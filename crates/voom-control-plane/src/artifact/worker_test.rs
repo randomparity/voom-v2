@@ -15,6 +15,20 @@ use voom_worker_protocol::{
 
 use super::*;
 
+#[test]
+fn duplicate_idempotency_key_maps_to_worker_crash_not_malformed() {
+    // A duplicate idempotency key is a transient server-side conflict (two
+    // concurrent dispatches raced on the same key), not a corrupt result.
+    // It must map to a retriable WorkerCrash, never terminal
+    // MalformedWorkerResult.
+    let err = map_dispatch_protocol_error(&ProtocolError::DuplicateIdempotencyKey {
+        key: "idem-1".to_owned(),
+        original_status: "active".to_owned(),
+    });
+    assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+    assert!(err.failure_class().is_retriable());
+}
+
 #[tokio::test]
 async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() {
     let dir = tempfile::tempdir().unwrap();
