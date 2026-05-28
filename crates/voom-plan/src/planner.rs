@@ -1121,6 +1121,13 @@ fn evaluate_remux_track_operations(
         .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
     let has_stream_facts = has_remux_stream_fact_shape(snapshot);
     if !has_track_operation && !has_stream_facts {
+        // No streams array to inspect, but the summary scalar can still prove
+        // the asset has no video. A container-only remux of a video-less asset
+        // is unsupported, so enforce video presence here rather than skipping
+        // the check and emitting a Planned remux.
+        if video_stream_count(snapshot) == Some(0) {
+            return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+        }
         return Ok(false);
     }
 

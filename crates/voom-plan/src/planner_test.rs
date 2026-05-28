@@ -385,6 +385,27 @@ fn container_mkv_alone_blocks_when_snapshot_container_is_unknown() {
 }
 
 #[test]
+fn container_mkv_alone_blocks_when_stream_summary_has_zero_video_and_no_streams_array() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    }]);
+    // mp4 container with a video_stream_count: 0 summary and NO streams array.
+    // A SetContainer-only remux must still enforce video presence and block —
+    // not silently bypass the check and emit a Planned remux for a video-less
+    // asset.
+    let snapshot = snapshot_with(Some("mp4"), Some("h264"), Some(0));
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+}
+
+#[test]
 fn intervening_non_remux_operation_does_not_split_same_phase_remux_group() {
     let policy = compiled_policy_with_ops(vec![
         CompiledOperation::SetContainer {
