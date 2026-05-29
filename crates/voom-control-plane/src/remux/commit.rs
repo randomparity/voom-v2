@@ -134,22 +134,6 @@ pub async fn record_staged_remux(
     })
 }
 
-pub async fn record_result_snapshot(
-    cp: &ControlPlane,
-    file_version_id: FileVersionId,
-    target_path: &Path,
-    result: &RemuxResult,
-) -> Result<MediaSnapshot, VoomError> {
-    record_result_snapshot_with_dispatcher(
-        cp,
-        file_version_id,
-        target_path,
-        result,
-        &BundledRemuxResultProbeDispatcher,
-    )
-    .await
-}
-
 pub(crate) async fn record_result_snapshot_with_dispatcher(
     cp: &ControlPlane,
     file_version_id: FileVersionId,
