@@ -57,8 +57,8 @@ pub struct CommitAudioExtractSidecarInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitAudioExtractSidecarReport {
     pub commit_record_id: ArtifactCommitRecordId,
-    pub result_file_version_id: FileVersionId,
-    pub result_file_location_id: FileLocationId,
+    pub result_file_version_id: Option<FileVersionId>,
+    pub result_file_location_id: Option<FileLocationId>,
     pub state: ArtifactCommitState,
     pub target_path: PathBuf,
     pub temp_path: PathBuf,
@@ -469,8 +469,8 @@ async fn finalize_sidecar_commit(
     commit_tx(tx).await?;
     Ok(CommitAudioExtractSidecarReport {
         commit_record_id: sidecar.commit_record.id,
-        result_file_version_id: sidecar.file_version_id,
-        result_file_location_id: sidecar.file_location_id,
+        result_file_version_id: Some(sidecar.file_version_id),
+        result_file_location_id: Some(sidecar.file_location_id),
         state: sidecar.commit_record.state,
         target_path: prepared.target_path.clone(),
         temp_path: prepared.temp_path.clone(),
@@ -521,10 +521,8 @@ async fn mark_sidecar_recovery_required(
     let recovery = recovery_report(prepared, input, &err).await;
     Ok(CommitAudioExtractSidecarReport {
         commit_record_id: recovered.id,
-        result_file_version_id: recovered.result_file_version_id.unwrap_or(FileVersionId(0)),
-        result_file_location_id: recovered
-            .result_file_location_id
-            .unwrap_or(FileLocationId(0)),
+        result_file_version_id: recovered.result_file_version_id,
+        result_file_location_id: recovered.result_file_location_id,
         state: recovered.state,
         target_path: prepared.target_path.clone(),
         temp_path: prepared.temp_path.clone(),
@@ -550,8 +548,8 @@ pub(super) async fn extract_post_commit_recovery(
         temp_exists: path_exists(&committed.temp_path).await,
         staging_path: staging_path.to_path_buf(),
         staging_exists: path_exists(staging_path).await,
-        result_file_version_id: Some(committed.result_file_version_id),
-        result_file_location_id: Some(committed.result_file_location_id),
+        result_file_version_id: committed.result_file_version_id,
+        result_file_location_id: committed.result_file_location_id,
         error_code: err.error_code().as_str(),
         message: err.to_string(),
     }

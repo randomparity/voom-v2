@@ -614,6 +614,16 @@ async fn commit_verified_extract_audio(
     )
     .await?;
     ensure_extract_commit_succeeded(&committed)?;
+    // `finalize_sidecar_commit` is the only producer of a Committed,
+    // recovery-free report, and it always sets Some IDs. These guards are
+    // defense-in-depth: a future Committed-with-None path fails loud here
+    // instead of emitting a sentinel zero ID downstream.
+    let result_file_version_id = committed.result_file_version_id.ok_or_else(|| {
+        VoomError::Internal("committed audio extract missing result_file_version_id".to_owned())
+    })?;
+    let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
+        VoomError::Internal("committed audio extract missing result_file_location_id".to_owned())
+    })?;
     let commit_recovery_required = match events::record_extract_succeeded(
         cp,
         events::ExtractSucceededEventInput {
@@ -650,8 +660,8 @@ async fn commit_verified_extract_audio(
         staged_artifact_location_id: request.staged.artifact_location_id,
         verification_id: request.verification_id,
         commit_record_id: committed.commit_record_id,
-        result_file_version_id: committed.result_file_version_id,
-        result_file_location_id: committed.result_file_location_id,
+        result_file_version_id,
+        result_file_location_id,
         staging_path: request.staging_path,
         target_path: request.target_path,
         commit_recovery_required,
