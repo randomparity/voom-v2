@@ -1,19 +1,37 @@
 use serde::{Deserialize, Serialize};
 
 pub const TRANSCODE_VIDEO_CONTAINER: &str = "mkv";
+pub const TRANSCODE_VIDEO_CONTAINER_MP4: &str = "mp4";
 pub const TRANSCODE_VIDEO_CODEC: &str = "hevc";
 pub const TRANSCODE_VIDEO_CODEC_ALIAS_H265: &str = "h265";
+pub const TRANSCODE_VIDEO_CODEC_AV1: &str = "av1";
 pub const TRANSCODE_VIDEO_PROFILE: &str = "default-hevc";
 
 #[must_use]
 pub fn is_supported_transcode_video_container(container: &str) -> bool {
-    container == TRANSCODE_VIDEO_CONTAINER
+    container == TRANSCODE_VIDEO_CONTAINER || container == TRANSCODE_VIDEO_CONTAINER_MP4
 }
 
 #[must_use]
 pub fn is_supported_transcode_video_codec(codec: &str) -> bool {
     codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC)
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_ALIAS_H265)
+        || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1)
+}
+
+/// Returns the canonical codec token (`"hevc"` or `"av1"`) for a recognized
+/// codec name or alias, or `None` when unrecognized.
+#[must_use]
+pub fn canonical_video_codec(codec: &str) -> Option<&'static str> {
+    if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC)
+        || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_ALIAS_H265)
+    {
+        Some(TRANSCODE_VIDEO_CODEC)
+    } else if codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1) {
+        Some(TRANSCODE_VIDEO_CODEC_AV1)
+    } else {
+        None
+    }
 }
 
 #[must_use]

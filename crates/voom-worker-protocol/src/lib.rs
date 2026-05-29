@@ -53,10 +53,11 @@ pub use remux::{
     is_supported_remux_container,
 };
 pub use transcode_video::{
-    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CONTAINER,
-    TRANSCODE_VIDEO_PROFILE, TranscodeVideoExpectedFacts, TranscodeVideoInput,
-    TranscodeVideoObservedFacts, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, is_default_hevc_profile,
+    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
+    TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
+    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
+    TranscodeVideoStatus, canonical_video_codec, is_default_hevc_profile,
     is_supported_transcode_video_codec, is_supported_transcode_video_container,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
