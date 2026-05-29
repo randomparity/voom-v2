@@ -376,6 +376,41 @@ async fn result_snapshot_failure_preserves_committed_result_ids_in_error() {
     assert_eq!(count_events(&cp, EventKind::ArtifactRemuxFailed).await, 0);
 }
 
+#[tokio::test]
+async fn execute_does_not_commit_when_staged_result_probe_fails() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+    let source_media_snapshot_id = record_source_snapshot(&cp, seeded.0).await;
+
+    let err = execute_remux_with_dispatchers(
+        &cp,
+        remux_input(&dir, seeded, source_media_snapshot_id),
+        &FakeRemuxDispatcher,
+        &FakeVerifyDispatcher,
+        &ErroringResultProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert!(
+        !dir.path().join("out/Movie.remux.mkv").exists(),
+        "a staged-result probe failure must not leave a committed target"
+    );
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactRemuxSucceeded).await,
+        0
+    );
+    // The probe runs after ArtifactRemuxStarted and routes through
+    // record_failure, so this pre-commit failure records exactly one failed
+    // event (unlike a post-commit DB-write failure, which records none).
+    assert_eq!(count_events(&cp, EventKind::ArtifactRemuxFailed).await, 1);
+    // Only the source snapshot exists; no result snapshot is recorded.
+    assert_eq!(count_events(&cp, EventKind::MediaSnapshotRecorded).await, 1);
+}
+
 #[test]
 fn commit_failure_message_preserves_recovery_metadata() {
     let target_path = std::path::PathBuf::from("/media/Movie.remux.mkv");
@@ -632,6 +667,22 @@ impl commit::RemuxResultProbeDispatcher for FakeResultProbeDispatcher {
                 }),
             },
         })
+    }
+}
+
+#[derive(Debug)]
+struct ErroringResultProbeDispatcher;
+
+#[async_trait]
+impl commit::RemuxResultProbeDispatcher for ErroringResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        _cp: &crate::ControlPlane,
+        _request: ProbeFileRequest,
+    ) -> Result<commit::ProbedRemuxResult, voom_core::VoomError> {
+        Err(voom_core::VoomError::ExternalSystemUnavailable(
+            "remux result probe failed: simulated worker error".to_owned(),
+        ))
     }
 }
 
