@@ -358,6 +358,70 @@ fn artifact_transcode_succeeded_payload_carries_profile_and_observed_output_fact
 }
 
 #[test]
+fn legacy_artifact_transcode_started_row_decodes_with_defaulted_fields() {
+    let json = serde_json::json!({
+        "kind": "artifact.transcode_started",
+        "payload": {
+            "job_id": 1,
+            "ticket_id": 2,
+            "lease_id": 3,
+            "source_file_version_id": 4,
+            "source_file_location_id": 5,
+            "staging_path": "/tmp/voom-stage/2/3/out.mkv",
+            "provider": "ffmpeg",
+            "provider_version": null
+        }
+    });
+
+    let back: Event = serde_json::from_value(json).unwrap();
+
+    let Event::ArtifactTranscodeStarted(p) = back else {
+        panic!("expected ArtifactTranscodeStarted");
+    };
+    assert_eq!(p.profile_name, "");
+    assert_eq!(p.encoder, "");
+    assert_eq!(p.target_codec, "");
+    assert_eq!(p.output_container, "");
+    assert_eq!(p.provider, Some("ffmpeg".to_owned()));
+}
+
+#[test]
+fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
+    let json = serde_json::json!({
+        "kind": "artifact.transcode_succeeded",
+        "payload": {
+            "job_id": 1,
+            "ticket_id": 2,
+            "lease_id": 3,
+            "source_file_version_id": 4,
+            "source_file_location_id": 5,
+            "artifact_handle_id": 6,
+            "artifact_location_id": 7,
+            "staging_path": "/tmp/voom-stage/2/3/out.mkv",
+            "output_container": "mkv",
+            "output_video_codec": "hevc",
+            "provider": "ffmpeg",
+            "provider_version": "6.1"
+        }
+    });
+
+    let back: Event = serde_json::from_value(json).unwrap();
+
+    let Event::ArtifactTranscodeSucceeded(p) = back else {
+        panic!("expected ArtifactTranscodeSucceeded");
+    };
+    assert_eq!(p.profile_name, "");
+    assert_eq!(p.encoder, "");
+    assert_eq!(p.target_codec, "");
+    assert!(!p.copied_video);
+    assert_eq!(p.output_width, 0);
+    assert_eq!(p.output_height, 0);
+    assert_eq!(p.output_pixel_format, "");
+    assert_eq!(p.output_container, "mkv");
+    assert_eq!(p.output_video_codec, "hevc");
+}
+
+#[test]
 fn artifact_transcode_failed_payload_carries_profile_facts() {
     let p = ArtifactTranscodeFailedPayload {
         job_id: 1,
