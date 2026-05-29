@@ -61,12 +61,6 @@ impl SqliteVideoProfileRepo {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
-
-    #[cfg(test)]
-    #[must_use]
-    pub fn pool_for_test(&self) -> &SqlitePool {
-        &self.pool
-    }
 }
 
 impl Repository for SqliteVideoProfileRepo {}
