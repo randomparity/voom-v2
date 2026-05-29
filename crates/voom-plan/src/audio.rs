@@ -412,7 +412,12 @@ pub fn selected_audio_streams(
     Ok(selected)
 }
 
-fn has_transcode_preservation_facts(stream: &SnapshotAudioStreamFact) -> bool {
+/// Returns whether a selected audio stream carries the facts required to
+/// preserve its metadata across a transcode (language, title, channels, and a
+/// known commentary disposition). Audio transcode planning and the
+/// control-plane runtime selection share this rule.
+#[must_use]
+pub fn has_transcode_preservation_facts(stream: &SnapshotAudioStreamFact) -> bool {
     stream.language.is_some()
         && stream.title.is_some()
         && stream.channels.is_some()

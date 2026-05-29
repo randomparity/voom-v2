@@ -3,8 +3,32 @@ use voom_policy::{MediaSnapshotInput, TargetKind, TargetRef, TrackFilter};
 use super::{
     AUDIO_TRANSCODE_CONTAINER, AudioBundleRole, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    stream_facts, transcode_audio_shape,
+    has_transcode_preservation_facts, stream_facts, transcode_audio_shape,
 };
+
+#[test]
+fn transcode_preservation_facts_require_language_title_channels_and_commentary() {
+    assert!(has_transcode_preservation_facts(&audio_fact(Some(false))));
+
+    let missing_language = SnapshotAudioStreamFact {
+        language: None,
+        ..audio_fact(Some(false))
+    };
+    let missing_title = SnapshotAudioStreamFact {
+        title: None,
+        ..audio_fact(Some(false))
+    };
+    let missing_channels = SnapshotAudioStreamFact {
+        channels: None,
+        ..audio_fact(Some(false))
+    };
+    let missing_commentary = audio_fact(None);
+
+    assert!(!has_transcode_preservation_facts(&missing_language));
+    assert!(!has_transcode_preservation_facts(&missing_title));
+    assert!(!has_transcode_preservation_facts(&missing_channels));
+    assert!(!has_transcode_preservation_facts(&missing_commentary));
+}
 
 #[test]
 fn stream_facts_parse_audio_streams_with_disposition_commentary() {

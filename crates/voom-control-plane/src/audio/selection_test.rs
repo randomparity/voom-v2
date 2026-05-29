@@ -66,6 +66,32 @@ fn transcode_rejects_zero_matches_and_sources_without_video() {
 }
 
 #[test]
+fn transcode_video_absence_takes_precedence_over_malformed_audio_facts() {
+    // No video stream, plus duplicate audio stream ids that `stream_facts`
+    // would otherwise reject as insufficient. Video presence is a precondition,
+    // so the runtime selection must surface NoVideo before parsing stream facts.
+    // `base` supplies only the non-payload identity fields; its payload is
+    // replaced below with the no-video, duplicate-id stream list under test.
+    let base = snapshot_with_streams(Vec::new());
+    let no_video_dup = MediaSnapshot {
+        payload: json!({"streams": [
+            audio("dup", 1, "aac", Some("eng"), Some("Main"), Some(false)),
+            audio("dup", 2, "aac", Some("jpn"), Some("Alt"), Some(false)),
+        ]}),
+        ..base
+    };
+
+    let err = transcode_selection_from_payload_and_snapshot(
+        &transcode_payload(&Value::Null),
+        &no_video_dup,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("video stream"));
+}
+
+#[test]
 fn extraction_selection_returns_exactly_one_stream_and_role() {
     let payload = extract_payload(&json!({"type": "commentary"}));
     let snapshot = snapshot_with_streams(vec![
