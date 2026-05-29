@@ -298,6 +298,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        copy_video: false,
     }
 }
 

@@ -211,6 +211,10 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         },
         output_container: "mkv".to_owned(),
         output_video_codec: codec.to_owned(),
+        output_width: 0,
+        output_height: 0,
+        output_pixel_format: String::new(),
+        copied_video: false,
     }
 }
 

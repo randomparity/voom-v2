@@ -66,6 +66,7 @@ pub fn request_for(
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        copy_video: false,
     })
 }
 

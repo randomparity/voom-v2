@@ -242,6 +242,11 @@ pub async fn handle_transcode_video(
         output,
         output_container: probe.container,
         output_video_codec: probe.video_codec,
+        // Phase 7 will populate these from the ffprobe output.
+        output_width: 0,
+        output_height: 0,
+        output_pixel_format: String::new(),
+        copied_video: false,
     })
 }
 

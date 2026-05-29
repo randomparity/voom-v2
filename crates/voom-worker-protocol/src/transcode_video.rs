@@ -34,9 +34,75 @@ pub fn canonical_video_codec(codec: &str) -> Option<&'static str> {
     }
 }
 
+use crate::encoder_caps::encoder_descriptor;
+
 #[must_use]
 pub fn is_default_hevc_profile(profile: &TranscodeVideoProfile) -> bool {
     profile == &TranscodeVideoProfile::default_hevc()
+}
+
+/// Validates a fully-typed profile against its encoder's capability descriptor.
+/// Returns a stable, human-readable reason string on the first violation.
+///
+/// # Errors
+/// Returns `Err` when the encoder is unknown, the target codec disagrees with
+/// the encoder, or any field falls outside the encoder's vocabulary/range.
+pub fn validate_profile_against_descriptor(
+    profile: &TranscodeVideoProfile,
+) -> Result<(), String> {
+    let Some(descriptor) = encoder_descriptor(&profile.encoder) else {
+        return Err(format!("unknown encoder `{}`", profile.encoder));
+    };
+    if descriptor.target_codec != profile.target_codec {
+        return Err(format!(
+            "encoder `{}` produces `{}`, not `{}`",
+            profile.encoder, descriptor.target_codec, profile.target_codec
+        ));
+    }
+    if !descriptor.accepts_crf(profile.crf) {
+        return Err(format!(
+            "crf {} outside {}..={} for `{}`",
+            profile.crf, descriptor.crf_min, descriptor.crf_max, profile.encoder
+        ));
+    }
+    if !descriptor.accepts_preset(&profile.preset) {
+        return Err(format!("preset `{}` invalid for `{}`", profile.preset, profile.encoder));
+    }
+    if let Some(tune) = &profile.tune {
+        if !descriptor.accepts_tune(tune) {
+            return Err(format!("tune `{tune}` invalid for `{}`", profile.encoder));
+        }
+    }
+    if let Some(codec_profile) = &profile.codec_profile {
+        if !descriptor.accepts_codec_profile(codec_profile) {
+            return Err(format!(
+                "codec_profile `{codec_profile}` invalid for `{}`",
+                profile.encoder
+            ));
+        }
+    }
+    if let Some(level) = &profile.codec_level {
+        if !descriptor.accepts_codec_level(level) {
+            return Err(format!("codec_level `{level}` invalid for `{}`", profile.encoder));
+        }
+    }
+    if let Some(pixel_format) = &profile.pixel_format {
+        if !descriptor.accepts_pixel_format(pixel_format) {
+            return Err(format!(
+                "pixel_format `{pixel_format}` invalid for `{}`",
+                profile.encoder
+            ));
+        }
+        if !descriptor
+            .pixel_format_compatible_with_profile(pixel_format, profile.codec_profile.as_deref())
+        {
+            return Err(format!(
+                "pixel_format `{pixel_format}` incompatible with codec_profile `{:?}`",
+                profile.codec_profile
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,9 +146,29 @@ pub struct TranscodeVideoOutput {
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoProfile {
     pub name: String,
+    pub target_codec: String,
     pub encoder: String,
     pub crf: u8,
     pub preset: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tune: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub copy_compatible: bool,
+}
+
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if signature")]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl TranscodeVideoProfile {
@@ -90,9 +176,17 @@ impl TranscodeVideoProfile {
     pub fn default_hevc() -> Self {
         Self {
             name: TRANSCODE_VIDEO_PROFILE.to_owned(),
+            target_codec: TRANSCODE_VIDEO_CODEC.to_owned(),
             encoder: "libx265".to_owned(),
             crf: 23,
             preset: "medium".to_owned(),
+            tune: None,
+            codec_profile: None,
+            codec_level: None,
+            pixel_format: None,
+            max_width: None,
+            max_height: None,
+            copy_compatible: false,
         }
     }
 }
@@ -103,6 +197,8 @@ pub struct TranscodeVideoRequest {
     pub input: TranscodeVideoInput,
     pub output: TranscodeVideoOutput,
     pub profile: TranscodeVideoProfile,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub copy_video: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +218,11 @@ pub struct TranscodeVideoResult {
     pub output: TranscodeVideoObservedFacts,
     pub output_container: String,
     pub output_video_codec: String,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub output_pixel_format: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub copied_video: bool,
 }
 
 #[cfg(test)]
