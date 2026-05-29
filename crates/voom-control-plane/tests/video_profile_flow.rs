@@ -12,13 +12,14 @@
 //! The test calls `preflight_from_process_env()` up front so a missing encoder
 //! fails loudly instead of being silently skipped (spec §10).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::compliance::{ComplianceExecuteData, ComplianceExecutionOptions};
+use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
@@ -147,10 +148,17 @@ struct CaseOutcome {
     output_height: u64,
     _tmp: tempfile::TempDir,
     _db: NamedTempFile,
+    _ffprobe_guard: FfprobeSiblingGuard,
 }
 
 async fn run_case(case: &Case) -> CaseOutcome {
     require_encoders();
+    // The post-commit result probe (spec §7 step 13) must run REAL ffprobe
+    // against the committed transcode output. Other tests in this crate install
+    // a canned test-helper `ffprobe` stub next to the worker binary in the shared
+    // profile dir; hide it for the duration of this real-ffmpeg flow so the probe
+    // observes the actual transcoded streams.
+    let ffprobe_guard = hide_stale_fake_ffprobe_sibling();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -209,6 +217,49 @@ async fn run_case(case: &Case) -> CaseOutcome {
         output_height: committed.output_height,
         _tmp: tmp,
         _db: db,
+        _ffprobe_guard: ffprobe_guard,
+    }
+}
+
+/// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
+/// the shared profile dir) so the bundled probe worker runs real ffprobe. The
+/// guard serializes the real-ffprobe cases in this binary (they share the single
+/// `target/debug/ffprobe` path) and restores the stub on drop.
+fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = target_debug_binary("ffprobe");
+    let hidden = path.with_file_name("ffprobe.video-profile-flow-hidden");
+    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
+        bytes
+            .windows(b"ffprobe version test-helper".len())
+            .any(|window| window == b"ffprobe version test-helper")
+    });
+    if is_stub {
+        std::fs::rename(&path, &hidden).unwrap();
+    }
+    FfprobeSiblingGuard {
+        path,
+        hidden,
+        restore: is_stub,
+        _lock: lock,
+    }
+}
+
+struct FfprobeSiblingGuard {
+    path: PathBuf,
+    hidden: PathBuf,
+    restore: bool,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for FfprobeSiblingGuard {
+    fn drop(&mut self) {
+        if self.restore && self.hidden.exists() && !self.path.exists() {
+            let _ = std::fs::rename(&self.hidden, &self.path);
+        }
     }
 }
 
@@ -283,11 +334,7 @@ async fn assert_committed_result(
         .iter()
         .find(|snapshot| snapshot.id == media_snapshot_id)
         .unwrap();
-    assert_eq!(
-        result_snapshot.payload["container"],
-        case.expected_container
-    );
-    assert_eq!(result_snapshot.payload["video_codec"], case.expected_codec);
+    assert_probed_result_snapshot(result_snapshot, case, output_width, output_height);
     CommittedResult {
         file_version_id,
         media_snapshot_id,
@@ -296,26 +343,80 @@ async fn assert_committed_result(
     }
 }
 
+/// The committed-result snapshot must be a REAL ffprobe observation of the
+/// committed bytes (spec §7 step 13), not a synthesized stub. We prove the
+/// probe actually ran by asserting the normalized `sprint10-v1` payload carries
+/// a non-empty `streams` array whose video stream reports the expected codec,
+/// pixel format, and the committed output dimensions.
+fn assert_probed_result_snapshot(
+    snapshot: &voom_store::repo::identity::MediaSnapshot,
+    case: &Case,
+    output_width: u64,
+    output_height: u64,
+) {
+    assert_eq!(snapshot.payload["format"], "sprint10-v1");
+    assert_eq!(snapshot.payload["probe"]["provider"], "ffprobe");
+    let streams = snapshot.payload["streams"]
+        .as_array()
+        .expect("probed result snapshot must carry a streams array");
+    assert!(
+        !streams.is_empty(),
+        "probed result snapshot streams array must not be empty"
+    );
+    let video = streams
+        .iter()
+        .find(|stream| stream["kind"] == "video")
+        .expect("probed result snapshot must include a video stream");
+    assert_eq!(video["codec_name"], case.expected_codec);
+    assert_eq!(video["pixel_format"], "yuv420p");
+    assert_eq!(video["width"].as_u64().unwrap(), output_width);
+    assert_eq!(video["height"].as_u64().unwrap(), output_height);
+}
+
+/// Re-plan the committed result by projecting its DURABLE result `MediaSnapshot`
+/// back through the normal `stream_summary_from_snapshot_payload` projection
+/// (`create_policy_input_set_from_scan`), rather than a hand-built synthetic
+/// draft. This proves the probed result snapshot round-trips: the projection
+/// reads `payload["streams"]`, which only exists because the post-commit probe
+/// recorded a real observation. A synthesized stub (no `streams`) would project
+/// to `video_stream_count: 0` and the MP4/codec gates would not see the result
+/// as already-compliant.
 async fn assert_replans_as_no_op(
     cp: &ControlPlane,
     policy_version_id: PolicyVersionId,
     result_file_version_id: FileVersionId,
     result_media_snapshot_id: MediaSnapshotId,
 ) {
-    let result_input = cp
-        .create_policy_input_set(input_for(SnapshotFacts {
-            slug: "replan-result",
+    let projected = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "replan-result".to_owned(),
             file_version_id: result_file_version_id,
-            media_snapshot_id: Some(result_media_snapshot_id),
-            container: "mkv",
-            video_codec: "hevc",
-            width: 320,
-            height: 240,
-        }))
+            media_snapshot_id: result_media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+        })
         .await
         .unwrap();
+
+    let set = cp
+        .get_policy_input_set(projected.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let projected_streams = &set.media_snapshots[0].stream_summary["streams"];
+    let projected_streams = projected_streams
+        .as_array()
+        .expect("projected stream_summary must carry a streams array");
+    assert!(
+        projected_streams
+            .iter()
+            .any(|stream| stream["kind"] == "video"),
+        "the durable result snapshot must project a video stream; a synthesized \
+         stub without a streams array would not round-trip through the projection"
+    );
+
     let result_plan = cp
-        .generate_compliance_report(policy_version_id, result_input.id)
+        .generate_compliance_report(policy_version_id, projected.input_set_id)
         .await
         .unwrap();
     assert_eq!(

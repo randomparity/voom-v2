@@ -2218,7 +2218,11 @@ async fn write_behavior(
 
 async fn transcode_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).unwrap();
-    let output_bytes = b"output!";
+    // Write real media bytes so the post-commit result probe (spec §7 step 13)
+    // runs the bundled ffprobe against a parseable file. The probe only verifies
+    // size+hash against these bytes; the container/codec the result claims are
+    // not asserted by these dispatch/heartbeat tests.
+    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
