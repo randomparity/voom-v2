@@ -26,6 +26,7 @@ pub enum DiagnosticCode {
     DeferredComposition,
     DeferredExecutionOperation,
     UnsupportedTranscodeShape,
+    InvalidVideoProfileSetting,
 }
 
 impl DiagnosticCode {
@@ -56,6 +57,7 @@ impl DiagnosticCode {
             Self::DeferredComposition => "deferred_composition",
             Self::DeferredExecutionOperation => "deferred_execution_operation",
             Self::UnsupportedTranscodeShape => "unsupported_transcode_shape",
+            Self::InvalidVideoProfileSetting => "invalid_video_profile_setting",
         }
     }
 }

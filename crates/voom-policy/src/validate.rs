@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    DiagnosticCode, DiagnosticSeverity, DiagnosticStage, PhaseAst, PolicyAst, PolicyDiagnostic,
-    SourceSpan, StatementAst, line_column,
+    DiagnosticCode, DiagnosticSeverity, DiagnosticStage, ExprAst, PhaseAst, PolicyAst,
+    PolicyDiagnostic, SourceSpan, StatementAst, line_column,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -602,25 +602,364 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_transcode_statement(&mut self, statement: &StatementAst) {
-        let text = statement_text(statement);
-        let tokens = words(text.as_ref());
-        if tokens.as_slice() == ["transcode", "video", "to", "hevc"] {
+        match statement {
+            StatementAst::Raw { text, .. } => {
+                let text = text.clone();
+                self.validate_transcode_header(statement, &text);
+            }
+            StatementAst::TranscodeInline {
+                header, settings, ..
+            } => {
+                if header.contains("using profile") {
+                    self.error(
+                        DiagnosticCode::UnsupportedTranscodeShape,
+                        statement.span(),
+                        "`using profile` and an inline body are mutually exclusive",
+                    );
+                    return;
+                }
+                let Some(codec) = self.transcode_target_codec(statement, header) else {
+                    return;
+                };
+                self.validate_inline_video_profile(statement, codec, settings);
+            }
+            StatementAst::Block { .. } => self.error(
+                DiagnosticCode::UnsupportedTranscodeShape,
+                statement.span(),
+                "transcode does not take a nested statement block",
+            ),
+        }
+    }
+
+    fn validate_transcode_header(&mut self, statement: &StatementAst, text: &str) {
+        let tokens = words(text);
+        if tokens.get(0..2) == Some(&["transcode", "video"]) {
+            self.validate_transcode_video_header(statement, text, &tokens);
             return;
         }
         if tokens
             .get(0..4)
             .is_some_and(|prefix| matches!(prefix, ["transcode", "audio", "to", "aac" | "opus"]))
         {
-            if self.validate_required_track_filter(statement, text.as_ref(), 4) {
-                self.validate_language_tokens(statement, text.as_ref());
+            if self.validate_required_track_filter(statement, text, 4) {
+                self.validate_language_tokens(statement, text);
             }
             return;
         }
         self.error(
             DiagnosticCode::UnsupportedTranscodeShape,
             statement.span(),
-            "only `transcode video to hevc {}` is supported in Sprint 12",
+            "unsupported transcode operation shape",
         );
+    }
+
+    fn validate_transcode_video_header(
+        &mut self,
+        statement: &StatementAst,
+        text: &str,
+        tokens: &[&str],
+    ) {
+        if self.transcode_target_codec(statement, text).is_none() {
+            return;
+        }
+        match tokens.get(4..) {
+            None | Some([]) => {}
+            Some(["using", "profile", _name]) => {}
+            Some(_) => self.error(
+                DiagnosticCode::UnsupportedTranscodeShape,
+                statement.span(),
+                "unsupported transcode video header",
+            ),
+        }
+    }
+
+    /// Extracts and validates the `<codec>` token at position 3
+    /// (`transcode video to <codec>`), emitting `UnsupportedTranscodeShape` for
+    /// unknown codecs. Returns the canonical codec on success.
+    fn transcode_target_codec(
+        &mut self,
+        statement: &StatementAst,
+        text: &str,
+    ) -> Option<&'static str> {
+        let tokens = words(text);
+        let codec = tokens.get(3).copied();
+        match codec {
+            Some("hevc") => Some("hevc"),
+            Some("av1") => Some("av1"),
+            _ => {
+                self.error(
+                    DiagnosticCode::UnsupportedTranscodeShape,
+                    statement.span(),
+                    "transcode video target codec must be hevc or av1",
+                );
+                None
+            }
+        }
+    }
+
+    fn validate_inline_video_profile(
+        &mut self,
+        statement: &StatementAst,
+        codec: &str,
+        settings: &[crate::SettingAst],
+    ) {
+        let span = statement.span();
+        if !self.validate_inline_setting_keys(span, settings) {
+            return;
+        }
+        let by_key: BTreeMap<&str, &ExprAst> = settings
+            .iter()
+            .map(|setting| (setting.key.value.as_str(), &setting.value))
+            .collect();
+
+        let Some(encoder) = self.inline_required_str(span, &by_key, "encoder") else {
+            return;
+        };
+        let Some(descriptor) = voom_worker_protocol::encoder_descriptor(&encoder) else {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("unknown encoder `{encoder}`"),
+            );
+            return;
+        };
+        if descriptor.target_codec != codec {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "encoder `{encoder}` produces `{}`, not `{codec}`",
+                    descriptor.target_codec
+                ),
+            );
+        }
+        self.validate_inline_crf_preset(span, descriptor, &by_key);
+        self.validate_inline_optionals(span, descriptor, &by_key);
+    }
+
+    fn validate_inline_setting_keys(
+        &mut self,
+        span: SourceSpan,
+        settings: &[crate::SettingAst],
+    ) -> bool {
+        const ALLOWED: &[&str] = &[
+            "encoder",
+            "crf",
+            "preset",
+            "tune",
+            "codec_profile",
+            "codec_level",
+            "pixel_format",
+            "max_width",
+            "max_height",
+            "output_container",
+            "copy_compatible",
+        ];
+        let mut seen = BTreeSet::new();
+        let mut ok = true;
+        for setting in settings {
+            let key = setting.key.value.as_str();
+            if !ALLOWED.contains(&key) {
+                self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!("unknown inline profile setting `{key}`"),
+                );
+                ok = false;
+            } else if !seen.insert(key) {
+                self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!("duplicate inline profile setting `{key}`"),
+                );
+                ok = false;
+            }
+        }
+        ok
+    }
+
+    fn validate_inline_crf_preset(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        by_key: &BTreeMap<&str, &ExprAst>,
+    ) {
+        if let Some(crf) = self.inline_required_str(span, by_key, "crf") {
+            match crf.parse::<u8>() {
+                Ok(value) if descriptor.accepts_crf(value) => {}
+                _ => self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!(
+                        "crf `{crf}` outside {}..={} for `{}`",
+                        descriptor.crf_min, descriptor.crf_max, descriptor.encoder
+                    ),
+                ),
+            }
+        }
+        if let Some(preset) = self.inline_required_str(span, by_key, "preset")
+            && !descriptor.accepts_preset(&preset)
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("preset `{preset}` invalid for `{}`", descriptor.encoder),
+            );
+        }
+    }
+
+    fn validate_inline_optionals(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        by_key: &BTreeMap<&str, &ExprAst>,
+    ) {
+        let tune = self.inline_optional_str(span, by_key, "tune");
+        if let Some(tune) = &tune
+            && !descriptor.accepts_tune(tune)
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("tune `{tune}` invalid for `{}`", descriptor.encoder),
+            );
+        }
+        let codec_profile = self.inline_optional_str(span, by_key, "codec_profile");
+        if let Some(codec_profile) = &codec_profile
+            && !descriptor.accepts_codec_profile(codec_profile)
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "codec_profile `{codec_profile}` invalid for `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
+        let codec_level = self.inline_optional_str(span, by_key, "codec_level");
+        if let Some(codec_level) = &codec_level
+            && !descriptor.accepts_codec_level(codec_level)
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "codec_level `{codec_level}` invalid for `{}`",
+                    descriptor.encoder
+                ),
+            );
+        }
+        let pixel_format = self.inline_optional_str(span, by_key, "pixel_format");
+        if let Some(pixel_format) = &pixel_format {
+            if !descriptor.accepts_pixel_format(pixel_format) {
+                self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!(
+                        "pixel_format `{pixel_format}` invalid for `{}`",
+                        descriptor.encoder
+                    ),
+                );
+            } else if !descriptor
+                .pixel_format_compatible_with_profile(pixel_format, codec_profile.as_deref())
+            {
+                self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!(
+                        "pixel_format `{pixel_format}` incompatible with codec_profile `{codec_profile:?}`"
+                    ),
+                );
+            }
+        }
+        self.validate_inline_container_and_dimensions(span, by_key);
+    }
+
+    fn validate_inline_container_and_dimensions(
+        &mut self,
+        span: SourceSpan,
+        by_key: &BTreeMap<&str, &ExprAst>,
+    ) {
+        if let Some(container) = self.inline_optional_str(span, by_key, "output_container")
+            && !matches!(container.as_str(), "mkv" | "mp4")
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("output_container `{container}` must be mkv or mp4"),
+            );
+        }
+        for key in ["max_width", "max_height"] {
+            if let Some(expr) = by_key.get(key) {
+                match expr {
+                    ExprAst::Number(value) if value.value.parse::<u32>().is_ok_and(|n| n > 0) => {}
+                    _ => self.error(
+                        DiagnosticCode::InvalidVideoProfileSetting,
+                        span,
+                        format!("{key} must be a positive integer"),
+                    ),
+                }
+            }
+        }
+        if let Some(expr) = by_key.get("copy_compatible")
+            && !matches!(expr, ExprAst::Boolean(_))
+        {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                "copy_compatible must be a boolean",
+            );
+        }
+    }
+
+    fn inline_required_str(
+        &mut self,
+        span: SourceSpan,
+        by_key: &BTreeMap<&str, &ExprAst>,
+        key: &str,
+    ) -> Option<String> {
+        let Some(expr) = by_key.get(key) else {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!("inline profile is missing mandatory `{key}`"),
+            );
+            return None;
+        };
+        self.inline_expr_as_string(span, key, expr)
+    }
+
+    fn inline_optional_str(
+        &mut self,
+        span: SourceSpan,
+        by_key: &BTreeMap<&str, &ExprAst>,
+        key: &str,
+    ) -> Option<String> {
+        let expr = by_key.get(key)?;
+        self.inline_expr_as_string(span, key, expr)
+    }
+
+    fn inline_expr_as_string(
+        &mut self,
+        span: SourceSpan,
+        key: &str,
+        expr: &ExprAst,
+    ) -> Option<String> {
+        match expr {
+            ExprAst::Identifier(value)
+            | ExprAst::String(value)
+            | ExprAst::Number(value)
+            | ExprAst::FieldPath(value) => Some(value.value.clone()),
+            ExprAst::Boolean(_) | ExprAst::List { .. } => {
+                self.error(
+                    DiagnosticCode::InvalidVideoProfileSetting,
+                    span,
+                    format!("`{key}` must be a scalar value"),
+                );
+                None
+            }
+        }
     }
 
     fn validate_extract_statement(&mut self, statement: &StatementAst) {
