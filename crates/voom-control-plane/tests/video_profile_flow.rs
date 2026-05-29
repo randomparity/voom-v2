@@ -105,9 +105,13 @@ async fn named_hevc_1080p_downscales_oversized_hevc_source_to_mp4() {
     };
     let outcome = run_case(&case).await;
     assert!(
-        outcome.output_width <= 1920 && outcome.output_height <= 1080,
-        "downscaled output must fit the 1920x1080 cap, got {}x{}",
-        outcome.output_width,
+        outcome.output_width <= 1920,
+        "downscaled output width must fit the 1920 cap, got {}",
+        outcome.output_width
+    );
+    assert!(
+        outcome.output_height <= 1080,
+        "downscaled output height must fit the 1080 cap, got {}",
         outcome.output_height
     );
     assert!(

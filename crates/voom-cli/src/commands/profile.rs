@@ -111,3 +111,7 @@ impl From<VideoProfile> for ProfileData {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "profile_test.rs"]
+mod tests;
