@@ -121,7 +121,8 @@ async fn assert_transcode_execution_result(
     assert!(result["staged_artifact_handle_id"].as_u64().unwrap() > 0);
     assert!(result["verification_id"].as_u64().unwrap() > 0);
     assert!(result["commit_record_id"].as_u64().unwrap() > 0);
-    assert!(out_dir.join("Movie.hevc.mkv").is_file());
+    // default-hevc resolves to: <stem>.default-hevc.hevc.mkv (Task 6.5 naming)
+    assert!(out_dir.join("Movie.default-hevc.hevc.mkv").is_file());
 
     let snapshots = SqliteIdentityRepo::new(voom_store::connect(url).await.unwrap())
         .list_media_snapshots_by_version(result_file_version_id)

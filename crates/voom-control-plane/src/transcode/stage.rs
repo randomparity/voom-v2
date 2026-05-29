@@ -7,6 +7,9 @@ pub async fn staging_path(
     ticket_id: TicketId,
     lease_id: LeaseId,
     source_path: &str,
+    profile_id: &str,
+    codec: &str,
+    container: &str,
 ) -> Result<PathBuf, VoomError> {
     tokio::fs::create_dir_all(staging_root)
         .await
@@ -54,10 +57,16 @@ pub async fn staging_path(
             canonical_root.display()
         )));
     }
-    Ok(canonical_parent.join(output_file_name(source_path)))
+    Ok(canonical_parent.join(output_file_name(source_path, profile_id, codec, container)))
 }
 
-pub async fn target_path(target_dir: &Path, source_path: &str) -> Result<PathBuf, VoomError> {
+pub async fn target_path(
+    target_dir: &Path,
+    source_path: &str,
+    profile_id: &str,
+    codec: &str,
+    container: &str,
+) -> Result<PathBuf, VoomError> {
     tokio::fs::create_dir_all(target_dir).await.map_err(|err| {
         VoomError::Config(format!(
             "create transcode target dir {}: {err}",
@@ -71,16 +80,40 @@ pub async fn target_path(target_dir: &Path, source_path: &str) -> Result<PathBuf
             target_dir.display()
         ))
     })?;
-    Ok(canonical_dir.join(output_file_name(source_path)))
+    let file_name = output_file_name(source_path, profile_id, codec, container);
+    let target = canonical_dir.join(&file_name);
+    if target.exists() {
+        return Err(VoomError::Config(format!(
+            "transcode target already exists: {}",
+            target.display()
+        )));
+    }
+    Ok(target)
 }
 
-fn output_file_name(source: &str) -> String {
+/// Builds the output file name from the source stem, profile identity,
+/// target codec, and container extension. The `profile_id` is sanitized
+/// so any character outside `[A-Za-z0-9._-]` is replaced with `-`, keeping
+/// file names safe across all filesystems.
+///
+/// Format: `<stem>.<profile_id>.<codec>.<container>`
+pub fn output_file_name(source: &str, profile_id: &str, codec: &str, container: &str) -> String {
     let stem = Path::new(source)
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .filter(|value| !value.is_empty())
         .unwrap_or("output");
-    format!("{stem}.hevc.mkv")
+    let sanitized_id: String = profile_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{stem}.{sanitized_id}.{codec}.{container}")
 }
 
 async fn reject_symlink_dir(path: &Path, label: &str) -> Result<(), VoomError> {
