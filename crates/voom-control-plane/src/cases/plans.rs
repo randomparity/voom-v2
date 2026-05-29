@@ -29,9 +29,12 @@ pub fn plan_policy_source_with_input(
     input: PolicyInputSetDraft,
     input_source_label: Option<&str>,
 ) -> Result<voom_plan::ExecutionPlan, VoomError> {
-    let compiled = voom_policy::compile_policy(source)
+    let mut compiled = voom_policy::compile_policy(source)
         .map_err(|err| err.error)?
         .policy;
+    // The offline fixture planner is store-free, so it can only resolve inline
+    // profiles; named references require the store-backed `voom plan show`.
+    crate::transcode::resolve::resolve_inline_profiles_in_policy(&mut compiled)?;
     plan_compiled_policy_with_input(
         compiled,
         input,
@@ -40,6 +43,40 @@ pub fn plan_policy_source_with_input(
             ..voom_plan::PlanningContext::default()
         },
     )
+}
+
+/// Resolves every `TranscodeVideo` operation's profile reference against the
+/// store-backed registry, populating `resolved_profile` (and overwriting
+/// `target_codec`/`container`) in memory before the pure planner runs.
+///
+/// # Errors
+/// Returns `CONFIG_INVALID` when a named profile does not exist or inline
+/// settings fail descriptor validation.
+pub(crate) async fn resolve_profiles_in_policy(
+    cp: &ControlPlane,
+    policy: &mut voom_policy::CompiledPolicy,
+) -> Result<(), VoomError> {
+    for phase in &mut policy.phases {
+        for operation in &mut phase.operations {
+            if let voom_policy::CompiledOperation::TranscodeVideo {
+                profile,
+                target_codec,
+                container,
+                resolved_profile,
+            } = operation
+            {
+                let resolved = crate::transcode::resolve::resolve_video_profile_ref(
+                    &cp.video_profiles,
+                    profile,
+                )
+                .await?;
+                target_codec.clone_from(&resolved.profile.target_codec);
+                container.clone_from(&resolved.output_container);
+                *resolved_profile = Some(resolved.profile);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ControlPlane {
@@ -61,7 +98,7 @@ impl ControlPlane {
             .ok_or_else(|| {
                 VoomError::NotFound(format!("policy version {policy_version_id} not found"))
             })?;
-        let policy: voom_policy::CompiledPolicy = serde_json::from_value(version.compiled_json)
+        let mut policy: voom_policy::CompiledPolicy = serde_json::from_value(version.compiled_json)
             .map_err(|e| {
                 VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
             })?;
@@ -72,6 +109,9 @@ impl ControlPlane {
                 "stored compiled policy identity mismatch for policy version {policy_version_id}"
             )));
         }
+        // Resolve profile references before the pure planner; shared with the
+        // execute path for dry-run/execute parity.
+        resolve_profiles_in_policy(self, &mut policy).await?;
         let input = self
             .policy_inputs
             .get_input_set(input_set_id)

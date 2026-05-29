@@ -73,6 +73,47 @@ fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoPr
     })
 }
 
+/// Resolves only `Inline` profiles (no registry needed). A `Named` reference
+/// returns `CONFIG_INVALID` directing the operator to a store-backed plan, rather
+/// than crashing the planner on a `None` `resolved_profile`.
+///
+/// # Errors
+/// Returns `CONFIG_INVALID` for any `Named` reference or invalid inline settings.
+pub fn resolve_inline_profiles_in_policy(
+    policy: &mut voom_policy::CompiledPolicy,
+) -> Result<(), VoomError> {
+    for phase in &mut policy.phases {
+        for operation in &mut phase.operations {
+            if let voom_policy::CompiledOperation::TranscodeVideo {
+                profile,
+                target_codec,
+                container,
+                resolved_profile,
+            } = operation
+            {
+                match profile {
+                    VideoProfileRef::Inline(settings) => {
+                        let typed = inline_to_worker_profile(settings)?;
+                        target_codec.clone_from(&typed.target_codec);
+                        *container = settings
+                            .output_container
+                            .clone()
+                            .unwrap_or_else(|| "mkv".to_owned());
+                        *resolved_profile = Some(typed);
+                    }
+                    VideoProfileRef::Named(name) => {
+                        return Err(VoomError::Config(format!(
+                            "named video profile `{name}` cannot be resolved offline; \
+                             use `voom plan show` against an initialized store"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "resolve_test.rs"]
 mod tests;

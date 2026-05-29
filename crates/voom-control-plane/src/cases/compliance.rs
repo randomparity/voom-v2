@@ -170,7 +170,7 @@ impl ControlPlane {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
-        let policy: voom_policy::CompiledPolicy =
+        let mut policy: voom_policy::CompiledPolicy =
             serde_json::from_value(inputs.version.compiled_json.clone()).map_err(|e| {
                 VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
             })?;
@@ -181,6 +181,10 @@ impl ControlPlane {
                 "stored compiled policy identity mismatch for policy version {policy_version_id}"
             )));
         }
+        // Resolve video profile references in-memory (after the stored-identity
+        // check, so the mutation cannot affect `source_hash`) before the pure
+        // planner runs. Shared with the dry-run path for parity.
+        super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
         let plan = super::plans::plan_compiled_policy_with_input(
             policy,
             super::plans::input_set_to_draft(inputs.input),
