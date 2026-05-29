@@ -1,7 +1,7 @@
 //! Per-encoder capability descriptors: the finite, encoder-specific vocabulary
 //! for CRF, preset, tune, codec profile/level, and pixel format. Pure data and
-//! predicates shared by the policy compiler (inline validation), the store seed
-//! validation, the planner (resource notes), and the `FFmpeg` worker.
+//! predicates shared by the policy compiler/validator, the planner (resource
+//! notes), and the `FFmpeg` worker's `validate_profile_against_descriptor`.
 
 /// How an encoder spells its speed knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,11 +105,6 @@ const DESCRIPTORS: &[EncoderDescriptor] = &[X265, SVTAV1, LIBAOM];
 #[must_use]
 pub fn encoder_descriptor(encoder: &str) -> Option<&'static EncoderDescriptor> {
     DESCRIPTORS.iter().find(|d| d.encoder == encoder)
-}
-
-#[must_use]
-pub fn all_encoder_descriptors() -> &'static [EncoderDescriptor] {
-    DESCRIPTORS
 }
 
 impl EncoderDescriptor {

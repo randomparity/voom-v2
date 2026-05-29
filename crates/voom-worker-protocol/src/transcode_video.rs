@@ -48,11 +48,6 @@ pub fn canonical_video_codec(codec: &str) -> Option<&'static str> {
 
 use crate::encoder_caps::encoder_descriptor;
 
-#[must_use]
-pub fn is_default_hevc_profile(profile: &TranscodeVideoProfile) -> bool {
-    profile == &TranscodeVideoProfile::default_hevc()
-}
-
 /// Validates a fully-typed profile against its encoder's capability descriptor.
 /// Returns a stable, human-readable reason string on the first violation.
 ///
