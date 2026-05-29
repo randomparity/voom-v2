@@ -84,7 +84,7 @@ async fn create_policy_document_returns_compile_diagnostics_without_persisting()
     let err = cp
         .create_policy_document(
             "bad",
-            "policy \"bad\" { phase a { transcode video to av1 {} } }",
+            "policy \"bad\" { phase a { transcode video to vp9 } }",
         )
         .await
         .unwrap_err();
@@ -109,7 +109,7 @@ async fn add_policy_version_returns_compile_diagnostics_without_persisting() {
     let err = cp
         .add_policy_version(
             created.document.id,
-            "policy \"p\" { phase a { transcode video to av1 {} } }",
+            "policy \"p\" { phase a { transcode video to vp9 } }",
         )
         .await
         .unwrap_err();

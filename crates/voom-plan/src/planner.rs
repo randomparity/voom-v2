@@ -274,13 +274,20 @@ impl<'a> PlanBuilder<'a> {
                 target_codec,
                 container,
                 profile,
-            } => self.expand_transcode_video_for_snapshot(
-                phase_name,
-                snapshot,
-                target_codec,
-                container,
-                profile,
-            ),
+                ..
+            } => {
+                let profile = match profile {
+                    voom_policy::VideoProfileRef::Named(name) => name.clone(),
+                    voom_policy::VideoProfileRef::Inline(_) => "inline".to_owned(),
+                };
+                self.expand_transcode_video_for_snapshot(
+                    phase_name,
+                    snapshot,
+                    target_codec,
+                    container,
+                    &profile,
+                );
+            }
             CompiledOperation::TranscodeAudio {
                 target_codec,
                 container,

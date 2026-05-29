@@ -3,7 +3,8 @@
     expect(
         clippy::unwrap_used,
         clippy::float_cmp,
-        reason = "policy tests assert deterministic fixtures directly and use unwrap for concise failures"
+        clippy::panic,
+        reason = "policy tests assert deterministic fixtures directly and use unwrap/panic for concise failures"
     )
 )]
 //! Policy-domain inputs for Sprint 3.

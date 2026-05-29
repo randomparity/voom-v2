@@ -231,7 +231,8 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
         policy: policy(CompiledOperation::TranscodeVideo {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
-            profile: "default-hevc".to_owned(),
+            profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+            resolved_profile: None,
         }),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
@@ -1530,7 +1531,8 @@ fn transcode_video() -> CompiledOperation {
     CompiledOperation::TranscodeVideo {
         target_codec: "hevc".to_owned(),
         container: "mkv".to_owned(),
-        profile: "default".to_owned(),
+        profile: voom_policy::VideoProfileRef::Named("default".to_owned()),
+        resolved_profile: None,
     }
 }
 

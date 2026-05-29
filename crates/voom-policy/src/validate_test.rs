@@ -102,8 +102,10 @@ fn rejects_invalid_inline_profiles() {
 #[test]
 fn rejects_using_profile_with_inline_body() {
     assert!(
-        codes("policy \"p\" { phase a { transcode video to hevc using profile \"x\" { crf: 20 } } }")
-            .contains(&"unsupported_transcode_shape".to_owned())
+        codes(
+            "policy \"p\" { phase a { transcode video to hevc using profile \"x\" { crf: 20 } } }"
+        )
+        .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 
@@ -378,10 +380,8 @@ fn rejects_on_error_with_extra_tokens() {
 #[test]
 fn rejects_unsupported_transcode_inside_rule_block() {
     assert!(
-        codes(
-            "policy \"p\" { phase a { rules first { rule \"r\" { transcode video to vp9 } } } }"
-        )
-        .contains(&"unsupported_transcode_shape".to_owned())
+        codes("policy \"p\" { phase a { rules first { rule \"r\" { transcode video to vp9 } } } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 

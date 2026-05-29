@@ -1,5 +1,5 @@
 policy "video transcode hevc" {
   phase normalize {
-    transcode video to hevc {}
+    transcode video to hevc
   }
 }

@@ -1,7 +1,7 @@
 {
   "policy_name": "video transcode hevc",
   "slug": "video-transcode-hevc",
-  "source_hash": "579fdc693591231c5c51cbaebd6520357b2a646a3a1d3fb61238434bc9233eee",
+  "source_hash": "183ab228fd77142d58fdb77b8fffbca3321b41fa7838df5cfbf9fb9ecf6b6abc",
   "schema_version": 2,
   "metadata": {},
   "config": {},
@@ -17,7 +17,9 @@
           "type": "transcode_video",
           "target_codec": "hevc",
           "container": "mkv",
-          "profile": "default-hevc"
+          "profile": {
+            "named": "default-hevc"
+          }
         }
       ]
     }

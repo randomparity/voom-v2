@@ -67,6 +67,10 @@ pub struct CompiledPhase {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "TranscodeVideo.resolved_profile is a pinned cross-phase contract field (Phase 6 fills it in-memory); boxing would diverge from the Sprint 15 plan's typed signature"
+)]
 pub enum CompiledOperation {
     SetContainer {
         container: String,
@@ -100,7 +104,14 @@ pub enum CompiledOperation {
     TranscodeVideo {
         target_codec: String,
         container: String,
-        profile: String,
+        profile: crate::VideoProfileRef,
+        /// Populated in-memory by the control plane's resolution step
+        /// (Phase 6) before planning; never written to `compiled_json`
+        /// (skipped when `None`, defaults to `None` on read) so stored
+        /// rows and `source_hash` are unaffected and legacy bare-string
+        /// policies still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_profile: Option<voom_worker_protocol::TranscodeVideoProfile>,
     },
     TranscodeAudio {
         target_codec: String,
@@ -293,6 +304,12 @@ fn lower_operation(
     source: &str,
     statement: &StatementAst,
 ) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
+    if let StatementAst::TranscodeInline {
+        header, settings, ..
+    } = statement
+    {
+        return Ok(lower_transcode_inline(header, settings));
+    }
     let text = statement_text(statement);
     let tokens = words(text.as_ref());
     let Some(keyword) = tokens.first().copied() else {
@@ -342,11 +359,7 @@ fn lower_operation(
                 filter: track_filter(text.as_ref()),
             })
         }
-        "transcode" => Ok(CompiledOperation::TranscodeVideo {
-            target_codec: "hevc".to_owned(),
-            container: "mkv".to_owned(),
-            profile: "default-hevc".to_owned(),
-        }),
+        "transcode" => Ok(lower_transcode_raw(&tokens)),
         "extract" if tokens.get(1).copied() == Some("audio") => {
             Ok(CompiledOperation::ExtractAudio {
                 target_codec: "opus".to_owned(),
@@ -366,6 +379,74 @@ fn lower_operation(
             rules: lower_rules(source, statement)?,
         }),
         _ => Err(vec![unknown_operation(source, statement.span())]),
+    }
+}
+
+fn lower_transcode_raw(tokens: &[&str]) -> CompiledOperation {
+    let codec = tokens.get(3).copied().unwrap_or("hevc").to_owned();
+    let profile = match tokens.get(4..) {
+        Some(["using", "profile", name]) => crate::VideoProfileRef::Named(strip_quotes(name)),
+        _ => crate::VideoProfileRef::Named(format!("default-{codec}")),
+    };
+    CompiledOperation::TranscodeVideo {
+        target_codec: codec,
+        container: "mkv".to_owned(),
+        profile,
+        resolved_profile: None,
+    }
+}
+
+fn lower_transcode_inline(header: &str, settings: &[crate::SettingAst]) -> CompiledOperation {
+    let tokens = words(header);
+    let codec = tokens.get(3).copied().unwrap_or("hevc").to_owned();
+    let inline = inline_settings_from(settings);
+    let container = inline
+        .output_container
+        .clone()
+        .unwrap_or_else(|| "mkv".to_owned());
+    CompiledOperation::TranscodeVideo {
+        target_codec: codec,
+        container,
+        profile: crate::VideoProfileRef::Inline(inline),
+        resolved_profile: None,
+    }
+}
+
+fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSettings {
+    let mut by_key = BTreeMap::new();
+    for setting in settings {
+        by_key.insert(setting.key.value.as_str(), &setting.value);
+    }
+    let str_at = |key: &str| by_key.get(key).map(|expr| expr_scalar_string(expr));
+    let u32_at = |key: &str| str_at(key).and_then(|value| value.parse::<u32>().ok());
+    crate::VideoProfileSettings {
+        encoder: str_at("encoder").unwrap_or_default(),
+        crf: str_at("crf")
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or_default(),
+        preset: str_at("preset").unwrap_or_default(),
+        tune: str_at("tune"),
+        codec_profile: str_at("codec_profile"),
+        codec_level: str_at("codec_level"),
+        pixel_format: str_at("pixel_format"),
+        max_width: u32_at("max_width"),
+        max_height: u32_at("max_height"),
+        output_container: str_at("output_container"),
+        copy_compatible: by_key.get("copy_compatible").and_then(|expr| match expr {
+            ExprAst::Boolean(value) => Some(value.value),
+            _ => None,
+        }),
+    }
+}
+
+fn expr_scalar_string(expr: &ExprAst) -> String {
+    match expr {
+        ExprAst::String(value)
+        | ExprAst::Identifier(value)
+        | ExprAst::Number(value)
+        | ExprAst::FieldPath(value) => value.value.clone(),
+        ExprAst::Boolean(value) => value.value.to_string(),
+        ExprAst::List { .. } => String::new(),
     }
 }
 
