@@ -296,6 +296,13 @@ async fn commit_verified_transcode_audio(
             request.staged.artifact_handle_id
         )));
     }
+    // Probe the staged result before commit: the fallible external probe runs on
+    // the content-hash-verified staged file (byte-identical to the add-only
+    // committed target), so a probe failure leaves nothing committed and
+    // propagates as Err (the caller records the failed event).
+    let probed =
+        commit::probe_staged_result(cp, &request.staging_path, &request.result, result_probe)
+            .await?;
     let committed = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: request.staged.artifact_handle_id,
@@ -309,35 +316,32 @@ async fn commit_verified_transcode_audio(
     let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
         VoomError::Internal("committed audio transcode missing result_file_location_id".to_owned())
     })?;
-    let result_snapshot = match commit::record_transcode_result_snapshot_with_dispatcher(
-        cp,
-        result_file_version_id,
-        &request.target_path,
-        &request.result,
-        result_probe,
-    )
-    .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            return Ok(transcode_report_after_commit(
-                &request,
-                &verified,
-                committed.commit_record_id,
-                result_file_version_id,
-                result_file_location_id,
-                None,
-                Some(transcode_post_commit_recovery(
+    // Only the local DB write remains after commit. On failure, keep the graceful
+    // recovery report rather than returning Err: a committed artifact stays in
+    // place and the caller's any-Err path would otherwise emit a misleading
+    // transcode-failed event.
+    let result_snapshot =
+        match commit::record_result_snapshot_payload(cp, result_file_version_id, probed).await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                return Ok(transcode_report_after_commit(
+                    &request,
+                    &verified,
                     committed.commit_record_id,
                     result_file_version_id,
                     result_file_location_id,
                     None,
-                    request.target_path.clone(),
-                    &err,
-                )),
-            ));
-        }
-    };
+                    Some(transcode_post_commit_recovery(
+                        committed.commit_record_id,
+                        result_file_version_id,
+                        result_file_location_id,
+                        None,
+                        request.target_path.clone(),
+                        &err,
+                    )),
+                ));
+            }
+        };
     if let Err(err) = events::record_transcode_succeeded(
         cp,
         events::TranscodeSucceededEventInput {
