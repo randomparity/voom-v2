@@ -52,6 +52,10 @@ const MIGRATION_0012_SQL: &str =
 /// compile time.
 const MIGRATION_0013_SQL: &str = include_str!("../../../migrations/0013_audio_sidecar_support.sql");
 
+/// SQL for migration 0014 (Sprint 15 video profiles seed), embedded at
+/// compile time.
+const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_video_profiles.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -156,6 +160,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("audio_sidecar_support"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0013_SQL),
+            false,
+        ),
+        Migration::new(
+            14,
+            Cow::Borrowed("video_profiles"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0014_SQL),
             false,
         ),
     ]),
