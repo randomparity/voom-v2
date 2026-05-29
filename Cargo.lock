@@ -2577,6 +2577,7 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-fake-support",
+ "voom-ffmpeg-worker",
  "voom-plan",
  "voom-policy",
  "voom-scheduler",
