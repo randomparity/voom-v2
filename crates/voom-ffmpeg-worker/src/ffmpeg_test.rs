@@ -475,6 +475,12 @@ fn container_args_mp4_unsupported_codec_is_error() {
 }
 
 #[test]
+fn container_args_unsupported_container_is_error() {
+    let err = container_args("webm", "hevc").unwrap_err();
+    assert!(matches!(err, FfmpegError::OutputFactsMismatch(_)));
+}
+
+#[test]
 fn scale_args_not_emitted_when_within_cap() {
     let profile = profile_1080p(); // max 1920x1080
     assert!(scale_args(&profile, 1280, 720).is_empty());

@@ -90,6 +90,7 @@ impl ControlPlane {
             input,
             &dispatch::BundledTranscodeVideoDispatcher,
             &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+            &commit::BundledTranscodeResultProbeDispatcher,
         )
         .await
     }
@@ -128,6 +129,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     input: ExecuteTranscodeVideoInput,
     transcode: &dyn TranscodeVideoDispatcher,
     verify: &dyn VerifyArtifactDispatcher,
+    result_probe: &dyn commit::TranscodeResultProbeDispatcher,
 ) -> Result<ExecuteTranscodeVideoReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
@@ -183,7 +185,20 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
         VoomError::Internal("committed transcode missing result_file_location_id".to_owned())
     })?;
-    let snapshot = commit::record_result_snapshot(cp, result_file_version_id, &result).await?;
+    let snapshot = commit::record_result_snapshot_with_dispatcher(
+        cp,
+        result_file_version_id,
+        &target_path,
+        &result,
+        result_probe,
+    )
+    .await
+    .map_err(|err| {
+        VoomError::ExternalSystemUnavailable(format!(
+            "transcode result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
+            committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
+        ))
+    })?;
     events::record_succeeded(
         cp,
         &input,

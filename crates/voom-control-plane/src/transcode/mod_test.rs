@@ -42,6 +42,7 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
         },
         &FakeTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap();
@@ -114,6 +115,7 @@ async fn execute_rejects_non_hevc_worker_result_before_commit() {
         },
         &WrongCodecTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -142,6 +144,7 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
         },
         &WrongInputFactsTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -176,6 +179,7 @@ async fn execute_rejects_copied_video_disagreement_before_commit() {
         // a worker result claiming copied_video=true must be rejected.
         &CopiedVideoDisagreementDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -245,6 +249,55 @@ impl TranscodeVideoDispatcher for WrongInputFactsTranscodeDispatcher {
         result.input_pre.size_bytes += 1;
         result.input_post = result.input_pre.clone();
         Ok(result)
+    }
+}
+
+#[derive(Debug)]
+struct FakeResultProbeDispatcher;
+
+#[async_trait]
+impl crate::transcode::commit::TranscodeResultProbeDispatcher for FakeResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<crate::transcode::commit::ProbedTranscodeResult, voom_core::VoomError> {
+        let mut tx = cp.pool.begin().await.unwrap();
+        let worker_id = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx)
+            .await?
+            .id;
+        tx.commit().await.unwrap();
+        let facts = voom_worker_protocol::ObservedFileFacts {
+            size_bytes: request.expected.size_bytes,
+            content_hash: request.expected.content_hash.clone(),
+            modified_at: None,
+            local_file_key: None,
+        };
+        Ok(crate::transcode::commit::ProbedTranscodeResult {
+            worker_id,
+            result: voom_worker_protocol::ProbeFileResult {
+                status: voom_worker_protocol::ProbeFileStatus::Probed,
+                provider: "ffprobe".to_owned(),
+                provider_version: "test".to_owned(),
+                pre_probe: facts.clone(),
+                post_probe: facts,
+                snapshot: serde_json::json!({
+                    "format": "sprint10-v1",
+                    "probe": {"provider": "ffprobe", "provider_version": "test"},
+                    "container": {"format_name": "matroska,webm"},
+                    "streams": [
+                        {
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "hevc",
+                            "pixel_format": "yuv420p",
+                            "width": 1280,
+                            "height": 720
+                        }
+                    ]
+                }),
+            },
+        })
     }
 }
 

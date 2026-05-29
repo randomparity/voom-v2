@@ -1435,6 +1435,7 @@ async fn dispatch_control_plane_transcode(
             options,
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+        &crate::transcode::commit::BundledTranscodeResultProbeDispatcher,
     )
     .await
     {

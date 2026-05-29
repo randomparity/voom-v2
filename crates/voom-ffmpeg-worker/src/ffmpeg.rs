@@ -209,7 +209,10 @@ fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoPro
 ///
 /// # Errors
 /// Returns `FfmpegError::OutputFactsMismatch` for an mp4 container with a video
-/// codec that has no defined mp4 tag.
+/// codec that has no defined mp4 tag, or for any container other than mkv/mp4.
+/// `validate_request_contract` already gates the container to mkv/mp4, so an
+/// unsupported container here means an upstream contract was bypassed; we fail
+/// loud rather than pass an unvalidated `-f <container>` to ffmpeg.
 pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, FfmpegError> {
     match container {
         "mkv" => Ok(vec![OsString::from("-f"), OsString::from("matroska")]),
@@ -230,7 +233,9 @@ pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, Ffm
                 OsString::from(tag),
             ])
         }
-        other => Ok(vec![OsString::from("-f"), OsString::from(other)]),
+        other => Err(FfmpegError::OutputFactsMismatch(format!(
+            "unsupported transcode_video output container `{other}` (mkv or mp4)"
+        ))),
     }
 }
 
