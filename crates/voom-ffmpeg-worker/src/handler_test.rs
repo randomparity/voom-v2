@@ -271,6 +271,107 @@ async fn extract_audio_rejects_dropped_source_language_or_title() {
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
 }
 
+// ---- Task 7.2 tests ----
+
+#[tokio::test]
+async fn copy_video_with_nonconforming_codec_fails_loudly() {
+    // copy_video=true but ffprobe reports h264 (not the target hevc)
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    // ffprobe reports h264 for the input
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            TranscodeVideoError::MalformedWorkerResult { .. }
+                | TranscodeVideoError::ConfigInvalid { .. }
+        ),
+        "expected MalformedWorkerResult or ConfigInvalid, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mp4_output_contract_now_accepted() {
+    // mp4 was previously rejected; now it is a supported container
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.output.container = "mp4".to_owned();
+    req.output.path = dir
+        .path()
+        .join("stage")
+        .join("input.hevc.mp4")
+        .to_string_lossy()
+        .into_owned();
+    // ffprobe returns mp4/hevc for output validation
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"mp4\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    // Should succeed — mp4 is now accepted
+    let result = handle_transcode_video(&req, &config).await;
+    assert!(result.is_ok(), "mp4 output should now be accepted: {result:?}");
+    let result = result.unwrap();
+    assert_eq!(result.output_container, "mp4");
+}
+
+#[tokio::test]
+async fn output_dims_and_pixfmt_populated_from_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let req = request(dir.path(), &input).await;
+    let config = config(dir.path());
+
+    let result = handle_transcode_video(&req, &config).await.unwrap();
+    assert_eq!(result.output_width, 1920);
+    assert_eq!(result.output_height, 1080);
+    assert_eq!(result.output_pixel_format, "yuv420p");
+    assert!(!result.copied_video);
+}
+
+#[tokio::test]
+async fn copy_video_sets_copied_video_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    // ffprobe returns hevc/mkv — matches the target codec
+    let config = config(dir.path());
+
+    let result = handle_transcode_video(&req, &config).await.unwrap();
+    assert!(result.copied_video);
+}
+
+fn config_with_probe(root: &Path, probe_script: &str) -> FfmpegConfig {
+    let ffmpeg = stub_bin(
+        root,
+        "ffmpeg",
+        "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+    );
+    let ffprobe = stub_bin(root, "ffprobe", probe_script);
+    FfmpegConfig::new(
+        ffmpeg,
+        ffprobe,
+        "ffmpeg version test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+}
+
+// ---- End Task 7.2 tests ----
+
 async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
     let stage = root.join("stage");
     tokio::fs::create_dir(&stage).await.unwrap();
