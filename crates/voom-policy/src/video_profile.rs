@@ -63,11 +63,15 @@ impl<'de> Deserialize<'de> for VideoProfileRef {
                 let key: String = map
                     .next_key()?
                     .ok_or_else(|| de::Error::custom("empty profile ref object"))?;
-                match key.as_str() {
-                    "named" => Ok(VideoProfileRef::Named(map.next_value()?)),
-                    "inline" => Ok(VideoProfileRef::Inline(map.next_value()?)),
-                    other => Err(de::Error::unknown_variant(other, &["named", "inline"])),
+                let value = match key.as_str() {
+                    "named" => VideoProfileRef::Named(map.next_value()?),
+                    "inline" => VideoProfileRef::Inline(map.next_value()?),
+                    other => return Err(de::Error::unknown_variant(other, &["named", "inline"])),
+                };
+                if map.next_key::<String>()?.is_some() {
+                    return Err(de::Error::custom("unexpected trailing key in profile ref"));
                 }
+                Ok(value)
             }
         }
 

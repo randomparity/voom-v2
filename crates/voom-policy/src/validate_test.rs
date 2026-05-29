@@ -97,6 +97,13 @@ fn rejects_invalid_inline_profiles() {
         )
         .contains(&"invalid_video_profile_setting".to_owned())
     );
+    // duplicate key
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 20 crf: 28 preset: 6 } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
 }
 
 #[test]

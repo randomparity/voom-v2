@@ -35,3 +35,28 @@ fn new_named_serializes_tagged_and_round_trips() {
     let back: VideoProfileRef = serde_json::from_str(&json).unwrap();
     assert_eq!(r, back);
 }
+
+#[test]
+fn rejects_unknown_tag() {
+    let err = serde_json::from_str::<VideoProfileRef>(r#"{"bogus":"x"}"#);
+    assert!(err.is_err());
+}
+
+#[test]
+fn rejects_empty_object() {
+    let err = serde_json::from_str::<VideoProfileRef>("{}").unwrap_err();
+    assert!(err.to_string().contains("empty profile ref object"));
+}
+
+#[test]
+fn rejects_trailing_key() {
+    let err = serde_json::from_str::<VideoProfileRef>(r#"{"named":"x","extra":1}"#).unwrap_err();
+    assert!(err.to_string().contains("unexpected trailing key"));
+}
+
+#[test]
+fn rejects_unknown_inline_field() {
+    let json = r#"{"inline":{"encoder":"libsvtav1","crf":30,"preset":"6","bogus":1}}"#;
+    let err = serde_json::from_str::<VideoProfileRef>(json);
+    assert!(err.is_err());
+}

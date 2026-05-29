@@ -618,7 +618,8 @@ impl<'a> Validator<'a> {
                     );
                     return;
                 }
-                let Some(codec) = self.transcode_target_codec(statement, header) else {
+                let tokens = words(header);
+                let Some(codec) = self.transcode_target_codec(statement, &tokens) else {
                     return;
                 };
                 self.validate_inline_video_profile(statement, codec, settings);
@@ -634,7 +635,7 @@ impl<'a> Validator<'a> {
     fn validate_transcode_header(&mut self, statement: &StatementAst, text: &str) {
         let tokens = words(text);
         if tokens.get(0..2) == Some(&["transcode", "video"]) {
-            self.validate_transcode_video_header(statement, text, &tokens);
+            self.validate_transcode_video_header(statement, &tokens);
             return;
         }
         if tokens
@@ -653,13 +654,8 @@ impl<'a> Validator<'a> {
         );
     }
 
-    fn validate_transcode_video_header(
-        &mut self,
-        statement: &StatementAst,
-        text: &str,
-        tokens: &[&str],
-    ) {
-        if self.transcode_target_codec(statement, text).is_none() {
+    fn validate_transcode_video_header(&mut self, statement: &StatementAst, tokens: &[&str]) {
+        if self.transcode_target_codec(statement, tokens).is_none() {
             return;
         }
         match tokens.get(4..) {
@@ -679,9 +675,8 @@ impl<'a> Validator<'a> {
     fn transcode_target_codec(
         &mut self,
         statement: &StatementAst,
-        text: &str,
+        tokens: &[&str],
     ) -> Option<&'static str> {
-        let tokens = words(text);
         let codec = tokens.get(3).copied();
         match codec {
             Some("hevc") => Some("hevc"),
@@ -851,29 +846,43 @@ impl<'a> Validator<'a> {
             );
         }
         let pixel_format = self.inline_optional_str(span, by_key, "pixel_format");
-        if let Some(pixel_format) = &pixel_format {
-            if !descriptor.accepts_pixel_format(pixel_format) {
-                self.error(
-                    DiagnosticCode::InvalidVideoProfileSetting,
-                    span,
-                    format!(
-                        "pixel_format `{pixel_format}` invalid for `{}`",
-                        descriptor.encoder
-                    ),
-                );
-            } else if !descriptor
-                .pixel_format_compatible_with_profile(pixel_format, codec_profile.as_deref())
-            {
-                self.error(
-                    DiagnosticCode::InvalidVideoProfileSetting,
-                    span,
-                    format!(
-                        "pixel_format `{pixel_format}` incompatible with codec_profile `{codec_profile:?}`"
-                    ),
-                );
-            }
-        }
+        self.validate_inline_pixel_format(
+            span,
+            descriptor,
+            pixel_format.as_deref(),
+            codec_profile.as_deref(),
+        );
         self.validate_inline_container_and_dimensions(span, by_key);
+    }
+
+    fn validate_inline_pixel_format(
+        &mut self,
+        span: SourceSpan,
+        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        pixel_format: Option<&str>,
+        codec_profile: Option<&str>,
+    ) {
+        let Some(pixel_format) = pixel_format else {
+            return;
+        };
+        if !descriptor.accepts_pixel_format(pixel_format) {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "pixel_format `{pixel_format}` invalid for `{}`",
+                    descriptor.encoder
+                ),
+            );
+        } else if !descriptor.pixel_format_compatible_with_profile(pixel_format, codec_profile) {
+            self.error(
+                DiagnosticCode::InvalidVideoProfileSetting,
+                span,
+                format!(
+                    "pixel_format `{pixel_format}` incompatible with codec_profile `{codec_profile:?}`"
+                ),
+            );
+        }
     }
 
     fn validate_inline_container_and_dimensions(
