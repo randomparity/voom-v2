@@ -46,6 +46,7 @@ use voom_store::{SchemaState, connect, probe_schema};
 pub mod artifact;
 pub mod audio;
 pub mod cases;
+mod media_snapshot;
 pub mod node_auth;
 pub mod remux;
 pub mod scan;
