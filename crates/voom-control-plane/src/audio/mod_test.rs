@@ -7,7 +7,7 @@ use voom_core::ids::{ArtifactCommitRecordId, BundleId};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{JobId, LeaseId, TicketId};
 use voom_store::repo::bundles::NewAssetBundle;
-use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest, ExtractAudioResult,
@@ -178,10 +178,55 @@ fn committed_extract_recovery_with_target_is_not_reported_as_success() {
 }
 
 #[tokio::test]
-async fn transcode_post_commit_probe_failure_returns_recovery_report() {
+async fn staged_result_probe_failure_does_not_commit() {
     let (cp, _db, dir) = fixture_with_dir().await;
     let source = seed_audio_source(&cp, &dir, b"source").await;
     let input = transcode_input_for_source(&source, &dir);
+
+    let err = execute_transcode_audio_with_dispatchers(
+        &cp,
+        input,
+        &WritingTranscodeDispatcher {
+            output_bytes: b"transcoded".to_vec(),
+        },
+        &SuccessfulVerifyDispatcher,
+        &FailingProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    // The probe now runs before commit, so a probe failure leaves nothing
+    // committed and the caller records exactly one failed event.
+    assert_eq!(err.error_code(), voom_core::ErrorCode::Internal);
+    assert_event_count(&cp, "artifact.audio_transcode_failed", 1).await;
+    assert_event_count(&cp, "artifact.audio_transcode_succeeded", 0).await;
+    assert_event_count(&cp, "artifact.commit_completed", 0).await;
+    let snapshots = cp
+        .identity
+        .list_media_snapshots_by_version(source.version)
+        .await
+        .unwrap();
+    // Only the seeded source snapshot exists; no result snapshot was recorded.
+    assert_eq!(snapshots.len(), 1);
+}
+
+#[tokio::test]
+async fn transcode_post_commit_snapshot_write_failure_returns_recovery_report() {
+    let (cp, _db, dir) = fixture_with_dir().await;
+    let source = seed_audio_source(&cp, &dir, b"source").await;
+    let input = transcode_input_for_source(&source, &dir);
+    // The staged probe succeeds; the post-commit media_snapshots insert aborts,
+    // so the only post-commit failure is the local DB write — the path the
+    // recovery report still covers. The source snapshot was already written by
+    // seed_audio_source above, so this trigger only catches the result snapshot.
+    sqlx::query(
+        "CREATE TRIGGER fail_audio_transcode_result_snapshot \
+         BEFORE INSERT ON media_snapshots \
+         BEGIN SELECT RAISE(ABORT, 'snapshot write unavailable'); END;",
+    )
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
 
     let report = execute_transcode_audio_with_dispatchers(
         &cp,
@@ -190,7 +235,7 @@ async fn transcode_post_commit_probe_failure_returns_recovery_report() {
             output_bytes: b"transcoded".to_vec(),
         },
         &SuccessfulVerifyDispatcher,
-        &FailingProbeDispatcher,
+        &SucceedingProbeDispatcher,
     )
     .await
     .unwrap();
@@ -608,7 +653,52 @@ impl commit::AudioResultProbeDispatcher for FailingProbeDispatcher {
         _cp: &crate::ControlPlane,
         _request: voom_worker_protocol::ProbeFileRequest,
     ) -> Result<commit::ProbedAudioResult, VoomError> {
-        Err(VoomError::Internal("probe failed after commit".to_owned()))
+        Err(VoomError::Internal(
+            "simulated staged-probe failure".to_owned(),
+        ))
+    }
+}
+
+struct SucceedingProbeDispatcher;
+
+#[async_trait]
+impl commit::AudioResultProbeDispatcher for SucceedingProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<commit::ProbedAudioResult, VoomError> {
+        let mut tx = cp.pool_for_test().begin().await.unwrap();
+        let worker = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        // Echo the expected facts so verify_probe_facts passes and the flow
+        // reaches the post-commit snapshot write.
+        let facts = voom_worker_protocol::ObservedFileFacts {
+            size_bytes: request.expected.size_bytes,
+            content_hash: request.expected.content_hash,
+            modified_at: None,
+            local_file_key: None,
+        };
+        Ok(commit::ProbedAudioResult {
+            worker_id: worker.id,
+            result: voom_worker_protocol::ProbeFileResult {
+                status: voom_worker_protocol::ProbeFileStatus::Probed,
+                provider: "ffprobe".to_owned(),
+                provider_version: "test".to_owned(),
+                pre_probe: facts.clone(),
+                post_probe: facts,
+                snapshot: serde_json::json!({
+                    "format": "sprint10-v1",
+                    "probe": { "provider": "ffprobe", "provider_version": "test" },
+                    "container": { "format_name": "matroska,webm" },
+                    "streams": [
+                        { "index": 0, "kind": "audio", "codec_name": "opus" }
+                    ]
+                }),
+            },
+        })
     }
 }
 

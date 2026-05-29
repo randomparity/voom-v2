@@ -2267,7 +2267,11 @@ async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
 
 async fn transcode_audio_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<TranscodeAudioRequest>(request.payload.clone()).unwrap();
-    let output_bytes = b"audio-output!";
+    // Write real media bytes so the staged result probe (now run before commit)
+    // launches the bundled ffprobe against a parseable file. The probe only
+    // verifies size+hash against these bytes; the container/codec the result
+    // claims are not asserted by these dispatch/heartbeat tests.
+    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
