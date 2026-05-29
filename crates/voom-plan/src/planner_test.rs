@@ -1208,6 +1208,16 @@ fn resource_notes_are_format_stable() {
 }
 
 #[test]
+fn downscale_note_emits_when_only_width_is_constrained() {
+    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+    profile.pixel_format = Some("yuv420p".to_owned());
+    profile.max_width = Some(1920);
+    let plan = plan_transcode_with_container(profile, source_hevc_2160_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+    assert!(notes.contains(&"downscale=3840x2160->1920x2160".to_owned()));
+}
+
+#[test]
 fn transcode_video_node_payload_carries_profile_and_resolved_profile() {
     let plan = plan_transcode_with_container(profile_hevc_mp4(), source_hevc_720_mkv(), "mp4");
     let payload = &plan.nodes[0].operation_payload;
@@ -1230,6 +1240,33 @@ fn transcode_video_blocks_when_profile_unresolved() {
     assert_eq!(
         error.diagnostics[0].code,
         PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+}
+
+#[test]
+fn unresolved_profile_reports_every_missing_snapshot() {
+    let policy = policy(CompiledOperation::TranscodeVideo {
+        target_codec: "hevc".to_owned(),
+        container: "mkv".to_owned(),
+        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+        resolved_profile: None,
+    });
+    let mut input = input_with_snapshot(source_hevc_720_mkv());
+    input.media_snapshots.push(source_hevc_2160_mkv());
+
+    let error = generate_plan(PlanningRequest {
+        policy,
+        input,
+        context: PlanningContext::default(),
+    })
+    .unwrap_err();
+
+    assert_eq!(error.diagnostics.len(), 2);
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .all(|d| d.code == PlanningDiagnosticCode::InvalidPlanningRequest)
     );
 }
 

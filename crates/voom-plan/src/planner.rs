@@ -523,20 +523,19 @@ impl<'a> PlanBuilder<'a> {
 
     fn record_missing_resolution(&mut self, phase_name: &str, snapshot: &MediaSnapshotInput) {
         let message = "transcode_video profile was not resolved before planning";
-        self.diagnostics.push(
+        let diagnostic =
             PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
                 .with_phase(phase_name)
                 .with_operation_kind("transcode_video")
-                .with_target(snapshot.target.clone()),
-        );
-        self.fatal.get_or_insert_with(|| PlanGenerationError {
-            diagnostics: vec![
-                PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
-                    .with_phase(phase_name)
-                    .with_operation_kind("transcode_video")
-                    .with_target(snapshot.target.clone()),
-            ],
-        });
+                .with_target(snapshot.target.clone());
+        match &mut self.fatal {
+            Some(fatal) => fatal.diagnostics.push(diagnostic),
+            None => {
+                self.fatal = Some(PlanGenerationError {
+                    diagnostics: vec![diagnostic],
+                });
+            }
+        }
     }
 
     fn push_transcode_video_diagnostic(
@@ -1496,6 +1495,8 @@ fn mp4_gate_shape(snapshot: &MediaSnapshotInput) -> Option<TranscodeVideoShape> 
         };
         let kind = object.get("kind").and_then(serde_json::Value::as_str);
         if kind == Some("video") {
+            // Video streams are skipped: the transcoder replaces the video
+            // stream, so its source codec never gates mp4 muxability.
             continue;
         }
         let codec_name = object.get("codec_name").and_then(serde_json::Value::as_str);
@@ -1521,7 +1522,6 @@ fn mp4_gate_shape(snapshot: &MediaSnapshotInput) -> Option<TranscodeVideoShape> 
 fn mp4_muxable(kind: &str, codec_name: &str) -> bool {
     match kind {
         "audio" => matches!(codec_name, "aac" | "ac3" | "eac3" | "opus"),
-        "video" => matches!(codec_name, "hevc" | "av1"),
         _ => false,
     }
 }
@@ -1574,14 +1574,12 @@ fn transcode_video_notes(
         ),
         format!("crf={}", resolved.crf),
     ];
-    if let (Some(cap_w), Some(cap_h), Some(src_w), Some(src_h)) = (
-        resolved.max_width,
-        resolved.max_height,
-        snapshot.width,
-        snapshot.height,
-    ) && (src_w > cap_w || src_h > cap_h)
-    {
-        notes.push(format!("downscale={src_w}x{src_h}->{cap_w}x{cap_h}"));
+    if let (Some(src_w), Some(src_h)) = (snapshot.width, snapshot.height) {
+        let cap_w = resolved.max_width.unwrap_or(src_w);
+        let cap_h = resolved.max_height.unwrap_or(src_h);
+        if src_w > cap_w || src_h > cap_h {
+            notes.push(format!("downscale={src_w}x{src_h}->{cap_w}x{cap_h}"));
+        }
     }
     notes
 }

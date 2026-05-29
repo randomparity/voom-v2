@@ -38,6 +38,15 @@ fn inline_hash_differs_for_near_identical_profiles() {
 }
 
 #[test]
+fn inline_hash_normalizes_codec_level_case_and_whitespace() {
+    let mut a = sample_settings();
+    a.codec_level = Some(" 5.1 ".to_owned());
+    let mut b = sample_settings();
+    b.codec_level = Some("5.1".to_owned());
+    assert_eq!(inline_profile_id(&a), inline_profile_id(&b));
+}
+
+#[test]
 fn cpu_cost_lookup_is_deterministic() {
     assert_eq!(cpu_cost("libx265", "placebo"), "high");
     assert_eq!(cpu_cost("libx265", "medium"), "medium");

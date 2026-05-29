@@ -1,18 +1,7 @@
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 
 use super::*;
-use crate::cases::cp;
-
-async fn transcodable_input(cp: &crate::ControlPlane, slug: &str) -> voom_core::PolicyInputSetId {
-    let mut draft = load_fixture(FixtureName::SyntheticNoncompliantTranscodeNeeded).unwrap();
-    draft.slug = slug.to_owned();
-    draft.fixture_labels = vec![slug.replace('-', "_")];
-    let snapshot = &mut draft.media_snapshots[0];
-    snapshot.container = Some("mp4".to_owned());
-    snapshot.video_codec = Some("h264".to_owned());
-    snapshot.stream_summary = serde_json::json!({ "video_stream_count": 1 });
-    cp.create_policy_input_set(draft).await.unwrap().id
-}
+use crate::cases::{cp, transcodable_input};
 
 #[test]
 fn plan_policy_source_with_input_draft_does_not_need_database() {

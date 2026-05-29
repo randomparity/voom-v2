@@ -15,7 +15,7 @@ use voom_worker_protocol::{
 };
 
 use crate::cases::policy_inputs::PolicyInputFromScanInput;
-use crate::cases::{count, cp};
+use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::{
     WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::WorkflowTicketPayload,
 };
@@ -1086,17 +1086,6 @@ impl ClientHandle for SuccessClient {
             ),
         })
     }
-}
-
-async fn transcodable_input(cp: &crate::ControlPlane, slug: &str) -> voom_core::PolicyInputSetId {
-    let mut draft = load_fixture(FixtureName::SyntheticNoncompliantTranscodeNeeded).unwrap();
-    draft.slug = slug.to_owned();
-    draft.fixture_labels = vec![slug.replace('-', "_")];
-    let snapshot = &mut draft.media_snapshots[0];
-    snapshot.container = Some("mp4".to_owned());
-    snapshot.video_codec = Some("h264".to_owned());
-    snapshot.stream_summary = serde_json::json!({ "video_stream_count": 1 });
-    cp.create_policy_input_set(draft).await.unwrap().id
 }
 
 #[tokio::test]

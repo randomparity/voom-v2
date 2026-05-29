@@ -25,7 +25,7 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
         parts.push(format!("codec_profile={}", v.to_ascii_lowercase()));
     }
     if let Some(v) = &s.codec_level {
-        parts.push(format!("codec_level={v}"));
+        parts.push(format!("codec_level={}", v.trim().to_ascii_lowercase()));
     }
     if let Some(v) = &s.pixel_format {
         parts.push(format!("pixel_format={}", v.to_ascii_lowercase()));
