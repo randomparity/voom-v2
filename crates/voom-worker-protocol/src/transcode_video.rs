@@ -199,6 +199,13 @@ impl TranscodeVideoProfile {
     }
 }
 
+/// Worker request schema for `transcode_video`.
+///
+/// ffmpeg workers are co-deployed bundled binaries launched by the control
+/// plane (ADR-0002 / `VOOM_FFMPEG_WORKER_BIN`), so this schema is lock-stepped
+/// with the control-plane build. The required fields and `deny_unknown_fields`
+/// are a deliberate fail-loud choice for an in-build contract — NOT a
+/// cross-version durable-replay contract. There is no version skew to tolerate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoRequest {
@@ -215,6 +222,11 @@ pub enum TranscodeVideoStatus {
     Transcoded,
 }
 
+/// Worker result schema for `transcode_video`.
+///
+/// Like [`TranscodeVideoRequest`], this schema is lock-stepped with the
+/// control-plane build (bundled co-deployed worker, ADR-0002). The strict
+/// fields are a fail-loud in-build contract, not a durable-replay format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoResult {

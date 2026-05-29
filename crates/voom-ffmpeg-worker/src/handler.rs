@@ -291,17 +291,31 @@ fn validate_copy_video_preconditions(
 }
 
 fn validate_copy_codec(target_codec: &str, probe: &InputProbe) -> Result<(), TranscodeVideoError> {
-    // Normalize both sides (ffprobe "hevc" == target "hevc"; av1 stays av1)
-    if normalize_codec_token(&probe.codec) != normalize_codec_token(target_codec) {
-        return Err(malformed_worker_result(
-            "copy_video",
-            format!(
-                "copy_video requested but source codec `{}` != target `{}`",
-                probe.codec, target_codec
-            ),
-        ));
+    if codec_tokens_match(&probe.codec, target_codec) {
+        return Ok(());
     }
-    Ok(())
+    Err(malformed_worker_result(
+        "copy_video",
+        format!(
+            "copy_video requested but source codec `{}` != target `{}`",
+            probe.codec, target_codec
+        ),
+    ))
+}
+
+/// Compares two codec tokens for copy-precondition equality. Resolves known
+/// aliases (e.g. `h265` -> `hevc`) via `canonical_video_codec` so an
+/// `h265`-spelled probe matches an `hevc` target — mirroring control-plane
+/// `decide_copy_video`. Falls back to a normalized literal compare only when
+/// either side is an unrecognized codec.
+fn codec_tokens_match(source: &str, target: &str) -> bool {
+    if let (Some(source_canonical), Some(target_canonical)) = (
+        voom_worker_protocol::canonical_video_codec(source),
+        voom_worker_protocol::canonical_video_codec(target),
+    ) {
+        return source_canonical == target_canonical;
+    }
+    normalize_codec_token(source) == normalize_codec_token(target)
 }
 
 fn validate_copy_dimensions(

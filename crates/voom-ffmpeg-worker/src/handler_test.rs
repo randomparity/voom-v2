@@ -658,6 +658,37 @@ fn assert_terminal_error(frame: &ProgressFrame, class: FailureClass, code: Error
     assert!(payload.is_some());
 }
 
+fn input_probe_with_codec(codec: &str) -> InputProbe {
+    InputProbe {
+        width: 1920,
+        height: 1080,
+        codec: codec.to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        codec_profile: None,
+        codec_level: None,
+        video_stream_count: 1,
+    }
+}
+
+#[test]
+fn validate_copy_codec_accepts_h265_alias_against_hevc_target() {
+    let probe = input_probe_with_codec("h265");
+    assert!(validate_copy_codec("hevc", &probe).is_ok());
+}
+
+#[test]
+fn validate_copy_codec_accepts_hevc_against_h265_target() {
+    let probe = input_probe_with_codec("hevc");
+    assert!(validate_copy_codec("h265", &probe).is_ok());
+}
+
+#[test]
+fn validate_copy_codec_rejects_mismatched_codec() {
+    let probe = input_probe_with_codec("h264");
+    let err = validate_copy_codec("hevc", &probe).unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
