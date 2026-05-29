@@ -1182,6 +1182,20 @@ fn blocked_insufficient_when_mp4_stream_inventory_underdescribed() {
 }
 
 #[test]
+fn blocked_insufficient_when_mp4_target_and_streams_array_absent() {
+    // A snapshot with video_stream_count but no "streams" array is under-described
+    // for an mp4 target — the gate must block rather than pass through.
+    let mut snapshot = snapshot_with(Some("mkv"), Some("h264"), Some(1));
+    snapshot.stream_summary = serde_json::json!({ "video_stream_count": 1 });
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), snapshot, "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
 fn resource_notes_are_format_stable() {
     let plan =
         plan_transcode_with_container(profile_hevc_1080p_mkv(), source_hevc_2160_mkv(), "mkv");

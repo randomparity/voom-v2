@@ -1476,10 +1476,17 @@ fn codec_level_needs_change(
 /// MP4 muxability gate. Returns `Some(shape)` to block; `None` when every
 /// non-video stream is fully described and MP4-muxable.
 fn mp4_gate_shape(snapshot: &MediaSnapshotInput) -> Option<TranscodeVideoShape> {
-    let streams = snapshot
+    // Absent streams array for an mp4 target means the source is
+    // under-described: block rather than proceeding uninspected.
+    let Some(streams) = snapshot
         .stream_summary
         .get("streams")
-        .and_then(serde_json::Value::as_array)?;
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Some(TranscodeVideoShape::InsufficientFacts(
+            "mp4 target requires fully enumerated streams".to_owned(),
+        ));
+    };
     let mut offenders = Vec::new();
     for stream in streams {
         let Some(object) = stream.as_object() else {
