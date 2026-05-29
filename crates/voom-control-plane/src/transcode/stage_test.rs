@@ -126,6 +126,24 @@ async fn existing_ticket_lease_parent_is_rejected() {
     assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
 }
 
+#[tokio::test]
+async fn target_path_rejects_existing_target_for_same_profile() {
+    let dir = tempfile::TempDir::new().unwrap();
+
+    let first = target_path(dir.path(), "Movie.mkv", "default-hevc", "hevc", "mkv")
+        .await
+        .unwrap();
+    std::fs::write(&first, b"committed output").unwrap();
+
+    // A second run of the SAME profile (identical source/profile/codec/container)
+    // collides with the committed target → CONFIG_INVALID.
+    let err = target_path(dir.path(), "Movie.mkv", "default-hevc", "hevc", "mkv")
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn staging_root_symlink_is_rejected() {

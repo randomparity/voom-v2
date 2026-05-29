@@ -133,6 +133,40 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
     );
 }
 
+#[tokio::test]
+async fn execute_rejects_copied_video_disagreement_before_commit() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+
+    let err = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
+        },
+        // default_resolved() is not copy_compatible, so request copy_video=false;
+        // a worker result claiming copied_video=true must be rejected.
+        &CopiedVideoDisagreementDispatcher,
+        &FakeVerifyDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
+        "copied_video disagreement must stop before commit"
+    );
+}
+
 #[derive(Debug)]
 struct FakeTranscodeDispatcher;
 
@@ -158,6 +192,22 @@ impl TranscodeVideoDispatcher for WrongCodecTranscodeDispatcher {
     ) -> Result<TranscodeVideoResult, voom_core::VoomError> {
         std::fs::write(&request.output.path, b"hevc bytes").unwrap();
         Ok(transcode_result(request, "h264"))
+    }
+}
+
+#[derive(Debug)]
+struct CopiedVideoDisagreementDispatcher;
+
+#[async_trait]
+impl TranscodeVideoDispatcher for CopiedVideoDisagreementDispatcher {
+    async fn dispatch_transcode_video(
+        &self,
+        request: TranscodeVideoRequest,
+    ) -> Result<TranscodeVideoResult, voom_core::VoomError> {
+        std::fs::write(&request.output.path, b"hevc bytes").unwrap();
+        let mut result = transcode_result(request, "hevc");
+        result.copied_video = true;
+        Ok(result)
     }
 }
 
