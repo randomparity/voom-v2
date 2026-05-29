@@ -3,7 +3,7 @@ use voom_core::VoomError;
 use voom_plan::audio::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioBundleRole,
     AudioOperationPayload, AudioOperationType, AudioPlanningBlock, SnapshotAudioStreamFact,
-    evaluate_audio_filter, extraction_role, selected_audio_streams, stream_facts,
+    extraction_role, has_transcode_preservation_facts, selected_audio_streams,
 };
 use voom_policy::{MediaSnapshotInput, TargetRef};
 use voom_store::repo::identity::MediaSnapshot;
@@ -49,20 +49,12 @@ pub fn transcode_selection_from_payload_and_snapshot(
         )));
     }
     let snapshot_input = media_snapshot_input(snapshot);
-    let facts = stream_facts(&snapshot_input).map_err(audio_block_error)?;
-    if !snapshot_has_video(&snapshot_input)? {
-        return Err(audio_block_error(AudioPlanningBlock::NoVideo));
-    }
-    let selected = selected_stream_facts(&facts, payload.filter.as_ref())?;
+    let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
+        .map_err(audio_block_error)?;
     if selected.is_empty() {
         return Err(audio_block_error(AudioPlanningBlock::ZeroMatches));
     }
-    if selected.iter().any(|stream| {
-        stream.language.is_none()
-            || stream.title.is_none()
-            || stream.channels.is_none()
-            || stream.disposition.commentary.is_none()
-    }) {
+    if !selected.iter().all(has_transcode_preservation_facts) {
         return Err(audio_block_error(
             AudioPlanningBlock::InsufficientSnapshotFacts,
         ));
@@ -126,32 +118,6 @@ pub fn extract_selection_from_payload_and_snapshot(
 fn parse_payload(payload: &Value) -> Result<AudioOperationPayload, VoomError> {
     AudioOperationPayload::try_from_execution_value(payload)
         .map_err(|err| VoomError::Config(format!("audio operation payload is invalid: {err}")))
-}
-
-fn selected_stream_facts(
-    facts: &[SnapshotAudioStreamFact],
-    filter: Option<&voom_policy::TrackFilter>,
-) -> Result<Vec<SnapshotAudioStreamFact>, VoomError> {
-    let mut selected = Vec::new();
-    for stream in facts {
-        let matches = match filter {
-            Some(filter) => evaluate_audio_filter(filter, stream).map_err(audio_block_error)?,
-            None => true,
-        };
-        if matches {
-            selected.push(stream.clone());
-        }
-    }
-    Ok(selected)
-}
-
-fn snapshot_has_video(snapshot: &MediaSnapshotInput) -> Result<bool, VoomError> {
-    snapshot
-        .stream_summary
-        .get("video_stream_count")
-        .and_then(Value::as_u64)
-        .map(|count| count > 0)
-        .ok_or_else(|| audio_block_error(AudioPlanningBlock::InsufficientSnapshotFacts))
 }
 
 fn stream_ref(stream: &SnapshotAudioStreamFact) -> AudioStreamRef {
