@@ -103,14 +103,39 @@ pub fn validate_result(
             result.output_video_codec, request.output.video_codec
         )));
     }
-    // copy_video flag must agree.
+    validate_output_facts(request, result)?;
+    if result.input_pre != result.input_post {
+        return Err(VoomError::ArtifactChecksumMismatch(
+            "transcode_video source changed during worker execution".to_owned(),
+        ));
+    }
+    if result.input_pre.size_bytes != selected.version.size_bytes
+        || result.input_pre.content_hash != selected.version.content_hash
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(
+            "transcode_video source facts do not match selected file_version".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the worker-observed output facts against the requested profile:
+/// the `copy_video`/`copied_video` flags must agree, output dimensions must
+/// respect the profile's `max_width`/`max_height` caps when constrained, and the
+/// output pixel format must match the constrained `pixel_format`.
+///
+/// # Errors
+/// Returns [`VoomError::MalformedWorkerResult`] on the first violation.
+pub fn validate_output_facts(
+    request: &TranscodeVideoRequest,
+    result: &TranscodeVideoResult,
+) -> Result<(), VoomError> {
     if result.copied_video != request.copy_video {
         return Err(VoomError::MalformedWorkerResult(format!(
             "transcode_video result copied_video={} but request copy_video={}",
             result.copied_video, request.copy_video
         )));
     }
-    // Output dimensions must respect max caps when constrained.
     if let Some(cap_w) = request.profile.max_width
         && result.output_width > cap_w
     {
@@ -127,7 +152,6 @@ pub fn validate_result(
             result.output_height, cap_h
         )));
     }
-    // Pixel format must match when constrained.
     if let Some(target_pf) = request.profile.pixel_format.as_deref()
         && !result.output_pixel_format.eq_ignore_ascii_case(target_pf)
     {
@@ -135,18 +159,6 @@ pub fn validate_result(
             "transcode_video result pixel_format `{}` does not match requested `{}`",
             result.output_pixel_format, target_pf
         )));
-    }
-    if result.input_pre != result.input_post {
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "transcode_video source changed during worker execution".to_owned(),
-        ));
-    }
-    if result.input_pre.size_bytes != selected.version.size_bytes
-        || result.input_pre.content_hash != selected.version.content_hash
-    {
-        return Err(VoomError::ArtifactChecksumMismatch(
-            "transcode_video source facts do not match selected file_version".to_owned(),
-        ));
     }
     Ok(())
 }

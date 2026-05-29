@@ -87,11 +87,34 @@ impl ControlPlane {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "transcode execution flow keeps all I/O steps sequential and together; \
-              splitting would distribute context across multiple fn boundaries"
-)]
+/// Decides `copy_video` for a transcode by re-reading the LATEST media snapshot
+/// (`max_by_key` on snapshot id) for the source file version and running
+/// [`resolve::decide_copy_video`] against the resolved profile.
+///
+/// Re-reading the latest snapshot is by design: any drift between the snapshot
+/// the planner saw and the one observed here fails loud downstream via the
+/// worker's copy-precondition revalidation plus [`dispatch::validate_result`].
+/// Returns `false` when no snapshot exists (cannot verify source compliance
+/// without observable facts).
+///
+/// # Errors
+/// Returns the underlying store error if the snapshot lookup fails.
+async fn decide_copy_video_for_source(
+    cp: &ControlPlane,
+    source_file_version_id: FileVersionId,
+    resolved: &resolve::ResolvedProfile,
+) -> Result<bool, VoomError> {
+    let snapshots = cp
+        .identity
+        .list_media_snapshots_by_version(source_file_version_id)
+        .await?;
+    let latest = snapshots.into_iter().max_by_key(|s| s.id);
+    Ok(latest.as_ref().is_some_and(|s| {
+        let snapshot_input = crate::media_snapshot::planning_input(s);
+        resolve::decide_copy_video(&resolved.profile, &snapshot_input)
+    }))
+}
+
 pub(crate) async fn execute_transcode_video_with_dispatchers(
     cp: &ControlPlane,
     input: ExecuteTranscodeVideoInput,
@@ -101,21 +124,8 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
 
-    // Re-read the latest media snapshot for the source file version to decide
-    // copy_video. Uses the most recent snapshot (highest id), mirroring how
-    // the planner reads facts. If no snapshot exists, no copy (we cannot verify
-    // source compliance without observable facts).
-    let source_snapshot = {
-        let snapshots = cp
-            .identity
-            .list_media_snapshots_by_version(input.source_file_version_id)
-            .await?;
-        snapshots.into_iter().max_by_key(|s| s.id)
-    };
-    let copy_video = source_snapshot.as_ref().is_some_and(|s| {
-        let snapshot_input = crate::media_snapshot::planning_input(s);
-        resolve::decide_copy_video(&input.resolved.profile, &snapshot_input)
-    });
+    let copy_video =
+        decide_copy_video_for_source(cp, input.source_file_version_id, &input.resolved).await?;
 
     let staging_path = stage::staging_path(
         &input.staging_root,
