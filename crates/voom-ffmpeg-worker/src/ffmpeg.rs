@@ -95,6 +95,7 @@ pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 ///
 /// When `copy_video` is true, emits `-c:v copy` regardless of encoder.
 /// Otherwise branches on `profile.encoder` to emit the per-encoder flags.
+#[must_use]
 pub fn video_codec_args(profile: &TranscodeVideoProfile, copy_video: bool) -> Vec<OsString> {
     if copy_video {
         return vec![OsString::from("-c:v"), OsString::from("copy")];
@@ -208,6 +209,7 @@ fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoPro
 ///
 /// - `mkv` → `-f matroska`
 /// - `mp4` → `-f mp4 -tag:v hvc1` (hevc) or `-tag:v av01` (av1)
+#[must_use]
 pub fn container_args(container: &str, codec: &str) -> Vec<OsString> {
     match container {
         "mkv" => vec![OsString::from("-f"), OsString::from("matroska")],
@@ -228,14 +230,13 @@ pub fn container_args(container: &str, codec: &str) -> Vec<OsString> {
 ///
 /// Only emits `-vf scale=...` when the source dimensions exceed the profile's
 /// caps. The filter forces even dimensions (required by most codecs).
+#[must_use]
 pub fn scale_args(profile: &TranscodeVideoProfile, src_w: u32, src_h: u32) -> Vec<OsString> {
-    let cap_w = match profile.max_width {
-        Some(w) => w,
-        None => return Vec::new(),
+    let Some(cap_w) = profile.max_width else {
+        return Vec::new();
     };
-    let cap_h = match profile.max_height {
-        Some(h) => h,
-        None => return Vec::new(),
+    let Some(cap_h) = profile.max_height else {
+        return Vec::new();
     };
     if src_w <= cap_w && src_h <= cap_h {
         return Vec::new();
@@ -413,10 +414,7 @@ pub async fn run_ffmpeg_extract_audio(
 
 /// Probes the input file and returns key video stream facts needed for
 /// downscale and copy-video revalidation.
-pub async fn probe_input(
-    config: &FfmpegConfig,
-    path: &Path,
-) -> Result<InputProbe, FfmpegError> {
+pub async fn probe_input(config: &FfmpegConfig, path: &Path) -> Result<InputProbe, FfmpegError> {
     let json = probe_json(config, path).await?;
     let video_stream = json
         .get("streams")
@@ -542,27 +540,28 @@ async fn probe_output(
         )));
     }
     // Validate dimension caps when set
-    if let Some(max_w) = profile.max_width {
-        if width > max_w {
-            return Err(FfmpegError::OutputFactsMismatch(format!(
-                "output width {width} exceeds cap {max_w}"
-            )));
-        }
+    if let Some(max_w) = profile.max_width
+        && width > max_w
+    {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "output width {width} exceeds cap {max_w}"
+        )));
     }
-    if let Some(max_h) = profile.max_height {
-        if height > max_h {
-            return Err(FfmpegError::OutputFactsMismatch(format!(
-                "output height {height} exceeds cap {max_h}"
-            )));
-        }
+    if let Some(max_h) = profile.max_height
+        && height > max_h
+    {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "output height {height} exceeds cap {max_h}"
+        )));
     }
     // Validate pixel format when constrained
-    if let Some(expected_pf) = &profile.pixel_format {
-        if !pixel_format.is_empty() && &pixel_format != expected_pf {
-            return Err(FfmpegError::OutputFactsMismatch(format!(
-                "expected pixel_format {expected_pf}, got {pixel_format}"
-            )));
-        }
+    if let Some(expected_pf) = &profile.pixel_format
+        && !pixel_format.is_empty()
+        && &pixel_format != expected_pf
+    {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "expected pixel_format {expected_pf}, got {pixel_format}"
+        )));
     }
 
     Ok(OutputProbe {

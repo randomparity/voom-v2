@@ -295,68 +295,63 @@ fn validate_copy_video_preconditions(
     }
 
     // Check dimension caps
-    if let Some(max_w) = profile.max_width {
-        if probe.width > max_w {
-            return Err(malformed_worker_result(
-                "copy_video",
-                format!(
-                    "copy_video source width {} exceeds profile cap {}",
-                    probe.width, max_w
-                ),
-            ));
-        }
+    if let Some(max_w) = profile.max_width
+        && probe.width > max_w
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source width {} exceeds profile cap {}",
+                probe.width, max_w
+            ),
+        ));
     }
-    if let Some(max_h) = profile.max_height {
-        if probe.height > max_h {
-            return Err(malformed_worker_result(
-                "copy_video",
-                format!(
-                    "copy_video source height {} exceeds profile cap {}",
-                    probe.height, max_h
-                ),
-            ));
-        }
+    if let Some(max_h) = profile.max_height
+        && probe.height > max_h
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source height {} exceeds profile cap {}",
+                probe.height, max_h
+            ),
+        ));
     }
 
     // Check constrained pixel format
-    if let Some(required_pf) = &profile.pixel_format {
-        if !probe.pixel_format.is_empty() && &probe.pixel_format != required_pf {
-            return Err(malformed_worker_result(
-                "copy_video",
-                format!(
-                    "copy_video source pixel_format `{}` != required `{}`",
-                    probe.pixel_format, required_pf
-                ),
-            ));
-        }
+    if let Some(required_pf) = &profile.pixel_format
+        && !probe.pixel_format.is_empty()
+        && &probe.pixel_format != required_pf
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source pixel_format `{}` != required `{}`",
+                probe.pixel_format, required_pf
+            ),
+        ));
     }
 
     // Check constrained codec profile
-    if let Some(required_cp) = &profile.codec_profile {
-        if let Some(source_cp) = &probe.codec_profile {
-            if normalize_codec_token(source_cp) != normalize_codec_token(required_cp) {
-                return Err(malformed_worker_result(
-                    "copy_video",
-                    format!(
-                        "copy_video source codec_profile `{source_cp}` != required `{required_cp}`"
-                    ),
-                ));
-            }
-        }
+    if let Some(required_cp) = &profile.codec_profile
+        && let Some(source_cp) = &probe.codec_profile
+        && normalize_codec_token(source_cp) != normalize_codec_token(required_cp)
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!("copy_video source codec_profile `{source_cp}` != required `{required_cp}`"),
+        ));
     }
 
     // Check constrained codec level
-    if let Some(required_cl) = &profile.codec_level {
-        if let Some(source_cl) = &probe.codec_level {
-            if normalize_codec_token(source_cl) != normalize_codec_token(required_cl) {
-                return Err(malformed_worker_result(
-                    "copy_video",
-                    format!(
-                        "copy_video source codec_level `{source_cl}` != required `{required_cl}`"
-                    ),
-                ));
-            }
-        }
+    if let Some(required_cl) = &profile.codec_level
+        && let Some(source_cl) = &probe.codec_level
+        && normalize_codec_token(source_cl) != normalize_codec_token(required_cl)
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!("copy_video source codec_level `{source_cl}` != required `{required_cl}`"),
+        ));
     }
 
     Ok(())
