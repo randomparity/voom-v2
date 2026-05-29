@@ -20,6 +20,7 @@ use crate::artifact::verify::{
 pub mod commit;
 pub mod dispatch;
 pub mod events;
+pub mod resolve;
 pub mod source;
 pub mod stage;
 
