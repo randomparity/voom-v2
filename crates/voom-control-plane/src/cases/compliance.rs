@@ -104,6 +104,46 @@ impl Default for ComplianceExecutionOptions {
     }
 }
 
+impl ComplianceExecutionOptions {
+    /// Route a single staging-root override to every operation family.
+    pub fn apply_staging_root(&mut self, root: PathBuf) {
+        self.transcode_staging_root.clone_from(&root);
+        self.remux_staging_root.clone_from(&root);
+        self.audio_staging_root = root;
+    }
+
+    /// Route a single output-directory override to every operation family.
+    pub fn apply_output_dir(&mut self, dir: PathBuf) {
+        self.transcode_target_dir.clone_from(&dir);
+        self.remux_target_dir.clone_from(&dir);
+        self.audio_target_dir = dir;
+    }
+}
+
+impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
+    fn from(options: ComplianceExecutionOptions) -> Self {
+        // Destructure exhaustively so a new facade path field is a compile
+        // error here rather than being silently dropped by `..default()`.
+        let ComplianceExecutionOptions {
+            transcode_staging_root,
+            transcode_target_dir,
+            remux_staging_root,
+            remux_target_dir,
+            audio_staging_root,
+            audio_target_dir,
+        } = options;
+        Self {
+            transcode_staging_root,
+            transcode_target_dir,
+            remux_staging_root,
+            remux_target_dir,
+            audio_staging_root,
+            audio_target_dir,
+            ..WorkflowExecutorOptions::default()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ComplianceExecuteError {
     pub source: VoomError,
@@ -455,15 +495,7 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
         options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let executor_options = WorkflowExecutorOptions {
-            transcode_staging_root: options.transcode_staging_root,
-            transcode_target_dir: options.transcode_target_dir,
-            remux_staging_root: options.remux_staging_root,
-            remux_target_dir: options.remux_target_dir,
-            audio_staging_root: options.audio_staging_root,
-            audio_target_dir: options.audio_target_dir,
-            ..WorkflowExecutorOptions::default()
-        };
+        let executor_options = WorkflowExecutorOptions::from(options);
         let executor = WorkflowExecutor::with_options(
             self.clone(),
             SingleWorkerPerKindSelector,
