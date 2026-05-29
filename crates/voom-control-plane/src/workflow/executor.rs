@@ -42,8 +42,8 @@ use crate::audio::{
 use crate::cases::{begin_tx, commit_tx};
 use crate::remux::commit::BundledRemuxResultProbeDispatcher;
 use crate::remux::{
-    ExecuteRemuxCompletion, ExecuteRemuxInput, RemuxDispatcher,
-    execute_remux_with_deferred_success_event, success_event_recovery_report,
+    ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
+    success_event_recovery_report,
 };
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
@@ -1694,7 +1694,7 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    let completion = match execute_remux_with_deferred_success_event(
+    let success = match execute_remux_with_deferred_success_event(
         control,
         input,
         &RuntimeRemuxDispatcher {
@@ -1709,7 +1709,7 @@ async fn dispatch_control_plane_remux(
     )
     .await
     {
-        Ok(completion) => completion,
+        Ok(success) => success,
         Err(source) => {
             return fail_lease_and_return(
                 control,
@@ -1720,26 +1720,15 @@ async fn dispatch_control_plane_remux(
             .await;
         }
     };
-    match completion {
-        ExecuteRemuxCompletion::Succeeded(success) => {
-            let result = serde_json::to_value(&success.report)
-                .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
-            match release_remux_lease_with_retry(control, lease_id, result, &success.success_event)
-                .await
-            {
-                Ok(()) => Ok(()),
-                Err(source) => {
-                    let recovery = success_event_recovery_report(&success, &source);
-                    let result = serde_json::to_value(&recovery).map_err(|err| {
-                        VoomError::Internal(format!("encode remux success-event recovery: {err}"))
-                    })?;
-                    release_lease_with_retry(control, lease_id, result).await
-                }
-            }
-        }
-        ExecuteRemuxCompletion::Recovery(recovery) => {
-            let result = serde_json::to_value(&recovery.report)
-                .map_err(|err| VoomError::Internal(format!("encode remux recovery: {err}")))?;
+    let result = serde_json::to_value(&success.report)
+        .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
+    match release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await {
+        Ok(()) => Ok(()),
+        Err(source) => {
+            let recovery = success_event_recovery_report(&success, &source);
+            let result = serde_json::to_value(&recovery).map_err(|err| {
+                VoomError::Internal(format!("encode remux success-event recovery: {err}"))
+            })?;
             release_lease_with_retry(control, lease_id, result).await
         }
     }

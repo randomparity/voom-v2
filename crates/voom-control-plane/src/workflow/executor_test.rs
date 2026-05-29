@@ -901,7 +901,7 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
 }
 
 #[tokio::test]
-async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failure() {
+async fn policy_remux_post_commit_snapshot_failure_fails_lease_retriable() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     let dir = tempfile::tempdir().unwrap();
     let source_path = dir.path().join("Movie.mkv");
@@ -940,7 +940,7 @@ async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failur
     options.remux_staging_root = root.join("stage");
     options.remux_target_dir = root.join("out");
 
-    super::dispatch_control_plane_remux(
+    let err = super::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,
@@ -950,52 +950,25 @@ async fn policy_remux_post_commit_snapshot_failure_is_not_retryable_remux_failur
         &options,
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
+    // Converged with transcode: the probe runs on the staged file before
+    // commit, so reaching this failure means commit already succeeded and only
+    // the local snapshot DB write failed. The error embeds the committed ids and
+    // the target stays in place.
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    let message = err.to_string();
+    assert!(message.contains("commit_record_id"));
+    assert!(message.contains("result_file_version_id=2"));
+    assert!(message.contains("result_file_location_id"));
     assert!(dir.path().join("out/Movie.remux.mkv").exists());
+    // The post-commit snapshot write is a local DB write, not a remux-operation
+    // failure, so no artifact.remux_failed event is recorded. Because it surfaces
+    // as a retriable external-system error (not a graceful recovery completion),
+    // the lease fails retriable and the ticket returns to the queue.
     assert_eq!(fixture.event_count("artifact.remux_failed").await, 0);
-    assert_eq!(fixture.event_count("ticket.failed_retriable").await, 0);
-    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
-    let result = fixture.first_ticket_result().await;
-    assert_eq!(result["status"], "committed_snapshot_failed");
-    assert_eq!(result["commit_record_id"], 1);
-    assert_eq!(result["result_file_version_id"], 2);
-    assert_eq!(result["result_file_location_id"], 2);
-    assert!(
-        result["target_path"]
-            .as_str()
-            .unwrap()
-            .ends_with("Movie.remux.mkv")
-    );
-    assert!(
-        result["staging_path"]
-            .as_str()
-            .unwrap()
-            .ends_with("ticket-1/lease-1/Movie.remux.mkv")
-    );
-    assert_eq!(result["error"]["code"], "EXTERNAL_SYSTEM_UNAVAILABLE");
-    assert!(
-        result["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("result_file_version_id=2")
-    );
-
-    let expiry = fixture
-        .cp
-        .expire_due(T0 + time::Duration::seconds(60))
-        .await
-        .unwrap();
-    assert!(expiry.expired_leases.is_empty());
-    assert!(expiry.requeued_tickets.is_empty());
-    assert!(expiry.failed_expiries.is_empty());
-    assert_eq!(fixture.ticket_state(ticket.id).await, "succeeded");
-    assert_eq!(
-        fixture
-            .event_count("ticket.requeued_after_lease_expiry")
-            .await,
-        0
-    );
+    assert_eq!(fixture.event_count("ticket.failed_retriable").await, 1);
+    assert_eq!(fixture.ticket_state(ticket.id).await, "ready");
 }
 
 #[tokio::test]
