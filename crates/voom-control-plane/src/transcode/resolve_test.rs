@@ -59,6 +59,36 @@ async fn unknown_named_profile_is_config_invalid() {
 }
 
 #[tokio::test]
+async fn descriptor_invalid_named_profile_is_config_invalid() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", tmp.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    // crf 60 passes the migration's coarse `crf >= 0` CHECK but exceeds
+    // libx265's descriptor crf_max (51): a row the SQL constraints accept yet
+    // the encoder descriptor refuses.
+    sqlx::query(
+        "INSERT INTO video_profiles \
+         (id, name, target_codec, encoder, crf, preset, output_container, copy_compatible) \
+         VALUES ('vp-bad-crf', 'bad-crf', 'hevc', 'libx265', 60, 'medium', 'mkv', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let repo = SqliteVideoProfileRepo::new(pool);
+
+    let err = resolve_video_profile_ref(
+        &repo,
+        &voom_policy::VideoProfileRef::Named("bad-crf".to_owned()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+    assert!(err.to_string().contains("crf 60"));
+}
+
+#[tokio::test]
 async fn inline_profile_gets_synthetic_identity() {
     let (repo, _tmp) = seeded_repo().await;
     let settings = inline_av1_settings(); // libsvtav1, crf 28, preset 6, mp4
