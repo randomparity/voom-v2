@@ -922,6 +922,7 @@ fn has_cycle(
 fn statement_text(statement: &StatementAst) -> Cow<'_, str> {
     match statement {
         StatementAst::Raw { text, .. } => Cow::Borrowed(text),
+        StatementAst::TranscodeInline { header, .. } => Cow::Borrowed(header.as_str()),
         StatementAst::Block { keyword, name, .. } => {
             if let Some(name) = name {
                 Cow::Owned(format!("{} {}", keyword.value, name.value))

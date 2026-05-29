@@ -358,7 +358,7 @@ fn lower_operation(
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
             operations: match statement {
                 StatementAst::Block { statements, .. } => lower_operations(source, statements)?,
-                StatementAst::Raw { .. } => Vec::new(),
+                StatementAst::Raw { .. } | StatementAst::TranscodeInline { .. } => Vec::new(),
             },
         }),
         "rules" => Ok(CompiledOperation::Rules {
@@ -832,6 +832,7 @@ fn unknown_operation(source: &str, span: SourceSpan) -> PolicyDiagnostic {
 fn statement_text(statement: &StatementAst) -> Cow<'_, str> {
     match statement {
         StatementAst::Raw { text, .. } => Cow::Borrowed(text),
+        StatementAst::TranscodeInline { header, .. } => Cow::Borrowed(header.as_str()),
         StatementAst::Block { keyword, name, .. } => {
             if let Some(name) = name {
                 Cow::Owned(format!("{} {}", keyword.value, name.value))
