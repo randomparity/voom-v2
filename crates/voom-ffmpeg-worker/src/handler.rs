@@ -258,17 +258,18 @@ pub async fn handle_transcode_audio(
     validate_transcode_audio_contract(request)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
-    validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
-    validate_output_missing(&output_path).await?;
-
-    let input_pre = observe_audio_file_facts(&input_path).await?;
-    verify_audio_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    let input_pre = prepare_audio_operation(
+        &input_path,
+        &output_path,
+        Path::new(&request.output.staging_root),
+        &request.input.expected,
+    )
+    .await?;
     let probe = run_ffmpeg_transcode_audio(config, &input_path, &output_path, request)
         .await
         .map_err(TranscodeVideoError::from)?;
-    let input_post = observe_audio_file_facts(&input_path).await?;
-    verify_audio_observed_match("input_post", &input_pre, &input_post)?;
-    let output = observe_audio_file_facts(&output_path).await?;
+    let (input_post, output) =
+        finalize_audio_operation(&input_path, &output_path, &input_pre).await?;
 
     Ok(TranscodeAudioResult {
         status: TranscodeAudioStatus::Transcoded,
@@ -301,17 +302,18 @@ pub async fn handle_extract_audio(
     validate_extract_audio_contract(request)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
-    validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
-    validate_output_missing(&output_path).await?;
-
-    let input_pre = observe_audio_file_facts(&input_path).await?;
-    verify_audio_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    let input_pre = prepare_audio_operation(
+        &input_path,
+        &output_path,
+        Path::new(&request.output.staging_root),
+        &request.input.expected,
+    )
+    .await?;
     let probe = run_ffmpeg_extract_audio(config, &input_path, &output_path, request)
         .await
         .map_err(TranscodeVideoError::from)?;
-    let input_post = observe_audio_file_facts(&input_path).await?;
-    verify_audio_observed_match("input_post", &input_pre, &input_post)?;
-    let output = observe_audio_file_facts(&output_path).await?;
+    let (input_post, output) =
+        finalize_audio_operation(&input_path, &output_path, &input_pre).await?;
 
     Ok(ExtractAudioResult {
         status: ExtractAudioStatus::Extracted,
@@ -330,6 +332,36 @@ pub async fn handle_extract_audio(
         output_language: probe.output_language,
         output_title: probe.output_title,
     })
+}
+
+/// Shared pre-ffmpeg flow for audio operations: validate the output path
+/// against the staging root, require the output to not yet exist, observe the
+/// input file, and verify it matches the request's expected facts.
+async fn prepare_audio_operation(
+    input_path: &Path,
+    output_path: &Path,
+    staging_root: &Path,
+    expected: &AudioExpectedFacts,
+) -> Result<AudioObservedFacts, TranscodeVideoError> {
+    validate_staging_path(staging_root, output_path)?;
+    validate_output_missing(output_path).await?;
+    let input_pre = observe_audio_file_facts(input_path).await?;
+    verify_audio_expected_facts("input_pre", &input_pre, expected)?;
+    Ok(input_pre)
+}
+
+/// Shared post-ffmpeg flow for audio operations: re-observe the input and
+/// confirm it was untouched while the operation ran, then observe the output.
+/// Returns `(input_post, output)`.
+async fn finalize_audio_operation(
+    input_path: &Path,
+    output_path: &Path,
+    input_pre: &AudioObservedFacts,
+) -> Result<(AudioObservedFacts, AudioObservedFacts), TranscodeVideoError> {
+    let input_post = observe_audio_file_facts(input_path).await?;
+    verify_audio_observed_match("input_post", input_pre, &input_post)?;
+    let output = observe_audio_file_facts(output_path).await?;
+    Ok((input_post, output))
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
