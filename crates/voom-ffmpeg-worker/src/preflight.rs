@@ -111,11 +111,7 @@ pub fn preflight_with_paths(
             "ffmpeg does not advertise required libsvtav1 encoder".to_owned(),
         )
     })?;
-    let libaom_encoder = parse_token(&encoders, "libaom-av1").ok_or_else(|| {
-        FFmpegPreflightError::Failed(
-            "ffmpeg does not advertise required libaom-av1 encoder".to_owned(),
-        )
-    })?;
+    let libaom_encoder = parse_token(&encoders, "libaom-av1").unwrap_or_default();
     let aac_encoder = parse_token(&encoders, "aac").ok_or_else(|| {
         FFmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
     })?;

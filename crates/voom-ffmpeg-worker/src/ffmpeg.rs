@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -10,15 +11,24 @@ use voom_worker_protocol::{
     TranscodeAudioRequest, TranscodeVideoProfile, TranscodeVideoRequest,
 };
 
+/// The video encoders advertised by every ffmpeg build voom supports.
+pub const ALL_VIDEO_ENCODERS: [&str; 3] = ["libx265", "libsvtav1", "libaom-av1"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegConfig {
     pub ffmpeg_path: PathBuf,
     pub ffprobe_path: PathBuf,
     pub provider_version: String,
     pub process_timeout: Duration,
+    available_video_encoders: BTreeSet<String>,
 }
 
 impl FfmpegConfig {
+    /// Builds a config that assumes every supported video encoder is available.
+    ///
+    /// Callers wiring a real ffmpeg build (e.g. `main`) must narrow this with
+    /// [`FfmpegConfig::with_available_video_encoders`] using the preflight
+    /// capabilities so a request naming an absent encoder fails loud.
     #[must_use]
     pub fn new(
         ffmpeg_path: PathBuf,
@@ -31,7 +41,27 @@ impl FfmpegConfig {
             ffprobe_path,
             provider_version,
             process_timeout,
+            available_video_encoders: ALL_VIDEO_ENCODERS
+                .iter()
+                .map(|encoder| (*encoder).to_owned())
+                .collect(),
         }
+    }
+
+    /// Restricts the config to the given set of available video encoders.
+    #[must_use]
+    pub fn with_available_video_encoders(
+        mut self,
+        encoders: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.available_video_encoders = encoders.into_iter().collect();
+        self
+    }
+
+    /// Returns true when the named video encoder is available in this build.
+    #[must_use]
+    pub fn has_video_encoder(&self, encoder: &str) -> bool {
+        self.available_video_encoders.contains(encoder)
     }
 }
 

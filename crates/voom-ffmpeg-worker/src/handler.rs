@@ -206,6 +206,7 @@ pub async fn handle_transcode_video(
         ));
     }
     validate_request_contract(request)?;
+    validate_encoder_available(request, config)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
     validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
@@ -547,6 +548,26 @@ async fn finalize_audio_operation(
     verify_audio_observed_match("input_post", input_pre, &input_post)?;
     let output = observe_audio_file_facts(output_path).await?;
     Ok((input_post, output))
+}
+
+/// Rejects a transcode request whose profile names a video encoder this ffmpeg
+/// build does not advertise, before any ffmpeg process is launched. A
+/// `copy_video` request emits `-c:v copy` and uses no encoder, so it is exempt.
+fn validate_encoder_available(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+) -> Result<(), TranscodeVideoError> {
+    if request.copy_video {
+        return Ok(());
+    }
+    let encoder = &request.profile.encoder;
+    if config.has_video_encoder(encoder) {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!("encoder `{encoder}` is not available in this ffmpeg build"),
+    ))
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {

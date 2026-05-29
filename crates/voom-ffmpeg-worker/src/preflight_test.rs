@@ -79,13 +79,26 @@ fn preflight_rejects_missing_libsvtav1() {
 }
 
 #[test]
-fn preflight_rejects_missing_libaom_av1() {
+fn preflight_succeeds_without_libaom_av1() {
     let temp = tempfile::tempdir().unwrap();
     let ffmpeg = fake_ffmpeg_without(temp.path(), "libaom-av1");
     let ffprobe = fake_ffprobe(temp.path());
 
-    let err = preflight_with_paths(&ffmpeg, &ffprobe);
-    assert!(err.is_err(), "expected error when libaom-av1 is missing");
+    let preflight = preflight_with_paths(&ffmpeg, &ffprobe).unwrap();
+
+    assert!(
+        preflight.libaom_encoder.is_empty(),
+        "absent libaom-av1 must leave the encoder field empty"
+    );
+    assert!(
+        !preflight.has_encoder("libaom-av1"),
+        "has_encoder must report libaom-av1 unavailable when absent"
+    );
+    assert!(
+        preflight.has_encoder("libsvtav1"),
+        "libsvtav1 stays required"
+    );
+    assert!(preflight.has_encoder("libx265"), "libx265 stays required");
 }
 
 #[test]

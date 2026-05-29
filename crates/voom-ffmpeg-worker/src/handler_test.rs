@@ -84,6 +84,40 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
 }
 
 #[tokio::test]
+async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.profile = TranscodeVideoProfile {
+        name: "av1-archive".to_owned(),
+        target_codec: "av1".to_owned(),
+        encoder: "libaom-av1".to_owned(),
+        crf: 35,
+        preset: "8".to_owned(),
+        tune: None,
+        codec_profile: None,
+        codec_level: None,
+        pixel_format: None,
+        max_width: None,
+        max_height: None,
+        copy_compatible: false,
+    };
+    request.output.video_codec = "av1".to_owned();
+    let config = config(dir.path())
+        .with_available_video_encoders(["libx265".to_owned(), "libsvtav1".to_owned()]);
+
+    let err = handle_transcode_video(&request, &config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string().contains("libaom-av1") && err.to_string().contains("not available"),
+        "unexpected error: {err}"
+    );
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
 async fn malformed_request_payload_is_accepted_then_terminal_error() {
     let request = OperationRequest {
         operation: OperationKind::TranscodeVideo,

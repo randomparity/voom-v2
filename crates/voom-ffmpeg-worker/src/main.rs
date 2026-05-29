@@ -7,7 +7,8 @@ use std::net::SocketAddr;
 
 use secrecy::SecretString;
 use voom_ffmpeg_worker::{
-    DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler, preflight_from_process_env,
+    ALL_VIDEO_ENCODERS, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler,
+    preflight_from_process_env,
 };
 use voom_worker_protocol::{HttpServer, ServerHandle, WorkerCredentials};
 
@@ -15,12 +16,18 @@ use voom_worker_protocol::{HttpServer, ServerHandle, WorkerCredentials};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = load_credentials()?;
     let preflight = preflight_from_process_env()?;
+    let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
+        .iter()
+        .filter(|encoder| preflight.has_encoder(encoder))
+        .map(|encoder| (*encoder).to_owned())
+        .collect();
     let config = FfmpegConfig::new(
         preflight.ffmpeg_path,
         preflight.ffprobe_path,
         preflight.ffmpeg_version,
         DEFAULT_PROCESS_TIMEOUT,
-    );
+    )
+    .with_available_video_encoders(available_video_encoders);
     let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
         .unwrap_or_else(|_| "127.0.0.1:0".to_owned())
         .parse()
