@@ -15,6 +15,7 @@
 
 pub mod audio;
 pub mod credentials;
+pub mod encoder_caps;
 pub mod envelope;
 pub mod handshake;
 pub mod http;
@@ -36,6 +37,9 @@ pub use audio::{
     TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
 };
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
+pub use encoder_caps::{
+    EncoderDescriptor, PresetDomain, all_encoder_descriptors, encoder_descriptor,
+};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};
 pub use http::{
