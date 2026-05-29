@@ -68,6 +68,68 @@ fn compliance_execution_defaults_use_production_audio_paths() {
 }
 
 #[test]
+fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default() {
+    let options = super::ComplianceExecutionOptions {
+        transcode_staging_root: PathBuf::from("/srv/transcode/staging"),
+        transcode_target_dir: PathBuf::from("/srv/transcode/out"),
+        remux_staging_root: PathBuf::from("/srv/remux/staging"),
+        remux_target_dir: PathBuf::from("/srv/remux/out"),
+        audio_staging_root: PathBuf::from("/srv/audio/staging"),
+        audio_target_dir: PathBuf::from("/srv/audio/out"),
+    };
+
+    let converted = WorkflowExecutorOptions::from(options.clone());
+
+    assert_eq!(
+        converted.transcode_staging_root,
+        options.transcode_staging_root
+    );
+    assert_eq!(converted.transcode_target_dir, options.transcode_target_dir);
+    assert_eq!(converted.remux_staging_root, options.remux_staging_root);
+    assert_eq!(converted.remux_target_dir, options.remux_target_dir);
+    assert_eq!(converted.audio_staging_root, options.audio_staging_root);
+    assert_eq!(converted.audio_target_dir, options.audio_target_dir);
+    // Non-path fields stay at workflow defaults: the facade carries paths only.
+    let workflow_defaults = WorkflowExecutorOptions::default();
+    assert_eq!(converted.max_attempts, workflow_defaults.max_attempts);
+    assert_eq!(converted.lease_ttl, workflow_defaults.lease_ttl);
+}
+
+#[test]
+fn apply_staging_root_sets_every_family_without_touching_target_dirs() {
+    let mut options = super::ComplianceExecutionOptions::default();
+    let defaults = super::ComplianceExecutionOptions::default();
+    options.apply_staging_root(PathBuf::from("/srv/staging"));
+
+    assert_eq!(
+        options.transcode_staging_root,
+        PathBuf::from("/srv/staging")
+    );
+    assert_eq!(options.remux_staging_root, PathBuf::from("/srv/staging"));
+    assert_eq!(options.audio_staging_root, PathBuf::from("/srv/staging"));
+    assert_eq!(options.transcode_target_dir, defaults.transcode_target_dir);
+    assert_eq!(options.remux_target_dir, defaults.remux_target_dir);
+    assert_eq!(options.audio_target_dir, defaults.audio_target_dir);
+}
+
+#[test]
+fn apply_output_dir_sets_every_family_without_touching_staging_roots() {
+    let mut options = super::ComplianceExecutionOptions::default();
+    let defaults = super::ComplianceExecutionOptions::default();
+    options.apply_output_dir(PathBuf::from("/srv/out"));
+
+    assert_eq!(options.transcode_target_dir, PathBuf::from("/srv/out"));
+    assert_eq!(options.remux_target_dir, PathBuf::from("/srv/out"));
+    assert_eq!(options.audio_target_dir, PathBuf::from("/srv/out"));
+    assert_eq!(
+        options.transcode_staging_root,
+        defaults.transcode_staging_root
+    );
+    assert_eq!(options.remux_staging_root, defaults.remux_staging_root);
+    assert_eq!(options.audio_staging_root, defaults.audio_staging_root);
+}
+
+#[test]
 fn compliance_ticket_operation_is_derived_from_workflow_ticket_kind() {
     assert_eq!(
         super::operation_from_ticket_kind("synthetic.workflow.operation.remux").unwrap(),
