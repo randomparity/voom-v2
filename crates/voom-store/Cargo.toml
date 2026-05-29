@@ -23,6 +23,7 @@ tracing = { workspace = true }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 voom-policy = { workspace = true }
+voom-worker-protocol = { workspace = true }
 
 [features]
 # Test-only public surface: enables init_on(pool), the test_support module

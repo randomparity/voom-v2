@@ -18,6 +18,7 @@ pub mod scheduler_decisions;
 pub mod schema_meta;
 pub mod tickets;
 pub mod use_leases;
+pub mod video_profiles;
 pub mod workers;
 
 pub use artifact_access_plans::{
@@ -72,6 +73,7 @@ pub use use_leases::{
     ReanchorReport, SqliteUseLeaseRepo, UseLease, UseLeaseKind, UseLeaseReleaseReason,
     UseLeaseRepo,
 };
+pub use video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo};
 pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
     WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerRepo,
