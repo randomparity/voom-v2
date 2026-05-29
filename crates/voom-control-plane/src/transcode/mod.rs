@@ -137,24 +137,20 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let copy_video =
         decide_copy_video_for_source(cp, input.source_file_version_id, &input.resolved).await?;
 
+    let output_name = stage::OutputName {
+        source_path: &selected.location.value,
+        profile_id: &input.resolved.profile.name,
+        codec: &input.resolved.profile.target_codec,
+        container: &input.resolved.output_container,
+    };
     let staging_path = stage::staging_path(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
-        &selected.location.value,
-        &input.resolved.profile.name,
-        &input.resolved.profile.target_codec,
-        &input.resolved.output_container,
+        &output_name,
     )
     .await?;
-    let target_path = stage::target_path(
-        &input.target_dir,
-        &selected.location.value,
-        &input.resolved.profile.name,
-        &input.resolved.profile.target_codec,
-        &input.resolved.output_container,
-    )
-    .await?;
+    let target_path = stage::target_path(&input.target_dir, &output_name).await?;
 
     events::record_started(cp, &input, selected.location.id, &staging_path).await?;
     let request = dispatch::request_for(
