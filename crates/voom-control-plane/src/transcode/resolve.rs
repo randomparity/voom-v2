@@ -19,39 +19,42 @@ pub struct ResolvedProfile {
 /// Resolves a policy profile reference into a fully-typed worker profile.
 /// `Named` references are looked up in the registry (unknown -> `CONFIG_INVALID`);
 /// `Inline` settings are assigned a deterministic `inline-<hash>` identity.
+/// Both kinds are validated against the encoder descriptor here, so the
+/// resolver is the single guard that rejects a profile the descriptor refuses.
 ///
 /// # Errors
-/// Returns `CONFIG_INVALID` when a named profile does not exist or inline
-/// settings fail descriptor validation.
+/// Returns `CONFIG_INVALID` when a named profile does not exist, or when either
+/// a named or inline profile fails descriptor validation.
 pub async fn resolve_video_profile_ref(
     repo: &SqliteVideoProfileRepo,
     reference: &VideoProfileRef,
 ) -> Result<ResolvedProfile, VoomError> {
-    match reference {
+    let resolved = match reference {
         VideoProfileRef::Named(name) => {
             let row = repo
                 .get_by_name(name)
                 .await?
                 .ok_or_else(|| VoomError::Config(format!("unknown video profile `{name}`")))?;
-            Ok(ResolvedProfile {
+            ResolvedProfile {
                 output_container: row.output_container.clone(),
                 profile: row.to_worker_profile(),
-            })
+            }
         }
-        VideoProfileRef::Inline(settings) => {
-            let profile = inline_to_worker_profile(settings)?;
-            // Belt-and-braces: validate even though the compiler already did.
-            voom_worker_protocol::validate_profile_against_descriptor(&profile)
-                .map_err(VoomError::Config)?;
-            Ok(ResolvedProfile {
-                output_container: settings
-                    .output_container
-                    .clone()
-                    .unwrap_or_else(|| "mkv".to_owned()),
-                profile,
-            })
-        }
-    }
+        VideoProfileRef::Inline(settings) => ResolvedProfile {
+            output_container: settings
+                .output_container
+                .clone()
+                .unwrap_or_else(|| "mkv".to_owned()),
+            profile: inline_to_worker_profile(settings)?,
+        },
+    };
+    // The resolver is the single guard: both reference kinds converge here, so a
+    // malformed seed row, a future writer that passes the migration's coarse SQL
+    // CHECKs, or a future reference arm cannot resolve a profile the encoder
+    // descriptor refuses.
+    voom_worker_protocol::validate_profile_against_descriptor(&resolved.profile)
+        .map_err(VoomError::Config)?;
+    Ok(resolved)
 }
 
 fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoProfile, VoomError> {
