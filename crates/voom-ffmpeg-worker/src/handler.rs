@@ -10,12 +10,13 @@ use voom_worker_protocol::{
     ExtractAudioStatus, OperationDispatch, OperationFuture, OperationHandler, OperationKind,
     OperationRequest, OperationResponse, ProgressFrame, ProtocolError, TranscodeAudioRequest,
     TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoExpectedFacts,
-    TranscodeVideoObservedFacts, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
+    TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus,
 };
 
 use crate::ffmpeg::{
-    FfmpegConfig, FfmpegError, run_ffmpeg_extract_audio, run_ffmpeg_transcode,
-    run_ffmpeg_transcode_audio,
+    FfmpegConfig, FfmpegError, InputProbe, probe_input, run_ffmpeg_extract_audio,
+    run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
 };
 use crate::observe::{ObserveError, observe_file_facts};
 
@@ -205,6 +206,7 @@ pub async fn handle_transcode_video(
         ));
     }
     validate_request_contract(request)?;
+    validate_encoder_available(request, config)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
     validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
@@ -222,7 +224,28 @@ pub async fn handle_transcode_video(
         .await
         .map_err(TranscodeVideoError::from)?;
     verify_expected_facts("input_pre", &input_pre, &request.input.expected)?;
-    let probe = run_ffmpeg_transcode(config, &input_path, &output_path, &request.profile)
+
+    // Probe input to learn source dimensions and, for copy_video, to
+    // revalidate the source satisfies the profile's constraints.
+    let input_probe = probe_input(config, &input_path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    if input_probe.video_stream_count > 1 {
+        // The transcode maps only 0:v:0; a source with multiple video streams
+        // would silently drop the rest. Fail loud rather than lose data.
+        return Err(TranscodeVideoError::from(FfmpegError::UnsupportedInput(
+            format!(
+                "source has {} video streams; transcode_video supports exactly one",
+                input_probe.video_stream_count
+            ),
+        )));
+    }
+
+    if request.copy_video {
+        validate_copy_video_preconditions(request, &input_probe)?;
+    }
+
+    let probe = run_ffmpeg_transcode(config, request, input_probe.width, input_probe.height)
         .await
         .map_err(TranscodeVideoError::from)?;
     let input_post = observe_file_facts(&input_path)
@@ -242,7 +265,170 @@ pub async fn handle_transcode_video(
         output,
         output_container: probe.container,
         output_video_codec: probe.video_codec,
+        output_width: probe.width,
+        output_height: probe.height,
+        output_pixel_format: probe.pixel_format,
+        copied_video: request.copy_video,
     })
+}
+
+/// Before emitting `-c:v copy`, confirm the source satisfies all constraints
+/// the profile imposes. Fails loudly on any mismatch — never silently
+/// re-encodes or copies a non-conforming stream.
+fn validate_copy_video_preconditions(
+    request: &TranscodeVideoRequest,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let profile = &request.profile;
+    validate_copy_codec(&request.output.video_codec, probe)?;
+    validate_copy_dimensions(profile, probe)?;
+    validate_copy_pixel_format(profile, probe)?;
+    validate_copy_codec_profile(profile, probe)?;
+    validate_copy_codec_level(profile, probe)?;
+    Ok(())
+}
+
+fn validate_copy_codec(target_codec: &str, probe: &InputProbe) -> Result<(), TranscodeVideoError> {
+    if codec_tokens_match(&probe.codec, target_codec) {
+        return Ok(());
+    }
+    Err(malformed_worker_result(
+        "copy_video",
+        format!(
+            "copy_video requested but source codec `{}` != target `{}`",
+            probe.codec, target_codec
+        ),
+    ))
+}
+
+/// Compares two codec tokens for copy-precondition equality. Resolves known
+/// aliases (e.g. `h265` -> `hevc`) via `canonical_video_codec` so an
+/// `h265`-spelled probe matches an `hevc` target — mirroring control-plane
+/// `decide_copy_video`. Falls back to a normalized literal compare only when
+/// either side is an unrecognized codec.
+fn codec_tokens_match(source: &str, target: &str) -> bool {
+    if let (Some(source_canonical), Some(target_canonical)) = (
+        voom_worker_protocol::canonical_video_codec(source),
+        voom_worker_protocol::canonical_video_codec(target),
+    ) {
+        return source_canonical == target_canonical;
+    }
+    voom_worker_protocol::normalize_codec_token(source)
+        == voom_worker_protocol::normalize_codec_token(target)
+}
+
+fn validate_copy_dimensions(
+    profile: &TranscodeVideoProfile,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    if let Some(max_w) = profile.max_width
+        && probe.width > max_w
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source width {} exceeds profile cap {}",
+                probe.width, max_w
+            ),
+        ));
+    }
+    if let Some(max_h) = profile.max_height
+        && probe.height > max_h
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source height {} exceeds profile cap {}",
+                probe.height, max_h
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// An unknown (empty) probe value under a constraint is non-conforming — we
+/// cannot prove the stream matches, so fail loudly.
+fn validate_copy_pixel_format(
+    profile: &TranscodeVideoProfile,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let Some(required_pf) = &profile.pixel_format else {
+        return Ok(());
+    };
+    if probe.pixel_format.is_empty() {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video requires pixel_format `{required_pf}` but source pixel_format is unknown"
+            ),
+        ));
+    }
+    if &probe.pixel_format != required_pf {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video source pixel_format `{}` != required `{}`",
+                probe.pixel_format, required_pf
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// An unknown (None) probe value under a constraint is non-conforming — fail
+/// loudly rather than copy blind.
+fn validate_copy_codec_profile(
+    profile: &TranscodeVideoProfile,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let Some(required_cp) = &profile.codec_profile else {
+        return Ok(());
+    };
+    let Some(source_cp) = &probe.codec_profile else {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video requires codec_profile `{required_cp}` but source codec_profile is unknown"
+            ),
+        ));
+    };
+    if voom_worker_protocol::normalize_codec_token(source_cp)
+        != voom_worker_protocol::normalize_codec_token(required_cp)
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!("copy_video source codec_profile `{source_cp}` != required `{required_cp}`"),
+        ));
+    }
+    Ok(())
+}
+
+/// An unknown (None) probe value under a constraint is non-conforming — fail
+/// loudly rather than copy blind.
+fn validate_copy_codec_level(
+    profile: &TranscodeVideoProfile,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let Some(required_cl) = &profile.codec_level else {
+        return Ok(());
+    };
+    let Some(source_cl) = &probe.codec_level else {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video requires codec_level `{required_cl}` but source codec_level is unknown"
+            ),
+        ));
+    };
+    if voom_worker_protocol::normalize_codec_token(source_cl)
+        != voom_worker_protocol::normalize_codec_token(required_cl)
+    {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!("copy_video source codec_level `{source_cl}` != required `{required_cl}`"),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn handle_transcode_audio(
@@ -364,19 +550,52 @@ async fn finalize_audio_operation(
     Ok((input_post, output))
 }
 
+/// Rejects a transcode request whose profile names a video encoder this ffmpeg
+/// build does not advertise, before any ffmpeg process is launched. A
+/// `copy_video` request emits `-c:v copy` and uses no encoder, so it is exempt.
+fn validate_encoder_available(
+    request: &TranscodeVideoRequest,
+    config: &FfmpegConfig,
+) -> Result<(), TranscodeVideoError> {
+    if request.copy_video {
+        return Ok(());
+    }
+    let encoder = &request.profile.encoder;
+    if config.has_video_encoder(encoder) {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "transcode_video",
+        format!("encoder `{encoder}` is not available in this ffmpeg build"),
+    ))
+}
+
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
-    if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container)
-        || !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec)
-    {
+    if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container) {
         return Err(config_invalid(
             "request",
-            "transcode_video output must request hevc video in mkv".to_owned(),
+            format!(
+                "transcode_video output container `{}` is not supported (mkv or mp4)",
+                request.output.container
+            ),
         ));
     }
-    if !voom_worker_protocol::is_default_hevc_profile(&request.profile) {
+    if !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_video profile must be default-hevc".to_owned(),
+            format!(
+                "transcode_video output codec `{}` is not supported (hevc or av1)",
+                request.output.video_codec
+            ),
+        ));
+    }
+    if voom_worker_protocol::validate_profile_against_descriptor(&request.profile).is_err() {
+        return Err(config_invalid(
+            "request",
+            format!(
+                "transcode_video profile `{}` failed encoder descriptor validation",
+                request.profile.name
+            ),
         ));
     }
     Ok(())
@@ -673,6 +892,10 @@ impl From<FfmpegError> for TranscodeVideoError {
             }
             FfmpegError::OutputFactsMismatch(message) => Self::MalformedWorkerResult {
                 payload: serde_json::json!({"stage": "output_probe", "message": message}),
+                message,
+            },
+            FfmpegError::UnsupportedInput(message) => Self::ConfigInvalid {
+                payload: serde_json::json!({"stage": "input_probe", "message": message}),
                 message,
             },
         }

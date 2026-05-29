@@ -20,6 +20,17 @@ pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
             .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
             .count()
     });
+    let video_stream = streams.as_array().and_then(|arr| {
+        arr.iter()
+            .find(|s| s.get("kind").and_then(Value::as_str) == Some("video"))
+    });
+    let dimension = |key: &str| {
+        video_stream
+            .and_then(|s| s.get(key))
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+
     MediaSnapshotInput {
         ordinal: 1,
         target: TargetRef::FileVersion {
@@ -39,8 +50,8 @@ pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
             .get("video_codec")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        width: None,
-        height: None,
+        width: dimension("width"),
+        height: dimension("height"),
         hdr: None,
         bitrate: None,
         duration_millis: None,

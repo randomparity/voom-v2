@@ -281,6 +281,10 @@ fn artifact_transcode_started_payload_serializes_correlation_fields() {
         source_file_version_id: 4,
         source_file_location_id: 5,
         staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: "default-hevc".to_owned(),
+        encoder: "libx265".to_owned(),
+        target_codec: "hevc".to_owned(),
+        output_container: "mkv".to_owned(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: None,
     };
@@ -297,6 +301,10 @@ fn artifact_transcode_started_payload_serializes_correlation_fields() {
         json["payload"]["staging_path"],
         "/tmp/voom-stage/2/3/out.mkv"
     );
+    assert_eq!(json["payload"]["profile_name"], "default-hevc");
+    assert_eq!(json["payload"]["encoder"], "libx265");
+    assert_eq!(json["payload"]["target_codec"], "hevc");
+    assert_eq!(json["payload"]["output_container"], "mkv");
     assert_eq!(json["payload"]["provider"], "ffmpeg");
     assert_eq!(json["payload"]["provider_version"], serde_json::Value::Null);
 
@@ -306,6 +314,160 @@ fn artifact_transcode_started_payload_serializes_correlation_fields() {
         Event::ArtifactTranscodeStarted(p).kind(),
         EventKind::ArtifactTranscodeStarted
     );
+}
+
+#[test]
+fn artifact_transcode_succeeded_payload_carries_profile_and_observed_output_facts() {
+    let p = ArtifactTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        artifact_handle_id: 6,
+        artifact_location_id: 7,
+        staging_path: "/tmp/voom-stage/2/3/out.mp4".to_owned(),
+        profile_name: "av1-1080p".to_owned(),
+        encoder: "libsvtav1".to_owned(),
+        target_codec: "av1".to_owned(),
+        output_container: "mp4".to_owned(),
+        output_video_codec: "av1".to_owned(),
+        copied_video: false,
+        output_width: 1920,
+        output_height: 1080,
+        output_pixel_format: "yuv420p".to_owned(),
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
+    };
+
+    let json = serde_json::to_value(Event::ArtifactTranscodeSucceeded(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.transcode_succeeded");
+    assert_eq!(json["payload"]["profile_name"], "av1-1080p");
+    assert_eq!(json["payload"]["encoder"], "libsvtav1");
+    assert_eq!(json["payload"]["target_codec"], "av1");
+    assert_eq!(json["payload"]["output_container"], "mp4");
+    assert_eq!(json["payload"]["output_video_codec"], "av1");
+    assert_eq!(json["payload"]["copied_video"], false);
+    assert_eq!(json["payload"]["output_width"], 1920);
+    assert_eq!(json["payload"]["output_height"], 1080);
+    assert_eq!(json["payload"]["output_pixel_format"], "yuv420p");
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactTranscodeSucceeded(q) if q == p));
+}
+
+#[test]
+fn legacy_artifact_transcode_started_row_decodes_with_defaulted_fields() {
+    let json = serde_json::json!({
+        "kind": "artifact.transcode_started",
+        "payload": {
+            "job_id": 1,
+            "ticket_id": 2,
+            "lease_id": 3,
+            "source_file_version_id": 4,
+            "source_file_location_id": 5,
+            "staging_path": "/tmp/voom-stage/2/3/out.mkv",
+            "provider": "ffmpeg",
+            "provider_version": null
+        }
+    });
+
+    let back: Event = serde_json::from_value(json).unwrap();
+
+    let expected = ArtifactTranscodeStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: String::new(),
+        encoder: String::new(),
+        target_codec: String::new(),
+        output_container: String::new(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    };
+    assert_eq!(back, Event::ArtifactTranscodeStarted(expected));
+}
+
+#[test]
+fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
+    let json = serde_json::json!({
+        "kind": "artifact.transcode_succeeded",
+        "payload": {
+            "job_id": 1,
+            "ticket_id": 2,
+            "lease_id": 3,
+            "source_file_version_id": 4,
+            "source_file_location_id": 5,
+            "artifact_handle_id": 6,
+            "artifact_location_id": 7,
+            "staging_path": "/tmp/voom-stage/2/3/out.mkv",
+            "output_container": "mkv",
+            "output_video_codec": "hevc",
+            "provider": "ffmpeg",
+            "provider_version": "6.1"
+        }
+    });
+
+    let back: Event = serde_json::from_value(json).unwrap();
+
+    let expected = ArtifactTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        artifact_handle_id: 6,
+        artifact_location_id: 7,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: String::new(),
+        encoder: String::new(),
+        target_codec: String::new(),
+        output_container: "mkv".to_owned(),
+        output_video_codec: "hevc".to_owned(),
+        copied_video: false,
+        output_width: 0,
+        output_height: 0,
+        output_pixel_format: String::new(),
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
+    };
+    assert_eq!(back, Event::ArtifactTranscodeSucceeded(expected));
+}
+
+#[test]
+fn artifact_transcode_failed_payload_carries_profile_facts() {
+    let p = ArtifactTranscodeFailedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: Some(5),
+        staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
+        profile_name: "default-av1".to_owned(),
+        encoder: "libsvtav1".to_owned(),
+        target_codec: "av1".to_owned(),
+        output_container: "mkv".to_owned(),
+        failure_class: FailureClass::WorkerCrash,
+        error_code: "EXTERNAL_SYSTEM_UNAVAILABLE".to_owned(),
+        message: "ffmpeg exited 1".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    };
+
+    let json = serde_json::to_value(Event::ArtifactTranscodeFailed(p.clone())).unwrap();
+
+    assert_eq!(json["kind"], "artifact.transcode_failed");
+    assert_eq!(json["payload"]["profile_name"], "default-av1");
+    assert_eq!(json["payload"]["encoder"], "libsvtav1");
+    assert_eq!(json["payload"]["target_codec"], "av1");
+    assert_eq!(json["payload"]["output_container"], "mkv");
+
+    let back: Event = serde_json::from_value(json).unwrap();
+    assert!(matches!(back, Event::ArtifactTranscodeFailed(q) if q == p));
 }
 
 #[test]
@@ -1203,6 +1365,10 @@ fn event_kind_matches_serde_tag() {
             source_file_version_id: 1,
             source_file_location_id: 1,
             staging_path: "/staging/x".to_owned(),
+            profile_name: "default-hevc".to_owned(),
+            encoder: "libx265".to_owned(),
+            target_codec: "hevc".to_owned(),
+            output_container: "mkv".to_owned(),
             provider: None,
             provider_version: None,
         }),
@@ -1212,6 +1378,10 @@ fn event_kind_matches_serde_tag() {
             lease_id: None,
             source_file_version_id: 1,
             staging_path: "/staging/x".to_owned(),
+            profile_name: "default-hevc".to_owned(),
+            encoder: "libx265".to_owned(),
+            target_codec: "hevc".to_owned(),
+            output_container: "mkv".to_owned(),
             percent_bps: None,
             message: None,
             provider: None,
@@ -1226,8 +1396,15 @@ fn event_kind_matches_serde_tag() {
             artifact_handle_id: 1,
             artifact_location_id: 1,
             staging_path: "/staging/x".to_owned(),
+            profile_name: "default-hevc".to_owned(),
+            encoder: "libx265".to_owned(),
+            target_codec: "hevc".to_owned(),
             output_container: "mkv".to_owned(),
-            output_video_codec: "h264".to_owned(),
+            output_video_codec: "hevc".to_owned(),
+            copied_video: false,
+            output_width: 1920,
+            output_height: 1080,
+            output_pixel_format: "yuv420p".to_owned(),
             provider: "ffmpeg".to_owned(),
             provider_version: "1".to_owned(),
         }),
@@ -1238,6 +1415,10 @@ fn event_kind_matches_serde_tag() {
             source_file_version_id: 1,
             source_file_location_id: None,
             staging_path: None,
+            profile_name: "default-hevc".to_owned(),
+            encoder: "libx265".to_owned(),
+            target_codec: "hevc".to_owned(),
+            output_container: "mkv".to_owned(),
             failure_class: FailureClass::WorkerCrash,
             error_code: "TRANSCODE_FAILED".to_owned(),
             message: "m".to_owned(),

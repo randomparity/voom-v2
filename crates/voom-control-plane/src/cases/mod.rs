@@ -117,3 +117,22 @@ pub(crate) async fn cp() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     .unwrap();
     (cp, tmp)
 }
+
+/// Builds a single-video mp4/h264 input set whose snapshot is transcodable to
+/// hevc, used by both the execute-path and dry-run-path resolution tests.
+#[cfg(test)]
+pub(crate) async fn transcodable_input(
+    cp: &crate::ControlPlane,
+    slug: &str,
+) -> voom_core::PolicyInputSetId {
+    let mut draft =
+        voom_policy::load_fixture(voom_policy::FixtureName::SyntheticNoncompliantTranscodeNeeded)
+            .unwrap();
+    draft.slug = slug.to_owned();
+    draft.fixture_labels = vec![slug.replace('-', "_")];
+    let snapshot = &mut draft.media_snapshots[0];
+    snapshot.container = Some("mp4".to_owned());
+    snapshot.video_codec = Some("h264".to_owned());
+    snapshot.stream_summary = serde_json::json!({ "video_stream_count": 1 });
+    cp.create_policy_input_set(draft).await.unwrap().id
+}

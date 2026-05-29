@@ -122,6 +122,12 @@ impl<'a> Parser<'a> {
     fn parse_metadata_block(&mut self) -> Result<Vec<SettingAst>, ParseError> {
         self.skip_ws_and_comments();
         self.expect_byte(b'{')?;
+        self.parse_setting_list()
+    }
+
+    /// Parses a `key: value` setting list up to and through the closing `}`.
+    /// Assumes the opening `{` has already been consumed.
+    fn parse_setting_list(&mut self) -> Result<Vec<SettingAst>, ParseError> {
         let mut settings = Vec::new();
         loop {
             self.skip_ws_and_comments();
@@ -129,7 +135,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if self.is_eof() {
-                return Err(self.error_at(self.cursor, "expected `}` to close metadata block"));
+                return Err(self.error_at(self.cursor, "expected `}` to close settings block"));
             }
 
             let key = self.parse_identifier()?;
@@ -207,6 +213,20 @@ impl<'a> Parser<'a> {
             let close_brace = block_end.ok_or_else(|| {
                 self.error_at(open_brace, "expected `}` to close statement block")
             })?;
+            if keyword.value == "transcode" {
+                let header = self.source[start..open_brace].trim().to_owned();
+                let mut inner = Self {
+                    source: self.source,
+                    cursor: open_brace + 1,
+                };
+                let settings = inner.parse_setting_list()?;
+                return Ok(StatementAst::TranscodeInline {
+                    keyword,
+                    header,
+                    settings,
+                    span,
+                });
+            }
             let name = self.statement_block_name(keyword.span.end, open_brace);
             let mut inner = Self {
                 source: self.source,

@@ -1251,7 +1251,7 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 
     let result = fixture.first_ticket_result().await;
     let staging_path = result["staging_path"].as_str().unwrap();
-    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.hevc.mkv"));
+    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.default-hevc.hevc.mkv"));
     assert_eq!(result["staged_artifact_handle_id"], 1);
     assert_eq!(result["staged_artifact_location_id"], 1);
     assert_eq!(result["verification_id"], 1);
@@ -2218,7 +2218,11 @@ async fn write_behavior(
 
 async fn transcode_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<TranscodeVideoRequest>(request.payload.clone()).unwrap();
-    let output_bytes = b"output!";
+    // Write real media bytes so the post-commit result probe (spec §7 step 13)
+    // runs the bundled ffprobe against a parseable file. The probe only verifies
+    // size+hash against these bytes; the container/codec the result claims are
+    // not asserted by these dispatch/heartbeat tests.
+    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2239,7 +2243,11 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
             "content_hash": format!("blake3:{}", blake3::hash(output_bytes).to_hex())
         },
         "output_container": "mkv",
-        "output_video_codec": "hevc"
+        "output_video_codec": "hevc",
+        // Phase 7 will populate these from the ffprobe output.
+        "output_width": 1920,
+        "output_height": 1080,
+        "output_pixel_format": "yuv420p"
     })
 }
 
@@ -2445,6 +2453,11 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
 }
 
 fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
+    // The resolved_profile is normally emitted by the planner (Task 5.2) and
+    // threaded via binding.rs into the ticket payload. Here we supply it
+    // directly so executor tests exercise the full dispatch path without
+    // running the planner.
+    let default_hevc = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
     WorkflowPlan {
         id: "policy-transcode-test".to_owned(),
         seed: 12,
@@ -2457,6 +2470,7 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
                 "target_codec": "hevc",
                 "container": "mkv",
                 "profile": "default-hevc",
+                "resolved_profile": serde_json::to_value(&default_hevc).unwrap(),
             }),
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),

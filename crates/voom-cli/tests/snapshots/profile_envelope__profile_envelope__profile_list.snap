@@ -1,0 +1,115 @@
+---
+source: crates/voom-cli/tests/profile_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "profile",
+  "status": "ok",
+  "data": {
+    "profiles": [
+      {
+        "id": "vp-av1-1080p",
+        "name": "av1-1080p",
+        "target_codec": "av1",
+        "encoder": "libsvtav1",
+        "crf": 32,
+        "preset": "8",
+        "tune": null,
+        "codec_profile": null,
+        "codec_level": null,
+        "pixel_format": null,
+        "max_width": 1920,
+        "max_height": 1080,
+        "output_container": "mp4",
+        "copy_compatible": true
+      },
+      {
+        "id": "vp-av1-archive",
+        "name": "av1-archive",
+        "target_codec": "av1",
+        "encoder": "libaom-av1",
+        "crf": 20,
+        "preset": "4",
+        "tune": null,
+        "codec_profile": null,
+        "codec_level": null,
+        "pixel_format": null,
+        "max_width": null,
+        "max_height": null,
+        "output_container": "mkv",
+        "copy_compatible": false
+      },
+      {
+        "id": "vp-default-av1",
+        "name": "default-av1",
+        "target_codec": "av1",
+        "encoder": "libsvtav1",
+        "crf": 30,
+        "preset": "8",
+        "tune": null,
+        "codec_profile": null,
+        "codec_level": null,
+        "pixel_format": null,
+        "max_width": null,
+        "max_height": null,
+        "output_container": "mkv",
+        "copy_compatible": false
+      },
+      {
+        "id": "vp-default-hevc",
+        "name": "default-hevc",
+        "target_codec": "hevc",
+        "encoder": "libx265",
+        "crf": 23,
+        "preset": "medium",
+        "tune": null,
+        "codec_profile": null,
+        "codec_level": null,
+        "pixel_format": null,
+        "max_width": null,
+        "max_height": null,
+        "output_container": "mkv",
+        "copy_compatible": false
+      },
+      {
+        "id": "vp-hevc-1080p",
+        "name": "hevc-1080p",
+        "target_codec": "hevc",
+        "encoder": "libx265",
+        "crf": 23,
+        "preset": "medium",
+        "tune": null,
+        "codec_profile": null,
+        "codec_level": null,
+        "pixel_format": null,
+        "max_width": 1920,
+        "max_height": 1080,
+        "output_container": "mp4",
+        "copy_compatible": true
+      },
+      {
+        "id": "vp-hevc-archive",
+        "name": "hevc-archive",
+        "target_codec": "hevc",
+        "encoder": "libx265",
+        "crf": 18,
+        "preset": "slow",
+        "tune": null,
+        "codec_profile": "main10",
+        "codec_level": null,
+        "pixel_format": "yuv420p10le",
+        "max_width": null,
+        "max_height": null,
+        "output_container": "mkv",
+        "copy_compatible": false
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

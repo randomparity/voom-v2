@@ -16,3 +16,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true, features = ["serde"] }
 voom-core = { workspace = true }
+voom-worker-protocol = { workspace = true }

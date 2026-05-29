@@ -4,6 +4,16 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{FileVersionId, MediaSnapshotId};
 
+fn snapshot_with_payload(payload: serde_json::Value) -> MediaSnapshot {
+    MediaSnapshot {
+        id: MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: OffsetDateTime::UNIX_EPOCH,
+        payload,
+    }
+}
+
 #[test]
 fn planning_input_derives_video_count_and_copies_container_and_codec() {
     let snapshot = MediaSnapshot {
@@ -28,6 +38,8 @@ fn planning_input_derives_video_count_and_copies_container_and_codec() {
     assert_eq!(input.container.as_deref(), Some("mkv"));
     assert_eq!(input.video_codec.as_deref(), Some("h264"));
     assert_eq!(input.existing_media_snapshot_id, Some(MediaSnapshotId(7)));
+    assert_eq!(input.width, None);
+    assert_eq!(input.height, None);
 }
 
 #[test]
@@ -45,4 +57,18 @@ fn planning_input_defaults_video_count_zero_when_no_streams() {
     assert_eq!(input.stream_summary["video_stream_count"], 0);
     assert_eq!(input.container, None);
     assert_eq!(input.video_codec, None);
+}
+
+#[test]
+fn planning_input_projects_video_dimensions() {
+    let snapshot = snapshot_with_payload(serde_json::json!({
+        "container": "matroska",
+        "streams": [{
+            "id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264",
+            "width": 3840, "height": 2160, "pixel_format": "yuv420p"
+        }]
+    }));
+    let input = planning_input(&snapshot);
+    assert_eq!(input.width, Some(3840));
+    assert_eq!(input.height, Some(2160));
 }

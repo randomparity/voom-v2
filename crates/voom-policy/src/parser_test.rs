@@ -73,3 +73,25 @@ fn parses_multiple_metadata_settings_separated_by_spaces() {
     assert_eq!(ast.metadata[0].key.value, "version");
     assert_eq!(ast.metadata[1].key.value, "description");
 }
+
+#[test]
+fn parses_transcode_inline_settings_body() {
+    let src = "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 28 preset: 6 } } }";
+    let ast = parse_policy_source(src).unwrap();
+    let op = &ast.phases[0].operations[0];
+    let crate::StatementAst::TranscodeInline { settings, .. } = op else {
+        panic!("expected TranscodeInline, got {op:?}");
+    };
+    let keys: Vec<&str> = settings.iter().map(|s| s.key.value.as_str()).collect();
+    assert_eq!(keys, vec!["encoder", "crf", "preset"]);
+}
+
+#[test]
+fn parses_bare_transcode_as_raw() {
+    let src = "policy \"p\" { phase a { transcode video to hevc } }";
+    let ast = parse_policy_source(src).unwrap();
+    assert!(matches!(
+        ast.phases[0].operations[0],
+        crate::StatementAst::Raw { .. }
+    ));
+}

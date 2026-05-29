@@ -17,6 +17,7 @@ pub mod hash;
 pub mod model;
 pub mod planner;
 pub mod remux;
+pub mod transcode_video_profile;
 
 pub use compliance_model::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
@@ -33,4 +34,5 @@ pub use model::{
     InputIdentity, NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext,
     PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints, TargetRef,
 };
-pub use planner::{PlanGenerationError, generate_plan};
+pub use planner::{PlanGenerationError, generate_plan, video_stream_field};
+pub use transcode_video_profile::{cpu_cost, inline_profile_id};

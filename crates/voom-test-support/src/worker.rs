@@ -131,17 +131,57 @@ pub fn workspace_root() -> PathBuf {
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
+/// Returns the cargo profile output directory that holds built binaries.
+///
+/// This is the directory the bundled control-plane worker derives from
+/// `std::env::current_exe()` when it auto-wires sibling binaries, so test
+/// helpers that touch those siblings must agree on it. It is robust across
+/// cargo target dirs (`target/debug`, `target/llvm-cov-target/debug`, a custom
+/// `CARGO_TARGET_DIR`, or a `--target <triple>` profile dir) because it walks up
+/// from the running test binary rather than assuming `target/debug`.
+#[must_use]
+pub fn target_debug_dir() -> PathBuf {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return workspace_root().join("target").join("debug");
+    };
+    let Some(exe_dir) = current_exe.parent() else {
+        return workspace_root().join("target").join("debug");
+    };
+    if exe_dir.file_name().is_some_and(|name| name == "deps") {
+        return exe_dir
+            .parent()
+            .map_or_else(|| exe_dir.to_path_buf(), std::path::Path::to_path_buf);
+    }
+    exe_dir.to_path_buf()
+}
+
 #[must_use]
 pub fn target_debug_binary(name: &str) -> PathBuf {
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    target_debug_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Returns the cargo target root that owns the active profile directory.
+///
+/// The nested `cargo build` invocations below must emit binaries into the same
+/// profile dir that [`target_debug_binary`] looks them up in. A nested `cargo
+/// build` does not inherit the outer `--target-dir` (e.g. llvm-cov's
+/// `target/llvm-cov-target`), so it would otherwise build into the default
+/// `target/debug` and the spawn-path lookup would miss. We derive the target
+/// root as the parent of the profile dir returned by [`target_debug_dir`] and
+/// pass it back via an explicit `--target-dir`, keeping build output and lookup
+/// in agreement across normal, coverage, and custom target dirs.
+fn target_root_dir() -> PathBuf {
+    let profile_dir = target_debug_dir();
+    profile_dir
+        .parent()
+        .map_or(profile_dir.clone(), std::path::Path::to_path_buf)
 }
 
 pub fn cargo_build_package(package: &str) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("cargo")
         .args(["build", "-p", package])
+        .arg("--target-dir")
+        .arg(target_root_dir())
         .current_dir(workspace_root())
         .status()?;
     if status.success() {
@@ -161,6 +201,8 @@ pub fn cargo_bin_or_build(
     }
     let status = Command::new("cargo")
         .args(["build", "-p", package, "--bin", binary])
+        .arg("--target-dir")
+        .arg(target_root_dir())
         .current_dir(workspace_root())
         .status()?;
     if !status.success() {

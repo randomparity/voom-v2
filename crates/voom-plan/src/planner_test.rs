@@ -231,7 +231,8 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
         policy: policy(CompiledOperation::TranscodeVideo {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
-            profile: "default-hevc".to_owned(),
+            profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+            resolved_profile: Some(voom_worker_protocol::TranscodeVideoProfile::default_hevc()),
         }),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
@@ -964,6 +965,311 @@ fn transcode_video_blocks_unknown_or_multi_video_snapshots() {
     assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(2)));
 }
 
+fn profile_hevc_1080p_mkv() -> voom_worker_protocol::TranscodeVideoProfile {
+    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+    profile.pixel_format = Some("yuv420p".to_owned());
+    profile.max_width = Some(1920);
+    profile.max_height = Some(1080);
+    profile
+}
+
+fn profile_hevc_mp4() -> voom_worker_protocol::TranscodeVideoProfile {
+    voom_worker_protocol::TranscodeVideoProfile::default_hevc()
+}
+
+fn profile_hevc_10bit() -> voom_worker_protocol::TranscodeVideoProfile {
+    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+    profile.codec_profile = Some("main10".to_owned());
+    profile.pixel_format = Some("yuv420p10le".to_owned());
+    profile
+}
+
+fn video_snapshot(
+    container: &str,
+    width: u32,
+    height: u32,
+    extra: &serde_json::Map<String, serde_json::Value>,
+    non_video: &[serde_json::Value],
+) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some(container), Some("hevc"), Some(1));
+    snapshot.width = Some(width);
+    snapshot.height = Some(height);
+    let mut video = serde_json::Map::new();
+    video.insert("id".to_owned(), serde_json::json!("stream-0"));
+    video.insert("index".to_owned(), serde_json::json!(0));
+    video.insert("kind".to_owned(), serde_json::json!("video"));
+    video.insert("codec_name".to_owned(), serde_json::json!("hevc"));
+    video.insert("width".to_owned(), serde_json::json!(width));
+    video.insert("height".to_owned(), serde_json::json!(height));
+    for (key, value) in extra {
+        video.insert(key.clone(), value.clone());
+    }
+    let mut streams = vec![serde_json::Value::Object(video)];
+    streams.extend(non_video.iter().cloned());
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": streams,
+    });
+    snapshot
+}
+
+fn video_extra(pairs: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect()
+}
+
+fn source_hevc_720_mkv() -> MediaSnapshotInput {
+    video_snapshot(
+        "mkv",
+        1280,
+        720,
+        &video_extra(&[("pixel_format", serde_json::json!("yuv420p"))]),
+        &[],
+    )
+}
+
+fn source_hevc_2160_mkv() -> MediaSnapshotInput {
+    video_snapshot(
+        "mkv",
+        3840,
+        2160,
+        &video_extra(&[("pixel_format", serde_json::json!("yuv420p"))]),
+        &[],
+    )
+}
+
+fn source_hevc_8bit() -> MediaSnapshotInput {
+    video_snapshot(
+        "mkv",
+        1280,
+        720,
+        &video_extra(&[
+            ("pixel_format", serde_json::json!("yuv420p")),
+            ("profile", serde_json::json!("Main")),
+        ]),
+        &[],
+    )
+}
+
+fn source_without_pixel_format() -> MediaSnapshotInput {
+    video_snapshot("mkv", 1280, 720, &video_extra(&[]), &[])
+}
+
+fn source_two_video_streams() -> MediaSnapshotInput {
+    let mut snapshot = source_hevc_720_mkv();
+    let streams = snapshot
+        .stream_summary
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+        .unwrap();
+    streams.push(serde_json::json!({
+        "id": "stream-1", "index": 1, "kind": "video", "codec_name": "hevc"
+    }));
+    snapshot.stream_summary["video_stream_count"] = serde_json::json!(2);
+    snapshot
+}
+
+fn source_with_ass_subtitle() -> MediaSnapshotInput {
+    video_snapshot(
+        "mkv",
+        1280,
+        720,
+        &video_extra(&[("pixel_format", serde_json::json!("yuv420p"))]),
+        &[serde_json::json!({
+            "id": "stream-1", "index": 1, "kind": "subtitle", "codec_name": "ass"
+        })],
+    )
+}
+
+fn source_stream_missing_codec() -> MediaSnapshotInput {
+    video_snapshot(
+        "mkv",
+        1280,
+        720,
+        &video_extra(&[("pixel_format", serde_json::json!("yuv420p"))]),
+        &[serde_json::json!({"id": "stream-1", "index": 1, "kind": "audio"})],
+    )
+}
+
+fn plan_transcode_with_container(
+    profile: voom_worker_protocol::TranscodeVideoProfile,
+    snapshot: MediaSnapshotInput,
+    container: &str,
+) -> crate::ExecutionPlan {
+    let policy = policy(CompiledOperation::TranscodeVideo {
+        target_codec: profile.target_codec.clone(),
+        container: container.to_owned(),
+        profile: voom_policy::VideoProfileRef::Named(profile.name.clone()),
+        resolved_profile: Some(profile),
+    });
+    generate_plan(request(policy, snapshot)).unwrap()
+}
+
+fn node_status(plan: &crate::ExecutionPlan) -> NodeStatus {
+    plan.nodes[0].status.clone()
+}
+
+fn blocked_reason(plan: &crate::ExecutionPlan) -> &str {
+    plan.nodes[0].status_reason.as_str()
+}
+
+fn resource_notes(plan: &crate::ExecutionPlan) -> Vec<String> {
+    plan.nodes[0].resource_estimates.notes.clone()
+}
+
+#[test]
+fn no_op_when_all_observable_constraints_satisfied() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_1080p_mkv(), source_hevc_720_mkv(), "mkv");
+    assert_eq!(node_status(&plan), NodeStatus::NoOp);
+}
+
+#[test]
+fn planned_when_too_wide() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_1080p_mkv(), source_hevc_2160_mkv(), "mkv");
+    assert_eq!(node_status(&plan), NodeStatus::Planned);
+}
+
+#[test]
+fn planned_on_container_change() {
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), source_hevc_720_mkv(), "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Planned);
+}
+
+#[test]
+fn planned_on_wrong_pixel_format_or_profile_level() {
+    let plan = plan_transcode_with_container(profile_hevc_10bit(), source_hevc_8bit(), "mkv");
+    assert_eq!(node_status(&plan), NodeStatus::Planned);
+}
+
+#[test]
+fn blocked_insufficient_when_constrained_pixel_format_unknown() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_10bit(), source_without_pixel_format(), "mkv");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn blocked_unsupported_when_not_exactly_one_video_stream() {
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), source_two_video_streams(), "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(plan.diagnostics[0].code.as_str(), "unsupported_media_shape");
+}
+
+#[test]
+fn blocked_when_mp4_target_has_incompatible_subtitle() {
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), source_with_ass_subtitle(), "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert!(blocked_reason(&plan).contains("ass"));
+}
+
+#[test]
+fn blocked_insufficient_when_mp4_stream_inventory_underdescribed() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_mp4(), source_stream_missing_codec(), "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn blocked_insufficient_when_mp4_target_and_streams_array_absent() {
+    // A snapshot with video_stream_count but no "streams" array is under-described
+    // for an mp4 target — the gate must block rather than pass through.
+    let mut snapshot = snapshot_with(Some("mkv"), Some("h264"), Some(1));
+    snapshot.stream_summary = serde_json::json!({ "video_stream_count": 1 });
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), snapshot, "mp4");
+    assert_eq!(node_status(&plan), NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code.as_str(),
+        "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn resource_notes_are_format_stable() {
+    let plan =
+        plan_transcode_with_container(profile_hevc_1080p_mkv(), source_hevc_2160_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+    assert!(notes.contains(&"encoder=libx265".to_owned()));
+    assert!(notes.contains(&"speed=medium".to_owned()));
+    assert!(notes.contains(&"cpu_cost=medium".to_owned()));
+    assert!(notes.contains(&"crf=23".to_owned()));
+    assert!(notes.contains(&"downscale=3840x2160->1920x1080".to_owned()));
+}
+
+#[test]
+fn downscale_note_emits_when_only_width_is_constrained() {
+    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+    profile.pixel_format = Some("yuv420p".to_owned());
+    profile.max_width = Some(1920);
+    let plan = plan_transcode_with_container(profile, source_hevc_2160_mkv(), "mkv");
+    let notes = resource_notes(&plan);
+    assert!(notes.contains(&"downscale=3840x2160->1920x2160".to_owned()));
+}
+
+#[test]
+fn transcode_video_node_payload_carries_profile_and_resolved_profile() {
+    let plan = plan_transcode_with_container(profile_hevc_mp4(), source_hevc_720_mkv(), "mp4");
+    let payload = &plan.nodes[0].operation_payload;
+    assert_eq!(payload["profile"], "default-hevc");
+    assert!(payload["resolved_profile"].is_object());
+    assert_eq!(payload["resolved_profile"]["encoder"], "libx265");
+    assert_eq!(payload["resolved_profile"]["crf"], 23);
+}
+
+#[test]
+fn transcode_video_blocks_when_profile_unresolved() {
+    let policy = policy(CompiledOperation::TranscodeVideo {
+        target_codec: "hevc".to_owned(),
+        container: "mkv".to_owned(),
+        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+        resolved_profile: None,
+    });
+    let result = generate_plan(request(policy, source_hevc_720_mkv()));
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.diagnostics[0].code,
+        PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+}
+
+#[test]
+fn unresolved_profile_reports_every_missing_snapshot() {
+    let policy = policy(CompiledOperation::TranscodeVideo {
+        target_codec: "hevc".to_owned(),
+        container: "mkv".to_owned(),
+        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+        resolved_profile: None,
+    });
+    let mut input = input_with_snapshot(source_hevc_720_mkv());
+    input.media_snapshots.push(source_hevc_2160_mkv());
+
+    let error = generate_plan(PlanningRequest {
+        policy,
+        input,
+        context: PlanningContext::default(),
+    })
+    .unwrap_err();
+
+    assert_eq!(error.diagnostics.len(), 2);
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .all(|d| d.code == PlanningDiagnosticCode::InvalidPlanningRequest)
+    );
+}
+
 #[test]
 fn transcode_audio_plans_selected_aac_audio_to_opus() {
     let plan = generate_plan(request_with_transcode_audio(snapshot_with_audio_streams(
@@ -1530,7 +1836,8 @@ fn transcode_video() -> CompiledOperation {
     CompiledOperation::TranscodeVideo {
         target_codec: "hevc".to_owned(),
         container: "mkv".to_owned(),
-        profile: "default".to_owned(),
+        profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
+        resolved_profile: Some(voom_worker_protocol::TranscodeVideoProfile::default_hevc()),
     }
 }
 

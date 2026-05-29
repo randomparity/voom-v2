@@ -44,9 +44,84 @@ fn rejects_depends_on_with_extra_tokens_after_list() {
 }
 
 #[test]
-fn accepts_sprint12_video_hevc_transcode() {
-    assert!(compile_policy("policy \"p\" { phase a { transcode video to hevc {} } }").is_ok());
-    assert!(compile_policy("policy \"p\" { phase a { transcode video to hevc } }").is_ok());
+fn accepts_hevc_and_av1_named_and_inline() {
+    assert!(codes("policy \"p\" { phase a { transcode video to hevc } }").is_empty());
+    assert!(codes("policy \"p\" { phase a { transcode video to av1 } }").is_empty());
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to hevc using profile \"hevc-archive\" } }"
+        )
+        .is_empty()
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 28 preset: 6 } } }"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn rejects_invalid_inline_profiles() {
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to av1 { crf: 28 preset: 6 } } }")
+            .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libx265 crf: 20 preset: medium } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to hevc { encoder: libx265 crf: 60 preset: medium } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 30 preset: medium } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 30 preset: 6 bogus: 1 } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to hevc { encoder: libx265 crf: 20 preset: slow codec_profile: main pixel_format: yuv420p10le } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+    // duplicate key
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 20 crf: 28 preset: 6 } } }"
+        )
+        .contains(&"invalid_video_profile_setting".to_owned())
+    );
+}
+
+#[test]
+fn rejects_using_profile_with_inline_body() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { transcode video to hevc using profile \"x\" { crf: 20 } } }"
+        )
+        .contains(&"unsupported_transcode_shape".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unknown_codec() {
+    assert!(
+        codes("policy \"p\" { phase a { transcode video to vp9 } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
+    );
 }
 
 #[test]
@@ -66,7 +141,7 @@ fn accepts_sprint14_audio_operations() {
 fn rejects_unsupported_transcode_shapes() {
     assert!(
         codes("policy \"p\" { phase a { transcode video to av1 {} } }")
-            .contains(&"unsupported_transcode_shape".to_owned())
+            .contains(&"invalid_video_profile_setting".to_owned())
     );
     assert!(
         codes("policy \"p\" { phase a { transcode video to hevc using profile \"small\" {} } }")
@@ -312,17 +387,15 @@ fn rejects_on_error_with_extra_tokens() {
 #[test]
 fn rejects_unsupported_transcode_inside_rule_block() {
     assert!(
-        codes(
-            "policy \"p\" { phase a { rules first { rule \"r\" { transcode video to av1 {} } } } }"
-        )
-        .contains(&"unsupported_transcode_shape".to_owned())
+        codes("policy \"p\" { phase a { rules first { rule \"r\" { transcode video to vp9 } } } }")
+            .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 
 #[test]
 fn reports_nested_when_diagnostic_once() {
     let diagnostics =
-        codes("policy \"p\" { phase a { when exists audio { transcode video to av1 {} } } }");
+        codes("policy \"p\" { phase a { when exists audio { transcode video to vp9 } } }");
 
     assert_eq!(
         diagnostics

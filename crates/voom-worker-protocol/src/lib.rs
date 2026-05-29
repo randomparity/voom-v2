@@ -5,7 +5,7 @@
         reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
-//! Versioned HTTP/JSON worker protocol for VOOM Sprint 2.
+//! Versioned HTTP/JSON worker protocol for VOOM.
 //!
 //! Public API surface is fixed in `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`.
 //! Sub-modules land incrementally in the Phase 1 commit sequence; this
@@ -15,6 +15,7 @@
 
 pub mod audio;
 pub mod credentials;
+pub mod encoder_caps;
 pub mod envelope;
 pub mod handshake;
 pub mod http;
@@ -36,6 +37,7 @@ pub use audio::{
     TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
 };
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
+pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};
 pub use http::{
@@ -53,11 +55,13 @@ pub use remux::{
     is_supported_remux_container,
 };
 pub use transcode_video::{
-    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CONTAINER,
-    TRANSCODE_VIDEO_PROFILE, TranscodeVideoExpectedFacts, TranscodeVideoInput,
-    TranscodeVideoObservedFacts, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, is_default_hevc_profile,
-    is_supported_transcode_video_codec, is_supported_transcode_video_container,
+    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
+    TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
+    TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
+    TranscodeVideoStatus, canonical_video_codec, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container, normalize_codec_token,
+    validate_profile_against_descriptor,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use verify_artifact::{

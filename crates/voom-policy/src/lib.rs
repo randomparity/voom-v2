@@ -3,7 +3,8 @@
     expect(
         clippy::unwrap_used,
         clippy::float_cmp,
-        reason = "policy tests assert deterministic fixtures directly and use unwrap for concise failures"
+        clippy::panic,
+        reason = "policy tests assert deterministic fixtures directly and use unwrap/panic for concise failures"
     )
 )]
 //! Policy-domain inputs for Sprint 3.
@@ -18,6 +19,7 @@ pub mod pipeline;
 pub mod policy_fixtures;
 pub mod span;
 pub mod validate;
+pub mod video_profile;
 
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{
@@ -44,3 +46,4 @@ pub use policy_fixtures::{
 };
 pub use span::{SourceLocation, SourceSpan, line_column};
 pub use validate::{ValidationResult, validate_policy_ast};
+pub use video_profile::{VideoProfileRef, VideoProfileSettings};

@@ -1,15 +1,17 @@
 #![expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
+use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
@@ -22,6 +24,10 @@ use voom_test_support::worker::{
 
 #[tokio::test]
 async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
+    // The post-commit result probe must run REAL ffprobe against the committed
+    // output; hide any canned test-helper `ffprobe` stub installed by sibling
+    // tests in the shared profile dir.
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -121,7 +127,8 @@ async fn assert_transcode_execution_result(
     assert!(result["staged_artifact_handle_id"].as_u64().unwrap() > 0);
     assert!(result["verification_id"].as_u64().unwrap() > 0);
     assert!(result["commit_record_id"].as_u64().unwrap() > 0);
-    assert!(out_dir.join("Movie.hevc.mkv").is_file());
+    // default-hevc resolves to: <stem>.default-hevc.hevc.mkv (Task 6.5 naming)
+    assert!(out_dir.join("Movie.default-hevc.hevc.mkv").is_file());
 
     let snapshots = SqliteIdentityRepo::new(voom_store::connect(url).await.unwrap())
         .list_media_snapshots_by_version(result_file_version_id)
@@ -131,29 +138,61 @@ async fn assert_transcode_execution_result(
         .iter()
         .find(|snapshot| snapshot.id == result_media_snapshot_id)
         .unwrap();
-    assert_eq!(result_snapshot.payload["container"], "mkv");
-    assert_eq!(result_snapshot.payload["video_codec"], "hevc");
+    // The result snapshot is a REAL ffprobe observation of the committed bytes
+    // (spec §7 step 13): a normalized `sprint10-v1` payload whose non-empty
+    // `streams` array reports the transcoded hevc video stream. A synthesized
+    // stub would carry neither.
+    assert_eq!(result_snapshot.payload["format"], "sprint10-v1");
+    assert_eq!(result_snapshot.payload["probe"]["provider"], "ffprobe");
+    let streams = result_snapshot.payload["streams"]
+        .as_array()
+        .expect("probed result snapshot must carry a streams array");
+    assert!(
+        streams
+            .iter()
+            .any(|stream| { stream["kind"] == "video" && stream["codec_name"] == "hevc" }),
+        "probed result snapshot must report an hevc video stream"
+    );
     (result_file_version_id, result_media_snapshot_id)
 }
 
+/// Re-plan the committed result by projecting its DURABLE result `MediaSnapshot`
+/// back through the normal `stream_summary_from_snapshot_payload` projection
+/// (`create_policy_input_set_from_scan`), proving the probed snapshot round-trips:
+/// the projection reads `payload["streams"]`, which only exists because the
+/// post-commit probe recorded a real observation.
 async fn assert_result_replans_as_no_op(
     cp: &ControlPlane,
     policy_version_id: voom_core::PolicyVersionId,
     result_file_version_id: FileVersionId,
     result_media_snapshot_id: MediaSnapshotId,
 ) {
-    let result_input = cp
-        .create_policy_input_set(input_for(
-            "movie-hevc",
-            result_file_version_id,
-            Some(result_media_snapshot_id),
-            "mkv",
-            "hevc",
-        ))
+    let projected = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "movie-hevc".to_owned(),
+            file_version_id: result_file_version_id,
+            media_snapshot_id: result_media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+        })
         .await
         .unwrap();
+    let set = cp
+        .get_policy_input_set(projected.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let projected_streams = set.media_snapshots[0].stream_summary["streams"]
+        .as_array()
+        .expect("projected stream_summary must carry a streams array");
+    assert!(
+        projected_streams
+            .iter()
+            .any(|stream| stream["kind"] == "video"),
+        "the durable result snapshot must project a video stream"
+    );
     let result_plan = cp
-        .generate_compliance_report(policy_version_id, result_input.id)
+        .generate_compliance_report(policy_version_id, projected.input_set_id)
         .await
         .unwrap();
     assert_eq!(
@@ -210,6 +249,51 @@ fn input_for(
         bundle_targets: Vec::new(),
         quality_profiles: Vec::new(),
         issues: Vec::new(),
+    }
+}
+
+/// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
+/// the shared profile dir) so the bundled probe worker runs real ffprobe. The
+/// static mutex serializes any real-ffprobe cases in this binary: they share the
+/// single `ffprobe` sibling path (derived from the running test binary so it
+/// tracks the active cargo target dir), so a future second test would otherwise
+/// race silently (one test restoring the stub while another is probing). The
+/// guard restores the stub on drop.
+fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = target_debug_binary("ffprobe");
+    let hidden = path.with_file_name("ffprobe.video-transcode-flow-hidden");
+    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
+        bytes
+            .windows(b"ffprobe version test-helper".len())
+            .any(|window| window == b"ffprobe version test-helper")
+    });
+    if is_stub {
+        std::fs::rename(&path, &hidden).unwrap();
+    }
+    FfprobeSiblingGuard {
+        path,
+        hidden,
+        restore: is_stub,
+        _lock: lock,
+    }
+}
+
+struct FfprobeSiblingGuard {
+    path: PathBuf,
+    hidden: PathBuf,
+    restore: bool,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for FfprobeSiblingGuard {
+    fn drop(&mut self) {
+        if self.restore && self.hidden.exists() && !self.path.exists() {
+            let _ = std::fs::rename(&self.hidden, &self.path);
+        }
     }
 }
 

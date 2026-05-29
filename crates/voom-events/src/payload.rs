@@ -340,6 +340,14 @@ pub struct ArtifactTranscodeStartedPayload {
     pub source_file_version_id: u64,
     pub source_file_location_id: u64,
     pub staging_path: String,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub encoder: String,
+    #[serde(default)]
+    pub target_codec: String,
+    #[serde(default)]
+    pub output_container: String,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
 }
@@ -351,6 +359,14 @@ pub struct ArtifactTranscodeProgressPayload {
     pub lease_id: Option<u64>,
     pub source_file_version_id: u64,
     pub staging_path: String,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub encoder: String,
+    #[serde(default)]
+    pub target_codec: String,
+    #[serde(default)]
+    pub output_container: String,
     pub percent_bps: Option<u16>,
     pub message: Option<String>,
     pub provider: Option<String>,
@@ -367,8 +383,22 @@ pub struct ArtifactTranscodeSucceededPayload {
     pub artifact_handle_id: u64,
     pub artifact_location_id: u64,
     pub staging_path: String,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub encoder: String,
+    #[serde(default)]
+    pub target_codec: String,
     pub output_container: String,
     pub output_video_codec: String,
+    #[serde(default)]
+    pub copied_video: bool,
+    #[serde(default)]
+    pub output_width: u32,
+    #[serde(default)]
+    pub output_height: u32,
+    #[serde(default)]
+    pub output_pixel_format: String,
     pub provider: String,
     pub provider_version: String,
 }
@@ -381,6 +411,14 @@ pub struct ArtifactTranscodeFailedPayload {
     pub source_file_version_id: u64,
     pub source_file_location_id: Option<u64>,
     pub staging_path: Option<String>,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub encoder: String,
+    #[serde(default)]
+    pub target_codec: String,
+    #[serde(default)]
+    pub output_container: String,
     pub failure_class: FailureClass,
     pub error_code: String,
     pub message: String,

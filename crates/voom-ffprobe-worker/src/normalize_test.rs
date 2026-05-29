@@ -182,6 +182,41 @@ fn rejects_malformed_present_numeric_values() {
 }
 
 #[test]
+fn captures_video_pixel_format_profile_and_level() {
+    let raw = serde_json::json!({
+        "format": {"format_name": "matroska,webm", "duration": "10.0"},
+        "streams": [{
+            "index": 0, "codec_type": "video", "codec_name": "hevc",
+            "width": 1920, "height": 1080,
+            "pix_fmt": "yuv420p10le", "profile": "Main 10", "level": 153
+        }]
+    });
+    let result = normalize_ffprobe_json(raw, "ffprobe 7.0", "2026-05-28T00:00:00Z");
+    assert!(result.is_ok());
+    let Ok(snapshot) = result else { return };
+    let stream = &snapshot["streams"][0];
+    assert_eq!(stream["pixel_format"], "yuv420p10le");
+    assert_eq!(stream["profile"], "Main 10");
+    assert_eq!(stream["level"], "153");
+}
+
+#[test]
+fn omits_absent_video_profile_fields() {
+    let raw = serde_json::json!({
+        "streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1, "height": 1}]
+    });
+    let result = normalize_ffprobe_json(raw, "v", "t");
+    assert!(result.is_ok());
+    let Ok(snapshot) = result else { return };
+    let Some(stream) = snapshot["streams"][0].as_object() else {
+        return;
+    };
+    assert!(!stream.contains_key("pixel_format"));
+    assert!(!stream.contains_key("profile"));
+    assert!(!stream.contains_key("level"));
+}
+
+#[test]
 fn rejects_malformed_top_level_sections() {
     for raw in [
         serde_json::json!({

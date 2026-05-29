@@ -85,6 +85,19 @@ async fn health_on_existing_but_uninitialized_db_is_uninitialized() {
 }
 
 #[tokio::test]
+async fn open_exposes_seeded_video_profiles() {
+    use voom_store::repo::video_profiles::VideoProfileRepo;
+
+    let (_keep, url) = fresh_url();
+    voom_store::init(&url).await.unwrap();
+    let cp = ControlPlane::open(&url).await.unwrap();
+    let profiles = cp.video_profiles.list().await.unwrap();
+    assert_eq!(profiles.len(), 6);
+    let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains(&"default-hevc"));
+}
+
+#[tokio::test]
 async fn init_then_health_reports_current() {
     let (_keep, url) = fresh_url();
     let report = voom_store::init(&url).await.unwrap();

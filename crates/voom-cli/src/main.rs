@@ -5,10 +5,11 @@ use anyhow::Result;
 use clap::Parser;
 use voom_cli::cli::{
     ArtifactCommand, Cli, Command, ComplianceCommand, NodeCommand, PlanCommand, PolicyCommand,
-    SchedulerCommand, WorkerCommand,
+    ProfileCommand, SchedulerCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, compliance, health, init, node, plan, policy, scan, scheduler, version, worker,
+    artifact, compliance, health, init, node, plan, policy, profile, scan, scheduler, version,
+    worker,
 };
 use voom_cli::envelope::{Local, emit_err};
 use voom_cli::logging;
@@ -202,6 +203,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Compliance(ref command) => dispatch_compliance(&cli, command.clone()).await,
         Command::Policy(ref command) => dispatch_policy(&cli, command.clone()).await,
         Command::Node(ref command) => dispatch_node(&cli, command.clone()).await,
+        Command::Profile(ref command) => dispatch_profile(&cli, command.clone()).await,
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
@@ -257,6 +259,23 @@ async fn dispatch_node(cli: &Cli, command: NodeCommand) -> Result<Exit> {
     };
     Ok(Exit::from_run_code(
         node::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_profile(cli: &Cli, command: ProfileCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("profile", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        profile::run(&cfg.database_url, local, command).await?,
     ))
 }
 

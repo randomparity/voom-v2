@@ -15,7 +15,7 @@ use voom_worker_protocol::{
 };
 
 use crate::cases::policy_inputs::PolicyInputFromScanInput;
-use crate::cases::{count, cp};
+use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::{
     WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::WorkflowTicketPayload,
 };
@@ -1086,4 +1086,56 @@ impl ClientHandle for SuccessClient {
             ),
         })
     }
+}
+
+#[tokio::test]
+async fn unknown_named_profile_blocks_before_planning() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "transcode-unknown-profile",
+            "policy \"transcode unknown profile\" { phase normalize { transcode video to hevc using profile \"nope\" } }",
+        )
+        .await
+        .unwrap();
+    let input_set_id = transcodable_input(&cp, "transcode-unknown-input").await;
+
+    let err = cp
+        .generate_compliance_report(policy.version.id, input_set_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+}
+
+#[tokio::test]
+async fn known_named_profile_resolves_default_hevc_before_planning() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "transcode-default-hevc",
+            "policy \"transcode default hevc\" { phase normalize { transcode video to hevc } }",
+        )
+        .await
+        .unwrap();
+    let input_set_id = transcodable_input(&cp, "transcode-default-input").await;
+
+    let data = cp
+        .generate_compliance_report(policy.version.id, input_set_id)
+        .await
+        .unwrap();
+
+    let node = data
+        .plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == "transcode_video")
+        .unwrap();
+    assert_eq!(node.status, voom_plan::NodeStatus::Planned);
+    assert_eq!(node.operation_payload["profile"], "default-hevc");
+    assert_eq!(
+        node.operation_payload["resolved_profile"]["encoder"],
+        "libx265"
+    );
+    assert_eq!(node.operation_payload["resolved_profile"]["crf"], 23);
 }

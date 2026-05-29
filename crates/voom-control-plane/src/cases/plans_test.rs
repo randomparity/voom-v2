@@ -1,7 +1,7 @@
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 
 use super::*;
-use crate::cases::cp;
+use crate::cases::{cp, transcodable_input};
 
 #[test]
 fn plan_policy_source_with_input_draft_does_not_need_database() {
@@ -90,4 +90,55 @@ async fn count_rows(cp: &crate::ControlPlane, table: &str) -> i64 {
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn dry_run_unknown_named_profile_blocks_before_planning() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "transcode-unknown-profile",
+            "policy \"transcode unknown profile\" { phase normalize { transcode video to hevc using profile \"nope\" } }",
+        )
+        .await
+        .unwrap();
+    let input_set_id = transcodable_input(&cp, "dry-run-unknown-input").await;
+
+    let err = cp
+        .plan_accepted_policy_version_with_input_set(policy.version.id, input_set_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFIG_INVALID");
+}
+
+#[tokio::test]
+async fn dry_run_known_named_profile_resolves_default_hevc_before_planning() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "transcode-default-hevc",
+            "policy \"transcode default hevc\" { phase normalize { transcode video to hevc } }",
+        )
+        .await
+        .unwrap();
+    let input_set_id = transcodable_input(&cp, "dry-run-default-input").await;
+
+    let plan = cp
+        .plan_accepted_policy_version_with_input_set(policy.version.id, input_set_id)
+        .await
+        .unwrap();
+
+    let node = plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == "transcode_video")
+        .unwrap();
+    assert_eq!(node.status, voom_plan::NodeStatus::Planned);
+    assert_eq!(node.operation_payload["profile"], "default-hevc");
+    assert_eq!(
+        node.operation_payload["resolved_profile"]["encoder"],
+        "libx265"
+    );
+    assert_eq!(node.operation_payload["resolved_profile"]["crf"], 23);
 }

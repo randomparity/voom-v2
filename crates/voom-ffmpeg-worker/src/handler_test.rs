@@ -50,14 +50,14 @@ async fn unsupported_output_contract_is_rejected_before_ffmpeg() {
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
     let mut request = request(dir.path(), &input).await;
-    request.output.container = "mp4".to_owned();
+    // mp4 is now supported; use avi which is not supported
+    request.output.container = "avi".to_owned();
 
     let err = handle_transcode_video(&request, &config(dir.path()))
         .await
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("mkv"));
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
@@ -67,6 +67,7 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
     let mut request = request(dir.path(), &input).await;
+    // libx264 is not a recognized encoder — descriptor validation rejects it
     request.profile.encoder = "libx264".to_owned();
 
     let err = handle_transcode_video(&request, &config(dir.path()))
@@ -74,7 +75,45 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("default-hevc"));
+    // error message should mention the profile name (default-hevc) or the encoder
+    assert!(
+        err.to_string().contains("default-hevc") || err.to_string().contains("descriptor"),
+        "unexpected error: {err}"
+    );
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn unavailable_encoder_is_config_invalid_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.profile = TranscodeVideoProfile {
+        name: "av1-archive".to_owned(),
+        target_codec: "av1".to_owned(),
+        encoder: "libaom-av1".to_owned(),
+        crf: 35,
+        preset: "8".to_owned(),
+        tune: None,
+        codec_profile: None,
+        codec_level: None,
+        pixel_format: None,
+        max_width: None,
+        max_height: None,
+        copy_compatible: false,
+    };
+    request.output.video_codec = "av1".to_owned();
+    let config = config(dir.path())
+        .with_available_video_encoders(["libx265".to_owned(), "libsvtav1".to_owned()]);
+
+    let err = handle_transcode_video(&request, &config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string().contains("libaom-av1") && err.to_string().contains("not available"),
+        "unexpected error: {err}"
+    );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
@@ -88,8 +127,9 @@ async fn malformed_request_payload_is_accepted_then_terminal_error() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -126,8 +166,9 @@ async fn transcode_audio_operation_decodes_typed_payload() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -148,8 +189,9 @@ async fn extract_audio_operation_decodes_typed_payload() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -266,6 +308,163 @@ async fn extract_audio_rejects_dropped_source_language_or_title() {
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
 }
 
+// ---- Task 7.2 tests ----
+
+#[tokio::test]
+async fn copy_video_with_nonconforming_codec_fails_loudly() {
+    // copy_video=true but ffprobe reports h264 (not the target hevc)
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    // ffprobe reports h264 for the input
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            TranscodeVideoError::MalformedWorkerResult { .. }
+                | TranscodeVideoError::ConfigInvalid { .. }
+        ),
+        "expected MalformedWorkerResult or ConfigInvalid, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn mp4_output_contract_now_accepted() {
+    // mp4 was previously rejected; now it is a supported container
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.output.container = "mp4".to_owned();
+    req.output.path = dir
+        .path()
+        .join("stage")
+        .join("input.hevc.mp4")
+        .to_string_lossy()
+        .into_owned();
+    // ffprobe returns mp4/hevc for output validation
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"mp4\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    // Should succeed — mp4 is now accepted
+    let result = handle_transcode_video(&req, &config).await;
+    assert!(
+        result.is_ok(),
+        "mp4 output should now be accepted: {result:?}"
+    );
+    let result = result.unwrap();
+    assert_eq!(result.output_container, "mp4");
+}
+
+#[tokio::test]
+async fn output_dims_and_pixfmt_populated_from_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let req = request(dir.path(), &input).await;
+    let config = config(dir.path());
+
+    let result = handle_transcode_video(&req, &config).await.unwrap();
+    assert_eq!(result.output_width, 1920);
+    assert_eq!(result.output_height, 1080);
+    assert_eq!(result.output_pixel_format, "yuv420p");
+    assert!(!result.copied_video);
+}
+
+#[tokio::test]
+async fn copy_video_sets_copied_video_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    // ffprobe returns hevc/mkv — matches the target codec
+    let config = config(dir.path());
+
+    let result = handle_transcode_video(&req, &config).await.unwrap();
+    assert!(result.copied_video);
+}
+
+#[tokio::test]
+async fn copy_video_with_constrained_profile_but_unknown_source_profile_fails_loudly() {
+    // Profile constrains codec_profile=main10, but the source probe reports no
+    // profile field (None). We cannot prove conformance → must fail loudly.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    req.profile.codec_profile = Some("main10".to_owned());
+    req.profile.pixel_format = Some("yuv420p10le".to_owned());
+    // ffprobe reports hevc (matches codec) but emits NO "profile" key → None.
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p10le\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::MalformedWorkerResult { .. }),
+        "expected MalformedWorkerResult for unknown source codec_profile, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("codec_profile"),
+        "error should mention codec_profile: {err}"
+    );
+}
+
+#[tokio::test]
+async fn multi_video_stream_source_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let req = request(dir.path(), &input).await;
+    // ffprobe reports two video streams.
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"},{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":640,\"height\":360,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::ConfigInvalid { .. }),
+        "expected ConfigInvalid for multi-video-stream source, got: {err}"
+    );
+    assert!(
+        err.to_string().contains('2'),
+        "error should name the video stream count: {err}"
+    );
+}
+
+fn config_with_probe(root: &Path, probe_script: &str) -> FfmpegConfig {
+    let ffmpeg = stub_bin(
+        root,
+        "ffmpeg",
+        "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+    );
+    let ffprobe = stub_bin(root, "ffprobe", probe_script);
+    FfmpegConfig::new(
+        ffmpeg,
+        ffprobe,
+        "ffmpeg version test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+}
+
+// ---- End Task 7.2 tests ----
+
 async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
     let stage = root.join("stage");
     tokio::fs::create_dir(&stage).await.unwrap();
@@ -298,6 +497,7 @@ async fn request(root: &Path, input: &Path) -> TranscodeVideoRequest {
             overwrite: false,
         },
         profile: TranscodeVideoProfile::default_hevc(),
+        copy_video: false,
     }
 }
 
@@ -307,10 +507,12 @@ fn config(root: &Path) -> FfmpegConfig {
         "ffmpeg",
         "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
     );
+    // ffprobe returns the same JSON for both probe_input and probe_output calls.
+    // Includes width/height/pix_fmt so both probes succeed.
     let ffprobe = stub_bin(
         root,
         "ffprobe",
-        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\"}]}\nJSON\n",
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
     );
     FfmpegConfig::new(
         ffmpeg,
@@ -465,9 +667,12 @@ fn extract_audio_request(
     }
 }
 
-fn config_path() -> FfmpegConfig {
-    let dir = tempfile::tempdir().unwrap().keep();
-    config(&dir)
+/// Returns a config backed by stub binaries plus the `TempDir` guard. Hold the
+/// guard for the test's duration so the tempdir is cleaned up afterward.
+fn config_path() -> (FfmpegConfig, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    (config, dir)
 }
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -509,6 +714,37 @@ fn assert_terminal_error(frame: &ProgressFrame, class: FailureClass, code: Error
     assert_eq!(*actual_code, code);
     assert!(!message.trim().is_empty());
     assert!(payload.is_some());
+}
+
+fn input_probe_with_codec(codec: &str) -> InputProbe {
+    InputProbe {
+        width: 1920,
+        height: 1080,
+        codec: codec.to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        codec_profile: None,
+        codec_level: None,
+        video_stream_count: 1,
+    }
+}
+
+#[test]
+fn validate_copy_codec_accepts_h265_alias_against_hevc_target() {
+    let probe = input_probe_with_codec("h265");
+    assert!(validate_copy_codec("hevc", &probe).is_ok());
+}
+
+#[test]
+fn validate_copy_codec_accepts_hevc_against_h265_target() {
+    let probe = input_probe_with_codec("hevc");
+    assert!(validate_copy_codec("h265", &probe).is_ok());
+}
+
+#[test]
+fn validate_copy_codec_rejects_mismatched_codec() {
+    let probe = input_probe_with_codec("h264");
+    let err = validate_copy_codec("hevc", &probe).unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
 }
 
 #[cfg(unix)]

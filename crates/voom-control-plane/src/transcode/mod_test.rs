@@ -7,9 +7,19 @@ use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
-    TranscodeVideoObservedFacts, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
-    VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
+    TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
+    VerifyArtifactResult, VerifyArtifactStatus,
 };
+
+use crate::transcode::resolve::ResolvedProfile;
+
+fn default_resolved() -> ResolvedProfile {
+    ResolvedProfile {
+        profile: TranscodeVideoProfile::default_hevc(),
+        output_container: "mkv".to_owned(),
+    }
+}
 
 #[tokio::test]
 async fn execute_records_verified_committed_transcode_result_and_events() {
@@ -28,9 +38,11 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &FakeTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap();
@@ -39,9 +51,9 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     assert!(
         report
             .staging_path
-            .ends_with("ticket-2/lease-3/Movie.hevc.mkv")
+            .ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv")
     );
-    assert!(report.target_path.ends_with("Movie.hevc.mkv"));
+    assert!(report.target_path.ends_with("Movie.default-hevc.hevc.mkv"));
     assert!(report.target_path.exists());
     assert_eq!(
         count_events(&cp, EventKind::ArtifactTranscodeStarted).await,
@@ -51,13 +63,33 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
         count_events(&cp, EventKind::ArtifactTranscodeSucceeded).await,
         1
     );
-    let recorded_staging_path = succeeded_staging_path(&cp).await;
+    assert_eq!(report.resolved_profile, "default-hevc");
+    assert_eq!(report.encoder, "libx265");
+    assert_eq!(report.target_codec, "hevc");
+    assert_eq!(report.output_container, "mkv");
+    assert!(!report.copied_video);
+    assert_eq!(report.output_width, 1280);
+    assert_eq!(report.output_height, 720);
+    assert_eq!(report.output_pixel_format, "yuv420p");
+
+    let succeeded = succeeded_payload(&cp).await;
+    assert_eq!(succeeded.profile_name, "default-hevc");
+    assert_eq!(succeeded.encoder, "libx265");
+    assert_eq!(succeeded.target_codec, "hevc");
+    assert_eq!(succeeded.output_container, "mkv");
+    assert!(!succeeded.copied_video);
+    assert_eq!(succeeded.output_width, 1280);
+    assert_eq!(succeeded.output_height, 720);
+    assert_eq!(succeeded.output_pixel_format, "yuv420p");
     assert!(
-        recorded_staging_path.ends_with("ticket-2/lease-3/Movie.hevc.mkv"),
-        "succeeded event recorded an empty/wrong staging_path: {recorded_staging_path:?}"
+        succeeded
+            .staging_path
+            .ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv"),
+        "succeeded event recorded an empty/wrong staging_path: {:?}",
+        succeeded.staging_path
     );
     assert_eq!(
-        recorded_staging_path,
+        succeeded.staging_path,
         report.staging_path.display().to_string()
     );
 }
@@ -79,9 +111,11 @@ async fn execute_rejects_non_hevc_worker_result_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &WrongCodecTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
@@ -106,17 +140,100 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &WrongInputFactsTranscodeDispatcher,
         &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
     )
     .await
     .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
     assert!(
-        !dir.path().join("out/Movie.hevc.mkv").exists(),
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
         "mismatched input facts must stop before commit"
+    );
+}
+
+#[tokio::test]
+async fn execute_rejects_copied_video_disagreement_before_commit() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+
+    let err = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
+        },
+        // default_resolved() is not copy_compatible, so request copy_video=false;
+        // a worker result claiming copied_video=true must be rejected.
+        &CopiedVideoDisagreementDispatcher,
+        &FakeVerifyDispatcher,
+        &FakeResultProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
+        "copied_video disagreement must stop before commit"
+    );
+}
+
+#[tokio::test]
+async fn execute_does_not_commit_when_staged_result_probe_fails() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+
+    let err = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
+        },
+        &FakeTranscodeDispatcher,
+        &FakeVerifyDispatcher,
+        &ErroringResultProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert!(
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
+        "a staged-result probe failure must not leave a committed target"
+    );
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactTranscodeSucceeded).await,
+        0
+    );
+    let snapshots = cp
+        .identity
+        .list_media_snapshots_by_version(seeded.0)
+        .await
+        .unwrap();
+    assert!(
+        snapshots.is_empty(),
+        "no result media snapshot should be recorded on probe failure"
     );
 }
 
@@ -149,6 +266,22 @@ impl TranscodeVideoDispatcher for WrongCodecTranscodeDispatcher {
 }
 
 #[derive(Debug)]
+struct CopiedVideoDisagreementDispatcher;
+
+#[async_trait]
+impl TranscodeVideoDispatcher for CopiedVideoDisagreementDispatcher {
+    async fn dispatch_transcode_video(
+        &self,
+        request: TranscodeVideoRequest,
+    ) -> Result<TranscodeVideoResult, voom_core::VoomError> {
+        std::fs::write(&request.output.path, b"hevc bytes").unwrap();
+        let mut result = transcode_result(request, "hevc");
+        result.copied_video = true;
+        Ok(result)
+    }
+}
+
+#[derive(Debug)]
 struct WrongInputFactsTranscodeDispatcher;
 
 #[async_trait]
@@ -162,6 +295,71 @@ impl TranscodeVideoDispatcher for WrongInputFactsTranscodeDispatcher {
         result.input_pre.size_bytes += 1;
         result.input_post = result.input_pre.clone();
         Ok(result)
+    }
+}
+
+#[derive(Debug)]
+struct FakeResultProbeDispatcher;
+
+#[async_trait]
+impl crate::transcode::commit::TranscodeResultProbeDispatcher for FakeResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        cp: &crate::ControlPlane,
+        request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<crate::transcode::commit::ProbedTranscodeResult, voom_core::VoomError> {
+        let mut tx = cp.pool.begin().await.unwrap();
+        let worker_id = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx)
+            .await?
+            .id;
+        tx.commit().await.unwrap();
+        let facts = voom_worker_protocol::ObservedFileFacts {
+            size_bytes: request.expected.size_bytes,
+            content_hash: request.expected.content_hash.clone(),
+            modified_at: None,
+            local_file_key: None,
+        };
+        Ok(crate::transcode::commit::ProbedTranscodeResult {
+            worker_id,
+            result: voom_worker_protocol::ProbeFileResult {
+                status: voom_worker_protocol::ProbeFileStatus::Probed,
+                provider: "ffprobe".to_owned(),
+                provider_version: "test".to_owned(),
+                pre_probe: facts.clone(),
+                post_probe: facts,
+                snapshot: serde_json::json!({
+                    "format": "sprint10-v1",
+                    "probe": {"provider": "ffprobe", "provider_version": "test"},
+                    "container": {"format_name": "matroska,webm"},
+                    "streams": [
+                        {
+                            "index": 0,
+                            "kind": "video",
+                            "codec_name": "hevc",
+                            "pixel_format": "yuv420p",
+                            "width": 1280,
+                            "height": 720
+                        }
+                    ]
+                }),
+            },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ErroringResultProbeDispatcher;
+
+#[async_trait]
+impl crate::transcode::commit::TranscodeResultProbeDispatcher for ErroringResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        _cp: &crate::ControlPlane,
+        _request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<crate::transcode::commit::ProbedTranscodeResult, voom_core::VoomError> {
+        Err(voom_core::VoomError::ExternalSystemUnavailable(
+            "transcode result probe failed: simulated transient worker error".to_owned(),
+        ))
     }
 }
 
@@ -211,6 +409,10 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         },
         output_container: "mkv".to_owned(),
         output_video_codec: codec.to_owned(),
+        output_width: 1280,
+        output_height: 720,
+        output_pixel_format: "yuv420p".to_owned(),
+        copied_video: false,
     }
 }
 
@@ -263,7 +465,9 @@ async fn seed_source(
     (file_version_id, file_location_id)
 }
 
-async fn succeeded_staging_path(cp: &crate::ControlPlane) -> String {
+async fn succeeded_payload(
+    cp: &crate::ControlPlane,
+) -> voom_events::payload::ArtifactTranscodeSucceededPayload {
     let page = cp
         .events()
         .list(
@@ -279,7 +483,7 @@ async fn succeeded_staging_path(cp: &crate::ControlPlane) -> String {
         .await
         .unwrap();
     match &page.items[0].envelope.payload {
-        voom_events::Event::ArtifactTranscodeSucceeded(p) => p.staging_path.clone(),
+        voom_events::Event::ArtifactTranscodeSucceeded(p) => p.clone(),
         other => panic!("expected ArtifactTranscodeSucceeded, got {other:?}"),
     }
 }

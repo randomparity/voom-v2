@@ -39,6 +39,7 @@ use voom_store::repo::{
     },
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
+    video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo},
     workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
@@ -82,6 +83,7 @@ pub struct ControlPlane {
     pub(crate) use_leases: SqliteUseLeaseRepo,
     pub(crate) policy_inputs: SqlitePolicyInputRepo,
     pub(crate) policies: SqlitePolicyRepo,
+    pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
 }
 
@@ -110,6 +112,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("use_leases", &self.use_leases)
             .field("policy_inputs", &self.policy_inputs)
             .field("policies", &self.policies)
+            .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
             .finish()
     }
@@ -206,6 +209,7 @@ impl ControlPlane {
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),
             policy_inputs: SqlitePolicyInputRepo::new(pool.clone()),
             policies: SqlitePolicyRepo::new(pool.clone()),
+            video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             pool,
             clock,
@@ -373,6 +377,27 @@ impl ControlPlane {
         filter: SchedulerDecisionFilter,
     ) -> Result<Vec<SchedulerDecision>, VoomError> {
         self.scheduler_decisions.list(filter).await
+    }
+
+    /// List the seeded video encode profiles, ordered by name.
+    ///
+    /// The `video_profiles` registry is read-only this sprint; this surface
+    /// powers `voom profile list`.
+    ///
+    /// # Errors
+    /// Propagates video-profile repository read errors.
+    pub async fn list_video_profiles(&self) -> Result<Vec<VideoProfile>, VoomError> {
+        self.video_profiles.list().await
+    }
+
+    /// Look up one video encode profile by registry name.
+    ///
+    /// Returns `None` for an unknown name; callers map that to `NOT_FOUND`.
+    ///
+    /// # Errors
+    /// Propagates video-profile repository read errors.
+    pub async fn get_video_profile(&self, name: &str) -> Result<Option<VideoProfile>, VoomError> {
+        self.video_profiles.get_by_name(name).await
     }
 
     #[cfg(any(test, feature = "test-support"))]

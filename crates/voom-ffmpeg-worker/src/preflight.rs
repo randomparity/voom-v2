@@ -14,10 +14,39 @@ pub struct FfmpegPreflight {
     pub ffmpeg_version: String,
     pub ffprobe_version: String,
     pub hevc_encoder: String,
+    pub svtav1_encoder: String,
+    pub libaom_encoder: String,
     pub aac_encoder: String,
     pub opus_encoder: String,
     pub matroska_muxer: String,
+    pub mp4_muxer: String,
     pub ogg_muxer: String,
+}
+
+impl FfmpegPreflight {
+    /// Returns true when the named video encoder was detected during preflight.
+    #[must_use]
+    pub fn has_encoder(&self, encoder: &str) -> bool {
+        match encoder {
+            "libx265" => !self.hevc_encoder.is_empty(),
+            "libsvtav1" => !self.svtav1_encoder.is_empty(),
+            "libaom-av1" => !self.libaom_encoder.is_empty(),
+            "aac" => !self.aac_encoder.is_empty(),
+            "libopus" => !self.opus_encoder.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Returns true when the named muxer was detected during preflight.
+    #[must_use]
+    pub fn has_muxer(&self, muxer: &str) -> bool {
+        match muxer {
+            "matroska" | "mkv" => !self.matroska_muxer.is_empty(),
+            "mp4" => !self.mp4_muxer.is_empty(),
+            "ogg" => !self.ogg_muxer.is_empty(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -72,11 +101,17 @@ pub fn preflight_with_paths(
                 .arg("-encoders"),
         ),
     )?;
-    let hevc_encoder = parse_libx265_encoder(&encoders).ok_or_else(|| {
+    let hevc_encoder = parse_token(&encoders, "libx265").ok_or_else(|| {
         FFmpegPreflightError::Failed(
             "ffmpeg does not advertise required libx265 encoder".to_owned(),
         )
     })?;
+    let svtav1_encoder = parse_token(&encoders, "libsvtav1").ok_or_else(|| {
+        FFmpegPreflightError::Failed(
+            "ffmpeg does not advertise required libsvtav1 encoder".to_owned(),
+        )
+    })?;
+    let libaom_encoder = parse_token(&encoders, "libaom-av1").unwrap_or_default();
     let aac_encoder = parse_token(&encoders, "aac").ok_or_else(|| {
         FFmpegPreflightError::Failed("ffmpeg does not advertise required aac encoder".to_owned())
     })?;
@@ -92,6 +127,9 @@ pub fn preflight_with_paths(
     let matroska_muxer = parse_token(&muxers, "matroska").ok_or_else(|| {
         FFmpegPreflightError::Failed("ffmpeg does not advertise required matroska muxer".to_owned())
     })?;
+    let mp4_muxer = parse_token(&muxers, "mp4").ok_or_else(|| {
+        FFmpegPreflightError::Failed("ffmpeg does not advertise required mp4 muxer".to_owned())
+    })?;
     let ogg_muxer = parse_token(&muxers, "ogg").ok_or_else(|| {
         FFmpegPreflightError::Failed("ffmpeg does not advertise required ogg muxer".to_owned())
     })?;
@@ -102,9 +140,12 @@ pub fn preflight_with_paths(
         ffmpeg_version,
         ffprobe_version,
         hevc_encoder,
+        svtav1_encoder,
+        libaom_encoder,
         aac_encoder,
         opus_encoder,
         matroska_muxer,
+        mp4_muxer,
         ogg_muxer,
     })
 }
@@ -208,10 +249,6 @@ fn command_output(command: &mut Command) -> io::Result<Output> {
 
 fn is_text_file_busy(err: &io::Error) -> bool {
     err.raw_os_error() == Some(26)
-}
-
-fn parse_libx265_encoder(encoders: &str) -> Option<String> {
-    parse_token(encoders, "libx265")
 }
 
 fn parse_token(text: &str, token: &str) -> Option<String> {

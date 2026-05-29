@@ -1,6 +1,6 @@
 [
   {
-    "code": "unsupported_transcode_shape",
+    "code": "invalid_video_profile_setting",
     "severity": "error",
     "stage": "validate",
     "span": {
@@ -11,7 +11,7 @@
       "line": 3,
       "column": 5
     },
-    "message": "only `transcode video to hevc {}` is supported in Sprint 12",
+    "message": "inline profile is missing mandatory `encoder`",
     "suggestion": null,
     "related": []
   }

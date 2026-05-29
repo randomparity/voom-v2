@@ -1378,6 +1378,37 @@ async fn dispatch_control_plane_transcode(
     options: &WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
     let _ = workflow_payload;
+    // Parse the resolved video profile from the ticket payload (embedded by
+    // binding.rs from the planner node payload per the pinned Phase 5↔6
+    // contract). This is the single resolution path — the profile was already
+    // resolved at planning time; we only deserialize it here.
+    let resolved_profile_value = payload
+        .get("resolved_profile")
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "transcode ticket {} missing resolved_profile",
+                ticket.id
+            ))
+        })?
+        .clone();
+    let resolved_profile: voom_worker_protocol::TranscodeVideoProfile =
+        serde_json::from_value(resolved_profile_value).map_err(|err| {
+            VoomError::Config(format!(
+                "transcode ticket {} resolved_profile malformed: {err}",
+                ticket.id
+            ))
+        })?;
+    let output_container = payload
+        .get("container")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            VoomError::Config(format!("transcode ticket {} missing container", ticket.id))
+        })?
+        .to_owned();
+    let resolved = crate::transcode::resolve::ResolvedProfile {
+        profile: resolved_profile,
+        output_container,
+    };
     let input = ExecuteTranscodeVideoInput {
         job_id: ticket.job_id.ok_or_else(|| {
             VoomError::Config(format!("transcode ticket {} missing job_id", ticket.id))
@@ -1392,6 +1423,7 @@ async fn dispatch_control_plane_transcode(
             .map(voom_core::FileLocationId),
         staging_root: options.transcode_staging_root.clone(),
         target_dir: options.transcode_target_dir.clone(),
+        resolved,
     };
     let report = match execute_transcode_video_with_dispatchers(
         control,
@@ -1403,6 +1435,7 @@ async fn dispatch_control_plane_transcode(
             options,
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
+        &crate::transcode::commit::BundledTranscodeResultProbeDispatcher,
     )
     .await
     {
