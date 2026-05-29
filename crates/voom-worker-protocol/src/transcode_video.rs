@@ -19,6 +19,18 @@ pub fn is_supported_transcode_video_codec(codec: &str) -> bool {
         || codec.eq_ignore_ascii_case(TRANSCODE_VIDEO_CODEC_AV1)
 }
 
+/// Normalizes codec profile/level tokens for comparison. ffprobe reports e.g.
+/// `"Main 10"` while a profile uses `"main10"`; collapse case and whitespace so
+/// the two compare equal.
+#[must_use]
+pub fn normalize_codec_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// Returns the canonical codec token (`"hevc"` or `"av1"`) for a recognized
 /// codec name or alias, or `None` when unrecognized.
 #[must_use]

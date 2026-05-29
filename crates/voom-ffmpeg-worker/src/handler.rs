@@ -271,19 +271,6 @@ pub async fn handle_transcode_video(
     })
 }
 
-/// Normalizes a codec profile/level token for comparison.
-///
-/// ffprobe reports e.g. `"Main 10"` while a profile uses `"main10"`.
-/// Collapse case and whitespace. Mirrors `normalize_codec_token` in
-/// `voom-plan/src/planner.rs`.
-fn normalize_codec_token(token: &str) -> String {
-    token
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 /// Before emitting `-c:v copy`, confirm the source satisfies all constraints
 /// the profile imposes. Fails loudly on any mismatch — never silently
 /// re-encodes or copies a non-conforming stream.
@@ -325,7 +312,8 @@ fn codec_tokens_match(source: &str, target: &str) -> bool {
     ) {
         return source_canonical == target_canonical;
     }
-    normalize_codec_token(source) == normalize_codec_token(target)
+    voom_worker_protocol::normalize_codec_token(source)
+        == voom_worker_protocol::normalize_codec_token(target)
 }
 
 fn validate_copy_dimensions(
@@ -403,7 +391,9 @@ fn validate_copy_codec_profile(
             ),
         ));
     };
-    if normalize_codec_token(source_cp) != normalize_codec_token(required_cp) {
+    if voom_worker_protocol::normalize_codec_token(source_cp)
+        != voom_worker_protocol::normalize_codec_token(required_cp)
+    {
         return Err(malformed_worker_result(
             "copy_video",
             format!("copy_video source codec_profile `{source_cp}` != required `{required_cp}`"),
@@ -429,7 +419,9 @@ fn validate_copy_codec_level(
             ),
         ));
     };
-    if normalize_codec_token(source_cl) != normalize_codec_token(required_cl) {
+    if voom_worker_protocol::normalize_codec_token(source_cl)
+        != voom_worker_protocol::normalize_codec_token(required_cl)
+    {
         return Err(malformed_worker_result(
             "copy_video",
             format!("copy_video source codec_level `{source_cl}` != required `{required_cl}`"),

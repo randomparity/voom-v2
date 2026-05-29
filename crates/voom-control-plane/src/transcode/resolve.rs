@@ -164,7 +164,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
 
     // Pixel format must match if constrained.
     if let Some(target_pf) = profile.pixel_format.as_deref() {
-        let Some(observed_pf) = video_stream_field(snapshot, "pixel_format") else {
+        let Some(observed_pf) = voom_plan::video_stream_field(snapshot, "pixel_format") else {
             return false;
         };
         if !observed_pf.eq_ignore_ascii_case(target_pf) {
@@ -175,49 +175,29 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
     // Codec profile must match if constrained (normalize whitespace/case like the planner).
     // Cross-reference: planner.rs::codec_profile_needs_change uses the same normalization.
     if let Some(target_cp) = profile.codec_profile.as_deref() {
-        let Some(observed_cp) = video_stream_field(snapshot, "profile") else {
+        let Some(observed_cp) = voom_plan::video_stream_field(snapshot, "profile") else {
             return false;
         };
-        if normalize_codec_token(observed_cp) != normalize_codec_token(target_cp) {
+        if voom_worker_protocol::normalize_codec_token(observed_cp)
+            != voom_worker_protocol::normalize_codec_token(target_cp)
+        {
             return false;
         }
     }
 
     // Codec level must match if constrained.
     if let Some(target_cl) = profile.codec_level.as_deref() {
-        let Some(observed_cl) = video_stream_field(snapshot, "level") else {
+        let Some(observed_cl) = voom_plan::video_stream_field(snapshot, "level") else {
             return false;
         };
-        if normalize_codec_token(observed_cl) != normalize_codec_token(target_cl) {
+        if voom_worker_protocol::normalize_codec_token(observed_cl)
+            != voom_worker_protocol::normalize_codec_token(target_cl)
+        {
             return false;
         }
     }
 
     true
-}
-
-/// Returns the value of a field from the first video stream in the snapshot's
-/// `stream_summary.streams` array.
-fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
-    snapshot
-        .stream_summary
-        .get("streams")
-        .and_then(serde_json::Value::as_array)?
-        .iter()
-        .find(|s| s.get("kind").and_then(serde_json::Value::as_str) == Some("video"))
-        .and_then(|s| s.get(key))
-        .and_then(serde_json::Value::as_str)
-}
-
-/// Normalizes codec profile/level tokens for comparison. ffprobe may report
-/// `"Main 10"` while a profile uses `"main10"`. Matches the normalization in
-/// `voom_plan::planner::normalize_codec_token`.
-fn normalize_codec_token(token: &str) -> String {
-    token
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 #[cfg(test)]

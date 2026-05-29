@@ -131,13 +131,14 @@ fn transcode_video_contract_helpers_pin_canonical_values_and_aliases() {
     assert!(is_supported_transcode_video_codec("H265"));
     assert!(!is_supported_transcode_video_container("avi"));
     assert!(!is_supported_transcode_video_codec("h264"));
+}
 
-    assert!(is_default_hevc_profile(
-        &TranscodeVideoProfile::default_hevc()
-    ));
-    let mut profile = TranscodeVideoProfile::default_hevc();
-    profile.name = "other".to_owned();
-    assert!(!is_default_hevc_profile(&profile));
+#[test]
+fn normalize_codec_token_collapses_case_and_whitespace() {
+    assert_eq!(normalize_codec_token("Main 10"), "main10");
+    assert_eq!(normalize_codec_token("main10"), "main10");
+    assert_eq!(normalize_codec_token("  HEVC  "), "hevc");
+    assert_eq!(normalize_codec_token(""), "");
 }
 
 fn observed_facts(content_hash: &str) -> TranscodeVideoObservedFacts {

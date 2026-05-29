@@ -37,9 +37,7 @@ pub use audio::{
     TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
 };
 pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
-pub use encoder_caps::{
-    EncoderDescriptor, PresetDomain, all_encoder_descriptors, encoder_descriptor,
-};
+pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
 pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
 pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};
 pub use http::{
@@ -61,8 +59,8 @@ pub use transcode_video::{
     TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
     TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
-    TranscodeVideoStatus, canonical_video_codec, is_default_hevc_profile,
-    is_supported_transcode_video_codec, is_supported_transcode_video_container,
+    TranscodeVideoStatus, canonical_video_codec, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container, normalize_codec_token,
     validate_profile_against_descriptor,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};

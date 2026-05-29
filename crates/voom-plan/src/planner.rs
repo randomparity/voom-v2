@@ -1454,7 +1454,8 @@ fn codec_profile_needs_change(
             "snapshot video codec profile is unknown".to_owned(),
         ));
     };
-    Ok(normalize_codec_token(observed) != normalize_codec_token(target))
+    Ok(voom_worker_protocol::normalize_codec_token(observed)
+        != voom_worker_protocol::normalize_codec_token(target))
 }
 
 fn codec_level_needs_change(
@@ -1469,7 +1470,8 @@ fn codec_level_needs_change(
             "snapshot video codec level is unknown".to_owned(),
         ));
     };
-    Ok(normalize_codec_token(observed) != normalize_codec_token(target))
+    Ok(voom_worker_protocol::normalize_codec_token(observed)
+        != voom_worker_protocol::normalize_codec_token(target))
 }
 
 /// MP4 muxability gate. Returns `Some(shape)` to block; `None` when every
@@ -1538,17 +1540,6 @@ pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Op
         .find(|stream| stream.get("kind").and_then(serde_json::Value::as_str) == Some("video"))
         .and_then(|stream| stream.get(key))
         .and_then(serde_json::Value::as_str)
-}
-
-/// Normalizes codec profile/level tokens for comparison. ffprobe reports e.g.
-/// `"Main 10"` while a profile uses `"main10"`; collapse case and whitespace so
-/// the two compare equal. (Phase 7 needs the same normalization.)
-fn normalize_codec_token(token: &str) -> String {
-    token
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 fn transcode_video_payload(
