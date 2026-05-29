@@ -504,6 +504,36 @@ fn scale_args_not_emitted_when_no_cap_set() {
     assert!(scale_args(&profile, 9999, 9999).is_empty());
 }
 
+#[test]
+fn scale_args_emitted_for_width_only_cap_when_source_wider() {
+    let mut profile = profile_1080p();
+    profile.max_width = Some(1920);
+    profile.max_height = None;
+    let args = scale_args(&profile, 3840, 1080);
+    let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(strs[0], "-vf");
+    assert!(strs[1].contains("min(1920,iw)"));
+}
+
+#[test]
+fn scale_args_emitted_for_height_only_cap_when_source_taller() {
+    let mut profile = profile_1080p();
+    profile.max_width = None;
+    profile.max_height = Some(1080);
+    let args = scale_args(&profile, 1920, 2160);
+    let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(strs[0], "-vf");
+    assert!(strs[1].contains("min(1080,ih)"));
+}
+
+#[test]
+fn scale_args_not_emitted_for_single_cap_within_bound() {
+    let mut profile = profile_1080p();
+    profile.max_width = Some(1920);
+    profile.max_height = None;
+    assert!(scale_args(&profile, 1280, 9999).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Previously existing tests - updated for new run_ffmpeg_transcode signature
 // ---------------------------------------------------------------------------

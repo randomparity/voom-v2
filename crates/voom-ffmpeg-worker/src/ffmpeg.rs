@@ -242,15 +242,17 @@ pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, Ffm
 /// Returns the scale filter arguments for aspect-preserving downscale-only.
 ///
 /// Only emits `-vf scale=...` when the source dimensions exceed the profile's
-/// caps. The filter forces even dimensions (required by most codecs).
+/// caps. A missing cap is treated as unbounded so a single-dimension cap is
+/// honored independently (matching policy validation and the planner, which
+/// treat `max_width` and `max_height` as independent). The filter forces even
+/// dimensions (required by most codecs).
 #[must_use]
 pub fn scale_args(profile: &TranscodeVideoProfile, src_w: u32, src_h: u32) -> Vec<OsString> {
-    let Some(cap_w) = profile.max_width else {
+    if profile.max_width.is_none() && profile.max_height.is_none() {
         return Vec::new();
-    };
-    let Some(cap_h) = profile.max_height else {
-        return Vec::new();
-    };
+    }
+    let cap_w = profile.max_width.unwrap_or(u32::MAX);
+    let cap_h = profile.max_height.unwrap_or(u32::MAX);
     if src_w <= cap_w && src_h <= cap_h {
         return Vec::new();
     }
