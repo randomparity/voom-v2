@@ -16,7 +16,10 @@ mod profile_envelope {
     #[tokio::test]
     async fn profile_list_emits_seeded_builtins() {
         let seeded = seed().await;
-        let out = profile_command(&seeded.url).args(["list"]).output().unwrap();
+        let out = profile_command(&seeded.url)
+            .args(["list"])
+            .output()
+            .unwrap();
         assert_eq!(out.status.code(), Some(0));
         let mut json = envelope(out.stdout);
         assert_eq!(json["command"], "profile");

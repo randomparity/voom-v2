@@ -87,7 +87,10 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
         "succeeded event recorded an empty/wrong staging_path: {:?}",
         succeeded.staging_path
     );
-    assert_eq!(succeeded.staging_path, report.staging_path.display().to_string());
+    assert_eq!(
+        succeeded.staging_path,
+        report.staging_path.display().to_string()
+    );
 }
 
 #[tokio::test]

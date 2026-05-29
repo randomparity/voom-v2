@@ -22,9 +22,7 @@ use voom_control_plane::cases::compliance::{ComplianceExecuteData, ComplianceExe
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
-use voom_policy::{
-    MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef,
-};
+use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
@@ -155,7 +153,12 @@ async fn run_case(case: &Case) -> CaseOutcome {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let source = tmp.path().join("Movie.mp4");
-    generate_fixture(&source, case.source_codec, case.source_width, case.source_height);
+    generate_fixture(
+        &source,
+        case.source_codec,
+        case.source_width,
+        case.source_height,
+    );
 
     let db = NamedTempFile::new().unwrap();
     let url = format!("sqlite://{}", db.path().display());
@@ -257,7 +260,11 @@ async fn assert_committed_result(
     let output_width = result["output_width"].as_u64().unwrap();
     let output_height = result["output_height"].as_u64().unwrap();
 
-    let committed = find_output(&tmp.join("out"), case.expected_output_glob, case.expected_container);
+    let committed = find_output(
+        &tmp.join("out"),
+        case.expected_output_glob,
+        case.expected_container,
+    );
     assert!(
         committed.is_file(),
         "expected committed output matching {}",
@@ -272,7 +279,10 @@ async fn assert_committed_result(
         .iter()
         .find(|snapshot| snapshot.id == media_snapshot_id)
         .unwrap();
-    assert_eq!(result_snapshot.payload["container"], case.expected_container);
+    assert_eq!(
+        result_snapshot.payload["container"],
+        case.expected_container
+    );
     assert_eq!(result_snapshot.payload["video_codec"], case.expected_codec);
     CommittedResult {
         file_version_id,
@@ -304,7 +314,10 @@ async fn assert_replans_as_no_op(
         .generate_compliance_report(policy_version_id, result_input.id)
         .await
         .unwrap();
-    assert_eq!(result_plan.plan.nodes[0].status, voom_plan::NodeStatus::NoOp);
+    assert_eq!(
+        result_plan.plan.nodes[0].status,
+        voom_plan::NodeStatus::NoOp
+    );
 }
 
 fn find_output(out_dir: &Path, prefix: &str, container: &str) -> std::path::PathBuf {
@@ -431,7 +444,10 @@ fn generate_fixture(path: &Path, codec: &str, width: u32, height: u32) {
         ])
         .status()
         .unwrap();
-    assert!(status.success(), "ffmpeg fixture generation failed: {status}");
+    assert!(
+        status.success(),
+        "ffmpeg fixture generation failed: {status}"
+    );
 }
 
 async fn start_worker(cp: &ControlPlane) -> TestWorkerLaunch {

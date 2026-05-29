@@ -396,10 +396,7 @@ impl ControlPlane {
     ///
     /// # Errors
     /// Propagates video-profile repository read errors.
-    pub async fn get_video_profile(
-        &self,
-        name: &str,
-    ) -> Result<Option<VideoProfile>, VoomError> {
+    pub async fn get_video_profile(&self, name: &str) -> Result<Option<VideoProfile>, VoomError> {
         self.video_profiles.get_by_name(name).await
     }
 
