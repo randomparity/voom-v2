@@ -4,13 +4,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use voom_core::{LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, OperationKind, TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CONTAINER,
-    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
-    TranscodeVideoRequest, TranscodeVideoResult, WorkerCredentials,
+    ClientHandle, OperationKind, TranscodeVideoExpectedFacts, TranscodeVideoInput,
+    TranscodeVideoOutput, TranscodeVideoRequest, TranscodeVideoResult, WorkerCredentials,
     is_supported_transcode_video_codec, is_supported_transcode_video_container,
 };
 
 use super::TranscodeVideoDispatcher;
+use super::resolve::ResolvedProfile;
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
 use crate::artifact::worker::{
@@ -45,6 +45,8 @@ impl TranscodeVideoDispatcher for BundledTranscodeVideoDispatcher {
 
 pub fn request_for(
     selected: &SelectedSource,
+    resolved: &ResolvedProfile,
+    copy_video: bool,
     staging_root: &Path,
     staging_path: &Path,
 ) -> Result<TranscodeVideoRequest, VoomError> {
@@ -61,25 +63,77 @@ pub fn request_for(
         output: TranscodeVideoOutput {
             staging_root: staging_root.to_string_lossy().into_owned(),
             path: staging_path.to_string_lossy().into_owned(),
-            container: TRANSCODE_VIDEO_CONTAINER.to_owned(),
-            video_codec: TRANSCODE_VIDEO_CODEC.to_owned(),
+            container: resolved.output_container.clone(),
+            video_codec: resolved.profile.target_codec.clone(),
             overwrite: false,
         },
-        profile: TranscodeVideoProfile::default_hevc(),
-        copy_video: false,
+        profile: resolved.profile.clone(),
+        copy_video,
     })
 }
 
 pub fn validate_result(
     selected: &SelectedSource,
+    request: &TranscodeVideoRequest,
     result: &TranscodeVideoResult,
 ) -> Result<(), VoomError> {
     if !is_supported_transcode_video_container(&result.output_container)
         || !is_supported_transcode_video_codec(&result.output_video_codec)
     {
         return Err(VoomError::MalformedWorkerResult(format!(
-            "transcode_video result expected mkv/hevc, got {}/{}",
+            "transcode_video result has unsupported container/codec: {}/{}",
             result.output_container, result.output_video_codec
+        )));
+    }
+    // Container and codec must match what was requested.
+    if !result
+        .output_container
+        .eq_ignore_ascii_case(&request.output.container)
+    {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result container `{}` does not match requested `{}`",
+            result.output_container, request.output.container
+        )));
+    }
+    if !voom_worker_protocol::canonical_video_codec(&result.output_video_codec)
+        .is_some_and(|c| c.eq_ignore_ascii_case(&request.output.video_codec))
+    {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result codec `{}` does not match requested `{}`",
+            result.output_video_codec, request.output.video_codec
+        )));
+    }
+    // copy_video flag must agree.
+    if result.copied_video != request.copy_video {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result copied_video={} but request copy_video={}",
+            result.copied_video, request.copy_video
+        )));
+    }
+    // Output dimensions must respect max caps when constrained.
+    if let Some(cap_w) = request.profile.max_width
+        && result.output_width > cap_w
+    {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result output_width {} exceeds cap {}",
+            result.output_width, cap_w
+        )));
+    }
+    if let Some(cap_h) = request.profile.max_height
+        && result.output_height > cap_h
+    {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result output_height {} exceeds cap {}",
+            result.output_height, cap_h
+        )));
+    }
+    // Pixel format must match when constrained.
+    if let Some(target_pf) = request.profile.pixel_format.as_deref()
+        && !result.output_pixel_format.eq_ignore_ascii_case(target_pf)
+    {
+        return Err(VoomError::MalformedWorkerResult(format!(
+            "transcode_video result pixel_format `{}` does not match requested `{}`",
+            result.output_pixel_format, target_pf
         )));
     }
     if result.input_pre != result.input_post {

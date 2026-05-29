@@ -8,6 +8,7 @@ use voom_core::{
     MediaSnapshotId, TicketId, VoomError,
 };
 use voom_store::repo::artifacts::ArtifactVerificationStatus;
+use voom_store::repo::identity::IdentityRepo;
 use voom_worker_protocol::TranscodeVideoResult;
 
 use crate::ControlPlane;
@@ -33,6 +34,9 @@ pub struct ExecuteTranscodeVideoInput {
     pub source_location_id: Option<FileLocationId>,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
+    /// The resolved video encode profile plus output container, threaded from
+    /// the ticket payload (binding.rs embeds it from the planner node payload).
+    pub resolved: resolve::ResolvedProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,6 +87,11 @@ impl ControlPlane {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "transcode execution flow keeps all I/O steps sequential and together; \
+              splitting would distribute context across multiple fn boundaries"
+)]
 pub(crate) async fn execute_transcode_video_with_dispatchers(
     cp: &ControlPlane,
     input: ExecuteTranscodeVideoInput,
@@ -91,19 +100,52 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
 ) -> Result<ExecuteTranscodeVideoReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
+
+    // Re-read the latest media snapshot for the source file version to decide
+    // copy_video. Uses the most recent snapshot (highest id), mirroring how
+    // the planner reads facts. If no snapshot exists, no copy (we cannot verify
+    // source compliance without observable facts).
+    let source_snapshot = {
+        let snapshots = cp
+            .identity
+            .list_media_snapshots_by_version(input.source_file_version_id)
+            .await?;
+        snapshots.into_iter().max_by_key(|s| s.id)
+    };
+    let copy_video = source_snapshot.as_ref().is_some_and(|s| {
+        let snapshot_input = crate::media_snapshot::planning_input(s);
+        resolve::decide_copy_video(&input.resolved.profile, &snapshot_input)
+    });
+
     let staging_path = stage::staging_path(
         &input.staging_root,
         input.ticket_id,
         input.lease_id,
         &selected.location.value,
+        &input.resolved.profile.name,
+        &input.resolved.profile.target_codec,
+        &input.resolved.output_container,
     )
     .await?;
-    let target_path = stage::target_path(&input.target_dir, &selected.location.value).await?;
+    let target_path = stage::target_path(
+        &input.target_dir,
+        &selected.location.value,
+        &input.resolved.profile.name,
+        &input.resolved.profile.target_codec,
+        &input.resolved.output_container,
+    )
+    .await?;
 
     events::record_started(cp, &input, selected.location.id, &staging_path).await?;
-    let request = dispatch::request_for(&selected, &input.staging_root, &staging_path)?;
-    let result = transcode.dispatch_transcode_video(request).await?;
-    dispatch::validate_result(&selected, &result)?;
+    let request = dispatch::request_for(
+        &selected,
+        &input.resolved,
+        copy_video,
+        &input.staging_root,
+        &staging_path,
+    )?;
+    let result = transcode.dispatch_transcode_video(request.clone()).await?;
+    dispatch::validate_result(&selected, &request, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;
 
     let staged =

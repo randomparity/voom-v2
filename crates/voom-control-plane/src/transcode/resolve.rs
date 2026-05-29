@@ -6,7 +6,7 @@
 
 use voom_core::VoomError;
 use voom_plan::inline_profile_id;
-use voom_policy::{VideoProfileRef, VideoProfileSettings};
+use voom_policy::{MediaSnapshotInput, VideoProfileRef, VideoProfileSettings};
 use voom_store::repo::video_profiles::{SqliteVideoProfileRepo, VideoProfileRepo};
 use voom_worker_protocol::TranscodeVideoProfile;
 
@@ -112,6 +112,112 @@ pub fn resolve_inline_profiles_in_policy(
         }
     }
     Ok(())
+}
+
+/// Decides whether the worker can stream-copy the video track rather than
+/// re-encoding it.
+///
+/// Returns `true` only when ALL of the following hold:
+/// - `profile.copy_compatible` is set (the profile explicitly opts in),
+/// - the source video codec already matches the target (`canonical_video_codec`
+///   alias-aware comparison, mirroring `planner.rs::transcode_video_needs_change`),
+/// - dimension caps are satisfied (source is within `max_width`/`max_height`),
+/// - if a target `pixel_format` is constrained, the source matches,
+/// - if a target `codec_profile`/`codec_level` is constrained, the source
+///   matches (using `normalize_codec_token`, as in `planner.rs`).
+///
+/// Any constrained observable that is unknown in the snapshot returns `false`
+/// (refuse to copy when we can't verify compliance).
+#[must_use]
+pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapshotInput) -> bool {
+    if !profile.copy_compatible {
+        return false;
+    }
+
+    // Codec must already be correct (alias-aware).
+    let Some(observed_codec) = snapshot.video_codec.as_deref() else {
+        return false;
+    };
+    let codec_matches = voom_worker_protocol::canonical_video_codec(observed_codec)
+        .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&profile.target_codec));
+    if !codec_matches {
+        return false;
+    }
+
+    // Dimensions must be within caps.
+    if let Some(cap_w) = profile.max_width {
+        let Some(width) = snapshot.width else {
+            return false;
+        };
+        if width > cap_w {
+            return false;
+        }
+    }
+    if let Some(cap_h) = profile.max_height {
+        let Some(height) = snapshot.height else {
+            return false;
+        };
+        if height > cap_h {
+            return false;
+        }
+    }
+
+    // Pixel format must match if constrained.
+    if let Some(target_pf) = profile.pixel_format.as_deref() {
+        let Some(observed_pf) = video_stream_field(snapshot, "pixel_format") else {
+            return false;
+        };
+        if !observed_pf.eq_ignore_ascii_case(target_pf) {
+            return false;
+        }
+    }
+
+    // Codec profile must match if constrained (normalize whitespace/case like the planner).
+    // Cross-reference: planner.rs::codec_profile_needs_change uses the same normalization.
+    if let Some(target_cp) = profile.codec_profile.as_deref() {
+        let Some(observed_cp) = video_stream_field(snapshot, "profile") else {
+            return false;
+        };
+        if normalize_codec_token(observed_cp) != normalize_codec_token(target_cp) {
+            return false;
+        }
+    }
+
+    // Codec level must match if constrained.
+    if let Some(target_cl) = profile.codec_level.as_deref() {
+        let Some(observed_cl) = video_stream_field(snapshot, "level") else {
+            return false;
+        };
+        if normalize_codec_token(observed_cl) != normalize_codec_token(target_cl) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Returns the value of a field from the first video stream in the snapshot's
+/// `stream_summary.streams` array.
+fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
+    snapshot
+        .stream_summary
+        .get("streams")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|s| s.get("kind").and_then(serde_json::Value::as_str) == Some("video"))
+        .and_then(|s| s.get(key))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Normalizes codec profile/level tokens for comparison. ffprobe may report
+/// `"Main 10"` while a profile uses `"main10"`. Matches the normalization in
+/// `voom_plan::planner::normalize_codec_token`.
+fn normalize_codec_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]

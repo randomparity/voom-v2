@@ -118,11 +118,27 @@ pub fn render_policy_transcode_payload(
     let target_codec = required_string(operation_payload, "target_codec")?;
     let container = required_string(operation_payload, "container")?;
     let profile = required_string(operation_payload, "profile")?;
+    // The planner embeds the full typed profile as `resolved_profile` (pinned
+    // Phase 5↔6 contract from Task 5.2). Thread it into the ticket payload so
+    // the executor can build the TranscodeVideoRequest without re-running
+    // resolution at dispatch time.
+    let resolved_profile = operation_payload
+        .get("resolved_profile")
+        .cloned()
+        .ok_or_else(|| {
+            BindingError::new("transcode_video node payload missing `resolved_profile`")
+        })?;
+    if !resolved_profile.is_object() {
+        return Err(BindingError::new(
+            "transcode_video node payload `resolved_profile` must be an object",
+        ));
+    }
     let mut payload = json!({
         "operation": "transcode_video",
         "target_codec": target_codec,
         "container": container,
         "profile": profile,
+        "resolved_profile": resolved_profile,
         "staging_root": staging_root,
         "target_dir": target_dir,
         "duration_ms": timing.duration_ms,

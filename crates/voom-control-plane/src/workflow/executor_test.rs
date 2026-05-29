@@ -1251,7 +1251,7 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 
     let result = fixture.first_ticket_result().await;
     let staging_path = result["staging_path"].as_str().unwrap();
-    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.hevc.mkv"));
+    assert!(staging_path.ends_with("ticket-1/lease-1/Movie.default-hevc.hevc.mkv"));
     assert_eq!(result["staged_artifact_handle_id"], 1);
     assert_eq!(result["staged_artifact_location_id"], 1);
     assert_eq!(result["verification_id"], 1);
@@ -2449,6 +2449,11 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
 }
 
 fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
+    // The resolved_profile is normally emitted by the planner (Task 5.2) and
+    // threaded via binding.rs into the ticket payload. Here we supply it
+    // directly so executor tests exercise the full dispatch path without
+    // running the planner.
+    let default_hevc = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
     WorkflowPlan {
         id: "policy-transcode-test".to_owned(),
         seed: 12,
@@ -2461,6 +2466,7 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
                 "target_codec": "hevc",
                 "container": "mkv",
                 "profile": "default-hevc",
+                "resolved_profile": serde_json::to_value(&default_hevc).unwrap(),
             }),
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),

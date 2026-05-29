@@ -7,9 +7,19 @@ use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{
-    TranscodeVideoObservedFacts, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
-    VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
+    TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus, VerifyArtifactObservedFacts, VerifyArtifactRequest,
+    VerifyArtifactResult, VerifyArtifactStatus,
 };
+
+use crate::transcode::resolve::ResolvedProfile;
+
+fn default_resolved() -> ResolvedProfile {
+    ResolvedProfile {
+        profile: TranscodeVideoProfile::default_hevc(),
+        output_container: "mkv".to_owned(),
+    }
+}
 
 #[tokio::test]
 async fn execute_records_verified_committed_transcode_result_and_events() {
@@ -28,6 +38,7 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &FakeTranscodeDispatcher,
         &FakeVerifyDispatcher,
@@ -39,9 +50,9 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     assert!(
         report
             .staging_path
-            .ends_with("ticket-2/lease-3/Movie.hevc.mkv")
+            .ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv")
     );
-    assert!(report.target_path.ends_with("Movie.hevc.mkv"));
+    assert!(report.target_path.ends_with("Movie.default-hevc.hevc.mkv"));
     assert!(report.target_path.exists());
     assert_eq!(
         count_events(&cp, EventKind::ArtifactTranscodeStarted).await,
@@ -53,7 +64,7 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
     );
     let recorded_staging_path = succeeded_staging_path(&cp).await;
     assert!(
-        recorded_staging_path.ends_with("ticket-2/lease-3/Movie.hevc.mkv"),
+        recorded_staging_path.ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv"),
         "succeeded event recorded an empty/wrong staging_path: {recorded_staging_path:?}"
     );
     assert_eq!(
@@ -79,6 +90,7 @@ async fn execute_rejects_non_hevc_worker_result_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &WrongCodecTranscodeDispatcher,
         &FakeVerifyDispatcher,
@@ -106,6 +118,7 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
             source_location_id: Some(seeded.1),
             staging_root: dir.path().join("stage"),
             target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
         },
         &WrongInputFactsTranscodeDispatcher,
         &FakeVerifyDispatcher,
@@ -115,7 +128,7 @@ async fn execute_rejects_worker_result_for_wrong_input_facts_before_commit() {
 
     assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
     assert!(
-        !dir.path().join("out/Movie.hevc.mkv").exists(),
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
         "mismatched input facts must stop before commit"
     );
 }
