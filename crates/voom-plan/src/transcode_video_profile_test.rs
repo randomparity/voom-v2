@@ -47,6 +47,19 @@ fn inline_hash_normalizes_codec_level_case_and_whitespace() {
 }
 
 #[test]
+fn inline_hash_stable_across_omitted_vs_default_optionals() {
+    let omitted = sample_settings(); // output_container: None, copy_compatible: None
+    let mut defaulted = sample_settings();
+    defaulted.output_container = Some("mkv".to_owned());
+    defaulted.copy_compatible = Some(false);
+    assert_eq!(
+        inline_profile_id(&omitted),
+        inline_profile_id(&defaulted),
+        "omitted optionals must resolve to the same inline id as the explicit defaults"
+    );
+}
+
+#[test]
 fn cpu_cost_lookup_is_deterministic() {
     assert_eq!(cpu_cost("libx265", "placebo"), "high");
     assert_eq!(cpu_cost("libx265", "medium"), "medium");

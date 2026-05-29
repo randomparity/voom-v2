@@ -36,12 +36,20 @@ fn canonical_form(s: &VideoProfileSettings) -> String {
     if let Some(v) = s.max_height {
         parts.push(format!("max_height={v}"));
     }
-    if let Some(v) = &s.output_container {
-        parts.push(format!("output_container={}", v.to_ascii_lowercase()));
-    }
-    if let Some(v) = s.copy_compatible {
-        parts.push(format!("copy_compatible={v}"));
-    }
+    // Always emit copy_compatible and output_container using the SAME resolved
+    // defaults `resolve::inline_to_worker_profile` applies, so an inline profile
+    // with these optionals omitted and one with them set to the defaults yield
+    // the byte-identical resolved profile AND the same inline-<hash> id.
+    let output_container = s
+        .output_container
+        .as_deref()
+        .unwrap_or("mkv")
+        .to_ascii_lowercase();
+    parts.push(format!("output_container={output_container}"));
+    parts.push(format!(
+        "copy_compatible={}",
+        s.copy_compatible.unwrap_or(false)
+    ));
     parts.join(";")
 }
 
