@@ -135,22 +135,6 @@ pub async fn record_staged_transcode(
     })
 }
 
-pub async fn record_result_snapshot(
-    cp: &ControlPlane,
-    file_version_id: FileVersionId,
-    target_path: &Path,
-    result: &TranscodeVideoResult,
-) -> Result<MediaSnapshot, VoomError> {
-    record_result_snapshot_with_dispatcher(
-        cp,
-        file_version_id,
-        target_path,
-        result,
-        &BundledTranscodeResultProbeDispatcher,
-    )
-    .await
-}
-
 pub(crate) async fn record_result_snapshot_with_dispatcher(
     cp: &ControlPlane,
     file_version_id: FileVersionId,

@@ -252,7 +252,17 @@ fn input_for(
     }
 }
 
+/// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
+/// the shared profile dir) so the bundled probe worker runs real ffprobe. The
+/// static mutex serializes any real-ffprobe cases in this binary: they share the
+/// single `target/debug/ffprobe` path, so a future second test would otherwise
+/// race silently (one test restoring the stub while another is probing). The
+/// guard restores the stub on drop.
 fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = SERIALIZE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = target_debug_binary("ffprobe");
     let hidden = path.with_file_name("ffprobe.video-transcode-flow-hidden");
     let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
@@ -267,6 +277,7 @@ fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
         path,
         hidden,
         restore: is_stub,
+        _lock: lock,
     }
 }
 
@@ -274,6 +285,7 @@ struct FfprobeSiblingGuard {
     path: PathBuf,
     hidden: PathBuf,
     restore: bool,
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for FfprobeSiblingGuard {

@@ -172,33 +172,20 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         commit::record_staged_transcode(cp, &input, selected.location.id, &staging_path, &result)
             .await?;
     let verified = verify_staged_transcode(cp, staged.artifact_handle_id, verify).await?;
-    let committed = cp
-        .commit_artifact(CommitArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-            target_path: target_path.clone(),
-        })
-        .await
-        .map_err(|err| VoomError::CommitFailure(err.to_string()))?;
-    let result_file_version_id = committed.result_file_version_id.ok_or_else(|| {
-        VoomError::Internal("committed transcode missing result_file_version_id".to_owned())
-    })?;
-    let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
-        VoomError::Internal("committed transcode missing result_file_location_id".to_owned())
-    })?;
-    let snapshot = commit::record_result_snapshot_with_dispatcher(
+    let committed = commit_and_probe_transcode_result(
         cp,
-        result_file_version_id,
+        staged.artifact_handle_id,
         &target_path,
         &result,
         result_probe,
     )
-    .await
-    .map_err(|err| {
-        VoomError::ExternalSystemUnavailable(format!(
-            "transcode result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
-            committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
-        ))
-    })?;
+    .await?;
+    let CommittedTranscodeResult {
+        commit_record_id,
+        result_file_version_id,
+        result_file_location_id,
+        snapshot,
+    } = committed;
     events::record_succeeded(
         cp,
         &input,
@@ -219,7 +206,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         staged_artifact_handle_id: staged.artifact_handle_id,
         staged_artifact_location_id: staged.artifact_location_id,
         verification_id: verified.verification_id,
-        commit_record_id: committed.commit_record_id,
+        commit_record_id,
         result_file_version_id,
         result_file_location_id,
         result_media_snapshot_id: snapshot.id,
@@ -233,6 +220,61 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         output_width: result.output_width,
         output_height: result.output_height,
         output_pixel_format: result.output_pixel_format.clone(),
+    })
+}
+
+struct CommittedTranscodeResult {
+    commit_record_id: ArtifactCommitRecordId,
+    result_file_version_id: FileVersionId,
+    result_file_location_id: FileLocationId,
+    snapshot: voom_store::repo::identity::MediaSnapshot,
+}
+
+/// Add-only commit the verified artifact, then probe the committed result
+/// through the durable scan/probe path and record its media snapshot.
+///
+/// A probe failure AFTER commit must not hide the committed result: the
+/// returned error embeds the commit record id and result FileVersion/FileLocation
+/// ids so an agent can inspect or re-probe (Sprint 15 failure taxonomy).
+async fn commit_and_probe_transcode_result(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &std::path::Path,
+    result: &TranscodeVideoResult,
+    result_probe: &dyn commit::TranscodeResultProbeDispatcher,
+) -> Result<CommittedTranscodeResult, VoomError> {
+    let committed = cp
+        .commit_artifact(CommitArtifactInput {
+            artifact_handle_id,
+            target_path: target_path.to_path_buf(),
+        })
+        .await
+        .map_err(|err| VoomError::CommitFailure(err.to_string()))?;
+    let result_file_version_id = committed.result_file_version_id.ok_or_else(|| {
+        VoomError::Internal("committed transcode missing result_file_version_id".to_owned())
+    })?;
+    let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
+        VoomError::Internal("committed transcode missing result_file_location_id".to_owned())
+    })?;
+    let snapshot = commit::record_result_snapshot_with_dispatcher(
+        cp,
+        result_file_version_id,
+        target_path,
+        result,
+        result_probe,
+    )
+    .await
+    .map_err(|err| {
+        VoomError::ExternalSystemUnavailable(format!(
+            "transcode result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
+            committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
+        ))
+    })?;
+    Ok(CommittedTranscodeResult {
+        commit_record_id: committed.commit_record_id,
+        result_file_version_id,
+        result_file_location_id,
+        snapshot,
     })
 }
 
