@@ -313,11 +313,7 @@ pub async fn run_ffmpeg_transcode(
     for arg in container_args(container, codec)? {
         command.arg(arg);
     }
-    command
-        .arg("-progress")
-        .arg("pipe:2")
-        .arg(output)
-        .kill_on_drop(true);
+    command.arg(output).kill_on_drop(true);
 
     let process_output = timeout(config.process_timeout, command.output())
         .await
@@ -361,8 +357,6 @@ pub async fn run_ffmpeg_transcode_audio(
         .arg("0")
         .arg("-f")
         .arg(audio_container_format(&request.output.container)?)
-        .arg("-progress")
-        .arg("pipe:2")
         .arg(output)
         .kill_on_drop(true);
 
@@ -411,8 +405,6 @@ pub async fn run_ffmpeg_extract_audio(
     command
         .arg("-f")
         .arg(audio_container_format(&request.output.container)?)
-        .arg("-progress")
-        .arg("pipe:2")
         .arg(output)
         .kill_on_drop(true);
 
