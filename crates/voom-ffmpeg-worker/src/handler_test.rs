@@ -390,6 +390,30 @@ async fn copy_video_with_constrained_profile_but_unknown_source_profile_fails_lo
     );
 }
 
+#[tokio::test]
+async fn multi_video_stream_source_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let req = request(dir.path(), &input).await;
+    // ffprobe reports two video streams.
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"},{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":640,\"height\":360,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::ConfigInvalid { .. }),
+        "expected ConfigInvalid for multi-video-stream source, got: {err}"
+    );
+    assert!(
+        err.to_string().contains('2'),
+        "error should name the video stream count: {err}"
+    );
+}
+
 fn config_with_probe(root: &Path, probe_script: &str) -> FfmpegConfig {
     let ffmpeg = stub_bin(
         root,

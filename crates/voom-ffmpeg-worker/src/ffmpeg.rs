@@ -43,6 +43,8 @@ pub enum FfmpegError {
     FfprobeFailed(String),
     #[error("output facts mismatch: {0}")]
     OutputFactsMismatch(String),
+    #[error("unsupported input: {0}")]
+    UnsupportedInput(String),
 }
 
 /// Facts probed from the output file after a successful transcode.

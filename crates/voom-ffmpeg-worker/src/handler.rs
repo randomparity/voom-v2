@@ -229,6 +229,16 @@ pub async fn handle_transcode_video(
     let input_probe = probe_input(config, &input_path)
         .await
         .map_err(TranscodeVideoError::from)?;
+    if input_probe.video_stream_count > 1 {
+        // The transcode maps only 0:v:0; a source with multiple video streams
+        // would silently drop the rest. Fail loud rather than lose data.
+        return Err(TranscodeVideoError::from(FfmpegError::UnsupportedInput(
+            format!(
+                "source has {} video streams; transcode_video supports exactly one",
+                input_probe.video_stream_count
+            ),
+        )));
+    }
 
     if request.copy_video {
         validate_copy_video_preconditions(request, &input_probe)?;
@@ -869,6 +879,10 @@ impl From<FfmpegError> for TranscodeVideoError {
             }
             FfmpegError::OutputFactsMismatch(message) => Self::MalformedWorkerResult {
                 payload: serde_json::json!({"stage": "output_probe", "message": message}),
+                message,
+            },
+            FfmpegError::UnsupportedInput(message) => Self::ConfigInvalid {
+                payload: serde_json::json!({"stage": "input_probe", "message": message}),
                 message,
             },
         }
