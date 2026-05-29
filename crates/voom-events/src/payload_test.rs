@@ -375,14 +375,21 @@ fn legacy_artifact_transcode_started_row_decodes_with_defaulted_fields() {
 
     let back: Event = serde_json::from_value(json).unwrap();
 
-    let Event::ArtifactTranscodeStarted(p) = back else {
-        panic!("expected ArtifactTranscodeStarted");
+    let expected = ArtifactTranscodeStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: String::new(),
+        encoder: String::new(),
+        target_codec: String::new(),
+        output_container: String::new(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
     };
-    assert_eq!(p.profile_name, "");
-    assert_eq!(p.encoder, "");
-    assert_eq!(p.target_codec, "");
-    assert_eq!(p.output_container, "");
-    assert_eq!(p.provider, Some("ffmpeg".to_owned()));
+    assert_eq!(back, Event::ArtifactTranscodeStarted(expected));
 }
 
 #[test]
@@ -407,18 +414,28 @@ fn legacy_artifact_transcode_succeeded_row_decodes_with_defaulted_fields() {
 
     let back: Event = serde_json::from_value(json).unwrap();
 
-    let Event::ArtifactTranscodeSucceeded(p) = back else {
-        panic!("expected ArtifactTranscodeSucceeded");
+    let expected = ArtifactTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        artifact_handle_id: 6,
+        artifact_location_id: 7,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: String::new(),
+        encoder: String::new(),
+        target_codec: String::new(),
+        output_container: "mkv".to_owned(),
+        output_video_codec: "hevc".to_owned(),
+        copied_video: false,
+        output_width: 0,
+        output_height: 0,
+        output_pixel_format: String::new(),
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
     };
-    assert_eq!(p.profile_name, "");
-    assert_eq!(p.encoder, "");
-    assert_eq!(p.target_codec, "");
-    assert!(!p.copied_video);
-    assert_eq!(p.output_width, 0);
-    assert_eq!(p.output_height, 0);
-    assert_eq!(p.output_pixel_format, "");
-    assert_eq!(p.output_container, "mkv");
-    assert_eq!(p.output_video_codec, "hevc");
+    assert_eq!(back, Event::ArtifactTranscodeSucceeded(expected));
 }
 
 #[test]
