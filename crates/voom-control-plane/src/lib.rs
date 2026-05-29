@@ -39,6 +39,7 @@ use voom_store::repo::{
     },
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
+    video_profiles::SqliteVideoProfileRepo,
     workers::SqliteWorkerRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
@@ -82,6 +83,7 @@ pub struct ControlPlane {
     pub(crate) use_leases: SqliteUseLeaseRepo,
     pub(crate) policy_inputs: SqlitePolicyInputRepo,
     pub(crate) policies: SqlitePolicyRepo,
+    pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
 }
 
@@ -110,6 +112,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("use_leases", &self.use_leases)
             .field("policy_inputs", &self.policy_inputs)
             .field("policies", &self.policies)
+            .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
             .finish()
     }
@@ -206,6 +209,7 @@ impl ControlPlane {
             use_leases: SqliteUseLeaseRepo::new(pool.clone()),
             policy_inputs: SqlitePolicyInputRepo::new(pool.clone()),
             policies: SqlitePolicyRepo::new(pool.clone()),
+            video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             pool,
             clock,
