@@ -62,15 +62,32 @@ async fn execute_records_verified_committed_transcode_result_and_events() {
         count_events(&cp, EventKind::ArtifactTranscodeSucceeded).await,
         1
     );
-    let recorded_staging_path = succeeded_staging_path(&cp).await;
+    assert_eq!(report.resolved_profile, "default-hevc");
+    assert_eq!(report.encoder, "libx265");
+    assert_eq!(report.target_codec, "hevc");
+    assert_eq!(report.output_container, "mkv");
+    assert!(!report.copied_video);
+    assert_eq!(report.output_width, 1280);
+    assert_eq!(report.output_height, 720);
+    assert_eq!(report.output_pixel_format, "yuv420p");
+
+    let succeeded = succeeded_payload(&cp).await;
+    assert_eq!(succeeded.profile_name, "default-hevc");
+    assert_eq!(succeeded.encoder, "libx265");
+    assert_eq!(succeeded.target_codec, "hevc");
+    assert_eq!(succeeded.output_container, "mkv");
+    assert!(!succeeded.copied_video);
+    assert_eq!(succeeded.output_width, 1280);
+    assert_eq!(succeeded.output_height, 720);
+    assert_eq!(succeeded.output_pixel_format, "yuv420p");
     assert!(
-        recorded_staging_path.ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv"),
-        "succeeded event recorded an empty/wrong staging_path: {recorded_staging_path:?}"
+        succeeded
+            .staging_path
+            .ends_with("ticket-2/lease-3/Movie.default-hevc.hevc.mkv"),
+        "succeeded event recorded an empty/wrong staging_path: {:?}",
+        succeeded.staging_path
     );
-    assert_eq!(
-        recorded_staging_path,
-        report.staging_path.display().to_string()
-    );
+    assert_eq!(succeeded.staging_path, report.staging_path.display().to_string());
 }
 
 #[tokio::test]
@@ -274,10 +291,9 @@ fn transcode_result(request: TranscodeVideoRequest, codec: &str) -> TranscodeVid
         },
         output_container: "mkv".to_owned(),
         output_video_codec: codec.to_owned(),
-        // Phase 7 will populate these from the ffprobe output.
-        output_width: 0,
-        output_height: 0,
-        output_pixel_format: String::new(),
+        output_width: 1280,
+        output_height: 720,
+        output_pixel_format: "yuv420p".to_owned(),
         copied_video: false,
     }
 }
@@ -331,7 +347,9 @@ async fn seed_source(
     (file_version_id, file_location_id)
 }
 
-async fn succeeded_staging_path(cp: &crate::ControlPlane) -> String {
+async fn succeeded_payload(
+    cp: &crate::ControlPlane,
+) -> voom_events::payload::ArtifactTranscodeSucceededPayload {
     let page = cp
         .events()
         .list(
@@ -347,7 +365,7 @@ async fn succeeded_staging_path(cp: &crate::ControlPlane) -> String {
         .await
         .unwrap();
     match &page.items[0].envelope.payload {
-        voom_events::Event::ArtifactTranscodeSucceeded(p) => p.staging_path.clone(),
+        voom_events::Event::ArtifactTranscodeSucceeded(p) => p.clone(),
         other => panic!("expected ArtifactTranscodeSucceeded, got {other:?}"),
     }
 }

@@ -55,6 +55,14 @@ pub struct ExecuteTranscodeVideoReport {
     pub result_media_snapshot_id: MediaSnapshotId,
     pub staging_path: PathBuf,
     pub target_path: PathBuf,
+    pub resolved_profile: String,
+    pub encoder: String,
+    pub target_codec: String,
+    pub output_container: String,
+    pub copied_video: bool,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub output_pixel_format: String,
 }
 
 #[async_trait]
@@ -161,21 +169,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let staged =
         commit::record_staged_transcode(cp, &input, selected.location.id, &staging_path, &result)
             .await?;
-    let verified = verify_artifact_with_dispatcher(
-        cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
-        verify,
-        &NoVerifyArtifactHooks,
-    )
-    .await?;
-    if verified.status != ArtifactVerificationStatus::Succeeded {
-        return Err(VoomError::VerificationFailure(format!(
-            "transcode artifact verification failed for {}",
-            staged.artifact_handle_id
-        )));
-    }
+    let verified = verify_staged_transcode(cp, staged.artifact_handle_id, verify).await?;
     let committed = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
@@ -216,7 +210,35 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
         result_media_snapshot_id: snapshot.id,
         staging_path,
         target_path,
+        resolved_profile: input.resolved.profile.name.clone(),
+        encoder: input.resolved.profile.encoder.clone(),
+        target_codec: input.resolved.profile.target_codec.clone(),
+        output_container: result.output_container.clone(),
+        copied_video: result.copied_video,
+        output_width: result.output_width,
+        output_height: result.output_height,
+        output_pixel_format: result.output_pixel_format.clone(),
     })
+}
+
+async fn verify_staged_transcode(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    verify: &dyn VerifyArtifactDispatcher,
+) -> Result<crate::artifact::verify::VerifyArtifactReport, VoomError> {
+    let verified = verify_artifact_with_dispatcher(
+        cp,
+        VerifyArtifactInput { artifact_handle_id },
+        verify,
+        &NoVerifyArtifactHooks,
+    )
+    .await?;
+    if verified.status != ArtifactVerificationStatus::Succeeded {
+        return Err(VoomError::VerificationFailure(format!(
+            "transcode artifact verification failed for {artifact_handle_id}"
+        )));
+    }
+    Ok(verified)
 }
 
 #[cfg(test)]
