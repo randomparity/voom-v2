@@ -318,40 +318,66 @@ fn validate_copy_video_preconditions(
         ));
     }
 
-    // Check constrained pixel format
-    if let Some(required_pf) = &profile.pixel_format
-        && !probe.pixel_format.is_empty()
-        && &probe.pixel_format != required_pf
-    {
-        return Err(malformed_worker_result(
-            "copy_video",
-            format!(
-                "copy_video source pixel_format `{}` != required `{}`",
-                probe.pixel_format, required_pf
-            ),
-        ));
+    // Check constrained pixel format. An unknown (empty) probe value under a
+    // constraint is non-conforming — we cannot prove the stream matches.
+    if let Some(required_pf) = &profile.pixel_format {
+        if probe.pixel_format.is_empty() {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video requires pixel_format `{required_pf}` but source pixel_format is unknown"
+                ),
+            ));
+        }
+        if &probe.pixel_format != required_pf {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video source pixel_format `{}` != required `{}`",
+                    probe.pixel_format, required_pf
+                ),
+            ));
+        }
     }
 
-    // Check constrained codec profile
-    if let Some(required_cp) = &profile.codec_profile
-        && let Some(source_cp) = &probe.codec_profile
-        && normalize_codec_token(source_cp) != normalize_codec_token(required_cp)
-    {
-        return Err(malformed_worker_result(
-            "copy_video",
-            format!("copy_video source codec_profile `{source_cp}` != required `{required_cp}`"),
-        ));
+    // Check constrained codec profile. An unknown (None) probe value under a
+    // constraint is non-conforming — fail loudly rather than copy blind.
+    if let Some(required_cp) = &profile.codec_profile {
+        let Some(source_cp) = &probe.codec_profile else {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video requires codec_profile `{required_cp}` but source codec_profile is unknown"
+                ),
+            ));
+        };
+        if normalize_codec_token(source_cp) != normalize_codec_token(required_cp) {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video source codec_profile `{source_cp}` != required `{required_cp}`"
+                ),
+            ));
+        }
     }
 
-    // Check constrained codec level
-    if let Some(required_cl) = &profile.codec_level
-        && let Some(source_cl) = &probe.codec_level
-        && normalize_codec_token(source_cl) != normalize_codec_token(required_cl)
-    {
-        return Err(malformed_worker_result(
-            "copy_video",
-            format!("copy_video source codec_level `{source_cl}` != required `{required_cl}`"),
-        ));
+    // Check constrained codec level. An unknown (None) probe value under a
+    // constraint is non-conforming — fail loudly rather than copy blind.
+    if let Some(required_cl) = &profile.codec_level {
+        let Some(source_cl) = &probe.codec_level else {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video requires codec_level `{required_cl}` but source codec_level is unknown"
+                ),
+            ));
+        };
+        if normalize_codec_token(source_cl) != normalize_codec_token(required_cl) {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!("copy_video source codec_level `{source_cl}` != required `{required_cl}`"),
+            ));
+        }
     }
 
     Ok(())

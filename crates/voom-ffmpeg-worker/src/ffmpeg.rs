@@ -95,29 +95,25 @@ pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 ///
 /// When `copy_video` is true, emits `-c:v copy` regardless of encoder.
 /// Otherwise branches on `profile.encoder` to emit the per-encoder flags.
-#[must_use]
-pub fn video_codec_args(profile: &TranscodeVideoProfile, copy_video: bool) -> Vec<OsString> {
+///
+/// # Errors
+/// Returns `FfmpegError::OutputFactsMismatch` for an unrecognized encoder.
+/// The contract validation in the handler rejects unknown encoders before
+/// reaching here; this arm is defensive and must never silently pass through.
+pub fn video_codec_args(
+    profile: &TranscodeVideoProfile,
+    copy_video: bool,
+) -> Result<Vec<OsString>, FfmpegError> {
     if copy_video {
-        return vec![OsString::from("-c:v"), OsString::from("copy")];
+        return Ok(vec![OsString::from("-c:v"), OsString::from("copy")]);
     }
     match profile.encoder.as_str() {
-        "libx265" => video_codec_args_x265(profile),
-        "libsvtav1" => video_codec_args_svtav1(profile),
-        "libaom-av1" => video_codec_args_libaom(profile),
-        other => {
-            // Unknown encoder — pass it through; the preflight and contract
-            // validation should have caught this already.
-            let mut args = vec![
-                OsString::from("-c:v"),
-                OsString::from(other),
-                OsString::from("-crf"),
-                OsString::from(profile.crf.to_string()),
-                OsString::from("-preset"),
-                OsString::from(&profile.preset),
-            ];
-            append_pixel_format_arg(&mut args, profile);
-            args
-        }
+        "libx265" => Ok(video_codec_args_x265(profile)),
+        "libsvtav1" => Ok(video_codec_args_svtav1(profile)),
+        "libaom-av1" => Ok(video_codec_args_libaom(profile)),
+        other => Err(FfmpegError::OutputFactsMismatch(format!(
+            "unknown video encoder `{other}`"
+        ))),
     }
 }
 
@@ -278,7 +274,7 @@ pub async fn run_ffmpeg_transcode(
         .arg("-map")
         .arg("0:t?");
 
-    for arg in video_codec_args(profile, request.copy_video) {
+    for arg in video_codec_args(profile, request.copy_video)? {
         command.arg(arg);
     }
     for arg in scale_args(profile, src_width, src_height) {

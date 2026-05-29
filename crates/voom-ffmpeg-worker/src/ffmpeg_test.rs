@@ -55,7 +55,12 @@ fn av1_mp4_ffprobe(dir: &Path) -> PathBuf {
     )
 }
 
-fn basic_request(dir: &Path, container: &str, codec: &str, profile: TranscodeVideoProfile) -> TranscodeVideoRequest {
+fn basic_request(
+    dir: &Path,
+    container: &str,
+    codec: &str,
+    profile: TranscodeVideoProfile,
+) -> TranscodeVideoRequest {
     let input = dir.join("input.mkv");
     TranscodeVideoRequest {
         input: TranscodeVideoInput {
@@ -179,14 +184,22 @@ async fn libx265_command_uses_named_preset_and_optional_flags() {
     let request = basic_request(dir.path(), container, codec, profile_x265_main10());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+        .await
+        .unwrap();
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-c:v\nlibx265\n"), "missing -c:v libx265");
     assert!(args.contains("-crf\n18\n"), "missing -crf 18");
     assert!(args.contains("-preset\nslow\n"), "missing -preset slow");
-    assert!(args.contains("-profile:v\nmain10\n"), "missing -profile:v main10");
-    assert!(args.contains("-pix_fmt\nyuv420p10le\n"), "missing -pix_fmt yuv420p10le");
+    assert!(
+        args.contains("-profile:v\nmain10\n"),
+        "missing -profile:v main10"
+    );
+    assert!(
+        args.contains("-pix_fmt\nyuv420p10le\n"),
+        "missing -pix_fmt yuv420p10le"
+    );
     assert!(args.contains("-f\nmatroska\n"), "missing -f matroska");
 }
 
@@ -201,7 +214,9 @@ async fn libsvtav1_command_uses_numeric_preset() {
     let request = basic_request(dir.path(), container, codec, profile_svtav1());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+        .await
+        .unwrap();
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-c:v\nlibsvtav1\n"), "missing -c:v libsvtav1");
@@ -225,10 +240,15 @@ async fn libaom_command_sets_cpu_used_and_bitrate_zero() {
     let request = basic_request(dir.path(), "mkv", "av1", profile_libaom());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+        .await
+        .unwrap();
 
     let args = std::fs::read_to_string(args_path).unwrap();
-    assert!(args.contains("-c:v\nlibaom-av1\n"), "missing -c:v libaom-av1");
+    assert!(
+        args.contains("-c:v\nlibaom-av1\n"),
+        "missing -c:v libaom-av1"
+    );
     assert!(args.contains("-crf\n20\n"), "missing -crf 20");
     assert!(args.contains("-b:v\n0\n"), "missing -b:v 0");
     assert!(args.contains("-cpu-used\n4\n"), "missing -cpu-used 4");
@@ -249,7 +269,9 @@ async fn mp4_hevc_tags_hvc1() {
     let request = basic_request(dir.path(), container, codec, profile_x265_main10());
     let config = FfmpegConfig::new(ffmpeg, ffprobe, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
 
-    run_ffmpeg_transcode(&config, &request, 1920, 1080).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+        .await
+        .unwrap();
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-tag:v\nhvc1\n"), "missing -tag:v hvc1");
@@ -269,13 +291,27 @@ async fn downscale_applies_only_when_source_exceeds_cap() {
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
     let request = basic_request(dir.path(), "mp4", "hevc", profile_1080p());
-    let config = FfmpegConfig::new(ffmpeg.clone(), ffprobe.clone(), "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+    let config = FfmpegConfig::new(
+        ffmpeg.clone(),
+        ffprobe.clone(),
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
 
     // 3840x2160 exceeds 1920x1080 cap → scale filter applied
-    run_ffmpeg_transcode(&config, &request, 3840, 2160).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 3840, 2160)
+        .await
+        .unwrap();
     let args = std::fs::read_to_string(&args_path).unwrap();
-    assert!(args.contains("-vf\n"), "expected -vf when source exceeds cap");
-    assert!(args.lines().any(|a| a.contains("scale=") && a.contains("min(")), "expected scale filter with min()");
+    assert!(
+        args.contains("-vf\n"),
+        "expected -vf when source exceeds cap"
+    );
+    assert!(
+        args.lines()
+            .any(|a| a.contains("scale=") && a.contains("min(")),
+        "expected scale filter with min()"
+    );
 
     // 1280x720 within cap → no scale filter
     let dir2 = tempfile::tempdir().unwrap();
@@ -288,11 +324,21 @@ async fn downscale_applies_only_when_source_exceeds_cap() {
     let input2 = dir2.path().join("input.mkv");
     tokio::fs::write(&input2, b"input").await.unwrap();
     let request2 = basic_request(dir2.path(), "mp4", "hevc", profile_1080p());
-    let config2 = FfmpegConfig::new(ffmpeg2, ffprobe2, "test".to_owned(), DEFAULT_PROCESS_TIMEOUT);
+    let config2 = FfmpegConfig::new(
+        ffmpeg2,
+        ffprobe2,
+        "test".to_owned(),
+        DEFAULT_PROCESS_TIMEOUT,
+    );
 
-    run_ffmpeg_transcode(&config2, &request2, 1280, 720).await.unwrap();
+    run_ffmpeg_transcode(&config2, &request2, 1280, 720)
+        .await
+        .unwrap();
     let args2 = std::fs::read_to_string(args_path2).unwrap();
-    assert!(!args2.contains("-vf\n"), "unexpected -vf when source within cap");
+    assert!(
+        !args2.contains("-vf\n"),
+        "unexpected -vf when source within cap"
+    );
 }
 
 #[tokio::test]
@@ -316,11 +362,16 @@ async fn copy_video_emits_stream_copy() {
         "test".to_owned(),
         DEFAULT_PROCESS_TIMEOUT,
     );
-    run_ffmpeg_transcode(&config, &request, 1920, 1080).await.unwrap();
+    run_ffmpeg_transcode(&config, &request, 1920, 1080)
+        .await
+        .unwrap();
 
     let args = std::fs::read_to_string(args_path).unwrap();
     assert!(args.contains("-c:v\ncopy\n"), "expected -c:v copy");
-    assert!(!args.contains("-c:v\nlibx265\n"), "unexpected -c:v libx265 when copy_video");
+    assert!(
+        !args.contains("-c:v\nlibx265\n"),
+        "unexpected -c:v libx265 when copy_video"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +381,7 @@ async fn copy_video_emits_stream_copy() {
 #[test]
 fn video_codec_args_copy_video_emits_copy() {
     let profile = TranscodeVideoProfile::default_hevc();
-    let args = video_codec_args(&profile, true);
+    let args = video_codec_args(&profile, true).unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert_eq!(strs, &["-c:v", "copy"]);
 }
@@ -338,7 +389,7 @@ fn video_codec_args_copy_video_emits_copy() {
 #[test]
 fn video_codec_args_x265_emits_required_flags() {
     let profile = TranscodeVideoProfile::default_hevc();
-    let args = video_codec_args(&profile, false);
+    let args = video_codec_args(&profile, false).unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"-c:v"));
     assert!(strs.contains(&"libx265"));
@@ -351,7 +402,7 @@ fn video_codec_args_x265_emits_required_flags() {
 #[test]
 fn video_codec_args_x265_optional_flags_emitted_when_set() {
     let profile = profile_x265_main10();
-    let args = video_codec_args(&profile, false);
+    let args = video_codec_args(&profile, false).unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"-profile:v"));
     assert!(strs.contains(&"main10"));
@@ -362,7 +413,7 @@ fn video_codec_args_x265_optional_flags_emitted_when_set() {
 #[test]
 fn video_codec_args_svtav1_emits_preset_and_no_cpu_used() {
     let profile = profile_svtav1();
-    let args = video_codec_args(&profile, false);
+    let args = video_codec_args(&profile, false).unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"libsvtav1"));
     assert!(strs.contains(&"-preset"));
@@ -374,7 +425,7 @@ fn video_codec_args_svtav1_emits_preset_and_no_cpu_used() {
 #[test]
 fn video_codec_args_libaom_emits_cpu_used_and_bitrate_zero() {
     let profile = profile_libaom();
-    let args = video_codec_args(&profile, false);
+    let args = video_codec_args(&profile, false).unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"libaom-av1"));
     assert!(strs.contains(&"-cpu-used"));
@@ -382,6 +433,14 @@ fn video_codec_args_libaom_emits_cpu_used_and_bitrate_zero() {
     assert!(strs.contains(&"-b:v"));
     assert!(strs.contains(&"0"));
     assert!(!strs.contains(&"-preset"));
+}
+
+#[test]
+fn video_codec_args_unknown_encoder_is_error() {
+    let mut profile = TranscodeVideoProfile::default_hevc();
+    profile.encoder = "libx264".to_owned();
+    let err = video_codec_args(&profile, false).unwrap_err();
+    assert!(matches!(err, FfmpegError::OutputFactsMismatch(_)));
 }
 
 #[test]

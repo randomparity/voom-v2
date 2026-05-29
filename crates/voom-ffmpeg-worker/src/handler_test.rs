@@ -321,7 +321,10 @@ async fn mp4_output_contract_now_accepted() {
 
     // Should succeed — mp4 is now accepted
     let result = handle_transcode_video(&req, &config).await;
-    assert!(result.is_ok(), "mp4 output should now be accepted: {result:?}");
+    assert!(
+        result.is_ok(),
+        "mp4 output should now be accepted: {result:?}"
+    );
     let result = result.unwrap();
     assert_eq!(result.output_container, "mp4");
 }
@@ -353,6 +356,35 @@ async fn copy_video_sets_copied_video_flag() {
 
     let result = handle_transcode_video(&req, &config).await.unwrap();
     assert!(result.copied_video);
+}
+
+#[tokio::test]
+async fn copy_video_with_constrained_profile_but_unknown_source_profile_fails_loudly() {
+    // Profile constrains codec_profile=main10, but the source probe reports no
+    // profile field (None). We cannot prove conformance → must fail loudly.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut req = request(dir.path(), &input).await;
+    req.copy_video = true;
+    req.profile.codec_profile = Some("main10".to_owned());
+    req.profile.pixel_format = Some("yuv420p10le".to_owned());
+    // ffprobe reports hevc (matches codec) but emits NO "profile" key → None.
+    let config = config_with_probe(
+        dir.path(),
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p10le\"}]}\nJSON\n",
+    );
+
+    let err = handle_transcode_video(&req, &config).await.unwrap_err();
+
+    assert!(
+        matches!(err, TranscodeVideoError::MalformedWorkerResult { .. }),
+        "expected MalformedWorkerResult for unknown source codec_profile, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("codec_profile"),
+        "error should mention codec_profile: {err}"
+    );
 }
 
 fn config_with_probe(root: &Path, probe_script: &str) -> FfmpegConfig {

@@ -28,12 +28,17 @@ fn preflight_rejects_non_executable_ffmpeg() {
     assert!(preflight_with_paths(&ffmpeg, &ffprobe).is_err());
 }
 
-const ALL_ENCODERS: &str =
-    "Encoders:\n V..... libx265 H.265 / HEVC\n V..... libsvtav1 SVT-AV1\n V..... libaom-av1 libaom AV1\n A..... aac AAC\n A..... libopus Opus\n";
+const ALL_ENCODERS: &str = "Encoders:\n V..... libx265 H.265 / HEVC\n V..... libsvtav1 SVT-AV1\n V..... libaom-av1 libaom AV1\n A..... aac AAC\n A..... libopus Opus\n";
 const ALL_MUXERS: &str = "Muxers:\n E matroska Matroska\n E mp4 MP4\n E ogg Ogg\n";
 
 fn fake_ffmpeg_all_encoders(dir: &Path) -> PathBuf {
-    ffmpeg_stub(dir, "ffmpeg", "ffmpeg version 7.0", ALL_ENCODERS, ALL_MUXERS)
+    ffmpeg_stub(
+        dir,
+        "ffmpeg",
+        "ffmpeg version 7.0",
+        ALL_ENCODERS,
+        ALL_MUXERS,
+    )
 }
 
 fn fake_ffmpeg_without(dir: &Path, missing_encoder: &str) -> PathBuf {

@@ -548,8 +548,8 @@ async fn missing_input_fails_with_artifact_unavailable() {
 }
 
 #[tokio::test]
-async fn input_drift_detected_after_transcode_start() {
-    // This tests the checksum mismatch error on the expected facts (not drift during transcode).
+async fn wrong_expected_input_facts_is_checksum_mismatch() {
+    // Wrong expected input facts are caught at pre-observation (before ffmpeg).
     let preflight = preflight_from_process_env()
         .expect("preflight failed — ensure libx265, libsvtav1, libaom-av1 are available");
     let config = ffmpeg_config(&preflight);
@@ -558,7 +558,7 @@ async fn input_drift_detected_after_transcode_start() {
     let output = dir.path().join("out.mkv");
     generate_h264_fixture(&input);
 
-    // Provide wrong expected hash — simulates drift detection
+    // Provide wrong expected size/hash — pre-observation rejects it.
     let request = TranscodeVideoRequest {
         input: TranscodeVideoInput {
             path: input.to_string_lossy().into_owned(),
@@ -743,4 +743,135 @@ async fn pixel_format_constraint_is_honored_in_output() {
         .expect("10-bit hevc transcode failed");
 
     assert_eq!(result.output_pixel_format, "yuv420p10le");
+}
+
+#[tokio::test]
+async fn output_codec_mismatch_is_malformed_result() {
+    // Request output.video_codec=av1 but use a libx265/hevc profile. The
+    // contract validates codec and profile independently, so this passes the
+    // pre-ffmpeg gate; ffmpeg then produces hevc, and probe_output rejects the
+    // codec disagreement → MalformedWorkerResult.
+    let preflight = preflight_from_process_env()
+        .expect("preflight failed — ensure libx265, libsvtav1, libaom-av1 are available");
+    let config = ffmpeg_config(&preflight);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("out.mkv");
+    generate_h264_fixture(&input);
+
+    // hevc-producing profile, but the request claims the output codec is av1.
+    let profile = TranscodeVideoProfile {
+        name: "default-hevc".to_owned(),
+        target_codec: "hevc".to_owned(),
+        encoder: "libx265".to_owned(),
+        crf: 28,
+        preset: "ultrafast".to_owned(),
+        tune: None,
+        codec_profile: None,
+        codec_level: None,
+        pixel_format: None,
+        max_width: None,
+        max_height: None,
+        copy_compatible: false,
+    };
+    let request = with_real_expected(
+        basic_request(&input, &output, dir.path(), "mkv", "av1", profile),
+        &input,
+    )
+    .await;
+
+    let err = handle_transcode_video(&request, &config)
+        .await
+        .expect_err("output codec mismatch should fail");
+
+    assert!(
+        matches!(
+            err,
+            voom_ffmpeg_worker::TranscodeVideoError::MalformedWorkerResult { .. }
+        ),
+        "expected MalformedWorkerResult for output codec mismatch, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_on_corrupt_input_is_external_system_unavailable() {
+    // A truncated/garbage file that ffmpeg cannot decode → ffmpeg exits
+    // non-zero → ExternalSystemUnavailable.
+    let preflight = preflight_from_process_env()
+        .expect("preflight failed — ensure libx265, libsvtav1, libaom-av1 are available");
+    let config = ffmpeg_config(&preflight);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("corrupt.mkv");
+    let output = dir.path().join("out.mkv");
+    // Not a valid media container — ffprobe/ffmpeg will reject it.
+    std::fs::write(&input, b"this is not a valid media file, just bytes").unwrap();
+
+    let request = with_real_expected(
+        basic_request(
+            &input,
+            &output,
+            dir.path(),
+            "mkv",
+            "hevc",
+            TranscodeVideoProfile::default_hevc(),
+        ),
+        &input,
+    )
+    .await;
+
+    let err = handle_transcode_video(&request, &config)
+        .await
+        .expect_err("corrupt input should fail");
+
+    assert!(
+        matches!(
+            err,
+            voom_ffmpeg_worker::TranscodeVideoError::ExternalSystemUnavailable { .. }
+        ),
+        "expected ExternalSystemUnavailable for corrupt input, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn tiny_process_timeout_yields_external_system_unavailable() {
+    // A 1ms process timeout against a real encode trips the timeout path. The
+    // worker probes the input first, so the timeout may fire on ffprobe or
+    // ffmpeg — both map to ExternalSystemUnavailable, which is what we assert.
+    let preflight = preflight_from_process_env()
+        .expect("preflight failed — ensure libx265, libsvtav1, libaom-av1 are available");
+    let config = FfmpegConfig::new(
+        preflight.ffmpeg_path.clone(),
+        preflight.ffprobe_path.clone(),
+        preflight.ffmpeg_version.clone(),
+        std::time::Duration::from_millis(1),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("out.mkv");
+    generate_h264_fixture(&input);
+
+    let request = with_real_expected(
+        basic_request(
+            &input,
+            &output,
+            dir.path(),
+            "mkv",
+            "hevc",
+            TranscodeVideoProfile::default_hevc(),
+        ),
+        &input,
+    )
+    .await;
+
+    let err = handle_transcode_video(&request, &config)
+        .await
+        .expect_err("1ms timeout should fail");
+
+    assert!(
+        matches!(
+            err,
+            voom_ffmpeg_worker::TranscodeVideoError::ExternalSystemUnavailable { .. }
+        ),
+        "expected ExternalSystemUnavailable for timeout, got: {err}"
+    );
 }
