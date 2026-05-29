@@ -73,6 +73,7 @@ struct PlanBuilder<'a> {
     nodes: Vec<PlanNode>,
     warnings: Vec<String>,
     diagnostics: Vec<PlanningDiagnostic>,
+    fatal: Option<PlanGenerationError>,
 }
 
 impl<'a> PlanBuilder<'a> {
@@ -88,6 +89,7 @@ impl<'a> PlanBuilder<'a> {
             nodes: Vec::new(),
             warnings: policy_warnings(policy),
             diagnostics: Vec::new(),
+            fatal: None,
         }
     }
 
@@ -271,22 +273,19 @@ impl<'a> PlanBuilder<'a> {
                 self.expand_set_container_for_snapshot(phase_name, snapshot, container);
             }
             CompiledOperation::TranscodeVideo {
-                target_codec,
                 container,
-                profile,
+                resolved_profile,
                 ..
             } => {
-                let profile = match profile {
-                    voom_policy::VideoProfileRef::Named(name) => name.clone(),
-                    voom_policy::VideoProfileRef::Inline(_) => "inline".to_owned(),
+                let Some(resolved) = resolved_profile.as_ref() else {
+                    // Resolution invariant (pinned Phase 5↔6 contract): the control
+                    // plane fills `resolved_profile` in-memory before planning. A
+                    // `None` here means resolution was skipped — a hard internal
+                    // error, never a silent no-op.
+                    self.record_missing_resolution(phase_name, snapshot);
+                    return;
                 };
-                self.expand_transcode_video_for_snapshot(
-                    phase_name,
-                    snapshot,
-                    target_codec,
-                    container,
-                    &profile,
-                );
+                self.expand_transcode_video_for_snapshot(phase_name, snapshot, resolved, container);
             }
             CompiledOperation::TranscodeAudio {
                 target_codec,
@@ -458,49 +457,56 @@ impl<'a> PlanBuilder<'a> {
         &mut self,
         phase_name: &str,
         snapshot: &MediaSnapshotInput,
-        target_codec: &str,
+        resolved: &voom_worker_protocol::TranscodeVideoProfile,
         container: &str,
-        profile: &str,
     ) {
-        let payload = json!({
-            "type": "transcode_video",
-            "target_codec": target_codec,
-            "container": container,
-            "profile": profile,
-        });
-        let observed_state = transcode_video_observed_state(snapshot);
-        let (status, status_reason, capability) = match transcode_video_shape(snapshot, container) {
-            TranscodeVideoShape::Compliant => (
-                NodeStatus::NoOp,
-                format!("video is already {target_codec} in {container}"),
-                None,
-            ),
-            TranscodeVideoShape::NeedsTranscode => (
-                NodeStatus::Planned,
-                format!("video will be transcoded to {target_codec} in {container}"),
-                Some("transcode_video".to_owned()),
-            ),
-            TranscodeVideoShape::InsufficientFacts(message) => {
-                self.push_transcode_video_diagnostic(
-                    PlanningDiagnosticCode::InsufficientSnapshotFacts,
-                    phase_name,
-                    snapshot,
-                    message,
-                );
-                (NodeStatus::Blocked, message.to_owned(), None)
-            }
-            TranscodeVideoShape::UnsupportedShape(message) => {
-                self.push_transcode_video_diagnostic(
-                    PlanningDiagnosticCode::UnsupportedMediaShape,
-                    phase_name,
-                    snapshot,
-                    message,
-                );
-                (NodeStatus::Blocked, message.to_owned(), None)
+        let target_codec = &resolved.target_codec;
+        let payload = match transcode_video_payload(resolved, container) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.fatal
+                    .get_or_insert_with(|| serialization_error(&error));
+                return;
             }
         };
+        let observed_state = transcode_video_observed_state(snapshot);
+        let mut notes = Vec::new();
+        let (status, status_reason, capability) =
+            match transcode_video_shape(snapshot, resolved, container) {
+                TranscodeVideoShape::Compliant => (
+                    NodeStatus::NoOp,
+                    format!("video is already {target_codec} in {container}"),
+                    None,
+                ),
+                TranscodeVideoShape::NeedsTranscode => {
+                    notes = transcode_video_notes(resolved, snapshot);
+                    (
+                        NodeStatus::Planned,
+                        format!("video will be transcoded to {target_codec} in {container}"),
+                        Some("transcode_video".to_owned()),
+                    )
+                }
+                TranscodeVideoShape::InsufficientFacts(message) => {
+                    self.push_transcode_video_diagnostic(
+                        PlanningDiagnosticCode::InsufficientSnapshotFacts,
+                        phase_name,
+                        snapshot,
+                        &message,
+                    );
+                    (NodeStatus::Blocked, message, None)
+                }
+                TranscodeVideoShape::UnsupportedShape(message) => {
+                    self.push_transcode_video_diagnostic(
+                        PlanningDiagnosticCode::UnsupportedMediaShape,
+                        phase_name,
+                        snapshot,
+                        &message,
+                    );
+                    (NodeStatus::Blocked, message, None)
+                }
+            };
 
-        self.nodes.push(make_node(
+        let mut node = make_node(
             phase_name,
             checked_ordinal(self.nodes.len()),
             snapshot,
@@ -510,7 +516,27 @@ impl<'a> PlanBuilder<'a> {
             status,
             status_reason,
             capability,
-        ));
+        );
+        node.resource_estimates = ResourceEstimates { notes };
+        self.nodes.push(node);
+    }
+
+    fn record_missing_resolution(&mut self, phase_name: &str, snapshot: &MediaSnapshotInput) {
+        let message = "transcode_video profile was not resolved before planning";
+        self.diagnostics.push(
+            PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
+                .with_phase(phase_name)
+                .with_operation_kind("transcode_video")
+                .with_target(snapshot.target.clone()),
+        );
+        self.fatal.get_or_insert_with(|| PlanGenerationError {
+            diagnostics: vec![
+                PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
+                    .with_phase(phase_name)
+                    .with_operation_kind("transcode_video")
+                    .with_target(snapshot.target.clone()),
+            ],
+        });
     }
 
     fn push_transcode_video_diagnostic(
@@ -727,7 +753,10 @@ impl<'a> PlanBuilder<'a> {
         ));
     }
 
-    fn finish(self) -> Result<ExecutionPlan, PlanGenerationError> {
+    fn finish(mut self) -> Result<ExecutionPlan, PlanGenerationError> {
+        if let Some(fatal) = self.fatal.take() {
+            return Err(fatal);
+        }
         let policy = PolicyIdentity {
             slug: self.policy.slug.clone(),
             source_hash: self.policy.source_hash.clone(),
@@ -786,12 +815,12 @@ impl<'a> PlanBuilder<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TranscodeVideoShape<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TranscodeVideoShape {
     Compliant,
     NeedsTranscode,
-    InsufficientFacts(&'a str),
-    UnsupportedShape(&'a str),
+    InsufficientFacts(String),
+    UnsupportedShape(String),
 }
 
 enum SnapshotOperation<'a> {
@@ -1295,33 +1324,259 @@ fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {
     }
 }
 
-fn transcode_video_shape<'a>(
+fn transcode_video_shape(
     snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
     target_container: &str,
-) -> TranscodeVideoShape<'a> {
+) -> TranscodeVideoShape {
     let Some(video_stream_count) = video_stream_count(snapshot) else {
-        return TranscodeVideoShape::InsufficientFacts("snapshot video stream count is unknown");
+        return TranscodeVideoShape::InsufficientFacts(
+            "snapshot video stream count is unknown".to_owned(),
+        );
     };
     if video_stream_count != 1 {
         return TranscodeVideoShape::UnsupportedShape(
-            "transcode_video requires exactly one video stream",
+            "transcode_video requires exactly one video stream".to_owned(),
         );
     }
 
     let Some(container) = snapshot.container.as_deref() else {
-        return TranscodeVideoShape::InsufficientFacts("snapshot container is unknown");
+        return TranscodeVideoShape::InsufficientFacts("snapshot container is unknown".to_owned());
     };
     let Some(video_codec) = snapshot.video_codec.as_deref() else {
-        return TranscodeVideoShape::InsufficientFacts("snapshot video codec is unknown");
+        return TranscodeVideoShape::InsufficientFacts(
+            "snapshot video codec is unknown".to_owned(),
+        );
     };
 
-    if container.eq_ignore_ascii_case(target_container)
-        && voom_worker_protocol::is_supported_transcode_video_codec(video_codec)
+    let needs_change = match transcode_video_needs_change(
+        snapshot,
+        resolved,
+        container,
+        video_codec,
+        target_container,
+    ) {
+        Ok(needs_change) => needs_change,
+        Err(shape) => return shape,
+    };
+
+    if target_container.eq_ignore_ascii_case(voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER_MP4)
+        && let Some(shape) = mp4_gate_shape(snapshot)
     {
-        TranscodeVideoShape::Compliant
-    } else {
-        TranscodeVideoShape::NeedsTranscode
+        return shape;
     }
+
+    if needs_change {
+        TranscodeVideoShape::NeedsTranscode
+    } else {
+        TranscodeVideoShape::Compliant
+    }
+}
+
+/// Accumulates whether the source needs re-encoding/re-muxing against the
+/// resolved profile's observable constraints. Returns `Err(shape)` when a
+/// constrained observable is unknown (`InsufficientFacts`).
+fn transcode_video_needs_change(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    container: &str,
+    video_codec: &str,
+    target_container: &str,
+) -> Result<bool, TranscodeVideoShape> {
+    let mut needs_change = false;
+
+    // Canonicalize the observed codec (e.g. the `h265` alias maps to `hevc`)
+    // before comparing against the resolved target codec.
+    let codec_matches = voom_worker_protocol::canonical_video_codec(video_codec)
+        .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&resolved.target_codec));
+    if !codec_matches {
+        needs_change = true;
+    }
+    if !container.eq_ignore_ascii_case(target_container) {
+        needs_change = true;
+    }
+
+    needs_change |= dimensions_need_change(snapshot, resolved)?;
+    needs_change |= pixel_format_needs_change(snapshot, resolved)?;
+    needs_change |= codec_profile_needs_change(snapshot, resolved)?;
+    needs_change |= codec_level_needs_change(snapshot, resolved)?;
+
+    Ok(needs_change)
+}
+
+fn dimensions_need_change(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+) -> Result<bool, TranscodeVideoShape> {
+    let mut needs_change = false;
+    if let Some(cap_w) = resolved.max_width {
+        let Some(width) = snapshot.width else {
+            return Err(TranscodeVideoShape::InsufficientFacts(
+                "snapshot video width is unknown".to_owned(),
+            ));
+        };
+        needs_change |= width > cap_w;
+    }
+    if let Some(cap_h) = resolved.max_height {
+        let Some(height) = snapshot.height else {
+            return Err(TranscodeVideoShape::InsufficientFacts(
+                "snapshot video height is unknown".to_owned(),
+            ));
+        };
+        needs_change |= height > cap_h;
+    }
+    Ok(needs_change)
+}
+
+fn pixel_format_needs_change(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+) -> Result<bool, TranscodeVideoShape> {
+    let Some(target) = resolved.pixel_format.as_deref() else {
+        return Ok(false);
+    };
+    let Some(observed) = video_stream_field(snapshot, "pixel_format") else {
+        return Err(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video pixel_format is unknown".to_owned(),
+        ));
+    };
+    Ok(!observed.eq_ignore_ascii_case(target))
+}
+
+fn codec_profile_needs_change(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+) -> Result<bool, TranscodeVideoShape> {
+    let Some(target) = resolved.codec_profile.as_deref() else {
+        return Ok(false);
+    };
+    let Some(observed) = video_stream_field(snapshot, "profile") else {
+        return Err(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video codec profile is unknown".to_owned(),
+        ));
+    };
+    Ok(normalize_codec_token(observed) != normalize_codec_token(target))
+}
+
+fn codec_level_needs_change(
+    snapshot: &MediaSnapshotInput,
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+) -> Result<bool, TranscodeVideoShape> {
+    let Some(target) = resolved.codec_level.as_deref() else {
+        return Ok(false);
+    };
+    let Some(observed) = video_stream_field(snapshot, "level") else {
+        return Err(TranscodeVideoShape::InsufficientFacts(
+            "snapshot video codec level is unknown".to_owned(),
+        ));
+    };
+    Ok(normalize_codec_token(observed) != normalize_codec_token(target))
+}
+
+/// MP4 muxability gate. Returns `Some(shape)` to block; `None` when every
+/// non-video stream is fully described and MP4-muxable.
+fn mp4_gate_shape(snapshot: &MediaSnapshotInput) -> Option<TranscodeVideoShape> {
+    let streams = snapshot
+        .stream_summary
+        .get("streams")
+        .and_then(serde_json::Value::as_array)?;
+    let mut offenders = Vec::new();
+    for stream in streams {
+        let Some(object) = stream.as_object() else {
+            return Some(TranscodeVideoShape::InsufficientFacts(
+                "mp4 target requires fully enumerated streams".to_owned(),
+            ));
+        };
+        let kind = object.get("kind").and_then(serde_json::Value::as_str);
+        if kind == Some("video") {
+            continue;
+        }
+        let codec_name = object.get("codec_name").and_then(serde_json::Value::as_str);
+        let (Some(kind), Some(codec_name)) = (kind, codec_name) else {
+            return Some(TranscodeVideoShape::InsufficientFacts(
+                "mp4 target requires fully enumerated streams".to_owned(),
+            ));
+        };
+        if !mp4_muxable(kind, codec_name) {
+            offenders.push(format!("{kind}:{codec_name}"));
+        }
+    }
+    if offenders.is_empty() {
+        None
+    } else {
+        Some(TranscodeVideoShape::UnsupportedShape(format!(
+            "mp4 target cannot mux stream(s) {}",
+            offenders.join(", ")
+        )))
+    }
+}
+
+fn mp4_muxable(kind: &str, codec_name: &str) -> bool {
+    match kind {
+        "audio" => matches!(codec_name, "aac" | "ac3" | "eac3" | "opus"),
+        "video" => matches!(codec_name, "hevc" | "av1"),
+        _ => false,
+    }
+}
+
+fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
+    snapshot
+        .stream_summary
+        .get("streams")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .find(|stream| stream.get("kind").and_then(serde_json::Value::as_str) == Some("video"))
+        .and_then(|stream| stream.get(key))
+        .and_then(serde_json::Value::as_str)
+}
+
+/// Normalizes codec profile/level tokens for comparison. ffprobe reports e.g.
+/// `"Main 10"` while a profile uses `"main10"`; collapse case and whitespace so
+/// the two compare equal. (Phase 7 needs the same normalization.)
+fn normalize_codec_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn transcode_video_payload(
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    container: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    Ok(json!({
+        "type": "transcode_video",
+        "target_codec": resolved.target_codec,
+        "container": container,
+        "profile": resolved.name,
+        "resolved_profile": serde_json::to_value(resolved)?,
+    }))
+}
+
+fn transcode_video_notes(
+    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    snapshot: &MediaSnapshotInput,
+) -> Vec<String> {
+    let mut notes = vec![
+        format!("encoder={}", resolved.encoder),
+        format!("speed={}", resolved.preset),
+        format!(
+            "cpu_cost={}",
+            crate::transcode_video_profile::cpu_cost(&resolved.encoder, &resolved.preset)
+        ),
+        format!("crf={}", resolved.crf),
+    ];
+    if let (Some(cap_w), Some(cap_h), Some(src_w), Some(src_h)) = (
+        resolved.max_width,
+        resolved.max_height,
+        snapshot.width,
+        snapshot.height,
+    ) && (src_w > cap_w || src_h > cap_h)
+    {
+        notes.push(format!("downscale={src_w}x{src_h}->{cap_w}x{cap_h}"));
+    }
+    notes
 }
 
 fn transcode_video_observed_state(snapshot: &MediaSnapshotInput) -> Option<serde_json::Value> {
