@@ -255,7 +255,8 @@ fn input_for(
 /// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
 /// the shared profile dir) so the bundled probe worker runs real ffprobe. The
 /// static mutex serializes any real-ffprobe cases in this binary: they share the
-/// single `target/debug/ffprobe` path, so a future second test would otherwise
+/// single `ffprobe` sibling path (derived from the running test binary so it
+/// tracks the active cargo target dir), so a future second test would otherwise
 /// race silently (one test restoring the stub while another is probing). The
 /// guard restores the stub on drop.
 fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {

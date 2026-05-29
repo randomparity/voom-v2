@@ -131,12 +131,33 @@ pub fn workspace_root() -> PathBuf {
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
+/// Returns the cargo profile output directory that holds built binaries.
+///
+/// This is the directory the bundled control-plane worker derives from
+/// `std::env::current_exe()` when it auto-wires sibling binaries, so test
+/// helpers that touch those siblings must agree on it. It is robust across
+/// cargo target dirs (`target/debug`, `target/llvm-cov-target/debug`, a custom
+/// `CARGO_TARGET_DIR`, or a `--target <triple>` profile dir) because it walks up
+/// from the running test binary rather than assuming `target/debug`.
+#[must_use]
+pub fn target_debug_dir() -> PathBuf {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return workspace_root().join("target").join("debug");
+    };
+    let Some(exe_dir) = current_exe.parent() else {
+        return workspace_root().join("target").join("debug");
+    };
+    if exe_dir.file_name().is_some_and(|name| name == "deps") {
+        return exe_dir
+            .parent()
+            .map_or_else(|| exe_dir.to_path_buf(), std::path::Path::to_path_buf);
+    }
+    exe_dir.to_path_buf()
+}
+
 #[must_use]
 pub fn target_debug_binary(name: &str) -> PathBuf {
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    target_debug_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
 pub fn cargo_build_package(package: &str) -> Result<(), Box<dyn std::error::Error>> {
