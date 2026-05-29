@@ -206,11 +206,7 @@ fn insert_string_as(
 /// Inserts `key` from `input` into `output` as a JSON string, regardless of
 /// whether the raw ffprobe value is a number or already a string. Absent or
 /// sentinel values are omitted. The output key equals the input key.
-fn insert_u64_as_string(
-    input: &Map<String, Value>,
-    output: &mut Map<String, Value>,
-    key: &str,
-) {
+fn insert_u64_as_string(input: &Map<String, Value>, output: &mut Map<String, Value>, key: &str) {
     let Some(value) = input.get(key) else {
         return;
     };
