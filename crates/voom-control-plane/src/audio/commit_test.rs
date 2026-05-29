@@ -95,12 +95,18 @@ async fn sidecar_prepare_records_pending_before_promotion_failure_marks_recovery
     .unwrap();
 
     assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
+    // A recovery-path report has no durable result IDs — they must be absent,
+    // not a sentinel zero that an observer could mistake for a real ID.
+    assert_eq!(report.result_file_version_id, None);
+    assert_eq!(report.result_file_location_id, None);
     let recovery = report.recovery_required.unwrap();
     assert_eq!(recovery.commit_record_id, report.commit_record_id);
     assert_eq!(recovery.source_bundle_id, voom_core::ids::BundleId(777));
     assert_eq!(recovery.role, "external_audio");
     assert_eq!(recovery.error_code, "ARTIFACT_UNAVAILABLE");
     assert!(!recovery.staging_exists);
+    assert_eq!(recovery.result_file_version_id, None);
+    assert_eq!(recovery.result_file_location_id, None);
 }
 
 #[tokio::test]
@@ -148,11 +154,11 @@ async fn sidecar_commit_emits_standard_artifact_commit_events() {
     assert_eq!(completed["commit_record_id"], report.commit_record_id.0);
     assert_eq!(
         completed["result_file_version_id"],
-        report.result_file_version_id.0
+        report.result_file_version_id.unwrap().0
     );
     assert_eq!(
         completed["result_file_location_id"],
-        report.result_file_location_id.0
+        report.result_file_location_id.unwrap().0
     );
 }
 

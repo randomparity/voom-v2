@@ -19,8 +19,8 @@ use voom_worker_protocol::{
 fn extract_commit_recovery_without_target_is_not_reported_as_success() {
     let report = commit::CommitAudioExtractSidecarReport {
         commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: FileVersionId(0),
-        result_file_location_id: FileLocationId(0),
+        result_file_version_id: None,
+        result_file_location_id: None,
         state: ArtifactCommitState::RecoveryRequired,
         target_path: PathBuf::from("/tmp/target.ogg"),
         temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
@@ -53,8 +53,8 @@ fn extract_commit_recovery_without_target_is_not_reported_as_success() {
 fn extract_commit_non_committed_state_is_not_reported_as_success() {
     let report = commit::CommitAudioExtractSidecarReport {
         commit_record_id: ArtifactCommitRecordId(10),
-        result_file_version_id: FileVersionId(1),
-        result_file_location_id: FileLocationId(2),
+        result_file_version_id: None,
+        result_file_location_id: None,
         state: ArtifactCommitState::Pending,
         target_path: PathBuf::from("/tmp/target.ogg"),
         temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
@@ -148,8 +148,8 @@ async fn extract_failure_records_audio_failed_event() {
 fn committed_extract_recovery_with_target_is_not_reported_as_success() {
     let report = commit::CommitAudioExtractSidecarReport {
         commit_record_id: ArtifactCommitRecordId(9),
-        result_file_version_id: FileVersionId(0),
-        result_file_location_id: FileLocationId(0),
+        result_file_version_id: None,
+        result_file_location_id: None,
         state: ArtifactCommitState::RecoveryRequired,
         target_path: PathBuf::from("/tmp/target.ogg"),
         temp_path: PathBuf::from("/tmp/.target.ogg.tmp"),
