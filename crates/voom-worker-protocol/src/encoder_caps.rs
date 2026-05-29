@@ -51,7 +51,8 @@ const X265: EncoderDescriptor = EncoderDescriptor {
     crf_max: 51,
     preset_domain: PresetDomain::Named(X265_PRESETS),
     tunes: &["psnr", "ssim", "grain", "fastdecode", "zerolatency"],
-    codec_profiles: &["main", "main10", "main12"],
+    // V1: profiles requiring wider chroma/bit-depth deferred until their pixel formats are added.
+    codec_profiles: &["main", "main10"],
     codec_levels: &[
         "3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2",
     ],
@@ -90,7 +91,8 @@ const LIBAOM: EncoderDescriptor = EncoderDescriptor {
     crf_max: 63,
     preset_domain: PresetDomain::NumericRange { min: 0, max: 8 },
     tunes: &["psnr", "ssim"],
-    codec_profiles: &["main", "high", "professional"],
+    // V1: profiles requiring wider chroma/bit-depth deferred until their pixel formats are added.
+    codec_profiles: &["main"],
     codec_levels: &["4.0", "4.1", "5.0", "5.1", "6.0", "6.1"],
     pixel_formats: &["yuv420p", "yuv420p10le"],
     ten_bit_pixel_formats: &["yuv420p10le"],

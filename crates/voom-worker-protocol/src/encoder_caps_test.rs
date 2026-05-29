@@ -19,10 +19,12 @@ fn encoder_must_match_target_codec() {
 #[test]
 fn crf_range_is_per_encoder() {
     let x265 = encoder_descriptor("libx265").unwrap();
+    assert!(x265.accepts_crf(0));
     assert!(x265.accepts_crf(23));
     assert!(x265.accepts_crf(51));
     assert!(!x265.accepts_crf(52));
     let svt = encoder_descriptor("libsvtav1").unwrap();
+    assert!(svt.accepts_crf(0));
     assert!(svt.accepts_crf(63));
     assert!(!svt.accepts_crf(64));
 }

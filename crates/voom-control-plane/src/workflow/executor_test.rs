@@ -2240,6 +2240,7 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
         },
         "output_container": "mkv",
         "output_video_codec": "hevc",
+        // Phase 7 will populate these from the ffprobe output.
         "output_width": 1920,
         "output_height": 1080,
         "output_pixel_format": "yuv420p"

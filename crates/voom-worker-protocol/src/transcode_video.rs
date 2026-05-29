@@ -101,8 +101,8 @@ pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> R
             .pixel_format_compatible_with_profile(pixel_format, profile.codec_profile.as_deref())
         {
             return Err(format!(
-                "pixel_format `{pixel_format}` incompatible with codec_profile `{:?}`",
-                profile.codec_profile
+                "pixel_format `{pixel_format}` incompatible with codec_profile `{}`",
+                profile.codec_profile.as_deref().unwrap_or("<none>")
             ));
         }
     }
@@ -153,6 +153,7 @@ pub struct TranscodeVideoProfile {
     pub target_codec: String,
     pub encoder: String,
     pub crf: u8,
+    /// Encoder-specific speed token: named x265 preset, SVT-AV1 `-preset N`, or libaom-av1 `-cpu-used N`.
     pub preset: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tune: Option<String>,

@@ -235,6 +235,26 @@ fn profile_validates_against_its_encoder_descriptor() {
     bad_combo.pixel_format = Some("yuv420p10le".to_owned());
     bad_combo.codec_profile = Some("main".to_owned()); // 10-bit under 8-bit profile
     assert!(validate_profile_against_descriptor(&bad_combo).is_err());
+
+    let mut unknown_encoder = TranscodeVideoProfile::default_hevc();
+    unknown_encoder.encoder = "libx264".to_owned(); // no descriptor
+    assert!(validate_profile_against_descriptor(&unknown_encoder).is_err());
+
+    let mut bad_preset = TranscodeVideoProfile::default_hevc();
+    bad_preset.preset = "turbofast".to_owned(); // not an x265 preset
+    assert!(validate_profile_against_descriptor(&bad_preset).is_err());
+
+    let mut bad_tune = TranscodeVideoProfile::default_hevc();
+    bad_tune.tune = Some("film".to_owned()); // not an x265 tune
+    assert!(validate_profile_against_descriptor(&bad_tune).is_err());
+
+    let mut bad_level = TranscodeVideoProfile::default_hevc();
+    bad_level.codec_level = Some("2.0".to_owned()); // not an x265 level
+    assert!(validate_profile_against_descriptor(&bad_level).is_err());
+
+    let mut bad_pixel_format = TranscodeVideoProfile::default_hevc();
+    bad_pixel_format.pixel_format = Some("rgb24".to_owned()); // not an x265 pixel format
+    assert!(validate_profile_against_descriptor(&bad_pixel_format).is_err());
 }
 
 #[test]

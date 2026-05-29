@@ -5,7 +5,7 @@
         reason = "tests favor unwrap over plumbing Result<()> through every assertion"
     )
 )]
-//! Versioned HTTP/JSON worker protocol for VOOM Sprint 2.
+//! Versioned HTTP/JSON worker protocol for VOOM.
 //!
 //! Public API surface is fixed in `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`.
 //! Sub-modules land incrementally in the Phase 1 commit sequence; this
