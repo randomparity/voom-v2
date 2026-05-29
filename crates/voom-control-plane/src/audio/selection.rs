@@ -1,11 +1,10 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use voom_core::VoomError;
 use voom_plan::audio::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioBundleRole,
     AudioOperationPayload, AudioOperationType, AudioPlanningBlock, SnapshotAudioStreamFact,
     extraction_role, has_transcode_preservation_facts, selected_audio_streams,
 };
-use voom_policy::{MediaSnapshotInput, TargetRef};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{AudioStreamRef, TranscodeAudioSelection};
 
@@ -48,7 +47,7 @@ pub fn transcode_selection_from_payload_and_snapshot(
             payload.container
         )));
     }
-    let snapshot_input = media_snapshot_input(snapshot);
+    let snapshot_input = crate::media_snapshot::planning_input(snapshot);
     let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
         .map_err(audio_block_error)?;
     if selected.is_empty() {
@@ -95,7 +94,7 @@ pub fn extract_selection_from_payload_and_snapshot(
             payload.container, payload.target_codec
         )));
     }
-    let snapshot_input = media_snapshot_input(snapshot);
+    let snapshot_input = crate::media_snapshot::planning_input(snapshot);
     let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
         .map_err(audio_block_error)?;
     let [source] = selected.as_slice() else {
@@ -124,49 +123,6 @@ fn stream_ref(stream: &SnapshotAudioStreamFact) -> AudioStreamRef {
     AudioStreamRef {
         snapshot_stream_id: stream.snapshot_stream_id.clone(),
         provider_stream_index: stream.provider_stream_index,
-    }
-}
-
-fn media_snapshot_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
-    let streams = snapshot
-        .payload
-        .get("streams")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let video_stream_count = streams.as_array().map_or(0, |streams| {
-        streams
-            .iter()
-            .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
-            .count()
-    });
-    MediaSnapshotInput {
-        ordinal: 1,
-        target: TargetRef::FileVersion {
-            id: snapshot.file_version_id,
-        },
-        container: snapshot
-            .payload
-            .get("container")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        stream_summary: json!({
-            "video_stream_count": video_stream_count,
-            "streams": streams,
-        }),
-        video_codec: snapshot
-            .payload
-            .get("video_codec")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        width: None,
-        height: None,
-        hdr: None,
-        bitrate: None,
-        duration_millis: None,
-        audio_languages: Vec::new(),
-        subtitle_languages: Vec::new(),
-        health_flags: Vec::new(),
-        existing_media_snapshot_id: Some(snapshot.id),
     }
 }
 
