@@ -219,6 +219,25 @@ fn request_carries_copy_video_flag_skipped_when_false() {
 }
 
 #[test]
+fn profile_validates_against_its_encoder_descriptor() {
+    let ok = TranscodeVideoProfile::default_hevc();
+    assert!(validate_profile_against_descriptor(&ok).is_ok());
+
+    let mut bad_codec = TranscodeVideoProfile::default_hevc();
+    bad_codec.target_codec = "av1".to_owned(); // libx265 is hevc-only
+    assert!(validate_profile_against_descriptor(&bad_codec).is_err());
+
+    let mut bad_crf = TranscodeVideoProfile::default_hevc();
+    bad_crf.crf = 60; // > 51 for libx265
+    assert!(validate_profile_against_descriptor(&bad_crf).is_err());
+
+    let mut bad_combo = TranscodeVideoProfile::default_hevc();
+    bad_combo.pixel_format = Some("yuv420p10le".to_owned());
+    bad_combo.codec_profile = Some("main".to_owned()); // 10-bit under 8-bit profile
+    assert!(validate_profile_against_descriptor(&bad_combo).is_err());
+}
+
+#[test]
 fn result_carries_observed_output_dimensions_and_copied_flag() {
     let json = serde_json::json!({
         "status": "transcoded",

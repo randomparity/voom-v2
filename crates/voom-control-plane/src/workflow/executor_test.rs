@@ -2239,7 +2239,10 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
             "content_hash": format!("blake3:{}", blake3::hash(output_bytes).to_hex())
         },
         "output_container": "mkv",
-        "output_video_codec": "hevc"
+        "output_video_codec": "hevc",
+        "output_width": 1920,
+        "output_height": 1080,
+        "output_pixel_format": "yuv420p"
     })
 }
 

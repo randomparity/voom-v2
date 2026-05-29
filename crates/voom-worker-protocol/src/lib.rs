@@ -63,6 +63,7 @@ pub use transcode_video::{
     TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult,
     TranscodeVideoStatus, canonical_video_codec, is_default_hevc_profile,
     is_supported_transcode_video_codec, is_supported_transcode_video_container,
+    validate_profile_against_descriptor,
 };
 pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
 pub use verify_artifact::{

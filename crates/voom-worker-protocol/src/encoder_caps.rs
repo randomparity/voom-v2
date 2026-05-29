@@ -1,7 +1,7 @@
 //! Per-encoder capability descriptors: the finite, encoder-specific vocabulary
 //! for CRF, preset, tune, codec profile/level, and pixel format. Pure data and
 //! predicates shared by the policy compiler (inline validation), the store seed
-//! validation, the planner (resource notes), and the FFmpeg worker.
+//! validation, the planner (resource notes), and the `FFmpeg` worker.
 
 /// How an encoder spells its speed knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +32,16 @@ pub struct EncoderDescriptor {
 }
 
 const X265_PRESETS: &[&str] = &[
-    "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower",
-    "veryslow", "placebo",
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+    "veryslow",
+    "placebo",
 ];
 
 const X265: EncoderDescriptor = EncoderDescriptor {
@@ -44,8 +52,17 @@ const X265: EncoderDescriptor = EncoderDescriptor {
     preset_domain: PresetDomain::Named(X265_PRESETS),
     tunes: &["psnr", "ssim", "grain", "fastdecode", "zerolatency"],
     codec_profiles: &["main", "main10", "main12"],
-    codec_levels: &["3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2"],
-    pixel_formats: &["yuv420p", "yuv420p10le", "yuv422p", "yuv422p10le", "yuv444p", "yuv444p10le"],
+    codec_levels: &[
+        "3.0", "3.1", "4.0", "4.1", "5.0", "5.1", "5.2", "6.0", "6.1", "6.2",
+    ],
+    pixel_formats: &[
+        "yuv420p",
+        "yuv420p10le",
+        "yuv422p",
+        "yuv422p10le",
+        "yuv444p",
+        "yuv444p10le",
+    ],
     ten_bit_pixel_formats: &["yuv420p10le", "yuv422p10le", "yuv444p10le"],
     eight_bit_only_profiles: &["main"],
     requires_bitrate_zero: false,

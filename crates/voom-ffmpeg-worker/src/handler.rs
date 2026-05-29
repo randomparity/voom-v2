@@ -370,7 +370,8 @@ async fn finalize_audio_operation(
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
-    if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container)
+    // Phase 7 will extend this to handle mp4 + av1; until then only mkv/hevc is wired.
+    if request.output.container != voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER
         || !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec)
     {
         return Err(config_invalid(

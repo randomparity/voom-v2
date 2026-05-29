@@ -47,9 +47,7 @@ pub fn is_default_hevc_profile(profile: &TranscodeVideoProfile) -> bool {
 /// # Errors
 /// Returns `Err` when the encoder is unknown, the target codec disagrees with
 /// the encoder, or any field falls outside the encoder's vocabulary/range.
-pub fn validate_profile_against_descriptor(
-    profile: &TranscodeVideoProfile,
-) -> Result<(), String> {
+pub fn validate_profile_against_descriptor(profile: &TranscodeVideoProfile) -> Result<(), String> {
     let Some(descriptor) = encoder_descriptor(&profile.encoder) else {
         return Err(format!("unknown encoder `{}`", profile.encoder));
     };
@@ -66,25 +64,31 @@ pub fn validate_profile_against_descriptor(
         ));
     }
     if !descriptor.accepts_preset(&profile.preset) {
-        return Err(format!("preset `{}` invalid for `{}`", profile.preset, profile.encoder));
+        return Err(format!(
+            "preset `{}` invalid for `{}`",
+            profile.preset, profile.encoder
+        ));
     }
-    if let Some(tune) = &profile.tune {
-        if !descriptor.accepts_tune(tune) {
-            return Err(format!("tune `{tune}` invalid for `{}`", profile.encoder));
-        }
+    if let Some(tune) = &profile.tune
+        && !descriptor.accepts_tune(tune)
+    {
+        return Err(format!("tune `{tune}` invalid for `{}`", profile.encoder));
     }
-    if let Some(codec_profile) = &profile.codec_profile {
-        if !descriptor.accepts_codec_profile(codec_profile) {
-            return Err(format!(
-                "codec_profile `{codec_profile}` invalid for `{}`",
-                profile.encoder
-            ));
-        }
+    if let Some(codec_profile) = &profile.codec_profile
+        && !descriptor.accepts_codec_profile(codec_profile)
+    {
+        return Err(format!(
+            "codec_profile `{codec_profile}` invalid for `{}`",
+            profile.encoder
+        ));
     }
-    if let Some(level) = &profile.codec_level {
-        if !descriptor.accepts_codec_level(level) {
-            return Err(format!("codec_level `{level}` invalid for `{}`", profile.encoder));
-        }
+    if let Some(level) = &profile.codec_level
+        && !descriptor.accepts_codec_level(level)
+    {
+        return Err(format!(
+            "codec_level `{level}` invalid for `{}`",
+            profile.encoder
+        ));
     }
     if let Some(pixel_format) = &profile.pixel_format {
         if !descriptor.accepts_pixel_format(pixel_format) {
@@ -166,7 +170,10 @@ pub struct TranscodeVideoProfile {
     pub copy_compatible: bool,
 }
 
-#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if signature")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if signature"
+)]
 fn is_false(value: &bool) -> bool {
     !*value
 }
