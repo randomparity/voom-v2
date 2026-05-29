@@ -224,7 +224,8 @@ async fn run_case(case: &Case) -> CaseOutcome {
 /// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
 /// the shared profile dir) so the bundled probe worker runs real ffprobe. The
 /// guard serializes the real-ffprobe cases in this binary (they share the single
-/// `target/debug/ffprobe` path) and restores the stub on drop.
+/// `ffprobe` sibling path, derived from the running test binary so it tracks the
+/// active cargo target dir) and restores the stub on drop.
 fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
     static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let lock = SERIALIZE
@@ -456,7 +457,9 @@ async fn scan_source(cp: &ControlPlane, source: &Path) -> FileVersionId {
 
 fn require_encoders() {
     let preflight = preflight_from_process_env().expect("ffmpeg preflight must succeed");
-    for encoder in ["libx265", "libsvtav1", "libaom-av1"] {
+    // These flows exercise libx265 (hevc cases) and libsvtav1 (inline AV1 case)
+    // only; libaom-av1 is optional and not required here.
+    for encoder in ["libx265", "libsvtav1"] {
         assert!(
             preflight.has_encoder(encoder),
             "required encoder {encoder} missing; this is a setup failure, not a skip"
