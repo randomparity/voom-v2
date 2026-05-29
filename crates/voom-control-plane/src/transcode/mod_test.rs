@@ -191,6 +191,52 @@ async fn execute_rejects_copied_video_disagreement_before_commit() {
     );
 }
 
+#[tokio::test]
+async fn execute_does_not_commit_when_staged_result_probe_fails() {
+    let (cp, _db, dir) = fixture().await;
+    let source = dir.path().join("Movie.mp4");
+    std::fs::write(&source, b"source bytes").unwrap();
+    let seeded = seed_source(&cp, &source, b"source bytes").await;
+
+    let err = execute_transcode_video_with_dispatchers(
+        &cp,
+        ExecuteTranscodeVideoInput {
+            job_id: JobId(1),
+            ticket_id: TicketId(2),
+            lease_id: LeaseId(3),
+            source_file_version_id: seeded.0,
+            source_location_id: Some(seeded.1),
+            staging_root: dir.path().join("stage"),
+            target_dir: dir.path().join("out"),
+            resolved: default_resolved(),
+        },
+        &FakeTranscodeDispatcher,
+        &FakeVerifyDispatcher,
+        &ErroringResultProbeDispatcher,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ExternalSystemUnavailable);
+    assert!(
+        !dir.path().join("out/Movie.default-hevc.hevc.mkv").exists(),
+        "a staged-result probe failure must not leave a committed target"
+    );
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactTranscodeSucceeded).await,
+        0
+    );
+    let snapshots = cp
+        .identity
+        .list_media_snapshots_by_version(seeded.0)
+        .await
+        .unwrap();
+    assert!(
+        snapshots.is_empty(),
+        "no result media snapshot should be recorded on probe failure"
+    );
+}
+
 #[derive(Debug)]
 struct FakeTranscodeDispatcher;
 
@@ -298,6 +344,22 @@ impl crate::transcode::commit::TranscodeResultProbeDispatcher for FakeResultProb
                 }),
             },
         })
+    }
+}
+
+#[derive(Debug)]
+struct ErroringResultProbeDispatcher;
+
+#[async_trait]
+impl crate::transcode::commit::TranscodeResultProbeDispatcher for ErroringResultProbeDispatcher {
+    async fn dispatch_result_probe(
+        &self,
+        _cp: &crate::ControlPlane,
+        _request: voom_worker_protocol::ProbeFileRequest,
+    ) -> Result<crate::transcode::commit::ProbedTranscodeResult, voom_core::VoomError> {
+        Err(voom_core::VoomError::ExternalSystemUnavailable(
+            "transcode result probe failed: simulated transient worker error".to_owned(),
+        ))
     }
 }
 

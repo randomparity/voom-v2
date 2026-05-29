@@ -175,7 +175,10 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let committed = commit_and_probe_transcode_result(
         cp,
         staged.artifact_handle_id,
-        &target_path,
+        CommitTranscodePaths {
+            staging_path: &staging_path,
+            target_path: &target_path,
+        },
         &result,
         result_probe,
     )
@@ -230,23 +233,35 @@ struct CommittedTranscodeResult {
     snapshot: voom_store::repo::identity::MediaSnapshot,
 }
 
-/// Add-only commit the verified artifact, then probe the committed result
-/// through the durable scan/probe path and record its media snapshot.
+struct CommitTranscodePaths<'a> {
+    staging_path: &'a std::path::Path,
+    target_path: &'a std::path::Path,
+}
+
+/// Probe the STAGED result first, then add-only commit the verified artifact,
+/// then record the already-probed media snapshot against the committed version.
 ///
-/// A probe failure AFTER commit must not hide the committed result: the
-/// returned error embeds the commit record id and result FileVersion/FileLocation
-/// ids so an agent can inspect or re-probe (Sprint 15 failure taxonomy).
+/// Probe-before-commit is deliberate: the fallible external probe runs against
+/// the content-hash-verified staged file (byte-identical to the committed
+/// target, since commit is an add-only promotion). A transient probe failure
+/// therefore leaves nothing committed and the ticket retries cleanly from
+/// staging — it can no longer orphan a committed result with no `MediaSnapshot`.
+///
+/// Only a local DB write (the snapshot record) remains after commit; if THAT
+/// fails the returned error embeds the commit record id and result
+/// FileVersion/FileLocation ids so an agent can inspect or re-record.
 async fn commit_and_probe_transcode_result(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
-    target_path: &std::path::Path,
+    paths: CommitTranscodePaths<'_>,
     result: &TranscodeVideoResult,
     result_probe: &dyn commit::TranscodeResultProbeDispatcher,
 ) -> Result<CommittedTranscodeResult, VoomError> {
+    let probed = commit::probe_staged_result(cp, paths.staging_path, result, result_probe).await?;
     let committed = cp
         .commit_artifact(CommitArtifactInput {
             artifact_handle_id,
-            target_path: target_path.to_path_buf(),
+            target_path: paths.target_path.to_path_buf(),
         })
         .await
         .map_err(|err| VoomError::CommitFailure(err.to_string()))?;
@@ -256,20 +271,14 @@ async fn commit_and_probe_transcode_result(
     let result_file_location_id = committed.result_file_location_id.ok_or_else(|| {
         VoomError::Internal("committed transcode missing result_file_location_id".to_owned())
     })?;
-    let snapshot = commit::record_result_snapshot_with_dispatcher(
-        cp,
-        result_file_version_id,
-        target_path,
-        result,
-        result_probe,
-    )
-    .await
-    .map_err(|err| {
-        VoomError::ExternalSystemUnavailable(format!(
-            "transcode result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
-            committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
-        ))
-    })?;
+    let snapshot = commit::record_result_snapshot_payload(cp, result_file_version_id, probed)
+        .await
+        .map_err(|err| {
+            VoomError::ExternalSystemUnavailable(format!(
+                "transcode result snapshot failed after commit_record_id={} result_file_version_id={} result_file_location_id={}: {err}",
+                committed.commit_record_id.0, result_file_version_id.0, result_file_location_id.0
+            ))
+        })?;
     Ok(CommittedTranscodeResult {
         commit_record_id: committed.commit_record_id,
         result_file_version_id,

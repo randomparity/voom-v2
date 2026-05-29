@@ -135,23 +135,58 @@ pub async fn record_staged_transcode(
     })
 }
 
-pub(crate) async fn record_result_snapshot_with_dispatcher(
+/// The normalized media-snapshot payload probed from the staged artifact,
+/// paired with the probe worker so the post-commit record step can attribute it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProbedResultPayload {
+    pub worker_id: WorkerId,
+    pub payload: serde_json::Value,
+}
+
+/// Probes the STAGED artifact (the content-hash-verified file at the staging
+/// path) and returns its normalized media-snapshot payload WITHOUT recording.
+///
+/// The staged file is byte-identical to the committed target (commit is an
+/// add-only promotion), so probing it yields the same stream/codec/dims facts.
+/// Running this fallible external probe before commit lets a transient probe
+/// failure retry cleanly from staging without orphaning a committed artifact.
+///
+/// # Errors
+/// Returns the probe dispatch error, or `ArtifactChecksumMismatch` when the
+/// probed facts drift from the worker-reported output facts.
+pub(crate) async fn probe_staged_result(
     cp: &ControlPlane,
-    file_version_id: FileVersionId,
-    target_path: &Path,
+    staging_path: &Path,
     result: &TranscodeVideoResult,
     dispatcher: &dyn TranscodeResultProbeDispatcher,
-) -> Result<MediaSnapshot, VoomError> {
+) -> Result<ProbedResultPayload, VoomError> {
     let expected = result_probe_expected_facts(&result.output);
-    let request = result_probe_request(target_path, &expected)?;
+    let request = result_probe_request(staging_path, &expected)?;
     let probed = dispatcher.dispatch_result_probe(cp, request).await?;
     verify_probe_facts(&expected, &probed.result)
         .map_err(|err| VoomError::ArtifactChecksumMismatch(err.message().to_owned()))?;
     let payload = snapshot_with_stream_ids(&probed.result.snapshot)?;
+    Ok(ProbedResultPayload {
+        worker_id: probed.worker_id,
+        payload,
+    })
+}
+
+/// Records the already-probed media-snapshot payload against the committed
+/// result file version. Only a local DB write remains here, so this runs
+/// AFTER commit (see `commit_and_probe_transcode_result`).
+///
+/// # Errors
+/// Returns the underlying store error if the snapshot insert fails.
+pub(crate) async fn record_result_snapshot_payload(
+    cp: &ControlPlane,
+    file_version_id: FileVersionId,
+    probed: ProbedResultPayload,
+) -> Result<MediaSnapshot, VoomError> {
     cp.record_media_snapshot(
         file_version_id,
         Some(probed.worker_id),
-        payload,
+        probed.payload,
         cp.clock().now(),
     )
     .await
