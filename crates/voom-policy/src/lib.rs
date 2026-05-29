@@ -18,6 +18,7 @@ pub mod pipeline;
 pub mod policy_fixtures;
 pub mod span;
 pub mod validate;
+pub mod video_profile;
 
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{
@@ -44,3 +45,4 @@ pub use policy_fixtures::{
 };
 pub use span::{SourceLocation, SourceSpan, line_column};
 pub use validate::{ValidationResult, validate_policy_ast};
+pub use video_profile::{VideoProfileRef, VideoProfileSettings};

@@ -2719,6 +2719,7 @@ dependencies = [
  "serde_json",
  "time",
  "voom-core",
+ "voom-worker-protocol",
 ]
 
 [[package]]
@@ -2748,6 +2749,7 @@ dependencies = [
  "voom-core",
  "voom-events",
  "voom-policy",
+ "voom-worker-protocol",
 ]
 
 [[package]]
