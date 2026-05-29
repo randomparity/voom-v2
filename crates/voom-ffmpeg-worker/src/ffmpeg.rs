@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -6,7 +7,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use voom_worker_protocol::{
     AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioRequest,
-    TranscodeAudioRequest, TranscodeVideoProfile,
+    TranscodeAudioRequest, TranscodeVideoProfile, TranscodeVideoRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,10 +45,26 @@ pub enum FfmpegError {
     OutputFactsMismatch(String),
 }
 
+/// Facts probed from the output file after a successful transcode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputProbe {
     pub container: String,
     pub video_codec: String,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_format: String,
+}
+
+/// Facts probed from the input file before transcoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputProbe {
+    pub width: u32,
+    pub height: u32,
+    pub codec: String,
+    pub pixel_format: String,
+    pub codec_profile: Option<String>,
+    pub codec_level: Option<String>,
+    pub video_stream_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,12 +91,176 @@ pub struct SourceAudioFact {
 
 pub const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_hours(2);
 
+/// Returns the video codec arguments for the given profile.
+///
+/// When `copy_video` is true, emits `-c:v copy` regardless of encoder.
+/// Otherwise branches on `profile.encoder` to emit the per-encoder flags.
+pub fn video_codec_args(profile: &TranscodeVideoProfile, copy_video: bool) -> Vec<OsString> {
+    if copy_video {
+        return vec![OsString::from("-c:v"), OsString::from("copy")];
+    }
+    match profile.encoder.as_str() {
+        "libx265" => video_codec_args_x265(profile),
+        "libsvtav1" => video_codec_args_svtav1(profile),
+        "libaom-av1" => video_codec_args_libaom(profile),
+        other => {
+            // Unknown encoder — pass it through; the preflight and contract
+            // validation should have caught this already.
+            let mut args = vec![
+                OsString::from("-c:v"),
+                OsString::from(other),
+                OsString::from("-crf"),
+                OsString::from(profile.crf.to_string()),
+                OsString::from("-preset"),
+                OsString::from(&profile.preset),
+            ];
+            append_pixel_format_arg(&mut args, profile);
+            args
+        }
+    }
+}
+
+fn video_codec_args_x265(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from("libx265"),
+        OsString::from("-crf"),
+        OsString::from(profile.crf.to_string()),
+        OsString::from("-preset"),
+        OsString::from(&profile.preset),
+    ];
+    if let Some(tune) = &profile.tune {
+        args.push(OsString::from("-tune"));
+        args.push(OsString::from(tune));
+    }
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
+    }
+    if let Some(level) = &profile.codec_level {
+        args.push(OsString::from("-level"));
+        args.push(OsString::from(level));
+    }
+    append_pixel_format_arg(&mut args, profile);
+    args
+}
+
+fn video_codec_args_svtav1(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from("libsvtav1"),
+        OsString::from("-crf"),
+        OsString::from(profile.crf.to_string()),
+        OsString::from("-preset"),
+        OsString::from(&profile.preset),
+    ];
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
+    }
+    // tune and level go via -svtav1-params for libsvtav1
+    let mut svt_params: Vec<String> = Vec::new();
+    if let Some(tune) = &profile.tune {
+        svt_params.push(format!("tune={tune}"));
+    }
+    if let Some(level) = &profile.codec_level {
+        svt_params.push(format!("level={level}"));
+    }
+    if !svt_params.is_empty() {
+        args.push(OsString::from("-svtav1-params"));
+        args.push(OsString::from(svt_params.join(":")));
+    }
+    append_pixel_format_arg(&mut args, profile);
+    args
+}
+
+fn video_codec_args_libaom(profile: &TranscodeVideoProfile) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-c:v"),
+        OsString::from("libaom-av1"),
+        OsString::from("-crf"),
+        OsString::from(profile.crf.to_string()),
+        OsString::from("-b:v"),
+        OsString::from("0"),
+        OsString::from("-cpu-used"),
+        OsString::from(&profile.preset),
+    ];
+    if let Some(tune) = &profile.tune {
+        args.push(OsString::from("-tune"));
+        args.push(OsString::from(tune));
+    }
+    if let Some(codec_profile) = &profile.codec_profile {
+        args.push(OsString::from("-profile:v"));
+        args.push(OsString::from(codec_profile));
+    }
+    append_pixel_format_arg(&mut args, profile);
+    args
+}
+
+fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoProfile) {
+    if let Some(pixel_format) = &profile.pixel_format {
+        args.push(OsString::from("-pix_fmt"));
+        args.push(OsString::from(pixel_format));
+    }
+}
+
+/// Returns container/format arguments for the given container and video codec.
+///
+/// - `mkv` → `-f matroska`
+/// - `mp4` → `-f mp4 -tag:v hvc1` (hevc) or `-tag:v av01` (av1)
+pub fn container_args(container: &str, codec: &str) -> Vec<OsString> {
+    match container {
+        "mkv" => vec![OsString::from("-f"), OsString::from("matroska")],
+        "mp4" => {
+            let tag = if codec == "hevc" { "hvc1" } else { "av01" };
+            vec![
+                OsString::from("-f"),
+                OsString::from("mp4"),
+                OsString::from("-tag:v"),
+                OsString::from(tag),
+            ]
+        }
+        other => vec![OsString::from("-f"), OsString::from(other)],
+    }
+}
+
+/// Returns the scale filter arguments for aspect-preserving downscale-only.
+///
+/// Only emits `-vf scale=...` when the source dimensions exceed the profile's
+/// caps. The filter forces even dimensions (required by most codecs).
+pub fn scale_args(profile: &TranscodeVideoProfile, src_w: u32, src_h: u32) -> Vec<OsString> {
+    let cap_w = match profile.max_width {
+        Some(w) => w,
+        None => return Vec::new(),
+    };
+    let cap_h = match profile.max_height {
+        Some(h) => h,
+        None => return Vec::new(),
+    };
+    if src_w <= cap_w && src_h <= cap_h {
+        return Vec::new();
+    }
+    // Downscale-only, preserve aspect, force even dims.
+    // See also: voom-plan/src/planner.rs for the dimension-cap logic.
+    let vf = format!(
+        "scale='min({cap_w},iw)':'min({cap_h},ih)':force_original_aspect_ratio=decrease,\
+         scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    );
+    vec![OsString::from("-vf"), OsString::from(vf)]
+}
+
 pub async fn run_ffmpeg_transcode(
     config: &FfmpegConfig,
-    input: &Path,
-    output: &Path,
-    profile: &TranscodeVideoProfile,
+    request: &TranscodeVideoRequest,
+    src_width: u32,
+    src_height: u32,
 ) -> Result<OutputProbe, FfmpegError> {
+    let input = Path::new(&request.input.path);
+    let output = Path::new(&request.output.path);
+    let profile = &request.profile;
+    let container = &request.output.container;
+    let codec = &request.output.video_codec;
+
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -94,13 +275,15 @@ pub async fn run_ffmpeg_transcode(
         .arg("-map")
         .arg("0:s?")
         .arg("-map")
-        .arg("0:t?")
-        .arg("-c:v")
-        .arg(&profile.encoder)
-        .arg("-crf")
-        .arg(profile.crf.to_string())
-        .arg("-preset")
-        .arg(&profile.preset)
+        .arg("0:t?");
+
+    for arg in video_codec_args(profile, request.copy_video) {
+        command.arg(arg);
+    }
+    for arg in scale_args(profile, src_width, src_height) {
+        command.arg(arg);
+    }
+    command
         .arg("-c:a")
         .arg("copy")
         .arg("-c:s")
@@ -108,9 +291,11 @@ pub async fn run_ffmpeg_transcode(
         .arg("-c:t")
         .arg("copy")
         .arg("-map_metadata")
-        .arg("0")
-        .arg("-f")
-        .arg("matroska")
+        .arg("0");
+    for arg in container_args(container, codec) {
+        command.arg(arg);
+    }
+    command
         .arg("-progress")
         .arg("pipe:2")
         .arg(output)
@@ -124,7 +309,7 @@ pub async fn run_ffmpeg_transcode(
         return Err(FfmpegError::FfmpegFailed(command_error(&process_output)));
     }
 
-    probe_output(config, output).await
+    probe_output(config, output, container, codec, profile).await
 }
 
 pub async fn run_ffmpeg_transcode_audio(
@@ -226,42 +411,176 @@ pub async fn run_ffmpeg_extract_audio(
     Ok(probe)
 }
 
-async fn probe_output(config: &FfmpegConfig, path: &Path) -> Result<OutputProbe, FfmpegError> {
-    let mut command = Command::new(&config.ffprobe_path);
-    command
-        .arg("-v")
-        .arg("error")
-        .arg("-print_format")
-        .arg("json")
-        .arg("-show_format")
-        .arg("-show_streams")
-        .arg(path)
-        .kill_on_drop(true);
-    let output = timeout(config.process_timeout, command.output())
-        .await
-        .map_err(|_| FfmpegError::FfprobeFailed("ffprobe timed out".to_owned()))?
-        .map_err(|err| FfmpegError::FfprobeFailed(err.to_string()))?;
-    if !output.status.success() {
-        return Err(FfmpegError::FfprobeFailed(command_error(&output)));
-    }
-    let json: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|err| FfmpegError::FfprobeFailed(format!("invalid ffprobe JSON: {err}")))?;
+/// Probes the input file and returns key video stream facts needed for
+/// downscale and copy-video revalidation.
+pub async fn probe_input(
+    config: &FfmpegConfig,
+    path: &Path,
+) -> Result<InputProbe, FfmpegError> {
+    let json = probe_json(config, path).await?;
+    let video_stream = json
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
+        })
+        .ok_or_else(|| FfmpegError::FfprobeFailed("no video stream in input".to_owned()))?;
+
+    let width = video_stream
+        .get("width")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let height = video_stream
+        .get("height")
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let codec = video_stream
+        .get("codec_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let pixel_format = video_stream
+        .get("pix_fmt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let codec_profile = video_stream
+        .get("profile")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let codec_level = video_stream
+        .get("level")
+        .and_then(Value::as_u64)
+        .map(|level_int| {
+            // ffprobe reports level as integer * 10 (e.g., 40 = 4.0)
+            format!("{}.{}", level_int / 10, level_int % 10)
+        });
+
+    let video_stream_count = json
+        .get("streams")
+        .and_then(Value::as_array)
+        .map(|streams| {
+            streams
+                .iter()
+                .filter(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
+                .count()
+        })
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+
+    Ok(InputProbe {
+        width,
+        height,
+        codec,
+        pixel_format,
+        codec_profile,
+        codec_level,
+        video_stream_count,
+    })
+}
+
+async fn probe_output(
+    config: &FfmpegConfig,
+    path: &Path,
+    expected_container: &str,
+    expected_codec: &str,
+    profile: &TranscodeVideoProfile,
+) -> Result<OutputProbe, FfmpegError> {
+    let json = probe_json(config, path).await?;
     let container = json
         .pointer("/format/format_name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let video_codec = first_video_codec(&json).unwrap_or_default();
-    if !container.split(',').any(|name| name == "matroska")
-        || !voom_worker_protocol::is_supported_transcode_video_codec(video_codec)
-    {
+    let video_stream = json
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|s| s.get("codec_type").and_then(Value::as_str) == Some("video"))
+        });
+
+    let actual_codec = video_stream
+        .and_then(|s| s.get("codec_name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let width = video_stream
+        .and_then(|s| s.get("width"))
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let height = video_stream
+        .and_then(|s| s.get("height"))
+        .and_then(Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let pixel_format = video_stream
+        .and_then(|s| s.get("pix_fmt"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    let probe_container = match expected_container {
+        "mkv" => "matroska",
+        "mp4" => "mp4",
+        other => other,
+    };
+    if !container.split(',').any(|name| name == probe_container) {
         return Err(FfmpegError::OutputFactsMismatch(format!(
-            "expected matroska/hevc output, got {container}/{video_codec}"
+            "expected {expected_container} output, got container={container}"
         )));
     }
+    // Map ffprobe codec names to canonical forms for comparison
+    let canonical_actual = canonical_output_codec(actual_codec);
+    if canonical_actual != expected_codec {
+        return Err(FfmpegError::OutputFactsMismatch(format!(
+            "expected {expected_codec} codec, got {actual_codec}"
+        )));
+    }
+    // Validate dimension caps when set
+    if let Some(max_w) = profile.max_width {
+        if width > max_w {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "output width {width} exceeds cap {max_w}"
+            )));
+        }
+    }
+    if let Some(max_h) = profile.max_height {
+        if height > max_h {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "output height {height} exceeds cap {max_h}"
+            )));
+        }
+    }
+    // Validate pixel format when constrained
+    if let Some(expected_pf) = &profile.pixel_format {
+        if !pixel_format.is_empty() && &pixel_format != expected_pf {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "expected pixel_format {expected_pf}, got {pixel_format}"
+            )));
+        }
+    }
+
     Ok(OutputProbe {
-        container: voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER.to_owned(),
-        video_codec: voom_worker_protocol::TRANSCODE_VIDEO_CODEC.to_owned(),
+        container: expected_container.to_owned(),
+        video_codec: expected_codec.to_owned(),
+        width,
+        height,
+        pixel_format,
     })
+}
+
+/// Maps ffprobe codec names to canonical voom-worker-protocol forms.
+fn canonical_output_codec(codec: &str) -> &str {
+    match codec {
+        "hevc" | "h265" => "hevc",
+        "av1" => "av1",
+        other => other,
+    }
 }
 
 async fn run_ffmpeg_command(
@@ -668,15 +987,6 @@ fn verify_preserved_audio_metadata(
         ));
     }
     Ok(())
-}
-
-fn first_video_codec(json: &Value) -> Option<&str> {
-    json.get("streams")?
-        .as_array()?
-        .iter()
-        .find(|stream| stream.get("codec_type").and_then(Value::as_str) == Some("video"))?
-        .get("codec_name")?
-        .as_str()
 }
 
 fn command_error(output: &std::process::Output) -> String {

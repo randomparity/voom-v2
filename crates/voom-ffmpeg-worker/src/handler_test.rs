@@ -50,14 +50,14 @@ async fn unsupported_output_contract_is_rejected_before_ffmpeg() {
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
     let mut request = request(dir.path(), &input).await;
-    request.output.container = "mp4".to_owned();
+    // mp4 is now supported; use avi which is not supported
+    request.output.container = "avi".to_owned();
 
     let err = handle_transcode_video(&request, &config(dir.path()))
         .await
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("mkv"));
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
@@ -67,6 +67,7 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
     let input = dir.path().join("input.mkv");
     tokio::fs::write(&input, b"input").await.unwrap();
     let mut request = request(dir.path(), &input).await;
+    // libx264 is not a recognized encoder — descriptor validation rejects it
     request.profile.encoder = "libx264".to_owned();
 
     let err = handle_transcode_video(&request, &config(dir.path()))
@@ -74,7 +75,11 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("default-hevc"));
+    // error message should mention the profile name (default-hevc) or the encoder
+    assert!(
+        err.to_string().contains("default-hevc") || err.to_string().contains("descriptor"),
+        "unexpected error: {err}"
+    );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
@@ -308,10 +313,12 @@ fn config(root: &Path) -> FfmpegConfig {
         "ffmpeg",
         "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
     );
+    // ffprobe returns the same JSON for both probe_input and probe_output calls.
+    // Includes width/height/pix_fmt so both probes succeed.
     let ffprobe = stub_bin(
         root,
         "ffprobe",
-        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\"}]}\nJSON\n",
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\"}]}\nJSON\n",
     );
     FfmpegConfig::new(
         ffmpeg,

@@ -14,8 +14,8 @@ use voom_worker_protocol::{
 };
 
 use crate::ffmpeg::{
-    FfmpegConfig, FfmpegError, run_ffmpeg_extract_audio, run_ffmpeg_transcode,
-    run_ffmpeg_transcode_audio,
+    FfmpegConfig, FfmpegError, InputProbe, probe_input, run_ffmpeg_extract_audio,
+    run_ffmpeg_transcode, run_ffmpeg_transcode_audio,
 };
 use crate::observe::{ObserveError, observe_file_facts};
 
@@ -222,7 +222,18 @@ pub async fn handle_transcode_video(
         .await
         .map_err(TranscodeVideoError::from)?;
     verify_expected_facts("input_pre", &input_pre, &request.input.expected)?;
-    let probe = run_ffmpeg_transcode(config, &input_path, &output_path, &request.profile)
+
+    // Probe input to learn source dimensions and, for copy_video, to
+    // revalidate the source satisfies the profile's constraints.
+    let input_probe = probe_input(config, &input_path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+
+    if request.copy_video {
+        validate_copy_video_preconditions(request, &input_probe)?;
+    }
+
+    let probe = run_ffmpeg_transcode(config, request, input_probe.width, input_probe.height)
         .await
         .map_err(TranscodeVideoError::from)?;
     let input_post = observe_file_facts(&input_path)
@@ -242,12 +253,113 @@ pub async fn handle_transcode_video(
         output,
         output_container: probe.container,
         output_video_codec: probe.video_codec,
-        // Phase 7 will populate these from the ffprobe output.
-        output_width: 0,
-        output_height: 0,
-        output_pixel_format: String::new(),
-        copied_video: false,
+        output_width: probe.width,
+        output_height: probe.height,
+        output_pixel_format: probe.pixel_format,
+        copied_video: request.copy_video,
     })
+}
+
+/// Normalizes a codec profile/level token for comparison.
+///
+/// ffprobe reports e.g. `"Main 10"` while a profile uses `"main10"`.
+/// Collapse case and whitespace. Mirrors `normalize_codec_token` in
+/// `voom-plan/src/planner.rs`.
+fn normalize_codec_token(token: &str) -> String {
+    token
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Before emitting `-c:v copy`, confirm the source satisfies all constraints
+/// the profile imposes. Fails loudly on any mismatch — never silently
+/// re-encodes or copies a non-conforming stream.
+fn validate_copy_video_preconditions(
+    request: &TranscodeVideoRequest,
+    probe: &InputProbe,
+) -> Result<(), TranscodeVideoError> {
+    let profile = &request.profile;
+    let target_codec = &request.output.video_codec;
+
+    // Normalize both sides (ffprobe "hevc" == target "hevc"; av1 stays av1)
+    if normalize_codec_token(&probe.codec) != normalize_codec_token(target_codec) {
+        return Err(malformed_worker_result(
+            "copy_video",
+            format!(
+                "copy_video requested but source codec `{}` != target `{}`",
+                probe.codec, target_codec
+            ),
+        ));
+    }
+
+    // Check dimension caps
+    if let Some(max_w) = profile.max_width {
+        if probe.width > max_w {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video source width {} exceeds profile cap {}",
+                    probe.width, max_w
+                ),
+            ));
+        }
+    }
+    if let Some(max_h) = profile.max_height {
+        if probe.height > max_h {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video source height {} exceeds profile cap {}",
+                    probe.height, max_h
+                ),
+            ));
+        }
+    }
+
+    // Check constrained pixel format
+    if let Some(required_pf) = &profile.pixel_format {
+        if !probe.pixel_format.is_empty() && &probe.pixel_format != required_pf {
+            return Err(malformed_worker_result(
+                "copy_video",
+                format!(
+                    "copy_video source pixel_format `{}` != required `{}`",
+                    probe.pixel_format, required_pf
+                ),
+            ));
+        }
+    }
+
+    // Check constrained codec profile
+    if let Some(required_cp) = &profile.codec_profile {
+        if let Some(source_cp) = &probe.codec_profile {
+            if normalize_codec_token(source_cp) != normalize_codec_token(required_cp) {
+                return Err(malformed_worker_result(
+                    "copy_video",
+                    format!(
+                        "copy_video source codec_profile `{source_cp}` != required `{required_cp}`"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Check constrained codec level
+    if let Some(required_cl) = &profile.codec_level {
+        if let Some(source_cl) = &probe.codec_level {
+            if normalize_codec_token(source_cl) != normalize_codec_token(required_cl) {
+                return Err(malformed_worker_result(
+                    "copy_video",
+                    format!(
+                        "copy_video source codec_level `{source_cl}` != required `{required_cl}`"
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn handle_transcode_audio(
@@ -370,19 +482,31 @@ async fn finalize_audio_operation(
 }
 
 fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), TranscodeVideoError> {
-    // Phase 7 will extend this to handle mp4 + av1; until then only mkv/hevc is wired.
-    if request.output.container != voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER
-        || !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec)
-    {
+    if !voom_worker_protocol::is_supported_transcode_video_container(&request.output.container) {
         return Err(config_invalid(
             "request",
-            "transcode_video output must request hevc video in mkv".to_owned(),
+            format!(
+                "transcode_video output container `{}` is not supported (mkv or mp4)",
+                request.output.container
+            ),
         ));
     }
-    if !voom_worker_protocol::is_default_hevc_profile(&request.profile) {
+    if !voom_worker_protocol::is_supported_transcode_video_codec(&request.output.video_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_video profile must be default-hevc".to_owned(),
+            format!(
+                "transcode_video output codec `{}` is not supported (hevc or av1)",
+                request.output.video_codec
+            ),
+        ));
+    }
+    if voom_worker_protocol::validate_profile_against_descriptor(&request.profile).is_err() {
+        return Err(config_invalid(
+            "request",
+            format!(
+                "transcode_video profile `{}` failed encoder descriptor validation",
+                request.profile.name
+            ),
         ));
     }
     Ok(())
