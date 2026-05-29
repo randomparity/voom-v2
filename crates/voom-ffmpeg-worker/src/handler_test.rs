@@ -93,8 +93,9 @@ async fn malformed_request_payload_is_accepted_then_terminal_error() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -131,8 +132,9 @@ async fn transcode_audio_operation_decodes_typed_payload() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -153,8 +155,9 @@ async fn extract_audio_operation_decodes_typed_payload() {
         progress_idle_deadline_ms: 1_000,
     };
 
+    let (config, _config_dir) = config_path();
     let frames = dispatch_frames(
-        handle_operation_with_test_config(request, config_path())
+        handle_operation_with_test_config(request, config)
             .await
             .unwrap(),
     );
@@ -606,9 +609,12 @@ fn extract_audio_request(
     }
 }
 
-fn config_path() -> FfmpegConfig {
-    let dir = tempfile::tempdir().unwrap().keep();
-    config(&dir)
+/// Returns a config backed by stub binaries plus the `TempDir` guard. Hold the
+/// guard for the test's duration so the tempdir is cleaned up afterward.
+fn config_path() -> (FfmpegConfig, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path());
+    (config, dir)
 }
 
 fn stub_bin(dir: &Path, name: &str, body: &str) -> PathBuf {

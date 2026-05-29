@@ -27,10 +27,11 @@ use voom_worker_protocol::{
 // Fixture generation
 // ---------------------------------------------------------------------------
 
-/// Generates a tiny (64x64, 2 seconds, 10fps) H.264 source file at `path`.
-/// Using a larger/longer source avoids pts/dts issues in mp4 muxing.
-fn generate_h264_fixture(path: &Path) {
-    let status = Command::new("ffmpeg")
+/// Generates a tiny (64x64, 2 seconds, 10fps) H.264 source file at `path`,
+/// using the same ffmpeg binary the worker uses. A larger/longer source avoids
+/// pts/dts issues in mp4 muxing.
+fn generate_h264_fixture(ffmpeg: &Path, path: &Path) {
+    let status = Command::new(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -56,9 +57,10 @@ fn generate_h264_fixture(path: &Path) {
     );
 }
 
-/// Generates a tiny (64x64, 1 second) HEVC source file at `path` (for `copy_video` tests).
-fn generate_hevc_fixture(path: &Path) {
-    let status = Command::new("ffmpeg")
+/// Generates a tiny (64x64, 1 second) HEVC source file at `path` (for
+/// `copy_video` tests), using the same ffmpeg binary the worker uses.
+fn generate_hevc_fixture(ffmpeg: &Path, path: &Path) {
+    let status = Command::new(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -86,9 +88,10 @@ fn generate_hevc_fixture(path: &Path) {
     );
 }
 
-/// Generates a (160x90, 2 seconds, 10fps) H.264 file — for downscale tests.
-fn generate_h264_oversized(path: &Path) {
-    let status = Command::new("ffmpeg")
+/// Generates a (160x90, 2 seconds, 10fps) H.264 file for downscale tests, using
+/// the same ffmpeg binary the worker uses.
+fn generate_h264_oversized(ffmpeg: &Path, path: &Path) {
+    let status = Command::new(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -190,7 +193,7 @@ async fn libx265_hevc_mkv_transcode_succeeds_with_correct_codec_and_container() 
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.hevc.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile::default_hevc();
     let request = with_real_expected(
@@ -225,7 +228,7 @@ async fn libsvtav1_av1_mkv_transcode_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.av1.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "default-av1".to_owned(),
@@ -264,7 +267,7 @@ async fn libaom_av1_mkv_transcode_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.av1.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "av1-archive".to_owned(),
@@ -303,7 +306,7 @@ async fn hevc_mp4_output_uses_hvc1_tag() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.hevc.mp4");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile::default_hevc();
     let request = with_real_expected(
@@ -351,7 +354,7 @@ async fn av1_mp4_output_uses_av01_tag() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.av1.mp4");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "av1-1080p".to_owned(),
@@ -390,7 +393,7 @@ async fn downscale_applied_when_source_exceeds_cap() {
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.hevc.mkv");
     // 160x90 source, cap at 80x45 → downscale must occur
-    generate_h264_oversized(&input);
+    generate_h264_oversized(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "hevc-tiny".to_owned(),
@@ -437,7 +440,7 @@ async fn copy_video_path_uses_stream_copy() {
     let input = dir.path().join("source.hevc.mkv");
     let output = dir.path().join("out.hevc.mkv");
     // Generate HEVC source so copy_video validation passes
-    generate_hevc_fixture(&input);
+    generate_hevc_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "default-hevc".to_owned(),
@@ -480,7 +483,7 @@ async fn copy_video_with_h264_source_fails_loudly() {
     let input = dir.path().join("source.h264.mkv");
     let output = dir.path().join("out.hevc.mkv");
     // H.264 source ≠ target hevc → copy_video must fail loudly
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile::default_hevc();
     let mut request = with_real_expected(
@@ -556,7 +559,7 @@ async fn wrong_expected_input_facts_is_checksum_mismatch() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     // Provide wrong expected size/hash — pre-observation rejects it.
     let request = TranscodeVideoRequest {
@@ -601,7 +604,7 @@ async fn existing_output_path_fails_before_ffmpeg() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
     // Pre-create the output to trigger the "already exists" guard
     std::fs::write(&output, b"existing").unwrap();
 
@@ -639,7 +642,7 @@ async fn bad_payload_container_is_config_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.avi");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     // avi is not a supported container
     let request = with_real_expected(
@@ -675,7 +678,7 @@ async fn path_escape_is_rejected_before_ffmpeg() {
     let config = ffmpeg_config(&preflight);
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let mut request = with_real_expected(
         basic_request(
@@ -716,7 +719,7 @@ async fn pixel_format_constraint_is_honored_in_output() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.hevc.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let profile = TranscodeVideoProfile {
         name: "hevc-10bit".to_owned(),
@@ -757,7 +760,7 @@ async fn output_codec_mismatch_is_malformed_result() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     // hevc-producing profile, but the request claims the output codec is av1.
     let profile = TranscodeVideoProfile {
@@ -848,7 +851,7 @@ async fn tiny_process_timeout_yields_external_system_unavailable() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("out.mkv");
-    generate_h264_fixture(&input);
+    generate_h264_fixture(&preflight.ffmpeg_path, &input);
 
     let request = with_real_expected(
         basic_request(

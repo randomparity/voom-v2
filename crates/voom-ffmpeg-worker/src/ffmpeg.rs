@@ -204,21 +204,33 @@ fn append_pixel_format_arg(args: &mut Vec<OsString>, profile: &TranscodeVideoPro
 /// Returns container/format arguments for the given container and video codec.
 ///
 /// - `mkv` → `-f matroska`
-/// - `mp4` → `-f mp4 -tag:v hvc1` (hevc) or `-tag:v av01` (av1)
-#[must_use]
-pub fn container_args(container: &str, codec: &str) -> Vec<OsString> {
+/// - `mp4` + `hevc` → `-f mp4 -tag:v hvc1`
+/// - `mp4` + `av1` → `-f mp4 -tag:v av01`
+///
+/// # Errors
+/// Returns `FfmpegError::OutputFactsMismatch` for an mp4 container with a video
+/// codec that has no defined mp4 tag.
+pub fn container_args(container: &str, codec: &str) -> Result<Vec<OsString>, FfmpegError> {
     match container {
-        "mkv" => vec![OsString::from("-f"), OsString::from("matroska")],
+        "mkv" => Ok(vec![OsString::from("-f"), OsString::from("matroska")]),
         "mp4" => {
-            let tag = if codec == "hevc" { "hvc1" } else { "av01" };
-            vec![
+            let tag = match codec {
+                "hevc" => "hvc1",
+                "av1" => "av01",
+                other => {
+                    return Err(FfmpegError::OutputFactsMismatch(format!(
+                        "unsupported mp4 video codec {other}"
+                    )));
+                }
+            };
+            Ok(vec![
                 OsString::from("-f"),
                 OsString::from("mp4"),
                 OsString::from("-tag:v"),
                 OsString::from(tag),
-            ]
+            ])
         }
-        other => vec![OsString::from("-f"), OsString::from(other)],
+        other => Ok(vec![OsString::from("-f"), OsString::from(other)]),
     }
 }
 
@@ -289,7 +301,7 @@ pub async fn run_ffmpeg_transcode(
         .arg("copy")
         .arg("-map_metadata")
         .arg("0");
-    for arg in container_args(container, codec) {
+    for arg in container_args(container, codec)? {
         command.arg(arg);
     }
     command
@@ -550,14 +562,20 @@ async fn probe_output(
             "output height {height} exceeds cap {max_h}"
         )));
     }
-    // Validate pixel format when constrained
-    if let Some(expected_pf) = &profile.pixel_format
-        && !pixel_format.is_empty()
-        && &pixel_format != expected_pf
-    {
-        return Err(FfmpegError::OutputFactsMismatch(format!(
-            "expected pixel_format {expected_pf}, got {pixel_format}"
-        )));
+    // Validate pixel format when constrained. An unknown (empty) output
+    // pixel_format under a constraint is non-conforming — fail fast, matching
+    // validate_copy_video_preconditions.
+    if let Some(expected_pf) = &profile.pixel_format {
+        if pixel_format.is_empty() {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "expected pixel_format {expected_pf}, but output pixel_format is unknown"
+            )));
+        }
+        if &pixel_format != expected_pf {
+            return Err(FfmpegError::OutputFactsMismatch(format!(
+                "expected pixel_format {expected_pf}, got {pixel_format}"
+            )));
+        }
     }
 
     Ok(OutputProbe {

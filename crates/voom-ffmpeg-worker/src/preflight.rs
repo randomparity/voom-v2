@@ -101,7 +101,7 @@ pub fn preflight_with_paths(
                 .arg("-encoders"),
         ),
     )?;
-    let hevc_encoder = parse_libx265_encoder(&encoders).ok_or_else(|| {
+    let hevc_encoder = parse_token(&encoders, "libx265").ok_or_else(|| {
         FFmpegPreflightError::Failed(
             "ffmpeg does not advertise required libx265 encoder".to_owned(),
         )
@@ -253,10 +253,6 @@ fn command_output(command: &mut Command) -> io::Result<Output> {
 
 fn is_text_file_busy(err: &io::Error) -> bool {
     err.raw_os_error() == Some(26)
-}
-
-fn parse_libx265_encoder(encoders: &str) -> Option<String> {
-    parse_token(encoders, "libx265")
 }
 
 fn parse_token(text: &str, token: &str) -> Option<String> {

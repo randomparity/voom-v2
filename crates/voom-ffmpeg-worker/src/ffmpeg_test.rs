@@ -445,14 +445,14 @@ fn video_codec_args_unknown_encoder_is_error() {
 
 #[test]
 fn container_args_mkv_emits_matroska() {
-    let args = container_args("mkv", "hevc");
+    let args = container_args("mkv", "hevc").unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert_eq!(strs, &["-f", "matroska"]);
 }
 
 #[test]
 fn container_args_mp4_hevc_tags_hvc1() {
-    let args = container_args("mp4", "hevc");
+    let args = container_args("mp4", "hevc").unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"mp4"));
     assert!(strs.contains(&"-tag:v"));
@@ -461,11 +461,17 @@ fn container_args_mp4_hevc_tags_hvc1() {
 
 #[test]
 fn container_args_mp4_av1_tags_av01() {
-    let args = container_args("mp4", "av1");
+    let args = container_args("mp4", "av1").unwrap();
     let strs: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
     assert!(strs.contains(&"mp4"));
     assert!(strs.contains(&"-tag:v"));
     assert!(strs.contains(&"av01"));
+}
+
+#[test]
+fn container_args_mp4_unsupported_codec_is_error() {
+    let err = container_args("mp4", "vp9").unwrap_err();
+    assert!(matches!(err, FfmpegError::OutputFactsMismatch(_)));
 }
 
 #[test]
