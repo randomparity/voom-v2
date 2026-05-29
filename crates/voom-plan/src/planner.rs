@@ -1526,7 +1526,10 @@ fn mp4_muxable(kind: &str, codec_name: &str) -> bool {
     }
 }
 
-fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
+/// Returns the value of a field from the first video stream in the snapshot's
+/// `stream_summary.streams` array.
+#[must_use]
+pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Option<&'a str> {
     snapshot
         .stream_summary
         .get("streams")
