@@ -121,6 +121,11 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             insert_string(input, &mut output, "avg_frame_rate");
             insert_u64_string(input, &mut output, "sample_rate", "sample_rate")?;
             insert_u64_value(input, &mut output, "channels", "channels")?;
+            insert_string_as(input, &mut output, "pix_fmt", "pixel_format");
+            insert_string(input, &mut output, "profile");
+            // ffprobe may emit `level` as a JSON number (e.g. 153); normalize to string
+            // for stable downstream comparison regardless of the ffprobe version.
+            insert_u64_as_string(input, &mut output, "level");
             insert_stream_language(input, &mut output);
             insert_disposition(input, &mut output)?;
 
@@ -195,6 +200,28 @@ fn insert_string_as(
         .filter(|value| !is_unknown_value(value))
     {
         output.insert(output_key.to_owned(), Value::String(value.to_owned()));
+    }
+}
+
+/// Inserts `key` from `input` into `output` as a JSON string, regardless of
+/// whether the raw ffprobe value is a number or already a string. Absent or
+/// sentinel values are omitted. The output key equals the input key.
+fn insert_u64_as_string(
+    input: &Map<String, Value>,
+    output: &mut Map<String, Value>,
+    key: &str,
+) {
+    let Some(value) = input.get(key) else {
+        return;
+    };
+    // Already a string — delegate to the sentinel-filtering path.
+    if value.is_string() {
+        insert_string(input, output, key);
+        return;
+    }
+    // Numeric value: stringify directly.
+    if let Some(n) = value.as_u64() {
+        output.insert(key.to_owned(), Value::String(n.to_string()));
     }
 }
 
