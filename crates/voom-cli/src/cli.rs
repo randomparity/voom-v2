@@ -48,6 +48,9 @@ pub enum Command {
     /// Register and manage execution nodes.
     #[command(subcommand)]
     Node(NodeCommand),
+    /// Inspect seeded video encode profiles.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
     /// Register and inspect workers.
     #[command(subcommand)]
     Worker(WorkerCommand),
@@ -173,6 +176,17 @@ pub enum NodeCommand {
         node_id: u64,
         #[arg(long)]
         expected_epoch: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ProfileCommand {
+    /// List the seeded video encode profiles.
+    List,
+    /// Show one video encode profile by name.
+    Show {
+        #[arg(long)]
+        name: String,
     },
 }
 

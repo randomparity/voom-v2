@@ -1,0 +1,33 @@
+---
+source: crates/voom-cli/tests/profile_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "profile",
+  "status": "ok",
+  "data": {
+    "profile": {
+      "id": "vp-hevc-archive",
+      "name": "hevc-archive",
+      "target_codec": "hevc",
+      "encoder": "libx265",
+      "crf": 18,
+      "preset": "slow",
+      "tune": null,
+      "codec_profile": "main10",
+      "codec_level": null,
+      "pixel_format": "yuv420p10le",
+      "max_width": null,
+      "max_height": null,
+      "output_container": "mkv",
+      "copy_compatible": false
+    }
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

@@ -6,6 +6,7 @@ pub mod init;
 pub mod node;
 pub mod plan;
 pub mod policy;
+pub mod profile;
 pub mod scan;
 pub mod scheduler;
 pub mod token_source;
