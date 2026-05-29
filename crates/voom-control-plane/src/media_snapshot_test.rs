@@ -38,6 +38,8 @@ fn planning_input_derives_video_count_and_copies_container_and_codec() {
     assert_eq!(input.container.as_deref(), Some("mkv"));
     assert_eq!(input.video_codec.as_deref(), Some("h264"));
     assert_eq!(input.existing_media_snapshot_id, Some(MediaSnapshotId(7)));
+    assert_eq!(input.width, None);
+    assert_eq!(input.height, None);
 }
 
 #[test]
