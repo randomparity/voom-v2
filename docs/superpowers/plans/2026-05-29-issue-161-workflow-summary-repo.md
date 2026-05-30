@@ -25,7 +25,7 @@
 
 - [ ] **Step 1: Write `migrations/0015_workflow_summaries.sql`.**
 
-Three `STRICT` tables. All timestamps are ISO-8601 TEXT (codebase convention). No leading `COMMIT;` dance is needed — this migration only *creates* tables and never rebuilds an FK'd table, so it runs inside sqlx's wrapping transaction unchanged. Keep `PRAGMA foreign_key_check;` as the final statement (matching `0012`) so a seeded-upgrade catches a dangling FK.
+Three `STRICT` tables. All timestamps are ISO-8601 TEXT (codebase convention). No leading `COMMIT;` dance is needed — this migration only *creates* tables and never rebuilds an FK'd table, so it runs inside sqlx's wrapping transaction unchanged. Do **not** append a trailing `PRAGMA foreign_key_check;`: 0012/0013 carry it only because they rebuild a populated table, and as a bare migration statement it returns rows without raising — inert here (this migration inserts no rows) and misleading. A create-only migration (cf. 0011) omits it.
 
 ```sql
 -- Sprint 16 -- durable three-grain workflow summaries (job / phase / file-phase).
@@ -91,8 +91,6 @@ CREATE TABLE workflow_file_phase_summaries (
 
 CREATE UNIQUE INDEX workflow_file_phase_summaries_key
     ON workflow_file_phase_summaries (job_id, phase_ordinal, branch_id);
-
-PRAGMA foreign_key_check;
 ```
 
 - [ ] **Step 2: Register migration 15 in `migrator.rs`.** Add `MIGRATION_0015_SQL` `include_str!` const and a `Migration::new(15, Cow::Borrowed("workflow_summaries"), MigrationType::Simple, …, false)` entry at the end of the `migrations` vec.
@@ -118,7 +116,7 @@ PRAGMA foreign_key_check;
 
 - [ ] **Step 4: Per-phase report-link test.** `phase_summary_links_report`: upsert a `NewPhaseSummary` with `outcome = Completed` and a `PhaseReport { report_id: "rep-abc", report: json!({"schema_version": 1}) }`; assert `get_phase_summary(job, 0)` and `phases_for_job(job)` both return it with the report_id and report intact. Add `phase_summary_skipped_has_no_report`: `outcome = Skipped`, `report: None`; assert it round-trips with `report_id`/`report` NULL. Implement until green.
 
-- [ ] **Step 5: Per-`(file, phase)` link test.** `file_phase_summary_links_artifacts`: upsert a committed `NewFilePhaseSummary` citing the seeded `file_version`/`file_location`/`artifact_handle`/`media_snapshot` and `ticket_ids = vec![TicketId(1), TicketId(2)]`; assert `get_file_phase_summary` returns the exact produced ids, ticket ids (order preserved), and `Committed`. Add `committed_requires_produced_lineage`: attempt to upsert a `Committed` row with `produced_file_version_id: None` and assert the call returns `Err(VoomError::Database(_))` (the CHECK fires) — proving the invariant is enforced at the DB, not just in Rust.
+- [ ] **Step 5: Per-`(file, phase)` link test.** `file_phase_summary_links_artifacts`: upsert a committed `NewFilePhaseSummary` citing the seeded `file_version`/`file_location`/`artifact_handle`/`media_snapshot` and `ticket_ids = vec![TicketId(1), TicketId(2)]`; assert `get_file_phase_summary` returns the exact produced ids, ticket ids (order preserved), and `Committed`. Add `committed_requires_produced_lineage`: attempt to upsert a `Committed` row with `produced_file_version_id: None` and assert the call returns `Err(VoomError::Database(_))` (the CHECK fires) — proving the invariant is enforced at the DB, not just in Rust. Add `produced_ids_must_reference_real_rows`: upsert a `Committed` row whose `produced_file_version_id` (and separately `reprobe_snapshot_id`) names an id that was never seeded (e.g. `FileVersionId(9999)`) and assert `Err(VoomError::Database(_))` from the foreign-key violation (FK enforcement is on — `pool.rs:32` sets `foreign_keys(true)`). This proves the link is FK-enforced against the right table, not merely stored — the other half of the "links the correct artifacts/snapshots" acceptance, and a guard against a column being wired to the wrong table or FK enforcement silently regressing.
 
 - [ ] **Step 6: Half-committed-barrier test.** `half_committed_barrier_records_only_advanced_files`: for one `phase_ordinal`, upsert a `Committed` row for branch `"a"` and **no** row for branch `"b"` (the file that failed); assert `file_phases_for_job(job)` returns exactly one row, for `"a"`. This is the issue's named acceptance.
 
@@ -141,7 +139,7 @@ PRAGMA foreign_key_check;
 - `cargo test -p voom-store workflow_summaries` — round-trip, report link, artifact link, committed-CHECK rejection, half-barrier, first-write-wins idempotency all pass.
 - `cargo test -p voom-store schema` — migration count is 15; the three tables and their FKs exist.
 - `just ci` — green.
-- The acceptance criteria in issue #161 map to: round-trip (Task 2 Step 1/3), per-phase report link (Step 4), per-`(file, phase)` artifact/ticket link (Step 5), half-committed barrier (Step 6).
+- The acceptance criteria in issue #161 map to: round-trip (Task 2 Step 1/3), per-phase report link (Step 4), per-`(file, phase)` artifact/ticket link — both stored-and-round-tripped and FK-enforced against real rows (Step 5), half-committed barrier (Step 6).
 
 ## Rollback / cleanup
 
