@@ -22,6 +22,40 @@ A single file with one phase behaves exactly as Sprints 12–15.
   via `&mut **tx`; no `unwrap/expect/panic/todo`.
 - Sibling unit tests (`<src>_test.rs` + `#[path]`); `just check-test-layout` green.
 
+## Cross-phase accounting & invariants (load-bearing)
+
+These follow from reusing one `job_id` across phases (ADR-0007) and the executor's
+job-scoped queries. They are not optional — code that ignores them produces a wrong
+durable summary or hangs.
+
+- **Counts are job-cumulative, not per-phase.** `refresh_counts`
+  (`executor.rs:1080-1117`), `workflow_finished`, and `first_failed_ticket_error`
+  all query `tickets WHERE job_id = ?`. The `WorkflowRunSummary` returned by
+  `run_plan_in_job` after phase *k* therefore reflects phases *1..k* cumulatively.
+  - The end-of-run job-grain `insert_summary` consumes this cumulative summary
+    directly (cumulative == whole job — correct).
+  - **Any phase-grain or file-phase count must be a per-phase delta**, never the
+    returned summary's totals. Per-`(file, phase)` rows carry their own explicit
+    `ticket_ids` (the only tickets that phase/branch owns). Per-phase `per_operation`
+    is computed by snapshotting cumulative counts immediately before the phase and
+    subtracting, or by aggregating that phase's `ticket_ids`. A test with ≥2 phases
+    must assert phase-2's row is not the sum of phases 1+2.
+- **Every phase-*k* ticket is terminal before phase *k+1* starts.** `workflow_id`
+  is `workflow-{job_id}` (`executor.rs:274`), identical across phases, and
+  `workflow_finished` counts non-terminal tickets job-wide. If any phase leaves a
+  ticket in `pending/ready/leased`, the next phase's loop never finishes (hang) or
+  spins on `retry_delay`. The coordinator asserts all phase-*k* tickets are terminal
+  after `run_plan_in_job` returns (success path) before projecting phase *k+1*; a
+  skipped/NoOp phase that mints no ticket is fine, but a phase that mints a ticket
+  must drive it to terminal. Covered by the skipped-phase test.
+- **`branch_id` is unique per `(job, phase)` — enforced, not assumed.**
+  `upsert_file_phase_summary` is `ON CONFLICT (job_id, phase_ordinal, branch_id)
+  DO NOTHING` (`workflow_summaries.rs:399`); its own comment (389-392) states it
+  *relies on* `branch_id` uniqueness. Two input files sharing a path stem collide
+  and the second file's row is silently dropped. The coordinator detects duplicate
+  `branch_id`s across the active file set **at job start** and fails fast with a
+  specific error — it never relies on `DO NOTHING` to paper over a collision.
+
 ## Phases
 
 ### Phase 1 — Executor: extract per-phase runner (refactor, no behaviour change)
@@ -42,7 +76,11 @@ A single file with one phase behaves exactly as Sprints 12–15.
 - **Test first:** existing executor tests stay green (single-call behaviour
   identical — success still ends in `succeed_job`); add a test asserting two
   sequential `submit_and_run_in_job` calls with the same `job_id` accumulate
-  tickets and the job stays `open` until the caller succeeds it.
+  tickets, the job stays `open` until the caller succeeds it, and the second
+  call's returned summary `ticket_count` is the **cumulative** total (counts are
+  job-scoped — this documents the delta requirement for the phase-grain rows in
+  Phase 3). Assert all tickets from the first call are terminal before the second
+  call returns (the cross-phase terminal invariant).
 - Guardrail: `cargo test -p voom-control-plane`, `just lint`. Commit.
 
 ### Phase 2 — Snapshot projection helper
@@ -59,6 +97,9 @@ A single file with one phase behaves exactly as Sprints 12–15.
 ### Phase 3 — Coordinator core (new module `workflow/coordinator.rs`)
 - Entry: `run_phase_barrier(&self, policy_version_id, input_set_id, options) ->
   Result<CoordinatorOutcome, _>`. Opens one job. `active = all files in input set`.
+- **Before opening the job:** derive each active file's `branch_id` and fail fast
+  with a specific error if any two collide (the per-`(file, phase)` upsert is
+  `DO NOTHING` and would silently drop the loser — see cross-phase invariants).
 - For `phase_name` in `compiled.phase_order`:
   1. Project each active file's current snapshot → one `PolicyInputSetDraft`;
      build `PlanningRequest`; `plan_phase(request, phase_name)`.
@@ -68,13 +109,23 @@ A single file with one phase behaves exactly as Sprints 12–15.
   3. Bridge planned nodes → `WorkflowPlan`; **override** the bridge's hardcoded
      `fan_out.max_files: 1` / `concurrency.max_in_flight_dispatches: 1`
      (`policy_bridge.rs:95-97`) with values driven by the active-file count so the
-     phase runs across files concurrently; `submit_and_run_in_job(job_id, plan)`.
+     phase runs across files concurrently; capture each active file's
+     active-version id (needed by step 4); `submit_and_run_in_job(job_id, plan)`.
      (Single active file → 1/1, preserving Sprint 12–15 parity.)
-  4. On ticket failure → whole job fails; **finalize** any branch that committed
-     inline before the failure (re-probe already done in dispatch; backfill its
-     per-`(file, phase)` row), then return error with partial summary.
+  4. On ticket failure → whole job fails. `run_plan_in_job` returns
+     `Err(WorkflowRunError { summary, source })` with counts but **no list of
+     committed branches** (inline commit is worker-side in
+     `transcode/audio/remux commit.rs`, invisible to the coordinator). Identify
+     committed branches by diffing each active file's chain tip against the
+     pre-phase active-version id captured in step 3: a file whose tip advanced
+     committed inline. Backfill those files' per-`(file, phase)` `Committed` rows
+     (re-probe already recorded in dispatch), then return the error with the
+     partial summary — satisfying ADR-0007's "records which files advanced even on
+     terminal failure." Files whose tip did not advance get no committed row.
   5. For each committed branch: read new active version + reprobe snapshot,
-     advance active version, `upsert_file_phase_summary` (`Committed`).
+     advance active version, `upsert_file_phase_summary` (`Committed`). Per-phase
+     `per_operation` is a delta (see cross-phase accounting), not the cumulative
+     returned summary.
   6. Regenerate the per-phase compliance report against refreshed facts;
      `upsert_phase_summary` with `report_id` + report JSON + `PhaseOutcome`.
 - After all phases: `succeed_job(job_id)`, then `insert_summary` (job grain
@@ -99,6 +150,12 @@ A single file with one phase behaves exactly as Sprints 12–15.
 - Extend `crates/voom-cli/tests/compliance_envelope.rs` with an insta snapshot
   for a real multi-phase scan→plan→execute→report flow (fixture media written by
   harness; redact job_id/paths). `cargo insta review`.
+- **Determinism:** the multi-file path runs with `max_in_flight_dispatches > 1`,
+  so ticket/branch completion order is nondeterministic. Sort all per-ticket /
+  per-branch / per-`(file, phase)` output by a stable key (`phase_ordinal`, then
+  `branch_id`, then `node_id`) before rendering the snapshot, so the golden output
+  is independent of dispatch order. The single-file case stays 1/1 (parity), so
+  the ordering rule only affects the multi-file snapshot.
 
 ### Phase 6 — Closeout
 - Sprint 16 closeout evidence matrix (phases→tickets→artifacts→snapshots→
@@ -109,7 +166,7 @@ Each commit: `just fmt-check && just lint && cargo test -p voom-control-plane`.
 Coordinator/probe-path changes additionally need full `cargo test --workspace`
 (real ffprobe on staged output). Final: `just ci`.
 
-## Risks / open checks for /challenge
+## Risks / open checks to confirm before the dependent phase
 - Confirm the dispatch path already records the reprobe snapshot against the
   *committed* FileVersion (so coordinator only reads, never re-probes) — verify
   in `transcode/audio/remux commit.rs` before Phase 3.
@@ -117,5 +174,12 @@ Coordinator/probe-path changes additionally need full `cargo test --workspace`
   back to a `branch_id` for the per-file row.
 - Confirm the per-phase compliance report generator accepts refreshed-snapshot
   input set without a stored input-set row (on-demand regen).
-- `branch_id` uniqueness within `(job, phase)` when two input files share a path
-  stem (binding.rs uses stem) — guard or document.
+
+## Resolved by the cross-phase invariants section (no longer open)
+- Per-phase vs cumulative counts → phase rows use deltas / explicit `ticket_ids`.
+- Mid-barrier-failure committed-branch detection → active-version-id diff (Phase 3
+  step 4).
+- Next-phase hang on a non-terminal prior-phase ticket → terminal invariant +
+  skipped-phase test.
+- `branch_id` collision (same path stem) → fail-fast guard at job start (Phase 3),
+  not reliance on the upsert's `DO NOTHING`.
