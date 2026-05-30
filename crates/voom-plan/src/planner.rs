@@ -53,6 +53,62 @@ pub fn generate_plan(request: PlanningRequest) -> Result<ExecutionPlan, PlanGene
     builder.finish()
 }
 
+/// Plans exactly one named phase against the supplied planning input.
+///
+/// Sprint 16's multi-phase coordinator drives the executor one phase at a time
+/// (`docs/superpowers/specs/2026-05-29-voom-sprint-16-design.md` §5,
+/// `docs/adr/0005-plan-phase-entry-point.md`): it projects each file's current
+/// snapshot into `request.input` and re-invokes the planner per phase so
+/// `run_if`/`skip_if` re-evaluate against the artifact the prior phase produced.
+///
+/// Shares the single planning code path with [`generate_plan`]; the resulting
+/// plan is deterministic from `(compiled policy, phase, snapshot)` and carries
+/// only the named phase's nodes (and therefore no inter-phase edges — ordering
+/// is the coordinator's barrier, not encoded in a per-phase plan).
+///
+/// # Errors
+///
+/// Returns [`PlanGenerationError`] when the input set is empty or when
+/// `phase_name` is not declared in `phase_order` (a coordinator bug — the bound
+/// is the declared phase count, and a phase outside it can never be planned). An
+/// operation that cannot be planned against the refreshed snapshot (for example
+/// a selector that now matches nothing) is **not** an error: it yields a
+/// `Blocked` node plus a planning diagnostic the coordinator turns into a
+/// blocked issue.
+pub fn plan_phase(
+    request: PlanningRequest,
+    phase_name: &str,
+) -> Result<ExecutionPlan, PlanGenerationError> {
+    let PlanningRequest {
+        policy,
+        input,
+        context,
+    } = request;
+    validate_input(&input)?;
+
+    if !policy.phase_order.iter().any(|name| name == phase_name) {
+        return Err(invalid_phase_request(
+            phase_name,
+            format!("phase {phase_name} is not declared in phase_order"),
+        ));
+    }
+    // A name bounded by phase_order but absent from `phases` is an internally
+    // inconsistent policy. Fail loud here rather than letting the shared
+    // expansion emit a node-less plan a coordinator could misread as a
+    // legitimately skipped phase (the symmetric structural error to the check
+    // above; see docs/adr/0005-plan-phase-entry-point.md).
+    if !policy.phases.iter().any(|phase| phase.name == phase_name) {
+        return Err(invalid_phase_request(
+            phase_name,
+            format!("phase {phase_name} is listed in phase_order but is missing"),
+        ));
+    }
+
+    let mut builder = PlanBuilder::new(&policy, &input, &context);
+    builder.expand_declared_phase(phase_name);
+    builder.finish()
+}
+
 fn validate_input(input: &PolicyInputSetDraft) -> Result<(), PlanGenerationError> {
     if input.media_snapshots.is_empty() {
         return Err(PlanGenerationError {
@@ -104,32 +160,37 @@ impl<'a> PlanBuilder<'a> {
             return;
         }
 
-        let phases_by_name: BTreeMap<&str, _> = self
+        for phase_name in &self.policy.phase_order {
+            self.expand_declared_phase(phase_name);
+        }
+    }
+
+    /// Expands a single phase that the caller has already confirmed is declared
+    /// in `phase_order`. Shared by the whole-policy [`Self::expand`] loop and the
+    /// per-phase [`plan_phase`] entry point so there is one planning code path.
+    fn expand_declared_phase(&mut self, phase_name: &str) {
+        let Some(phase) = self
             .policy
             .phases
             .iter()
-            .map(|phase| (phase.name.as_str(), phase))
-            .collect();
-
-        for phase_name in &self.policy.phase_order {
-            let Some(phase) = phases_by_name.get(phase_name.as_str()).copied() else {
-                self.diagnostics.push(
-                    PlanningDiagnostic::error(
-                        PlanningDiagnosticCode::InvalidPlanningRequest,
-                        format!("phase {phase_name} is listed in phase_order but is missing"),
-                    )
-                    .with_phase(phase_name),
-                );
-                continue;
-            };
-
-            self.expand_phase(
-                &phase.name,
-                phase.run_if.as_ref(),
-                phase.skip_if.as_ref(),
-                &phase.operations,
+            .find(|phase| phase.name == phase_name)
+        else {
+            self.diagnostics.push(
+                PlanningDiagnostic::error(
+                    PlanningDiagnosticCode::InvalidPlanningRequest,
+                    format!("phase {phase_name} is listed in phase_order but is missing"),
+                )
+                .with_phase(phase_name),
             );
-        }
+            return;
+        };
+
+        self.expand_phase(
+            &phase.name,
+            phase.run_if.as_ref(),
+            phase.skip_if.as_ref(),
+            &phase.operations,
+        );
     }
 
     fn expand_phase(
@@ -2075,6 +2136,15 @@ fn target_key(target: &TargetRef) -> String {
 
 fn checked_ordinal(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn invalid_phase_request(phase_name: &str, message: String) -> PlanGenerationError {
+    PlanGenerationError {
+        diagnostics: vec![
+            PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
+                .with_phase(phase_name),
+        ],
+    }
 }
 
 fn serialization_error(error: &serde_json::Error) -> PlanGenerationError {
