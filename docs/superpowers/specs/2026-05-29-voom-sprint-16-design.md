@@ -217,10 +217,12 @@ by `(job_id, phase_ordinal)`. Report lineage is the ordered per-phase rows, not 
 stored pointer.
 
 The report recorded for a phase covers that phase's **refreshed** facts: it is
-regenerated *after* the phase's branches commit and re-probe, against the surviving
-files' advanced chain tips, so it reflects the artifacts the phase produced rather
+regenerated *after* the phase's branches commit and re-probe, against the phase's
+input set re-projected at its refreshed chain tips (committed files at their produced
+version, others unchanged), so it reflects the artifacts the phase produced rather
 than the facts that entered it. The point at which the report is regenerated, the
-file set it covers, and how a second read-only plan pass reconciles with the
+file set it covers (including blocked files, whose diagnostic the report alone
+records durably), and how a second read-only plan pass reconciles with the
 bounded-replan invariant (§9) are pinned by
 `docs/adr/0008-per-phase-report-regenerated-against-refreshed-facts.md`.
 
