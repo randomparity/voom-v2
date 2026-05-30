@@ -1,5 +1,6 @@
 #![expect(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
@@ -163,6 +164,101 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
     let durable_phases = repo.phases_for_job(job_id).await.unwrap();
     assert_eq!(durable_phases.len(), 1);
     assert_eq!(durable_phases[0].outcome, PhaseOutcome::Completed);
+}
+
+/// When one file's ticket fails mid-phase while a sibling commits inline, the
+/// coordinator records the committed file's `Committed` per-`(file, phase)` row
+/// before returning (ADR-0007): the executor drains every in-flight dispatch to
+/// a terminal state, so the survivor's commit has landed, and that durable
+/// record must survive the failed job. The failed file gets no row, the run
+/// returns a `partial` outcome, and the job is `failed`.
+#[tokio::test]
+async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let good = tmp.path().join("Good.mp4");
+    let doomed = tmp.path().join("Doomed.mp4");
+    generate_h264_fixture(&good);
+    generate_h264_fixture(&doomed);
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let good_file = scan_one(&cp, &good).await;
+    let doomed_file = scan_one(&cp, &doomed).await;
+    // Corrupt the doomed source AFTER scanning so its transcode fails on the
+    // source-facts check (size/hash no longer match the scanned file version),
+    // while the good file transcodes and commits inline.
+    std::fs::write(&doomed, b"not a video anymore").unwrap();
+
+    let policy = cp
+        .create_policy_document(
+            "video-transcode-hevc",
+            &load_policy_fixture("fixtures/policies/video-transcode-hevc.voom").unwrap(),
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[
+            ("good", good_file),
+            ("doomed", doomed_file),
+        ]))
+        .await
+        .unwrap();
+
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = tmp.path().join("out");
+    let result = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                transcode_staging_root: tmp.path().join("stage"),
+                transcode_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await;
+    worker.shutdown().unwrap();
+
+    let err = result.expect_err("a failed file must fail the phase-barrier run");
+    let partial = err
+        .partial
+        .expect("the committed sibling must be reported as a partial outcome");
+
+    // Exactly the good file committed; the doomed file produced no row.
+    assert_eq!(partial.file_phases.len(), 1);
+    let committed = &partial.file_phases[0];
+    assert_eq!(committed.branch_id, "Good");
+    assert_eq!(committed.outcome, FilePhaseOutcome::Committed);
+    assert!(committed.produced_file_version_id.is_some());
+    assert!(committed.reprobe_snapshot_id.is_some());
+    assert!(out_dir.join("Good.default-hevc.hevc.mkv").is_file());
+
+    // The committed row is durable and the job is failed.
+    let repo = SqliteWorkflowSummaryRepo::new(voom_store::connect(&url).await.unwrap());
+    let durable = repo.file_phases_for_job(partial.job_id).await.unwrap();
+    assert_eq!(durable.len(), 1);
+    assert_eq!(durable[0].branch_id, "Good");
+    assert_eq!(job_state(&url, partial.job_id).await, "failed");
+}
+
+async fn job_state(url: &str, job_id: voom_core::JobId) -> String {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE id = ?")
+        .bind(i64::try_from(job_id.0).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap()
 }
 
 async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {

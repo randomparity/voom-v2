@@ -226,6 +226,24 @@ pub struct CoordinatorError {
     pub partial: Option<CoordinatorOutcome>,
 }
 
+impl From<VoomError> for CoordinatorError {
+    /// Errors with no inline-committed work carry no partial outcome.
+    fn from(source: VoomError) -> Self {
+        Self {
+            source,
+            partial: None,
+        }
+    }
+}
+
+/// A phase that failed during dispatch. `run_summary` is `Some` once the
+/// executor actually ran the workflow (and so some files may have committed
+/// inline before draining), `None` for a pre-dispatch bridge failure.
+struct PhaseDispatchFailure {
+    source: VoomError,
+    run_summary: Option<crate::workflow::WorkflowRunSummary>,
+}
+
 impl ControlPlane {
     /// Drive the existing workflow executor one phase at a time across every
     /// file in a policy input set, phases acting as barriers across files
@@ -245,18 +263,8 @@ impl ControlPlane {
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
-            .await
-            .map_err(|source| CoordinatorError {
-                source,
-                partial: None,
-            })?;
-        let policy = self
-            .compiled_policy_for_version(&inputs.version)
-            .await
-            .map_err(|source| CoordinatorError {
-                source,
-                partial: None,
-            })?;
+            .await?;
+        let policy = self.compiled_policy_for_version(&inputs.version).await?;
         let active: Vec<FileVersionId> = inputs
             .input
             .media_snapshots
@@ -279,13 +287,7 @@ impl ControlPlane {
         // *before* opening the job: the per-`(file, phase)` upsert is
         // `ON CONFLICT DO NOTHING` and would silently drop a colliding file's
         // row, losing it from the durable summary.
-        let branch_ids =
-            self.active_branch_ids(&active)
-                .await
-                .map_err(|source| CoordinatorError {
-                    source,
-                    partial: None,
-                })?;
+        let branch_ids = self.active_branch_ids(&active).await?;
 
         let now = self.clock().now();
         let job = self
@@ -294,29 +296,25 @@ impl ControlPlane {
                 priority: 0,
                 created_at: now,
             })
-            .await
-            .map_err(|source| CoordinatorError {
-                source,
-                partial: None,
-            })?;
+            .await?;
 
         // Job-cleanup contract: once the job is open, every error path finalizes
-        // it as `failed` rather than orphaning it in `open`. Committed per-file
-        // rows are durable before any error returns (queryable via
-        // `file_phases_for_job`), satisfying ADR-0007's advanced-file record.
+        // it as `failed` rather than orphaning it in `open`. A dispatch failure
+        // already failed the job inside `run_plan_in_job` (and `fail_job` is a
+        // no-op on an already-failed job), so this `fail_job` only matters for
+        // pre-dispatch errors that leave the job open. Committed per-`(file,
+        // phase)` rows are durable before the error returns (queryable via
+        // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
         match self
             .run_phase_barrier_in_job(job.id, &policy, &context, base_draft, &branch_ids, options)
             .await
         {
             Ok(outcome) => Ok(outcome),
-            Err(source) => {
+            Err(err) => {
                 let _ = self
-                    .fail_job(job.id, source.to_string(), self.clock().now())
+                    .fail_job(job.id, err.source.to_string(), self.clock().now())
                     .await;
-                Err(CoordinatorError {
-                    source,
-                    partial: None,
-                })
+                Err(err)
             }
         }
     }
@@ -370,9 +368,9 @@ impl ControlPlane {
         base_draft: PolicyInputSetDraft,
         branch_ids: &[(FileVersionId, String)],
         options: ComplianceExecutionOptions,
-    ) -> Result<CoordinatorOutcome, VoomError> {
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if branch_ids.is_empty() || policy.phase_order.is_empty() {
-            return self.finalize_zero_phase_run(job_id).await;
+            return Ok(self.finalize_zero_phase_run(job_id).await?);
         }
         let mut files = self.initial_phase_files(branch_ids).await?;
         let runtimes = self.policy_runtime_registry().await?;
@@ -406,9 +404,25 @@ impl ControlPlane {
                 .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
             let dispositions = classify_phase(&files, &plan);
 
-            let run = self
+            let run = match self
                 .dispatch_phase(&executor, job_id, &plan, &report, &dispositions)
-                .await?;
+                .await
+            {
+                Ok(run) => run,
+                Err(failure) => {
+                    return self
+                        .finalize_failed_phase(
+                            job_id,
+                            phase_ordinal,
+                            &files,
+                            &dispositions,
+                            failure,
+                            phases,
+                            file_phases,
+                        )
+                        .await;
+                }
+            };
             if run.is_some() {
                 last_run = run;
             }
@@ -497,7 +511,7 @@ impl ControlPlane {
         plan: &ExecutionPlan,
         report: &voom_plan::ComplianceReport,
         dispositions: &[Disposition],
-    ) -> Result<Option<crate::workflow::WorkflowRunSummary>, VoomError> {
+    ) -> Result<Option<crate::workflow::WorkflowRunSummary>, PhaseDispatchFailure> {
         let planned = dispositions
             .iter()
             .filter(|d| matches!(d, Disposition::Planned { .. }))
@@ -505,7 +519,11 @@ impl ControlPlane {
         if planned == 0 {
             return Ok(None);
         }
-        let bridge = workflow_plan_from_compliance(plan, report)?;
+        let bridge =
+            workflow_plan_from_compliance(plan, report).map_err(|source| PhaseDispatchFailure {
+                source,
+                run_summary: None,
+            })?;
         let Some(mut workflow) = bridge.workflow else {
             return Ok(None);
         };
@@ -513,11 +531,89 @@ impl ControlPlane {
         // every active file concurrently (`policy_bridge.rs` hardcodes 1/1).
         workflow.fan_out.max_files = planned;
         workflow.concurrency.max_in_flight_dispatches = planned;
+        // On a ticket failure the executor drains every in-flight dispatch to a
+        // terminal state (so any inline commit has landed) and fails the job;
+        // carry its run summary so the partial outcome reports the job-cumulative
+        // counts including the failure.
         let run = executor
             .submit_and_run_in_job(job_id, workflow)
             .await
-            .map_err(|err| err.source)?;
+            .map_err(|err| PhaseDispatchFailure {
+                source: err.source,
+                run_summary: Some(err.summary),
+            })?;
         Ok(Some(run))
+    }
+
+    /// Finalize a run whose phase failed during dispatch: record every file that
+    /// committed inline before the failure (the executor drained in-flight
+    /// dispatches, so their commits have landed), then return the partial
+    /// outcome inside the error. No phase-grain row is written for the failed
+    /// phase, and the job is already `failed`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "threads the in-progress run's accumulated phase/file rows into the partial"
+    )]
+    async fn finalize_failed_phase(
+        &self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        files: &[PhaseFile],
+        dispositions: &[Disposition],
+        failure: PhaseDispatchFailure,
+        phases: Vec<PhaseSummary>,
+        mut file_phases: Vec<FilePhaseSummary>,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let Some(run_summary) = failure.run_summary else {
+            // A pre-dispatch bridge failure ran no tickets, so nothing committed.
+            return Err(failure.source.into());
+        };
+        for (file, disposition) in files.iter().zip(dispositions) {
+            let Disposition::Planned { node_id } = disposition else {
+                continue;
+            };
+            let (tip, snapshot) = active_version_with_snapshot(&self.identity, file.asset_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::Internal(format!(
+                        "committed file asset {} lost its snapshot",
+                        file.asset_id
+                    ))
+                })?;
+            if tip.id == file.version_id {
+                continue;
+            }
+            let workflow_node_id = format!("{POLICY_NODE_ID_PREFIX}{node_id}");
+            let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
+            let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
+            let row = self
+                .write_file_row(
+                    job_id,
+                    phase_ordinal,
+                    file,
+                    FilePhaseOutcome::Committed,
+                    &ticket_ids,
+                    Some(produced),
+                )
+                .await?;
+            file_phases.push(row);
+        }
+        let summary = self
+            .workflow_summaries()
+            .insert_summary(
+                job_grain_summary(job_id, Some(&run_summary)),
+                self.clock().now(),
+            )
+            .await?;
+        Err(CoordinatorError {
+            source: failure.source,
+            partial: Some(CoordinatorOutcome {
+                job_id,
+                summary,
+                phases,
+                file_phases,
+            }),
+        })
     }
 
     /// Write each active file's per-`(file, phase)` row and advance the working
