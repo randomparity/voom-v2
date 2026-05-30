@@ -110,25 +110,61 @@ to be present; `skipped`/`blocked` require all four produced references NULL.
 produces an artifact handle, but the column is not forced, to avoid over-pinning
 ahead of the coordinator.)
 
+A `committed` row therefore always carries its re-probe snapshot. The invariant
+that satisfies this is: **a per-`(file, phase)` row is written only after both
+the phase artifact commits *and* its staged result is re-probed.** A crash in the
+commit→re-probe window leaves no row for that file; that window is recovered by
+the idempotent backfill below (the file's committed artifact is already its active
+version, so re-probe + write is a pure record-keeping step, never a re-mutation).
+
+### Idempotent child writes (append-only, first-write-wins)
+
+The two child grains are written by two coordinator paths that can target the
+*same* natural key: the per-`(file, phase)` row is written when a file advances,
+**and again** by mid-failure finalization (§6) or post-crash resume (§8) when the
+first write was lost; the per-phase row is written when a phase's files are all
+resolved **and again** when its report is regenerated on resume (§8). The spec
+calls this an "idempotent backfill" where "fully recorded `(file, phase)` pairs
+are never re-run" (§8).
+
+Child inserts are therefore **idempotent first-write-wins**, not plain inserts:
+`INSERT … ON CONFLICT(<natural key>) DO NOTHING`. A conflicting write is a no-op
+and the method returns the already-stored row. This is safe because the rows are
+append-only and deterministic — a regenerated per-phase report has the same
+content-addressed `report_id` (same committed facts ⇒ same report), and a
+re-finalized per-file row carries the same committed lineage. To let the
+coordinator implement "never re-run fully recorded pairs" without relying on a
+conflict, the repo also exposes targeted existence reads
+(`get_phase_summary`, `get_file_phase_summary` below). The job-level parent stays
+a single end-of-run insert (one writer, one row).
+
 ### Repository surface
 
 `SqliteWorkflowSummaryRepo` follows the existing conventions (`connect`/`init`
 separation — the table is created only by a migration, never by the repo; an
 `_in_tx` variant per writer plus a pool-wrapping variant that `begin`/`commit`s):
 
-- `insert_summary` / `insert_summary_in_tx(NewWorkflowSummary)`
-- `insert_phase_summary` / `insert_phase_summary_in_tx(NewPhaseSummary) → PhaseSummary`
-- `insert_file_phase_summary` / `insert_file_phase_summary_in_tx(NewFilePhaseSummary) → FilePhaseSummary`
+- `insert_summary` / `insert_summary_in_tx(NewWorkflowSummary)` — job-level, a
+  single end-of-run insert.
+- `upsert_phase_summary` / `upsert_phase_summary_in_tx(NewPhaseSummary) → PhaseSummary`
+  — idempotent first-write-wins on `(job_id, phase_ordinal)`.
+- `upsert_file_phase_summary` / `upsert_file_phase_summary_in_tx(NewFilePhaseSummary) → FilePhaseSummary`
+  — idempotent first-write-wins on `(job_id, phase_ordinal, branch_id)`.
 - `get_summary(JobId) → Option<WorkflowSummary>`
+- `get_phase_summary(JobId, phase_ordinal) → Option<PhaseSummary>`
+- `get_file_phase_summary(JobId, phase_ordinal, branch_id) → Option<FilePhaseSummary>`
 - `phases_for_job(JobId) → Vec<PhaseSummary>` ordered by `phase_ordinal`
 - `file_phases_for_job(JobId) → Vec<FilePhaseSummary>` ordered by
   `(phase_ordinal, branch_id)`
 
-Insert methods construct their return value from the input plus
-`last_insert_rowid()` — they do not re-read — so no post-write SELECT through the
-tx handle is needed. Reads run on the pool. Insert is the only mutation: per-file
-and per-phase rows are append-only (§4), and the job-level row is written once
-with the run's final counters.
+A child `upsert_*` method whose `ON CONFLICT DO NOTHING` matched an existing row
+re-reads that row **through the same tx handle** (a pool read would query a
+different connection and miss an uncommitted sibling write) and returns it; a
+fresh insert constructs its return value from the input plus
+`last_insert_rowid()`. The job-level `insert_summary` is a plain insert (one row
+per job). Pool reads run on the pool. The two child grains are append-only and
+idempotent (above); the job-level row is written once with the run's final
+counters.
 
 ## Consequences
 
@@ -138,6 +174,17 @@ with the run's final counters.
   children and parent.
 - A half-committed barrier is recorded exactly: only advanced files have rows,
   and the `committed` CHECK guarantees each carries its produced lineage.
+- A terminally-failed job that never resumes (§6) may have child rows (the files
+  that advanced) but **no job-level parent row**, since the parent is a single
+  end-of-run insert. The child grains are therefore authoritative for "which
+  files advanced"; a consumer must query `file_phases_for_job` even when
+  `get_summary` returns `None`, rather than treat a missing parent as "no
+  summary." Persisting a parent row on terminal failure is the coordinator's call
+  (#162), not forced by this schema.
+- Resume and mid-failure finalization can re-issue the same child write; the
+  idempotent first-write-wins inserts make that a no-op, so neither path throws a
+  UNIQUE violation, and "fully recorded pairs are never re-run" (§8) holds without
+  the coordinator needing a read-before-write race guard.
 - The store stays below control-plane: it depends on no control-plane or
   `voom-plan` type; rollup and report ride as JSON.
 - The schema ships before its first writer (#162); it is a spec-advertised
@@ -176,6 +223,18 @@ with the run's final counters.
 - **Persist `throughput_per_second`.** Rejected: derivable from `dispatch_count`
   and `elapsed`, and absent from the issue's counter list — storing it duplicates
   state that can drift.
+- **Plain insert-only child writes (throw on conflict).** Rejected: the spec's
+  finalize (§6) and resume (§8) paths can both write the same `(job_id,
+  phase_ordinal, branch_id)` row, and the spec names this an "idempotent
+  backfill." A plain insert against the UNIQUE natural key would throw on the
+  second write, forcing every caller into a read-before-write race guard.
+  First-write-wins `ON CONFLICT DO NOTHING` makes the second write a no-op
+  directly, which is sound because the rows are append-only and deterministic.
+- **Update-on-conflict (last-write-wins) for child rows.** Rejected: the rows are
+  append-only records of what was committed; a regenerated per-phase report is
+  byte-identical (same committed facts ⇒ same content-addressed `report_id`), so
+  overwriting buys nothing and would let a buggy late write mutate a recorded
+  fact. First-write-wins preserves the original record.
 - **A single wide `outcome` vocabulary shared by phase and file grains.**
   Rejected: `partially-committed` is meaningful only at the phase grain (a phase
   where some files advanced and some did not); a file is `committed`, `skipped`,
