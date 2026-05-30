@@ -166,6 +166,101 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
     assert_eq!(durable_phases[0].outcome, PhaseOutcome::Completed);
 }
 
+/// The barrier re-plans each phase against the artifact the prior phase
+/// produced. A two-phase policy transcodes the file in phase 0 (h264 -> hevc,
+/// committing a new chain tip), then phase 1 projects that committed artifact
+/// into the planner: its report targets phase 0's produced `FileVersion` and
+/// observes the committed hevc codec. If the coordinator had not advanced the
+/// chain tip, phase 1 would instead target the original version and observe
+/// h264 — so the phase-1 report proves the chain advance. (The repeated
+/// transcode here is intentional fixture shaping; per ADR-0007 the planner
+/// re-runs it because the probe reports the container as `matroska,webm`, not
+/// the canonical `mkv` — orthogonal to the chain-advance behavior under test.)
+#[tokio::test]
+async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let source = tmp.path().join("Chain.mp4");
+    generate_h264_fixture(&source);
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let file = scan_one(&cp, &source).await;
+    let policy = cp
+        .create_policy_document(
+            "video-transcode-hevc-twice",
+            "policy \"video transcode hevc twice\" {\n  \
+               phase normalize { transcode video to hevc }\n  \
+               phase reverify { depends_on: [normalize] transcode video to hevc }\n}",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[("chain", file)]))
+        .await
+        .unwrap();
+
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = tmp.path().join("out");
+    let outcome = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                transcode_staging_root: tmp.path().join("stage"),
+                transcode_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await;
+    worker.shutdown().unwrap();
+    let outcome = outcome.unwrap();
+
+    // Phase 0 transcodes h264 and commits a new hevc FileVersion.
+    assert_eq!(outcome.phases.len(), 2);
+    assert_eq!(outcome.phases[0].phase_name, "normalize");
+    assert_eq!(outcome.phases[0].outcome, PhaseOutcome::Completed);
+    let phase0_commit = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.phase_ordinal == 0 && row.outcome == FilePhaseOutcome::Committed)
+        .expect("phase 0 commits the transcoded file");
+    let produced_version = phase0_commit
+        .produced_file_version_id
+        .expect("committed row records the produced version");
+    assert!(out_dir.join("Chain.default-hevc.hevc.mkv").is_file());
+
+    // Chain advance: phase 1 re-plans against the FileVersion phase 0 produced
+    // (not the original h264 input), observing its committed hevc codec. If the
+    // coordinator had not advanced the file's chain tip, phase 1 would target
+    // the original version and observe h264.
+    let phase1 = outcome.phases[1]
+        .report
+        .as_ref()
+        .expect("phase 1 has a report");
+    assert_eq!(phase1.report["input"]["slug"], "phase-barrier-two-file");
+    let check = &phase1.report["checks"][0];
+    assert_eq!(
+        check["target"]["id"].as_u64().unwrap(),
+        produced_version.0,
+        "phase 1 must plan against phase 0's produced FileVersion"
+    );
+    assert_eq!(
+        check["observed_state"]["video_codec"], "hevc",
+        "phase 1 must observe the committed hevc artifact"
+    );
+}
+
 /// When one file's ticket fails mid-phase while a sibling commits inline, the
 /// coordinator records the committed file's `Committed` per-`(file, phase)` row
 /// before returning (ADR-0007): the executor drains every in-flight dispatch to

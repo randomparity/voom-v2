@@ -66,6 +66,26 @@ the existing executor, one phase per `submit_and_run`-equivalent call.**
 - Unplannable targets surface as `Blocked` plan nodes + diagnostics from the
   single `plan_phase` call; the coordinator drops those files (abort-for-file)
   while planned siblings proceed.
+- The coordinator re-projects each file's **chain-tip `MediaSnapshot`** into the
+  planner every phase (`project_media_snapshot_input`), so it plans against the
+  probed facts of the produced artifact — not the input set's declared facts.
+  Two consequences follow:
+  - `compliance execute` returns `issues` derived from the input set
+    (`generate_compliance_report` over `input_set_to_draft`) alongside `phases`
+    derived from the re-projected snapshots. When a caller's declared input-set
+    facts disagree with the probe, those two surfaces in the same envelope can
+    disagree; execute trusts the probe (the real bytes), the issue/report
+    surface reflects the declared input. A file whose probed snapshot omits a
+    container (`payload.container.format_name`) projects to no container and is
+    `Blocked` ("snapshot container is unknown").
+  - The projected container is the raw probe `format_name` (e.g. ffprobe reports
+    Matroska as `matroska,webm`), compared verbatim by the planner against a
+    policy's canonical container (`mkv`). A phase that re-checks the same
+    container-bearing transform on an already-produced artifact therefore re-runs
+    it rather than seeing a no-op. Each phase still runs exactly once (the loop is
+    bounded by `phase_order`), so this is bounded re-work, not a loop — but a
+    multi-phase policy that repeats a container-canonicalizing transform will
+    transcode each such phase until the planner normalizes probe container names.
 
 ## Considered & rejected
 
