@@ -69,6 +69,15 @@ durable summary or hangs.
     `Ok(summary)` and leaves the job open. `fail_job` on an in-phase ticket
     failure stays inside the runner (whole job fails, spec §8). Job success is the
     caller's responsibility.
+  - **One intentional behaviour change on the failure path:** today the terminal
+    branch (`executor.rs:311-320`) calls `fail_job` and returns `Err` immediately,
+    dropping the `active` `JoinSet` (line 291) and aborting in-flight sibling
+    dispatches. The runner must instead **drain** `active` (await `join_next` to
+    completion) before `fail_job`, so every dispatch that was going to commit
+    inline has landed (or definitively not) before the runner returns. This makes
+    the coordinator's chain-tip diff (Phase 3 step 4) race-free: no dispatch is in
+    flight when tips are inspected. Verify no existing test asserts abort-on-
+    failure timing; the final job state (`failed`) is unchanged.
   - Add crate-visible `submit_and_run_in_job(&self, job_id, plan)` = thin wrapper
     over `run_plan_in_job` (validates the plan first; on validate error fails the
     job since it already exists). The coordinator calls this per phase and calls
@@ -80,7 +89,10 @@ durable summary or hangs.
   call's returned summary `ticket_count` is the **cumulative** total (counts are
   job-scoped — this documents the delta requirement for the phase-grain rows in
   Phase 3). Assert all tickets from the first call are terminal before the second
-  call returns (the cross-phase terminal invariant).
+  call returns (the cross-phase terminal invariant). Add a failure-path test: a
+  plan with one failing ticket and ≥2 concurrent sibling dispatches
+  (`max_in_flight_dispatches > 1`) asserts the runner returns `Err` only after
+  every sibling dispatch has reached a terminal state (the drain contract).
 - Guardrail: `cargo test -p voom-control-plane`, `just lint`. Commit.
 
 ### Phase 2 — Snapshot projection helper
@@ -97,15 +109,34 @@ durable summary or hangs.
 ### Phase 3 — Coordinator core (new module `workflow/coordinator.rs`)
 - Entry: `run_phase_barrier(&self, policy_version_id, input_set_id, options) ->
   Result<CoordinatorOutcome, _>`. Opens one job. `active = all files in input set`.
+- Load `policy_version_id` → `CompiledPolicy` (source of `compiled.phase_order`).
 - **Before opening the job:** derive each active file's `branch_id` and fail fast
   with a specific error if any two collide (the per-`(file, phase)` upsert is
   `DO NOTHING` and would silently drop the loser — see cross-phase invariants).
+- **Job cleanup contract:** once the job is open, *every* error path — not just an
+  in-phase ticket failure — must call `fail_job(job_id, …)` before returning. The
+  runner already fails the job on ticket failure; coordinator-side errors after
+  `open_job` (snapshot projection, a `plan_phase` hard `Err` per ADR-0005, the
+  bridge call, report regeneration, a summary upsert) would otherwise orphan the
+  job in `open`. Wrap the post-`open_job` body so any `Err` finalizes the job as
+  `failed`. (Empty `phase_order` or empty active set → no phases run → `succeed_job`
+  + a zero-phase `insert_summary`; covered by an empty-state test.)
 - For `phase_name` in `compiled.phase_order`:
   1. Project each active file's current snapshot → one `PolicyInputSetDraft`;
      build `PlanningRequest`; `plan_phase(request, phase_name)`.
-  2. Partition plan nodes by target: `Blocked` → drop file (record blocked
-     issue + `PhaseOutcome`/`FilePhaseOutcome::Blocked` row); zero nodes →
-     phase `Skipped`; `Planned` → proceed.
+  2. Partition plan nodes **per file** by `NodeStatus` (ADR-0005 emits exactly
+     one node status per target when the phase runs):
+     - `Blocked` → drop file from the active set (abort-for-file); record blocked
+       issue + `FilePhaseOutcome::Blocked` row.
+     - `NoOp` (file already compliant for this phase) → **keep active, version
+       unchanged, no dispatch**; record `FilePhaseOutcome::Skipped` row. (The
+       bridge filters `Planned`-only, so `NoOp` mints no ticket — the coordinator
+       must still keep the file active and account for it; omitting this bucket
+       would either drop a compliant file or lose its row.)
+     - `Planned` → proceed to dispatch.
+     - **Zero nodes for the whole phase** (every target skipped via
+       `run_if`/`skip_if`, ADR-0005) → phase `Skipped`; every active file stays
+       active, version unchanged, `FilePhaseOutcome::Skipped`.
   3. Bridge planned nodes → `WorkflowPlan`; **override** the bridge's hardcoded
      `fan_out.max_files: 1` / `concurrency.max_in_flight_dispatches: 1`
      (`policy_bridge.rs:95-97`) with values driven by the active-file count so the
@@ -128,6 +159,10 @@ durable summary or hangs.
      returned summary.
   6. Regenerate the per-phase compliance report against refreshed facts;
      `upsert_phase_summary` with `report_id` + report JSON + `PhaseOutcome`.
+     **Phase-grain `PhaseOutcome` rule** from the per-file outcome multiset:
+     all files committed → `Completed`; any committed alongside any
+     blocked/skipped → `PartiallyCommitted`; all blocked → `Blocked`; all skipped
+     (incl. whole-phase skip and all-`NoOp`) → `Skipped`.
 - After all phases: `succeed_job(job_id)`, then `insert_summary` (job grain
   counters + `per_operation`). On any phase's ticket failure the runner already
   failed the job; the coordinator finalizes committed branches and returns the
@@ -135,7 +170,12 @@ durable summary or hangs.
 - **Tests first** (unit, handler-level, injected providers): single-file/single-
   phase parity; artifact-chain (phase N+1 plans against phase N's FileVersion);
   re-probe snapshot fed forward; bounded replan (one pass/phase, no phase added);
-  unplannable→blocked; skipped phase; partial-barrier-failure finalization.
+  unplannable→blocked; `NoOp`/compliant file stays active and carries forward;
+  whole-phase skip; partial-barrier-failure finalization (concurrent siblings);
+  coordinator-side error after `open_job` (e.g. injected `plan_phase` hard-error)
+  leaves the job `failed`, not `open`; empty active set / empty `phase_order`
+  succeeds with a zero-phase summary; mixed phase (commit + block) →
+  `PhaseOutcome::PartiallyCommitted`.
 - Commit per logical step.
 
 ### Phase 4 — Wire into `compliance execute`
