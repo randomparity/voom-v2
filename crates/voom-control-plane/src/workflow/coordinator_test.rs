@@ -453,3 +453,61 @@ async fn active_version_with_snapshot_returns_none_for_unknown_asset() {
 
     assert!(result.is_none());
 }
+
+/// Build a single-phase compiled policy whose phase carries the given `on_error`
+/// strategy. `CompiledPolicy::minimal_for_test` is `#[cfg(test)]`-private to
+/// `voom-policy`, so this builds it from public fields instead.
+fn policy_with_on_error(strategy: Option<voom_policy::ErrorStrategy>) -> voom_policy::CompiledPolicy {
+    voom_policy::CompiledPolicy {
+        policy_name: "guarded".to_owned(),
+        slug: "guarded".to_owned(),
+        source_hash: "src-hash-onerr".to_owned(),
+        schema_version: 2,
+        metadata: std::collections::BTreeMap::new(),
+        config: std::collections::BTreeMap::new(),
+        phases: vec![voom_policy::CompiledPhase {
+            name: "normalize".to_owned(),
+            depends_on: Vec::new(),
+            run_if: None,
+            skip_if: None,
+            on_error: strategy,
+            operations: Vec::new(),
+        }],
+        phase_order: vec!["normalize".to_owned()],
+        warnings: Vec::new(),
+        provenance: voom_policy::PolicyProvenance::default(),
+    }
+}
+
+#[test]
+fn reject_unhandled_on_error_rejects_continue() {
+    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
+        voom_policy::ErrorStrategy::Continue,
+    )))
+    .unwrap_err();
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    assert!(err.to_string().contains("normalize"), "names the phase: {err}");
+    assert!(err.to_string().contains("continue"), "names the strategy: {err}");
+}
+
+#[test]
+fn reject_unhandled_on_error_rejects_skip() {
+    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
+        voom_policy::ErrorStrategy::Skip,
+    )))
+    .unwrap_err();
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    assert!(err.to_string().contains("normalize"));
+    assert!(err.to_string().contains("skip"));
+}
+
+#[test]
+fn reject_unhandled_on_error_allows_abort_and_unset() {
+    assert!(
+        super::reject_unhandled_on_error(&policy_with_on_error(Some(
+            voom_policy::ErrorStrategy::Abort
+        )))
+        .is_ok()
+    );
+    assert!(super::reject_unhandled_on_error(&policy_with_on_error(None)).is_ok());
+}

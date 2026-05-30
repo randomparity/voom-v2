@@ -107,6 +107,28 @@ fn phase_outcome(file_outcomes: &[FilePhaseOutcome]) -> PhaseOutcome {
     }
 }
 
+/// Reject a policy whose any `phase_order` phase declares a non-default
+/// `on_error` strategy. `continue`/`skip` are deferred this sprint (Sprint 16
+/// §11); honoring them partially would be indistinguishable at runtime from real
+/// handling, so they are rejected at resolve time before any job opens (#165).
+fn reject_unhandled_on_error(policy: &voom_policy::CompiledPolicy) -> Result<(), VoomError> {
+    for phase_name in &policy.phase_order {
+        let Some(phase) = policy.phases.iter().find(|phase| phase.name == *phase_name) else {
+            continue;
+        };
+        let label = match phase.on_error {
+            None | Some(voom_policy::ErrorStrategy::Abort) => continue,
+            Some(voom_policy::ErrorStrategy::Continue) => "continue",
+            Some(voom_policy::ErrorStrategy::Skip) => "skip",
+        };
+        return Err(VoomError::PolicyValidationError(format!(
+            "phase `{phase_name}` declares on_error `{label}`, which is not supported this sprint \
+             (only the default abort); see Sprint 16 §11"
+        )));
+    }
+    Ok(())
+}
+
 /// Build a phase's planning input: the input set's identity with each still-active
 /// file's current snapshot projected in place of the original snapshots.
 fn phase_draft(base: &PolicyInputSetDraft, files: &[PhaseFile]) -> PolicyInputSetDraft {
@@ -320,6 +342,7 @@ impl ControlPlane {
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        reject_unhandled_on_error(&policy)?;
         let active: Vec<FileVersionId> = inputs
             .input
             .media_snapshots
