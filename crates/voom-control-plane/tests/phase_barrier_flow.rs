@@ -149,6 +149,40 @@ fn assert_phase_completed(outcome: &CoordinatorOutcome, out_dir: &Path) {
         "job summary dispatch_count {} should cover both files",
         outcome.summary.dispatch_count
     );
+
+    // ADR-0008: the regenerated report covers *every* file that entered the phase
+    // — here, one check per committed file targeting that file's produced
+    // version. Asserting both produced versions appear pins the full-entered-set
+    // semantics at >1 file (the single-file chain/blocked tests cannot).
+    let report = outcome.phases[0]
+        .report
+        .as_ref()
+        .expect("a completed phase records a regenerated report");
+    let mut report_targets: Vec<u64> = report.report["checks"]
+        .as_array()
+        .expect("the report carries a checks array")
+        .iter()
+        .map(|check| {
+            check["target"]["id"]
+                .as_u64()
+                .expect("each check targets a version")
+        })
+        .collect();
+    report_targets.sort_unstable();
+    let mut produced_versions: Vec<u64> = outcome
+        .file_phases
+        .iter()
+        .map(|row| {
+            row.produced_file_version_id
+                .expect("committed row records its produced version")
+                .0
+        })
+        .collect();
+    produced_versions.sort_unstable();
+    assert_eq!(
+        report_targets, produced_versions,
+        "the phase report must contain a check targeting each file's produced version"
+    );
 }
 
 /// The rows are durable, not just returned in memory: re-read them through a
