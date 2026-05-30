@@ -9,8 +9,8 @@ use voom_policy::{
 };
 
 use crate::{
-    DependencyKind, NodeStatus, PlanningContext, PlanningDiagnosticCode, PlanningRequest,
-    generate_plan,
+    DependencyKind, NodeStatus, PlanGenerationError, PlanningContext, PlanningDiagnosticCode,
+    PlanningRequest, generate_plan, plan_phase,
 };
 
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
@@ -1807,6 +1807,245 @@ fn rules_unknown_condition_blocks_nested_leaf_operation() {
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
+    );
+}
+
+#[test]
+fn plan_phase_plans_only_the_named_phase() {
+    let policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        (
+            "tracks",
+            vec![CompiledOperation::KeepTracks {
+                target: TrackTarget::Audio,
+                filter: Some(TrackFilter::LanguageIn {
+                    values: vec!["eng".to_owned()],
+                }),
+            }],
+        ),
+    ]);
+
+    let tracks_plan = plan_phase(
+        request(policy.clone(), snapshot_mp4_with_video_audio_subtitle()),
+        "tracks",
+    )
+    .unwrap();
+
+    assert!(!tracks_plan.nodes.is_empty());
+    assert!(
+        tracks_plan
+            .nodes
+            .iter()
+            .all(|node| node.phase_name == "tracks"),
+        "plan_phase must emit nodes only for the named phase"
+    );
+
+    let normalize_plan = plan_phase(
+        request(policy, snapshot_mp4_with_video_audio_subtitle()),
+        "normalize",
+    )
+    .unwrap();
+    assert!(!normalize_plan.nodes.is_empty());
+    assert!(
+        normalize_plan
+            .nodes
+            .iter()
+            .all(|node| node.phase_name == "normalize")
+    );
+}
+
+#[test]
+fn plan_phase_reevaluates_skip_if_against_supplied_snapshot() {
+    let mut policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+    policy.phases[0].skip_if = Some(container_is("mp4"));
+
+    let skipped = plan_phase(
+        request(policy.clone(), snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+    assert!(
+        skipped.nodes.is_empty(),
+        "a skipped phase produces no nodes"
+    );
+    assert!(skipped.diagnostics.is_empty());
+
+    let planned = plan_phase(
+        request(policy, snapshot_with(Some("avi"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+    assert_eq!(planned.nodes.len(), 1);
+    assert_eq!(planned.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
+fn plan_phase_reevaluates_run_if_against_supplied_snapshot() {
+    let mut policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+    policy.phases[0].run_if = Some(container_is("avi"));
+
+    let does_not_run = plan_phase(
+        request(policy.clone(), snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+    assert!(does_not_run.nodes.is_empty());
+
+    let runs = plan_phase(
+        request(policy, snapshot_with(Some("avi"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+    assert_eq!(runs.nodes.len(), 1);
+    assert_eq!(runs.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
+fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
+    let policy = compiled_policy_with_phases(&[(
+        "audio",
+        vec![CompiledOperation::ExtractAudio {
+            target_codec: "opus".to_owned(),
+            container: "ogg".to_owned(),
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["jpn".to_owned()],
+            }),
+        }],
+    )]);
+
+    let plan = plan_phase(
+        request(policy, snapshot_mkv_with_video_audio_subtitle()),
+        "audio",
+    )
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.phase_name.as_deref() == Some("audio")),
+        "the blocking diagnostic must name the phase the coordinator blocks"
+    );
+}
+
+#[test]
+fn plan_phase_rejects_phase_not_in_phase_order() {
+    let policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+
+    let error: PlanGenerationError = plan_phase(
+        request(policy, snapshot_with(Some("mp4"), None, None)),
+        "ghost",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.diagnostics[0].code,
+        PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+    assert!(error.diagnostics[0].message.contains("ghost"));
+}
+
+#[test]
+fn plan_phase_is_deterministic_for_same_inputs() {
+    let policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+
+    let first = plan_phase(
+        request(policy.clone(), snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+    let second = plan_phase(
+        request(policy, snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+
+    assert_eq!(first.plan_id, second.plan_id);
+    assert_eq!(first.plan_hash, second.plan_hash);
+}
+
+#[test]
+fn plan_phase_carries_no_inter_phase_edges() {
+    let policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        (
+            "tracks",
+            vec![CompiledOperation::KeepTracks {
+                target: TrackTarget::Audio,
+                filter: Some(TrackFilter::LanguageIn {
+                    values: vec!["eng".to_owned()],
+                }),
+            }],
+        ),
+    ]);
+
+    let plan = plan_phase(
+        request(policy, snapshot_mp4_with_video_audio_subtitle()),
+        "tracks",
+    )
+    .unwrap();
+
+    assert!(
+        plan.edges.is_empty(),
+        "a single-phase plan carries no inter-phase edges; ordering is the coordinator's barrier"
+    );
+}
+
+#[test]
+fn plan_phase_rejects_empty_input_set() {
+    let policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+    let mut input = input_with_snapshot(snapshot_with(Some("mp4"), None, None));
+    input.media_snapshots.clear();
+
+    let error = plan_phase(
+        PlanningRequest {
+            policy,
+            input,
+            context: PlanningContext::default(),
+        },
+        "normalize",
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyInputSet
     );
 }
 
