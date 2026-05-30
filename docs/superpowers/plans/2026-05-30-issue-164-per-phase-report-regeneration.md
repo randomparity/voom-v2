@@ -30,11 +30,13 @@
 ### Task 1: Shift the chain integration test to post-commit report semantics (failing test)
 
 **Files:**
-- Test: `crates/voom-control-plane/tests/phase_barrier_flow.rs:260-281` (inside `phase_barrier_chains_committed_artifact_into_the_next_phase`) and `:287-340` (`assert_reprobe_and_lineage_chain`)
+- Test: `crates/voom-control-plane/tests/phase_barrier_flow.rs` — the phase-1 report block at `:264-278` (inside `phase_barrier_chains_committed_artifact_into_the_next_phase`) and the helper `assert_reprobe_and_lineage_chain` at `:287-340`.
 
-- [ ] **Step 1: Rewrite the phase-0 report assertion to reflect phase 0's produced artifact**
+- [ ] **Step 1: Delete the old phase-1 block and add a phase-0 assertion in its place**
 
-In `phase_barrier_chains_committed_artifact_into_the_next_phase`, replace the existing phase-1 report block (current lines 260-278, which assert phase 1 targets phase 0's produced version) with a phase-**0** assertion. After the existing `let produced_version = phase0_commit.produced_file_version_id.expect(...)` (around line 255-257), add:
+First **delete** the existing phase-1 report block at `phase_barrier_flow.rs:264-278` — the `let phase1 = outcome.phases[1].report... assert observed hevc` block that asserts phase 1 targets `produced_version` (V1). It encodes the pre-#164 off-by-one and, left in place, would contradict the phase-1→V2 assertion added in Step 2 and fail Task 2's verification.
+
+Then, in its place (after the existing `let produced_version = phase0_commit.produced_file_version_id.expect(...)` binding at `:255-257`), add the phase-**0** assertion:
 
 ```rust
     // Issue #164: the report recorded for a phase reflects that phase's own
@@ -83,7 +85,17 @@ In `assert_reprobe_and_lineage_chain` (the helper already resolves `phase1_commi
     );
 ```
 
-If the helper does not already bind the produced-V2 id, add `let produced_v2 = phase1_commit.produced_file_version_id.expect("phase 1 committed row records its produced version");` before the block.
+If the helper does not already bind the produced-V2 id, add `let produced_v2 = phase1_commit.produced_file_version_id.expect("phase 1 committed row records its produced version");` before the block. (As of this writing the helper already binds `produced_v2` at `:310-312`.)
+
+Then update the now-false comment at `phase_barrier_flow.rs:329-333`: it referenced the deleted "phase-1 report targeting V1" assertion. Reword it to reference the produced-version chain (V0 scan → V1 phase 0 → V2 phase 1) that the surrounding `produced_from` / `snapshots_for_version` checks actually establish — e.g.:
+
+```rust
+    // The refreshed snapshot is keyed to the produced version and is the only
+    // (hence chain-tip) snapshot on it, so it is exactly what the coordinator
+    // projects as the next phase's planning input. Combined with the V0->V1->V2
+    // produced_from chain asserted above, this proves phase 0's reprobe snapshot
+    // is the fact fed forward into phase 1's planner.
+```
 
 - [ ] **Step 3: Run the test to verify it fails against current code**
 
@@ -240,18 +252,21 @@ Run: `cargo test -p voom-cli` first to see which `compliance execute` insta snap
 Then: `cargo insta review` and accept only the diffs where the per-phase `report` block now shows the produced artifact's facts (codec/container/target version) and reject anything unexpected. Re-run `cargo test -p voom-cli` until green.
 Expected: the accepted snapshot diffs are confined to per-phase `report` content; redacted ids (produced_*/reprobe/ticket_ids) are unchanged.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Commit — stage every file changed in Steps 1-6, not a fixed list**
+
+Steps 5-6 may have edited integration tests (`compliance_execute.rs`, `video_transcode_flow.rs`), `coordinator_test.rs`, and/or CLI snapshots in addition to `coordinator.rs` and `phase_barrier_flow.rs`. Do **not** stage a hardcoded list — the commit must match the tested tree, or guardrails are not green at the commit. Verify first, then stage all changed paths:
 
 ```bash
-git add crates/voom-control-plane/src/workflow/coordinator.rs \
-        crates/voom-control-plane/tests/phase_barrier_flow.rs \
-        crates/voom-cli/tests/snapshots
+git status --short                     # confirm only expected files changed
+git add -u crates/voom-control-plane crates/voom-cli   # all tracked edits in both crates
+git add crates/voom-cli/tests/snapshots                # any new/accepted .snap files
+git status --short                     # confirm nothing intended is left unstaged
 git commit -m "feat(control-plane): regenerate per-phase report against refreshed facts
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
 
-(Also stage `crates/voom-control-plane/src/workflow/coordinator_test.rs` if Step 5 required edits there.)
+If `git status` shows a changed file you did not intend to touch, stop and reconcile before committing.
 
 ---
 
@@ -315,7 +330,7 @@ Expected: PASS — `fmt-check`, `lint` (clippy `-D warnings`), `check-test-layou
 
 - [ ] **Step 3: Commit any fixups**
 
-If Steps 1-2 required changes, commit them with an imperative subject and the `Co-Authored-By` trailer. If nothing changed, skip.
+If Steps 1-2 required changes, `git status --short` to see every changed path, stage all of them (not a fixed list), and commit with an imperative subject and the `Co-Authored-By` trailer. If nothing changed, skip.
 
 ---
 
