@@ -162,6 +162,21 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
             .iter()
             .all(|row| row.outcome == FilePhaseOutcome::Committed)
     );
+    // Issue #163: each committed file's refreshed snapshot is keyed to the
+    // version that file produced (the single-phase case of the chain test).
+    for row in &durable_files {
+        let produced = row
+            .produced_file_version_id
+            .expect("committed row records its produced version");
+        let snapshot = row
+            .reprobe_snapshot_id
+            .expect("committed row records its reprobe snapshot");
+        assert_eq!(
+            snapshots_for_version(url, produced).await,
+            vec![i64::try_from(snapshot.0).unwrap()],
+            "the committed file's reprobe snapshot must key to the version it produced"
+        );
+    }
     let durable_phases = repo.phases_for_job(job_id).await.unwrap();
     assert_eq!(durable_phases.len(), 1);
     assert_eq!(durable_phases[0].outcome, PhaseOutcome::Completed);
@@ -281,6 +296,12 @@ async fn assert_reprobe_and_lineage_chain(
     let phase0_snapshot = phase0_commit
         .reprobe_snapshot_id
         .expect("phase 0 committed row records its reprobe snapshot");
+    // Phase 1 produces V2 only because the planner re-runs the transcode under
+    // the ADR-0007 container-normalization quirk (probe reports `matroska,webm`,
+    // not canonical `mkv`; see this test's docstring). If that quirk is ever
+    // fixed, phase 1 becomes a NoOp and this lookup fails — the chain/lineage
+    // behavior under test is unaffected; switch the policy's second phase to a
+    // genuinely-needed mutation (e.g. remux) to keep producing V2.
     let phase1_commit = outcome
         .file_phases
         .iter()
