@@ -257,24 +257,37 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
         .expect("committed row records the produced version");
     assert!(out_dir.join("Chain.default-hevc.hevc.mkv").is_file());
 
-    // Chain advance: phase 1 re-plans against the FileVersion phase 0 produced
-    // (not the original h264 input), observing its committed hevc codec. If the
-    // coordinator had not advanced the file's chain tip, phase 1 would target
-    // the original version and observe h264.
-    let phase1 = outcome.phases[1]
+    // Issue #164: the report recorded for a phase reflects that phase's own
+    // produced artifact, regenerated after commit + re-probe — not the facts
+    // that entered the phase. Phase 0 transcoded h264 -> hevc and committed a new
+    // FileVersion; its recorded report must therefore target that produced
+    // version and observe the committed hevc codec. Before #164 this row held the
+    // pre-dispatch report (target = the scanned h264 version, observed h264).
+    let phase0 = outcome.phases[0]
         .report
         .as_ref()
-        .expect("phase 1 has a report");
-    assert_eq!(phase1.report["input"]["slug"], "phase-barrier-two-file");
-    let check = &phase1.report["checks"][0];
+        .expect("phase 0 has a report");
+    assert_eq!(phase0.report["input"]["slug"], "phase-barrier-two-file");
+    let phase0_check = &phase0.report["checks"][0];
     assert_eq!(
-        check["target"]["id"].as_u64().unwrap(),
+        phase0_check["target"]["id"].as_u64().unwrap(),
         produced_version.0,
-        "phase 1 must plan against phase 0's produced FileVersion"
+        "phase 0's report must target the FileVersion phase 0 produced"
     );
     assert_eq!(
-        check["observed_state"]["video_codec"], "hevc",
-        "phase 1 must observe the committed hevc artifact"
+        phase0_check["observed_state"]["video_codec"], "hevc",
+        "phase 0's report must observe its committed hevc artifact"
+    );
+    // Deterministic identity preserved (#164 acceptance): the regenerated report
+    // carries a content-addressed report_id, and the row's report_id column
+    // matches the identity embedded in the report JSON.
+    assert!(
+        !phase0.report_id.is_empty(),
+        "the recorded phase report carries a content-addressed report_id"
+    );
+    assert_eq!(
+        phase0.report_id, phase0.report["report_id"],
+        "the row's report_id column matches the embedded report identity"
     );
 
     assert_reprobe_and_lineage_chain(&url, &outcome, scanned_version, phase0_commit).await;
@@ -314,6 +327,23 @@ async fn assert_reprobe_and_lineage_chain(
         .reprobe_snapshot_id
         .expect("phase 1 committed row records its reprobe snapshot");
 
+    // Issue #164: phase 1's recorded report reflects phase 1's produced artifact
+    // (V2), regenerated after its commit — not phase 0's output (V1).
+    let phase1 = outcome.phases[1]
+        .report
+        .as_ref()
+        .expect("phase 1 has a report");
+    let phase1_check = &phase1.report["checks"][0];
+    assert_eq!(
+        phase1_check["target"]["id"].as_u64().unwrap(),
+        produced_v2.0,
+        "phase 1's report must target the FileVersion phase 1 produced"
+    );
+    assert_eq!(
+        phase1_check["observed_state"]["video_codec"], "hevc",
+        "phase 1's report must observe its committed hevc artifact"
+    );
+
     // produced_from chain is append-only and never retires the source.
     assert_eq!(
         produced_from(url, produced_v1).await,
@@ -328,9 +358,9 @@ async fn assert_reprobe_and_lineage_chain(
 
     // The refreshed snapshot is keyed to the produced version and is the only
     // (hence chain-tip) snapshot on it, so it is exactly what the coordinator
-    // projects as the next phase's planning input. Combined with the phase-1
-    // report targeting V1 above, this proves phase 0's reprobe snapshot is fed
-    // forward into phase 1's planner.
+    // projects as the next phase's planning input. Combined with the V0->V1->V2
+    // produced_from chain asserted above, this proves phase 0's reprobe snapshot
+    // is the fact fed forward into phase 1's planner.
     assert_eq!(
         snapshots_for_version(url, produced_v1).await,
         vec![i64::try_from(phase0_snapshot.0).unwrap()],

@@ -36,13 +36,13 @@ expression: json
         "phase_ordinal": 0,
         "phase_name": "normalize",
         "outcome": "completed",
-        "report_id": "report_2a184b121f5d5f8c",
+        "report_id": "report_e4b2821af4314231",
         "report": {
           "schema_version": 1,
-          "report_id": "report_2a184b121f5d5f8c",
-          "report_hash": "blake3:b7f00454026274335997fff410a3387841cbda7fb997123242c43a8a4edf1118",
-          "plan_id": "plan_c87f78ccad67a3f6",
-          "plan_hash": "blake3:c87f78ccad67a3f652319fc6f222d07c958a631bf6a9a59bada3030071f01d5c",
+          "report_id": "report_e4b2821af4314231",
+          "report_hash": "blake3:09ded0f81db6f5028287e7dfe199b8ec881b4d60a770df7a221afb36c5c55a3a",
+          "plan_id": "plan_26a3c00101d7024f",
+          "plan_hash": "blake3:26a3c00101d7024f8671fe5f821c05f18942a4bbe73d7e6701d1c4609905410a",
           "policy": {
             "slug": "container-metadata",
             "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
@@ -71,11 +71,11 @@ expression: json
           },
           "checks": [
             {
-              "check_id": "check_768afd3d946914dd",
-              "node_id": "node_f951e5ab8838b792",
+              "check_id": "check_dbabb3ebf97d8a1a",
+              "node_id": "node_d9b6b0cc4caf4781",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               },
               "compliance_kind": "container",
               "operation_kind": "remux",
@@ -89,22 +89,22 @@ expression: json
                   "subtitle"
                 ],
                 "defaults": [],
-                "source_media_snapshot_id": 1
+                "source_media_snapshot_id": 2
               },
               "observed_state": {
-                "container": "mp4"
+                "container": "mov,mp4,m4a,3gp,3g2,mj2"
               },
               "check_status": "noncompliant",
-              "reason": "container mp4 will be changed to mkv",
+              "reason": "container mov,mp4,m4a,3gp,3g2,mj2 will be changed to mkv",
               "issue_action_hint": "create_or_update_planned",
               "execution_eligibility": "supported"
             },
             {
-              "check_id": "check_7c7214e61f331dff",
-              "node_id": "node_42252154f03cf5c8",
+              "check_id": "check_4bc9525cb63646aa",
+              "node_id": "node_c520b9e0e0a4da73",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               },
               "compliance_kind": "unsupported",
               "operation_kind": "clear_tags",
@@ -117,11 +117,11 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_9c42c704f4a45d26",
-              "node_id": "node_0ac465fea71da622",
+              "check_id": "check_7f67c8f1da9fabc8",
+              "node_id": "node_2cb1f04bb88984c6",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               },
               "compliance_kind": "unsupported",
               "operation_kind": "set_tag",
@@ -142,11 +142,11 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_ed38973b8f1945ee",
-              "node_id": "node_ea9ac911d4b1eb87",
+              "check_id": "check_b858982717e7ae74",
+              "node_id": "node_7e472d6411e7638f",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               },
               "compliance_kind": "unsupported",
               "operation_kind": "delete_tag",
@@ -165,36 +165,36 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation clear_tags is not supported by compliance reports",
-              "plan_id": "plan_c87f78ccad67a3f6",
-              "node_id": "node_42252154f03cf5c8",
-              "check_id": "check_7c7214e61f331dff",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_c520b9e0e0a4da73",
+              "check_id": "check_4bc9525cb63646aa",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               }
             },
             {
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation set_tag is not supported by compliance reports",
-              "plan_id": "plan_c87f78ccad67a3f6",
-              "node_id": "node_0ac465fea71da622",
-              "check_id": "check_9c42c704f4a45d26",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_2cb1f04bb88984c6",
+              "check_id": "check_7f67c8f1da9fabc8",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               }
             },
             {
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation delete_tag is not supported by compliance reports",
-              "plan_id": "plan_c87f78ccad67a3f6",
-              "node_id": "node_ea9ac911d4b1eb87",
-              "check_id": "check_ed38973b8f1945ee",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_7e472d6411e7638f",
+              "check_id": "check_b858982717e7ae74",
               "target": {
                 "type": "file_version",
-                "id": 1
+                "id": 2
               }
             }
           ],

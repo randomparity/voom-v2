@@ -457,11 +457,18 @@ impl ControlPlane {
             if run.is_some() {
                 last_run = run;
             }
+            let entered: Vec<(FileAssetId, u32)> = files
+                .iter()
+                .map(|file| (file.asset_id, file.ordinal))
+                .collect();
             let rows = self
                 .finalize_phase(job_id, phase_ordinal, &mut files, &dispositions)
                 .await?;
             let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
             file_phases.extend(rows);
+            let report = self
+                .regenerate_phase_report(policy, context, &base_draft, phase_name, &entered)
+                .await?;
             let phase_row = self
                 .workflow_summaries()
                 .upsert_phase_summary(
@@ -469,12 +476,7 @@ impl ControlPlane {
                         job_id,
                         phase_ordinal,
                         phase_name: phase_name.clone(),
-                        report: Some(PhaseReport {
-                            report_id: report.report_id.clone(),
-                            report: serde_json::to_value(&report).map_err(|e| {
-                                VoomError::Internal(format!("phase report encode: {e}"))
-                            })?,
-                        }),
+                        report: Some(report),
                         outcome,
                     },
                     self.clock().now(),
@@ -644,6 +646,50 @@ impl ControlPlane {
                 phases,
                 file_phases,
             }),
+        })
+    }
+
+    /// Regenerate the per-phase compliance report against the phase's refreshed
+    /// facts (ADR-0008): re-read every file that *entered* the phase at its
+    /// current chain tip (committed files at their produced version + re-probe
+    /// snapshot, others unchanged), re-project, re-plan the same phase, and
+    /// generate the report. Read-only: no tickets, no version advance, no phase.
+    async fn regenerate_phase_report(
+        &self,
+        policy: &voom_policy::CompiledPolicy,
+        context: &PlanningContext,
+        base_draft: &PolicyInputSetDraft,
+        phase_name: &str,
+        entered: &[(FileAssetId, u32)],
+    ) -> Result<PhaseReport, VoomError> {
+        let mut snapshots = Vec::with_capacity(entered.len());
+        for (asset_id, ordinal) in entered {
+            let (_tip, snapshot) = active_version_with_snapshot(&self.identity, *asset_id)
+                .await?
+                .ok_or_else(|| {
+                    VoomError::Internal(format!(
+                        "phase file asset {asset_id} lost its snapshot during report regeneration"
+                    ))
+                })?;
+            snapshots.push(project_media_snapshot_input(*ordinal, &snapshot));
+        }
+        let mut draft = base_draft.clone();
+        draft.media_snapshots = snapshots;
+        let plan = voom_plan::plan_phase(
+            PlanningRequest {
+                policy: policy.clone(),
+                input: draft,
+                context: context.clone(),
+            },
+            phase_name,
+        )
+        .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
+        let report = voom_plan::generate_compliance_report(&plan)
+            .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
+        Ok(PhaseReport {
+            report_id: report.report_id.clone(),
+            report: serde_json::to_value(&report)
+                .map_err(|e| VoomError::Internal(format!("phase report encode: {e}")))?,
         })
     }
 
