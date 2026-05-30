@@ -28,7 +28,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 14);
+    assert_eq!(expected_migrations(), 15);
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -121,6 +121,68 @@ async fn remote_execution_schema_contains_idempotency_and_artifact_access_tables
         .unwrap();
         assert_eq!(index_count, 1, "missing index {index_name}");
     }
+}
+
+#[tokio::test]
+async fn workflow_summary_schema_links_grains_to_jobs_and_artifacts() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    for table in [
+        "workflow_summaries",
+        "workflow_phase_summaries",
+        "workflow_file_phase_summaries",
+    ] {
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(table_count, 1, "missing table {table}");
+    }
+
+    let phase_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'workflow_phase_summaries'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        phase_sql.contains(
+            "CHECK (outcome IN ('completed', 'partially-committed', 'skipped', 'blocked'))"
+        )
+    );
+    assert!(phase_sql.contains("report_id IS NULL AND report IS NULL"));
+
+    let file_phase_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' \
+         AND name = 'workflow_file_phase_summaries'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(file_phase_sql.contains("CHECK (outcome IN ('committed', 'skipped', 'blocked'))"));
+    assert!(file_phase_sql.contains("CHECK (json_valid(ticket_ids))"));
+
+    // The grandchild references jobs plus the four produced-artifact tables.
+    let mut fk_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT \"table\" FROM pragma_foreign_key_list('workflow_file_phase_summaries')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    fk_tables.sort();
+    assert_eq!(
+        fk_tables,
+        vec![
+            "artifact_handles".to_owned(),
+            "file_locations".to_owned(),
+            "file_versions".to_owned(),
+            "jobs".to_owned(),
+            "media_snapshots".to_owned(),
+        ]
+    );
 }
 
 #[tokio::test]
