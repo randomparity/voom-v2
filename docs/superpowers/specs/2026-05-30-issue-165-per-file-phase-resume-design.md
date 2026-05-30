@@ -113,12 +113,14 @@ Read `file_phases_for_job(prior_job_id)` once and index rows by
    chain tip ≠ `recorded_tip`, a phase committed inline without a row. Backfill a
    `Committed` row at `resume_ordinal` (re-probe the current tip via
    `ProducedRefs::resolve`, empty `ticket_ids`), then `resume_ordinal += 1`. This
-   one mechanism covers every "advanced-without-a-row" case, including a file
-   with **zero** prior rows whose tip already advanced (a crash before the very
-   first row write, or a stale/wrong `prior_job_id`): such a file is backfilled
-   at ordinal 0 and resumes at 1 — it is **never** re-planned from scratch
-   against its own product. So an already-advanced file is never re-mutated even
-   when the prior rows are absent.
+   one mechanism covers the **single** within-job gap the at-most-one invariant
+   bounds (below), including a file with **zero** prior rows in the passed job
+   whose tip advanced one phase (a crash before the very first row write): it is
+   backfilled at ordinal 0 and resumes at 1, never re-planned from scratch against
+   its own product. A file that advanced *several* phases while the passed job
+   shows none of them is a contract violation the single backfill cannot fully
+   absorb — see §3.3/§6; the caller avoids it by honoring the most-recent-job
+   contract (§3.3).
 
    *At-most-one-un-rowed-commit invariant.* The phase loop runs every entering
    file's inline commit during `dispatch_phase`, then writes **all** their rows
