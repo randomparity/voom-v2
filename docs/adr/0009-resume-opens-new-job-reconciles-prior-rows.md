@@ -161,10 +161,13 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   Rejected: a resumed prior job records a file's rows as the contiguous *tail*
   `[r, m]` (`r > 0`), not a prefix from 0, so "smallest missing" returns 0 for
   such a job and re-enters phases the file already passed — re-mutating a
-  container phase under chained resume. "Highest recorded + 1" plus the
-  consistency-backfill keeps resume correct whether the caller passes the
-  original or the most-recent failed job id; cross-job per-file cursors are
-  deferred (§11).
+  container phase under chained resume. "Highest recorded + 1" reads the tail
+  correctly when the caller passes the **most-recently-failed** job id (which
+  holds each file's contiguous tail); the single-commit consistency-backfill then
+  covers only the within-that-job crash gap. Passing an *older* job in a resume
+  chain hides multiple sibling commits the single backfill cannot absorb and is a
+  caller-contract violation; cross-job per-file cursors that would make any job in
+  the chain safe are deferred (§11).
 - **Rely on replanning seeing a no-op for already-advanced files.** Rejected: ADR-0007
   documents that a container transform re-runs on replanning against the produced
   artifact, so this would re-mutate recorded phases — exactly what spec §8 forbids.

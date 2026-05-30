@@ -74,10 +74,11 @@ case) leaves the job stuck `Open` because the process died before `fail_job`
 ran. Resume therefore assumes a **single writer** — the caller guarantees the
 prior run is no longer executing. Automated liveness detection and recovery
 (lease expiry, watcher) are deferred (Sprint 16 §11); this sprint the caller
-passes the prior run's own job id verbatim from the failed run's
-`CoordinatorError.partial.job_id` / `CoordinatorOutcome.job_id`. A `prior_job_id`
-that points to a *different* real run is a caller-contract violation that the
-coordinator cannot detect (jobs do not store policy/input identity, ADR-0006/0007);
+passes the **most-recently-failed** run's job id verbatim from the latest
+`CoordinatorError.partial.job_id` (§3.3 explains why the latest job, not an
+earlier one in a resume chain). A `prior_job_id` that points to a *different* real
+run is a caller-contract violation that the coordinator cannot detect (jobs do not
+store policy/input identity, ADR-0006/0007);
 the consistency guard in §3.1 step 3 still prevents the worst outcome
 (re-mutating an already-advanced file) by backfilling rather than re-planning
 from scratch whenever a file's chain tip has advanced past what the rows record.
@@ -131,32 +132,6 @@ Read `file_phases_for_job(prior_job_id)` once and index rows by
 The file enters the phase loop with its computed `resume_ordinal` and its
 current chain-tip snapshot.
 
-### 3.3 Repeated (chained) resume
-
-A resume can itself crash or fail, so resume must survive being run against a job
-that is *already* a resume. Because a single job's rows for a file are the
-contiguous tail `[r, m]` (§3.1 step 2), reading **one** prior job is not a full
-per-file history after a prior resume — yet the algorithm stays correct under two
-combined rules:
-
-- **Highest-recorded-plus-one** reads that tail correctly: a prior **resumed** job
-  J2 holding `{F: phase 1 = Committed}` yields `resume_ordinal(F) = 2`, not `0`,
-  so F is not re-entered at a phase it already passed.
-- **The consistency-backfill** absorbs commits a *sibling* job recorded: if the
-  caller instead passes the **original** job J1 (which holds `{F: phase 0}`),
-  `resume_ordinal(F) = 1`, but F's chain tip already advanced to phase 1's product
-  under J2, so `tip ≠ recorded_tip` backfills F at phase 1 and resumes at 2.
-
-So resume is correct whether the caller passes the original or the most-recent
-failed job id — the case the round-1/2 review flagged. A file that a sibling job
-recorded as `Blocked` and that is invisible to the passed job is the one residual
-imperfection: it may be re-entered, but a blocked phase re-plans to the same
-diagnostic and **commits nothing** (no tickets, no mutation), so the worst case is
-a redundant re-block, never re-mutation or data loss. Full cross-job history
-stitching (a per-file cursor spanning jobs) is deferred (§11); this sprint's
-guarantee is *no re-mutation under repeated resume*, verified by a two-failure
-unit test (§7).
-
 ### 3.2 Heterogeneous per-file start in the phase loop
 
 `PhaseFile` carries `resume_ordinal: u32` (`0` for a fresh run). The phase loop
@@ -187,6 +162,35 @@ A fresh `run_phase_barrier` sets every `resume_ordinal = 0`, so every file enter
 every phase from phase 0 — the phase loop is identical to today's behavior. The
 only change to the fresh path is the §5 `on_error` reject in its resolve
 prologue.
+
+### 3.3 Repeated (chained) resume
+
+A resume can itself crash or fail, so resume must survive being run against a job
+that is *already* a resume. **Caller contract: always pass the most-recently-failed
+job id** (the latest `CoordinatorError.partial.job_id`). By construction that job
+holds each file's contiguous tail `[r, m]` (§3.1 step 2: a single job records a
+file's rows from that run's resume point onward), so:
+
+- **Highest-recorded-plus-one** reads the tail exactly: a resumed job J2 holding
+  `{F: phase 1 = Committed}` yields `resume_ordinal(F) = 2`, not `0`, so F is not
+  re-entered at a phase it already passed. A depth-N chain stays correct because
+  each resume passes the latest job, whose rows are F's newest tail.
+- **The backfill** then only ever needs to cover the *single* within-that-job
+  crash gap (commit landed, row not yet written; §3.1 step 3's at-most-one
+  invariant), never multiple commits.
+
+Passing an **older** job in a chain is a caller-contract violation, in the same
+class as an unrelated job id (§6): an older job hides every commit a later sibling
+recorded, and the single-commit backfill cannot absorb more than one, so a
+container phase could be re-planned against its own product. The coordinator
+cannot detect a stale-but-valid job id (jobs store no chain linkage); cross-job
+per-file cursors that would make any job id in the chain safe are deferred (§11).
+This sprint's guarantee is *no re-mutation under repeated resume when the caller
+honors the most-recent-job contract*, verified by a two-failure unit test (§7).
+A file that the passed job records as `Blocked` is terminal and excluded (§3.1
+step 1); a `Blocked` file invisible to the passed job that is re-entered re-plans
+to the same diagnostic and **commits nothing**, so even that residual case is a
+redundant re-block, never re-mutation.
 
 ## 4. Idempotency contract
 
