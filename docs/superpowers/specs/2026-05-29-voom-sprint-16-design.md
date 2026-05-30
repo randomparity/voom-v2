@@ -216,6 +216,16 @@ JSON (or its hash) are recorded in the per-phase workflow-summary child row keye
 by `(job_id, phase_ordinal)`. Report lineage is the ordered per-phase rows, not a
 stored pointer.
 
+The report recorded for a phase covers that phase's **refreshed** facts: it is
+regenerated *after* the phase's branches commit and re-probe, against the phase's
+input set re-projected at its refreshed chain tips (committed files at their produced
+version, others unchanged), so it reflects the artifacts the phase produced rather
+than the facts that entered it. The point at which the report is regenerated, the
+file set it covers (including blocked files, whose diagnostic the report alone
+records durably), and how a second read-only plan pass reconciles with the
+bounded-replan invariant (§9) are pinned by
+`docs/adr/0008-per-phase-report-regenerated-against-refreshed-facts.md`.
+
 ### Durable workflow summary
 
 A new `workflow_summaries` table (a job row, a per-phase child, and a
@@ -305,10 +315,11 @@ durable tickets and bundled workers.
 
 ## 7. Events And Reporting
 
-- Per-phase compliance reports are regenerated and recorded in the per-phase
-  workflow-summary rows as in Section 4. The CLI report surface returns the
-  latest phase's report and can expose the per-phase chain by reading the ordered
-  summary rows.
+- Per-phase compliance reports are regenerated against each phase's refreshed
+  facts and recorded in the per-phase workflow-summary rows as in Section 4
+  (`docs/adr/0008-per-phase-report-regenerated-against-refreshed-facts.md`). The
+  CLI report surface returns the latest phase's report and can expose the
+  per-phase chain by reading the ordered summary rows.
 - Events continue to record facts only; the phase loop is driven by tickets and
   the coordinator's active-version advance, never by events (ADR-0001).
 - The durable summary is the inspection surface tying phases to tickets,

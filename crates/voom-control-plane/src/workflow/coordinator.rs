@@ -118,6 +118,42 @@ fn phase_draft(base: &PolicyInputSetDraft, files: &[PhaseFile]) -> PolicyInputSe
     draft
 }
 
+/// Regenerate the per-phase compliance report against the phase's refreshed facts
+/// (ADR-0008): re-project every file that *entered* the phase at its refreshed
+/// chain tip (committed files at their produced version + re-probe snapshot,
+/// others unchanged), re-plan the same phase, and generate the report. Pure: the
+/// `refreshed` snapshots are supplied by `finalize_phase`, so this does no
+/// database reads, dispatches no tickets, advances no version, and adds no phase.
+fn regenerate_phase_report(
+    policy: &voom_policy::CompiledPolicy,
+    context: &PlanningContext,
+    base_draft: &PolicyInputSetDraft,
+    phase_name: &str,
+    refreshed: &[(u32, MediaSnapshot)],
+) -> Result<PhaseReport, VoomError> {
+    let mut draft = base_draft.clone();
+    draft.media_snapshots = refreshed
+        .iter()
+        .map(|(ordinal, snapshot)| project_media_snapshot_input(*ordinal, snapshot))
+        .collect();
+    let plan = voom_plan::plan_phase(
+        PlanningRequest {
+            policy: policy.clone(),
+            input: draft,
+            context: context.clone(),
+        },
+        phase_name,
+    )
+    .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
+    let report = voom_plan::generate_compliance_report(&plan)
+        .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
+    Ok(PhaseReport {
+        report_id: report.report_id.clone(),
+        report: serde_json::to_value(&report)
+            .map_err(|e| VoomError::Internal(format!("phase report encode: {e}")))?,
+    })
+}
+
 /// Job-grain summary counters from the last phase that dispatched work (counts
 /// are job-cumulative, so the final run reflects the whole job), or zeros when
 /// no phase dispatched.
@@ -457,11 +493,13 @@ impl ControlPlane {
             if run.is_some() {
                 last_run = run;
             }
-            let rows = self
+            let (rows, refreshed) = self
                 .finalize_phase(job_id, phase_ordinal, &mut files, &dispositions)
                 .await?;
             let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
             file_phases.extend(rows);
+            let report =
+                regenerate_phase_report(policy, context, &base_draft, phase_name, &refreshed)?;
             let phase_row = self
                 .workflow_summaries()
                 .upsert_phase_summary(
@@ -469,12 +507,7 @@ impl ControlPlane {
                         job_id,
                         phase_ordinal,
                         phase_name: phase_name.clone(),
-                        report: Some(PhaseReport {
-                            report_id: report.report_id.clone(),
-                            report: serde_json::to_value(&report).map_err(|e| {
-                                VoomError::Internal(format!("phase report encode: {e}"))
-                            })?,
-                        }),
+                        report: Some(report),
                         outcome,
                     },
                     self.clock().now(),
@@ -648,38 +681,46 @@ impl ControlPlane {
     }
 
     /// Write each active file's per-`(file, phase)` row and advance the working
-    /// set: drop blocked files, refresh committed files' chain tips.
+    /// set: drop blocked files, refresh committed files' chain tips. Returns the
+    /// rows alongside each entered file's `(ordinal, refreshed snapshot)` — the
+    /// in-hand inputs the regenerated per-phase report re-projects, so it needs
+    /// no further database reads (ADR-0008).
     async fn finalize_phase(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
         files: &mut Vec<PhaseFile>,
         dispositions: &[Disposition],
-    ) -> Result<Vec<FilePhaseSummary>, VoomError> {
+    ) -> Result<(Vec<FilePhaseSummary>, Vec<(u32, MediaSnapshot)>), VoomError> {
         let mut rows = Vec::with_capacity(dispositions.len());
+        let mut refreshed = Vec::with_capacity(dispositions.len());
         let mut survivors = Vec::with_capacity(files.len());
         for (file, disposition) in std::mem::take(files).into_iter().zip(dispositions) {
-            let (row, keep) = self
+            let ordinal = file.ordinal;
+            let (row, snapshot, keep) = self
                 .finalize_file(job_id, phase_ordinal, file, disposition)
                 .await?;
             rows.push(row);
+            refreshed.push((ordinal, snapshot));
             if let Some(file) = keep {
                 survivors.push(file);
             }
         }
         *files = survivors;
-        Ok(rows)
+        Ok((rows, refreshed))
     }
 
-    /// Resolve one file's outcome for a phase, returning its summary row and the
-    /// (possibly advanced) file if it stays active.
+    /// Resolve one file's outcome for a phase. Returns the summary row, the
+    /// file's **refreshed** chain-tip snapshot (committed → the produced
+    /// version's re-probe snapshot, otherwise unchanged) for the regenerated
+    /// per-phase report, and the (possibly advanced) file if it stays active.
     async fn finalize_file(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
         mut file: PhaseFile,
         disposition: &Disposition,
-    ) -> Result<(FilePhaseSummary, Option<PhaseFile>), VoomError> {
+    ) -> Result<(FilePhaseSummary, MediaSnapshot, Option<PhaseFile>), VoomError> {
         match disposition {
             Disposition::Blocked => {
                 let row = self
@@ -692,7 +733,7 @@ impl ControlPlane {
                         None,
                     )
                     .await?;
-                Ok((row, None))
+                Ok((row, file.snapshot, None))
             }
             Disposition::Skipped => {
                 let row = self
@@ -705,7 +746,7 @@ impl ControlPlane {
                         None,
                     )
                     .await?;
-                Ok((row, Some(file)))
+                Ok((row, file.snapshot.clone(), Some(file)))
             }
             Disposition::Planned { node_id } => {
                 let workflow_node_id = format!("{POLICY_NODE_ID_PREFIX}{node_id}");
@@ -731,7 +772,7 @@ impl ControlPlane {
                             None,
                         )
                         .await?;
-                    return Ok((row, Some(file)));
+                    return Ok((row, file.snapshot.clone(), Some(file)));
                 }
                 let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
                 let row = self
@@ -746,7 +787,7 @@ impl ControlPlane {
                     .await?;
                 file.version_id = tip.id;
                 file.snapshot = snapshot;
-                Ok((row, Some(file)))
+                Ok((row, file.snapshot.clone(), Some(file)))
             }
         }
     }
