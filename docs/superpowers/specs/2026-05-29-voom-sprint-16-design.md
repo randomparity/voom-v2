@@ -361,7 +361,13 @@ durable tickets and bundled workers.
   re-mutation; the per-phase report is regenerated once the phase's active files
   are all re-probed. Idempotency rests on the append-only committed artifacts
   being the active version the next phase plans against; fully recorded
-  `(file, phase)` pairs are never re-run.
+  `(file, phase)` pairs are never re-run. The resume entry point, its
+  reconciliation algorithm, the job-ownership decision (resume opens a new job
+  and reconciles against the prior job's rows), and resolve-time rejection of
+  non-default `on_error` are pinned by
+  `docs/adr/0009-resume-opens-new-job-reconciles-prior-rows.md` and detailed in
+  `docs/superpowers/specs/2026-05-30-issue-165-per-file-phase-resume-design.md`
+  (#165).
 
 ## 9. Testing
 

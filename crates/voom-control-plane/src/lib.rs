@@ -291,7 +291,6 @@ impl ControlPlane {
         &self.jobs
     }
     #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.jobs` directly today")]
     #[must_use]
     pub(crate) fn jobs(&self) -> &SqliteJobRepo {
         &self.jobs

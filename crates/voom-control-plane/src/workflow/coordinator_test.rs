@@ -5,13 +5,14 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
 use voom_core::{FileVersionId, JobId};
 use voom_policy::{FixtureName, TargetRef, load_fixture, load_policy_fixture};
+use voom_store::repo::identity::NewFileLocation;
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaSnapshot, NewFileVersion,
     ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewWorkflowSummary, WorkflowSummaryRepo,
+    FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary, WorkflowSummaryRepo,
 };
 
 use crate::cases::compliance::ComplianceExecutionOptions;
@@ -452,4 +453,392 @@ async fn active_version_with_snapshot_returns_none_for_unknown_asset() {
         .unwrap();
 
     assert!(result.is_none());
+}
+
+/// Build a single-phase compiled policy whose phase carries the given `on_error`
+/// strategy. `CompiledPolicy::minimal_for_test` is `#[cfg(test)]`-private to
+/// `voom-policy`, so this builds it from public fields instead.
+fn policy_with_on_error(
+    strategy: Option<voom_policy::ErrorStrategy>,
+) -> voom_policy::CompiledPolicy {
+    voom_policy::CompiledPolicy {
+        policy_name: "guarded".to_owned(),
+        slug: "guarded".to_owned(),
+        source_hash: "src-hash-onerr".to_owned(),
+        schema_version: 2,
+        metadata: std::collections::BTreeMap::new(),
+        config: std::collections::BTreeMap::new(),
+        phases: vec![voom_policy::CompiledPhase {
+            name: "normalize".to_owned(),
+            depends_on: Vec::new(),
+            run_if: None,
+            skip_if: None,
+            on_error: strategy,
+            operations: Vec::new(),
+        }],
+        phase_order: vec!["normalize".to_owned()],
+        warnings: Vec::new(),
+        provenance: voom_policy::PolicyProvenance::default(),
+    }
+}
+
+#[test]
+fn reject_unhandled_on_error_rejects_continue() {
+    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
+        voom_policy::ErrorStrategy::Continue,
+    )))
+    .unwrap_err();
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    assert!(
+        err.to_string().contains("normalize"),
+        "names the phase: {err}"
+    );
+    assert!(
+        err.to_string().contains("continue"),
+        "names the strategy: {err}"
+    );
+}
+
+#[test]
+fn reject_unhandled_on_error_rejects_skip() {
+    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
+        voom_policy::ErrorStrategy::Skip,
+    )))
+    .unwrap_err();
+    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
+    assert!(err.to_string().contains("normalize"));
+    assert!(err.to_string().contains("skip"));
+}
+
+#[test]
+fn reject_unhandled_on_error_allows_abort_and_unset() {
+    assert!(
+        super::reject_unhandled_on_error(&policy_with_on_error(Some(
+            voom_policy::ErrorStrategy::Abort
+        )))
+        .is_ok()
+    );
+    assert!(super::reject_unhandled_on_error(&policy_with_on_error(None)).is_ok());
+}
+
+async fn open_workflow_job(cp: &crate::ControlPlane) -> JobId {
+    cp.open_job(NewJob {
+        kind: "synthetic.workflow".to_owned(),
+        priority: 0,
+        created_at: T0,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+/// Write a prior-job `(file, phase)` row. For a `Committed` outcome the DB CHECK
+/// requires the produced version, its live location, and its reprobe snapshot, so
+/// resolve all three from `produced_version`; `Skipped`/`Blocked` carry none.
+async fn record_file_phase(
+    cp: &crate::ControlPlane,
+    job_id: JobId,
+    phase_ordinal: u32,
+    branch_id: &str,
+    outcome: FilePhaseOutcome,
+    produced_version: Option<FileVersionId>,
+) {
+    let produced = if outcome == FilePhaseOutcome::Committed {
+        let version = produced_version.unwrap();
+        let location = cp
+            .identity()
+            .list_live_file_locations_by_version(version)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let snapshot = latest_snapshot(cp, version).await;
+        (Some(version), Some(location.id), Some(snapshot.id))
+    } else {
+        (None, None, None)
+    };
+    cp.workflow_summaries()
+        .upsert_file_phase_summary(
+            NewFilePhaseSummary {
+                job_id,
+                phase_ordinal,
+                branch_id: branch_id.to_owned(),
+                ticket_ids: Vec::new(),
+                produced_file_version_id: produced.0,
+                produced_file_location_id: produced.1,
+                artifact_handle_id: None,
+                reprobe_snapshot_id: produced.2,
+                outcome,
+            },
+            T0,
+        )
+        .await
+        .unwrap();
+}
+
+/// Append a transcode-produced version to `parent`'s asset, give it a live
+/// location and a recorded snapshot, and return the new version id. The live
+/// location is required because the resume backfill resolves `ProducedRefs`,
+/// which reads `list_live_file_locations_by_version`.
+async fn advance_chain_tip(
+    cp: &crate::ControlPlane,
+    parent: FileVersionId,
+    hash: &str,
+    payload: Value,
+) -> FileVersionId {
+    let asset_id = cp
+        .identity()
+        .get_file_version(parent)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id;
+    let version = cp
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: hash.to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Transcode,
+            produced_from_version_id: Some(parent),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    cp.create_file_location(NewFileLocation {
+        file_version_id: version.id,
+        kind: FileLocationKind::LocalPath,
+        value: format!("/lib/produced/{hash}.mkv"),
+        proof: None,
+        observed_at: T0,
+    })
+    .await
+    .unwrap();
+    cp.record_media_snapshot(version.id, None, payload, T0)
+        .await
+        .unwrap();
+    version.id
+}
+
+#[tokio::test]
+async fn reconcile_resume_resumes_after_highest_recorded_phase() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let v = seed_version(&cp, "/lib/r/movie.mkv", "hash-r1", reprobe_payload("h264")).await;
+    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Committed, Some(v)).await;
+    record_file_phase(&cp, prior, 1, "movie", FilePhaseOutcome::Committed, Some(v)).await;
+
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(survivors[0].resume_ordinal, 2, "highest recorded (1) + 1");
+    assert!(
+        backfilled.is_empty(),
+        "tip == recorded committed version, no backfill"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_resume_excludes_blocked_file() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let v = seed_version(&cp, "/lib/b/movie.mkv", "hash-b1", reprobe_payload("h264")).await;
+    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
+
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+
+    assert!(survivors.is_empty(), "a blocked file is terminal");
+    assert!(backfilled.is_empty());
+}
+
+#[tokio::test]
+async fn reconcile_resume_drops_fully_recorded_file() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let v = seed_version(&cp, "/lib/c/movie.mkv", "hash-c1", reprobe_payload("h264")).await;
+    for ordinal in 0..2 {
+        record_file_phase(
+            &cp,
+            prior,
+            ordinal,
+            "movie",
+            FilePhaseOutcome::Committed,
+            Some(v),
+        )
+        .await;
+    }
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, _) = cp.reconcile_resume(prior, new_job, files, 2).await.unwrap();
+    assert!(
+        survivors.is_empty(),
+        "resume_ordinal (2) >= phase_count (2) => complete"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_resume_backfills_committed_tip_without_row() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let v0 = seed_version(&cp, "/lib/d/movie.mkv", "hash-d0", reprobe_payload("h264")).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "movie",
+        FilePhaseOutcome::Committed,
+        Some(v0),
+    )
+    .await;
+    let v1 = advance_chain_tip(&cp, v0, "hash-d1", reprobe_payload("hevc")).await;
+
+    let files = cp
+        .initial_phase_files(&[(v0, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+
+    assert_eq!(
+        backfilled.len(),
+        1,
+        "the un-rowed phase-1 commit is backfilled"
+    );
+    assert_eq!(backfilled[0].phase_ordinal, 1);
+    assert_eq!(backfilled[0].outcome, FilePhaseOutcome::Committed);
+    assert_eq!(backfilled[0].produced_file_version_id, Some(v1));
+    assert!(backfilled[0].ticket_ids.is_empty());
+    assert_eq!(
+        survivors[0].resume_ordinal, 2,
+        "resume past the backfilled phase"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await; // no rows at all under this job
+    let v0 = seed_version(&cp, "/lib/e/movie.mkv", "hash-e0", reprobe_payload("h264")).await;
+    let _v1 = advance_chain_tip(&cp, v0, "hash-e1", reprobe_payload("hevc")).await;
+
+    let files = cp
+        .initial_phase_files(&[(v0, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+    assert_eq!(
+        backfilled.len(),
+        1,
+        "advanced-without-rows is backfilled at ordinal 0"
+    );
+    assert_eq!(backfilled[0].phase_ordinal, 0);
+    assert_eq!(survivors[0].resume_ordinal, 1);
+}
+
+#[tokio::test]
+async fn reconcile_resume_resumes_after_skipped_phase() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let v = seed_version(&cp, "/lib/pt/movie.mkv", "hash-pt", reprobe_payload("h264")).await;
+    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Skipped, None).await;
+
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+    assert_eq!(
+        survivors[0].resume_ordinal, 1,
+        "skipped row at 0 => resume at 1"
+    );
+    assert!(
+        backfilled.is_empty(),
+        "a skipped phase did not advance the tip"
+    );
+}
+
+#[tokio::test]
+async fn resume_phase_barrier_rejects_unknown_prior_job() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    let v = seed_version(&cp, "/lib/u/movie.mkv", "hash-u1", reprobe_payload("h264")).await;
+    let s = latest_snapshot(&cp, v).await;
+    let input = cp
+        .create_policy_input_set(file_draft("unknown-prior", &[s]))
+        .await
+        .unwrap();
+
+    let err = cp
+        .resume_phase_barrier(
+            JobId(999_999),
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.source.code(), "NOT_FOUND");
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0, "no job opens when the prior job is unknown");
+}
+
+#[tokio::test]
+async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
+    let (cp, _tmp) = cp().await;
+    // A phase-level (not policy-level) on_error: continue is the deferred case the
+    // resolve-time guard rejects. No committed fixture carries one, so author it
+    // inline.
+    let source = "policy \"on-error-guard\" {\n  \
+        phase normalize {\n    on_error: continue\n    container mkv\n  }\n}\n";
+    let created = cp
+        .create_policy_document("on-error-guard", source)
+        .await
+        .unwrap();
+    let v = seed_version(&cp, "/lib/o/movie.mkv", "hash-o1", reprobe_payload("h264")).await;
+    let s = latest_snapshot(&cp, v).await;
+    let input = cp
+        .create_policy_input_set(file_draft("on-error", &[s]))
+        .await
+        .unwrap();
+    let prior = open_workflow_job(&cp).await;
+
+    let err = cp
+        .resume_phase_barrier(
+            prior,
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.source.code(), "POLICY_VALIDATION_ERROR");
+    // The on_error reject precedes open_job, so resume opens no new job — only the
+    // pre-existing prior job remains.
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 1, "resume opened no job beyond the prior one");
 }

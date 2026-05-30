@@ -50,9 +50,17 @@ const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
 struct PhaseFile {
     asset_id: FileAssetId,
     version_id: FileVersionId,
+    /// The input-set starting version (chain root for this run). The resume
+    /// backfill consistency guard compares the current tip against this when no
+    /// committed row is visible (#165).
+    start_version_id: FileVersionId,
     snapshot: MediaSnapshot,
     branch_id: String,
     ordinal: u32,
+    /// First phase ordinal this file participates in (`0` for a fresh run; set by
+    /// resume reconciliation). The loop passes a file through phases below this
+    /// untouched (#165).
+    resume_ordinal: u32,
 }
 
 /// How a single file's phase node resolved (ADR-0005: at most one node status
@@ -105,6 +113,28 @@ fn phase_outcome(file_outcomes: &[FilePhaseOutcome]) -> PhaseOutcome {
     } else {
         PhaseOutcome::Skipped
     }
+}
+
+/// Reject a policy whose any `phase_order` phase declares a non-default
+/// `on_error` strategy. `continue`/`skip` are deferred this sprint (Sprint 16
+/// §11); honoring them partially would be indistinguishable at runtime from real
+/// handling, so they are rejected at resolve time before any job opens (#165).
+fn reject_unhandled_on_error(policy: &voom_policy::CompiledPolicy) -> Result<(), VoomError> {
+    for phase_name in &policy.phase_order {
+        let Some(phase) = policy.phases.iter().find(|phase| phase.name == *phase_name) else {
+            continue;
+        };
+        let label = match phase.on_error {
+            None | Some(voom_policy::ErrorStrategy::Abort) => continue,
+            Some(voom_policy::ErrorStrategy::Continue) => "continue",
+            Some(voom_policy::ErrorStrategy::Skip) => "skip",
+        };
+        return Err(VoomError::PolicyValidationError(format!(
+            "phase `{phase_name}` declares on_error `{label}`, which is not supported this sprint \
+             (only the default abort); see Sprint 16 §11"
+        )));
+    }
+    Ok(())
 }
 
 /// Build a phase's planning input: the input set's identity with each still-active
@@ -320,6 +350,7 @@ impl ControlPlane {
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        reject_unhandled_on_error(&policy)?;
         let active: Vec<FileVersionId> = inputs
             .input
             .media_snapshots
@@ -382,6 +413,137 @@ impl ControlPlane {
         }
     }
 
+    /// Resume a crashed or failed phase-barrier run (issue #165, spec §3/§8).
+    /// Opens a **new** job and reconciles each file against `prior_job_id`'s
+    /// per-`(file, phase)` rows (ADR-0009). Pass the **most-recently-failed**
+    /// run's job id (the latest [`CoordinatorError`]`.partial.job_id`).
+    ///
+    /// # Errors
+    /// Returns [`CoordinatorError`] when `prior_job_id` does not exist, durable
+    /// inputs are missing, the policy declares an unsupported `on_error`, or a
+    /// phase's tickets fail.
+    pub async fn resume_phase_barrier(
+        &self,
+        prior_job_id: JobId,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let runtimes = self.policy_runtime_registry().await?;
+        self.resume_phase_barrier_with_runtimes(
+            prior_job_id,
+            policy_version_id,
+            input_set_id,
+            options,
+            runtimes,
+        )
+        .await
+    }
+
+    /// [`Self::resume_phase_barrier`] with an injected worker-runtime registry, so
+    /// tests can drive resume against in-process fakes.
+    ///
+    /// # Errors
+    /// See [`Self::resume_phase_barrier`].
+    pub async fn resume_phase_barrier_with_runtimes(
+        &self,
+        prior_job_id: JobId,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        use voom_store::repo::jobs::JobRepo;
+        if self.jobs().get(prior_job_id).await?.is_none() {
+            return Err(VoomError::NotFound(format!(
+                "resume: prior job {prior_job_id} does not exist"
+            ))
+            .into());
+        }
+        let inputs = self
+            .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
+            .await?;
+        let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        reject_unhandled_on_error(&policy)?;
+        let active: Vec<FileVersionId> = inputs
+            .input
+            .media_snapshots
+            .iter()
+            .filter_map(|snapshot| match snapshot.target {
+                PolicyInputTargetRef::FileVersion { id } => Some(id),
+                _ => None,
+            })
+            .collect();
+        let base_draft = input_set_to_draft(inputs.input);
+        let context = PlanningContext {
+            policy_version_id: Some(policy_version_id),
+            policy_input_set_id: Some(input_set_id),
+            ..PlanningContext::default()
+        };
+        let branch_ids = self.active_branch_ids(&active).await?;
+
+        let now = self.clock().now();
+        let job = self
+            .open_job(NewJob {
+                kind: WORKFLOW_JOB_KIND.to_owned(),
+                priority: 0,
+                created_at: now,
+            })
+            .await?;
+
+        match self
+            .resume_phase_barrier_in_job(
+                job.id,
+                prior_job_id,
+                &policy,
+                &context,
+                base_draft,
+                &branch_ids,
+                options,
+                runtimes,
+            )
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(err) => {
+                let _ = self
+                    .fail_job(job.id, err.source.to_string(), self.clock().now())
+                    .await;
+                Err(err)
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "resume threads the prior job id through the same owned-job run state"
+    )]
+    async fn resume_phase_barrier_in_job(
+        &self,
+        job_id: JobId,
+        prior_job_id: JobId,
+        policy: &voom_policy::CompiledPolicy,
+        context: &PlanningContext,
+        base_draft: PolicyInputSetDraft,
+        branch_ids: &[(FileVersionId, String)],
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        if branch_ids.is_empty() || policy.phase_order.is_empty() {
+            return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
+        }
+        let files = self.initial_phase_files(branch_ids).await?;
+        let phase_count = u32::try_from(policy.phase_order.len())
+            .map_err(|e| VoomError::Internal(format!("phase count overflow: {e}")))?;
+        let (files, backfilled) = self
+            .reconcile_resume(prior_job_id, job_id, files, phase_count)
+            .await?;
+        self.drive_phase_loop(
+            job_id, policy, context, base_draft, files, backfilled, options, runtimes,
+        )
+        .await
+    }
+
     /// Derive a stable branch id (the file's location path stem) for every
     /// active file, rejecting a stem collision across the set.
     async fn active_branch_ids(
@@ -438,9 +600,47 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if branch_ids.is_empty() || policy.phase_order.is_empty() {
-            return Ok(self.finalize_zero_phase_run(job_id).await?);
+            return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
         }
-        let mut files = self.initial_phase_files(branch_ids).await?;
+        let files = self.initial_phase_files(branch_ids).await?;
+        self.drive_phase_loop(
+            job_id,
+            policy,
+            context,
+            base_draft,
+            files,
+            Vec::new(),
+            options,
+            runtimes,
+        )
+        .await
+    }
+
+    /// Run the phase loop across `files`, each file participating only in phases
+    /// at or above its `resume_ordinal` (`0` for a fresh run). `seed_file_phases`
+    /// pre-loads rows a resume backfilled before the loop. Files below their
+    /// `resume_ordinal` pass through a phase untouched and rejoin at their own
+    /// resume phase (#165).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one owned job's run state plus the pre-seeded resume rows"
+    )]
+    async fn drive_phase_loop(
+        &self,
+        job_id: JobId,
+        policy: &voom_policy::CompiledPolicy,
+        context: &PlanningContext,
+        base_draft: PolicyInputSetDraft,
+        mut files: Vec<PhaseFile>,
+        seed_file_phases: Vec<FilePhaseSummary>,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        if files.is_empty() || policy.phase_order.is_empty() {
+            return Ok(self
+                .finalize_zero_phase_run(job_id, seed_file_phases)
+                .await?);
+        }
         let executor = WorkflowExecutor::with_options(
             self.clone(),
             SingleWorkerPerKindSelector,
@@ -449,7 +649,7 @@ impl ControlPlane {
         );
 
         let mut phases = Vec::new();
-        let mut file_phases = Vec::new();
+        let mut file_phases = seed_file_phases;
         let mut last_run = None;
         for (index, phase_name) in policy.phase_order.iter().enumerate() {
             if files.is_empty() {
@@ -457,7 +657,17 @@ impl ControlPlane {
             }
             let phase_ordinal = u32::try_from(index)
                 .map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))?;
-            let draft = phase_draft(&base_draft, &files);
+            // Only files that have reached their resume phase enter this phase;
+            // the rest pass through untouched and rejoin at their own ordinal.
+            let (mut entering, passthrough): (Vec<PhaseFile>, Vec<PhaseFile>) =
+                std::mem::take(&mut files)
+                    .into_iter()
+                    .partition(|file| file.resume_ordinal <= phase_ordinal);
+            if entering.is_empty() {
+                files = passthrough;
+                continue;
+            }
+            let draft = phase_draft(&base_draft, &entering);
             let plan = voom_plan::plan_phase(
                 PlanningRequest {
                     policy: policy.clone(),
@@ -469,7 +679,7 @@ impl ControlPlane {
             .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
             let report = voom_plan::generate_compliance_report(&plan)
                 .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
-            let dispositions = classify_phase(&files, &plan);
+            let dispositions = classify_phase(&entering, &plan);
 
             let run = match self
                 .dispatch_phase(&executor, job_id, &plan, &report, &dispositions)
@@ -481,7 +691,7 @@ impl ControlPlane {
                         .finalize_failed_phase(
                             job_id,
                             phase_ordinal,
-                            &files,
+                            &entering,
                             &dispositions,
                             failure,
                             phases,
@@ -494,7 +704,7 @@ impl ControlPlane {
                 last_run = run;
             }
             let (rows, refreshed) = self
-                .finalize_phase(job_id, phase_ordinal, &mut files, &dispositions)
+                .finalize_phase(job_id, phase_ordinal, &mut entering, &dispositions)
                 .await?;
             let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
             file_phases.extend(rows);
@@ -514,13 +724,32 @@ impl ControlPlane {
                 )
                 .await?;
             phases.push(phase_row);
+
+            // Recombine the phase's survivors with the files still waiting for
+            // their resume phase.
+            files = entering;
+            files.extend(passthrough);
         }
 
+        self.finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
+            .await
+            .map_err(CoordinatorError::from)
+    }
+
+    /// Succeed the owned job and write its job-grain summary, returning the
+    /// completed [`CoordinatorOutcome`].
+    async fn finalize_succeeded_run(
+        &self,
+        job_id: JobId,
+        last_run: Option<&crate::workflow::WorkflowRunSummary>,
+        phases: Vec<PhaseSummary>,
+        file_phases: Vec<FilePhaseSummary>,
+    ) -> Result<CoordinatorOutcome, VoomError> {
         let now = self.clock().now();
         self.succeed_job(job_id, now).await?;
         let summary = self
             .workflow_summaries()
-            .insert_summary(job_grain_summary(job_id, last_run.as_ref()), now)
+            .insert_summary(job_grain_summary(job_id, last_run), now)
             .await?;
         Ok(CoordinatorOutcome {
             job_id,
@@ -556,13 +785,90 @@ impl ControlPlane {
             files.push(PhaseFile {
                 asset_id: version.file_asset_id,
                 version_id: tip.id,
+                start_version_id: *version_id,
                 snapshot,
                 branch_id: branch_id.clone(),
                 ordinal: u32::try_from(index + 1)
                     .map_err(|e| VoomError::Internal(format!("file ordinal overflow: {e}")))?,
+                resume_ordinal: 0,
             });
         }
         Ok(files)
+    }
+
+    /// Compute each active file's `resume_ordinal` from the most-recent failed
+    /// job's per-`(file, phase)` rows (spec §3.1). Drops files that are terminal
+    /// (`Blocked` at their highest recorded phase) or complete
+    /// (`resume_ordinal >= phase_count`). Backfills a `Committed` row for any file
+    /// whose chain tip advanced past its highest recorded committed version
+    /// (a crash between the inline commit and the row write, or a stale prior id).
+    /// Returns the surviving files (with `resume_ordinal` set) and the rows it
+    /// backfilled (#165).
+    async fn reconcile_resume(
+        &self,
+        prior_job_id: JobId,
+        job_id: JobId,
+        files: Vec<PhaseFile>,
+        phase_count: u32,
+    ) -> Result<(Vec<PhaseFile>, Vec<FilePhaseSummary>), VoomError> {
+        let prior = self
+            .workflow_summaries()
+            .file_phases_for_job(prior_job_id)
+            .await?;
+        let mut survivors = Vec::with_capacity(files.len());
+        let mut backfilled = Vec::new();
+        for mut file in files {
+            let rows: Vec<&FilePhaseSummary> = prior
+                .iter()
+                .filter(|row| row.branch_id == file.branch_id)
+                .collect();
+            let highest = rows.iter().max_by_key(|row| row.phase_ordinal);
+            if highest.is_some_and(|top| top.outcome == FilePhaseOutcome::Blocked) {
+                continue; // terminal: aborted-for-file under the prior run
+            }
+            let mut resume_ordinal = highest.map_or(0, |top| top.phase_ordinal + 1);
+
+            // Consistency backfill: default the recorded tip to the input-set
+            // starting version when no committed row is visible.
+            let recorded_tip = rows
+                .iter()
+                .filter(|row| row.outcome == FilePhaseOutcome::Committed)
+                .max_by_key(|row| row.phase_ordinal)
+                .and_then(|row| row.produced_file_version_id)
+                .unwrap_or(file.start_version_id);
+            if file.version_id != recorded_tip {
+                let tip = self
+                    .identity
+                    .get_file_version(file.version_id)
+                    .await?
+                    .ok_or_else(|| {
+                        VoomError::Internal(format!(
+                            "resume: chain tip {} vanished for {}",
+                            file.version_id, file.branch_id
+                        ))
+                    })?;
+                let produced = ProducedRefs::resolve(self, &tip, &file.snapshot).await?;
+                let row = self
+                    .write_file_row(
+                        job_id,
+                        resume_ordinal,
+                        &file,
+                        FilePhaseOutcome::Committed,
+                        &[],
+                        Some(produced),
+                    )
+                    .await?;
+                backfilled.push(row);
+                resume_ordinal += 1;
+            }
+
+            if resume_ordinal >= phase_count {
+                continue; // complete: nothing left to run
+            }
+            file.resume_ordinal = resume_ordinal;
+            survivors.push(file);
+        }
+        Ok((survivors, backfilled))
     }
 
     /// Bridge the phase's planned nodes to a workflow and run them in the owned
@@ -855,6 +1161,7 @@ impl ControlPlane {
     async fn finalize_zero_phase_run(
         &self,
         job_id: JobId,
+        seed_file_phases: Vec<FilePhaseSummary>,
     ) -> Result<CoordinatorOutcome, VoomError> {
         let now = self.clock().now();
         self.succeed_job(job_id, now).await?;
@@ -879,7 +1186,7 @@ impl ControlPlane {
             job_id,
             summary,
             phases: Vec::new(),
-            file_phases: Vec::new(),
+            file_phases: seed_file_phases,
         })
     }
 }
