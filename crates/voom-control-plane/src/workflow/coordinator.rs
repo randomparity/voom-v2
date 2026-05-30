@@ -35,6 +35,7 @@ use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::plans::input_set_to_draft;
 use crate::cases::policy_inputs::stream_summary_from_snapshot_payload;
 
+use super::WorkerRuntimeRegistry;
 use super::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
 use super::expansion::branch_id_from_path;
 use super::policy_bridge::workflow_plan_from_compliance;
@@ -261,6 +262,23 @@ impl ControlPlane {
         input_set_id: PolicyInputSetId,
         options: ComplianceExecutionOptions,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let runtimes = self.policy_runtime_registry().await?;
+        self.run_phase_barrier_with_runtimes(policy_version_id, input_set_id, options, runtimes)
+            .await
+    }
+
+    /// [`run_phase_barrier`] with an injected worker-runtime registry, so tests
+    /// can drive the loop against in-process fakes without discovering workers.
+    ///
+    /// # Errors
+    /// See [`run_phase_barrier`].
+    pub async fn run_phase_barrier_with_runtimes(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
@@ -306,7 +324,15 @@ impl ControlPlane {
         // phase)` rows are durable before the error returns (queryable via
         // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
         match self
-            .run_phase_barrier_in_job(job.id, &policy, &context, base_draft, &branch_ids, options)
+            .run_phase_barrier_in_job(
+                job.id,
+                &policy,
+                &context,
+                base_draft,
+                &branch_ids,
+                options,
+                runtimes,
+            )
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -360,6 +386,10 @@ impl ControlPlane {
         branch_id_from_path(&path)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one owned job's run state: policy, context, draft, branch ids, options, runtimes"
+    )]
     async fn run_phase_barrier_in_job(
         &self,
         job_id: JobId,
@@ -368,12 +398,12 @@ impl ControlPlane {
         base_draft: PolicyInputSetDraft,
         branch_ids: &[(FileVersionId, String)],
         options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if branch_ids.is_empty() || policy.phase_order.is_empty() {
             return Ok(self.finalize_zero_phase_run(job_id).await?);
         }
         let mut files = self.initial_phase_files(branch_ids).await?;
-        let runtimes = self.policy_runtime_registry().await?;
         let executor = WorkflowExecutor::with_options(
             self.clone(),
             SingleWorkerPerKindSelector,
