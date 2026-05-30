@@ -238,24 +238,26 @@ adds a test for a new failure mode rather than breaking an existing green one.
   cold start — a fresh start uses `run_phase_barrier`.
 - **Resume of an existing but mismatched `prior_job_id`** (a real job from a
   different run whose rows do not key to these files): the coordinator cannot
-  detect this (jobs store no policy/input identity). It does **not** silently
-  re-plan an advanced file from scratch, because the §3.1 step-3 consistency
-  guard backfills any file whose chain tip has advanced past its `recorded_tip`
-  (which defaults to the input-set starting version when the file has no
-  `Committed` row). So a file that advanced under the *real* prior run is
-  backfilled and skipped rather than re-mutated, even when the supplied
-  `prior_job_id` is wrong. A file that genuinely never advanced (tip == starting
-  version) runs all phases from 0, which is correct. The only residual risk is a
-  wrong id whose foreign rows collide by `branch_id` *and* mislead reconciliation
-  toward skipping real work — a caller-contract violation called out in §3, not a
-  silent data-loss path.
+  detect this (jobs store no policy/input identity), so this is a caller-contract
+  violation (§3, §3.3), not a guaranteed-safe path. The §3.1 step-3 consistency
+  guard *reduces* the blast radius: a file that advanced **one** phase under the
+  real run (tip one version past its starting version, no visible `Committed`
+  row) is backfilled at ordinal 0 and skipped rather than re-planned from
+  scratch, and a file that genuinely never advanced (tip == starting version)
+  runs all phases from 0, which is correct. It does **not** fully cover a file
+  that advanced **multiple** phases under the real run while the supplied id
+  shows none of them: the single-commit backfill absorbs only the last, so a
+  container phase could still be re-planned against its own product. Safety for
+  that case rests on the most-recent-job contract (§3.3), exactly as for chained
+  resume — this is a contract violation that degrades to bounded re-mutation, not
+  a silent data-loss or orphan path.
 - **A file present in the prior rows but absent from the current input set, or
   vice versa:** reconciliation is per current-input-set file; prior rows for
   files not in the current set are ignored, and current files with no prior rows
   start at `resume_ordinal = 0`.
 - **Backfill when the highest `Committed` row's produced version equals the
-  current tip:** no gap, no backfill; `resume_ordinal` is the first missing
-  phase as computed.
+  current tip:** no gap, no backfill; `resume_ordinal` stays at highest-recorded
+  + 1 (§3.1 step 2).
 - **`on_error` on a phase not in `phase_order`:** unreachable — the guard walks
   `phase_order`, the authoritative execution order; a phase absent from it never
   runs and is irrelevant.
