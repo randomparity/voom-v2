@@ -337,6 +337,23 @@ async fn run_phase_barrier_drops_unplannable_file_as_blocked() {
         .await
         .unwrap();
     assert_eq!(tickets, 0, "a blocked phase dispatches no tickets");
+
+    // Issue #164 / ADR-0008: even an all-blocked phase (nothing committed) must
+    // still record a report, and that report must carry the blocked file's
+    // diagnostic — the per-(file, phase) row has no diagnostic field, so the
+    // report is the only durable record of *why* the file blocked. Recording
+    // `None` here (the rejected survivors-only design) would lose it.
+    let phase = outcome.phases.first().unwrap();
+    assert!(
+        phase.report.is_some(),
+        "an all-blocked phase must still record a report (ADR-0008), got None"
+    );
+    let report = phase.report.as_ref().unwrap();
+    assert!(
+        !report.report["diagnostics"].as_array().unwrap().is_empty(),
+        "blocked phase report must carry the planner diagnostic, got {:?}",
+        report.report["diagnostics"]
+    );
 }
 
 #[tokio::test]
