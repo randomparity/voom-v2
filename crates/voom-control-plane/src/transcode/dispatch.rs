@@ -35,9 +35,15 @@ impl TranscodeVideoDispatcher for BundledTranscodeVideoDispatcher {
         let worker = BundledWorkerProcess::launch(WorkerId(0), command)
             .await
             .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
-        let result =
-            dispatch_transcode_video_with_client(&worker.client, &worker.credentials, request)
-                .await;
+        // This dispatcher launches a fresh worker per call, so its idempotency
+        // cache starts empty; a stable key is enough to dedup a retried call.
+        let result = dispatch_transcode_video_with_client(
+            &worker.client,
+            &worker.credentials,
+            "transcode-video-control-plane",
+            request,
+        )
+        .await;
         let _status = worker.shutdown(Duration::from_secs(5)).await;
         result
     }
@@ -182,6 +188,7 @@ pub async fn require_output_file_matches_result(
 pub(crate) async fn dispatch_transcode_video_with_client<C>(
     client: &C,
     credentials: &WorkerCredentials,
+    idempotency_key: &str,
     transcode: TranscodeVideoRequest,
 ) -> Result<TranscodeVideoResult, VoomError>
 where
@@ -192,7 +199,7 @@ where
         client,
         credentials,
         WorkerOperationDispatch {
-            idempotency_key: "transcode-video-control-plane",
+            idempotency_key,
             operation: OperationKind::TranscodeVideo,
             lease_id: LeaseId(0),
             payload: transcode,

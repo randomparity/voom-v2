@@ -152,7 +152,9 @@ impl ControlPlane {
     }
 }
 
-fn stream_summary_from_snapshot_payload(payload: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn stream_summary_from_snapshot_payload(
+    payload: &serde_json::Value,
+) -> serde_json::Value {
     let streams = payload
         .get("streams")
         .cloned()

@@ -301,6 +301,84 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
 }
 
 #[tokio::test]
+async fn submit_and_run_in_job_leaves_job_open_and_accumulates_across_calls() {
+    let fixture = ExecutorFixture::with_ready_tickets(1).await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let first = executor
+        .submit_and_run_in_job(job_id, independent_hash_plan(1))
+        .await
+        .unwrap();
+    assert_eq!(first.job_id, job_id);
+    assert_eq!(first.ticket_count, 1);
+    assert_eq!(
+        fixture.job_state(job_id).await,
+        "open",
+        "runner must not succeed the job; the caller owns succeed_job"
+    );
+    assert_eq!(
+        fixture.non_terminal_ticket_count(job_id).await,
+        0,
+        "every ticket from the first call is terminal before the next call"
+    );
+
+    let second = executor
+        .submit_and_run_in_job(job_id, independent_hash_plan(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        second.ticket_count, 2,
+        "counts are job-scoped, so the second call's summary is cumulative"
+    );
+    assert_eq!(fixture.job_state(job_id).await, "open");
+
+    fixture.cp.succeed_job(job_id, T0).await.unwrap();
+    assert_eq!(fixture.job_state(job_id).await, "succeeded");
+}
+
+#[tokio::test]
+async fn submit_and_run_in_job_drains_in_flight_dispatches_before_failing() {
+    let mut fixture = ExecutorFixture::without_workers(3).await;
+    fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            4,
+            FakeBehavior::Crash,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    // Three independent crashing dispatches run concurrently; the first failure
+    // makes the runner fail the job. The drain contract requires every sibling
+    // dispatch to reach a terminal state (lease released, ticket failed) before
+    // the runner returns, so the coordinator's post-run inspection is race-free.
+    let mut plan = independent_hash_plan(3);
+    plan.concurrency = ConcurrencyPolicy {
+        max_in_flight_dispatches: 3,
+    };
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let err = executor
+        .submit_and_run_in_job(job_id, plan)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerCrash);
+    assert_eq!(fixture.job_state(job_id).await, "failed");
+    assert_eq!(
+        fixture.held_lease_count().await,
+        0,
+        "no dispatch may still hold a lease once the runner returns"
+    );
+    assert_eq!(
+        fixture.leased_ticket_count(job_id).await,
+        0,
+        "no dispatch may still be in flight (ticket left leased) once the runner returns"
+    );
+}
+
+#[tokio::test]
 async fn policy_transcode_root_ticket_carries_source_ids_and_operation_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
     fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
@@ -1614,6 +1692,45 @@ impl ExecutorFixture {
             .fetch_one(&self.cp.pool)
             .await
             .unwrap()
+    }
+
+    async fn job_state(&self, job_id: JobId) -> String {
+        sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn non_terminal_ticket_count(&self, job_id: JobId) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tickets \
+             WHERE job_id = ? AND state IN ('pending', 'ready', 'leased')",
+        )
+        .bind(i64::try_from(job_id.0).unwrap())
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap()
+    }
+
+    async fn leased_ticket_count(&self, job_id: JobId) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM tickets WHERE job_id = ? AND state = 'leased'")
+            .bind(i64::try_from(job_id.0).unwrap())
+            .fetch_one(&self.cp.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn open_workflow_job(&self) -> JobId {
+        self.cp
+            .open_job(NewJob {
+                kind: "synthetic.workflow".to_owned(),
+                priority: 0,
+                created_at: T0,
+            })
+            .await
+            .unwrap()
+            .id
     }
 
     async fn first_lease_heartbeat_window(&self) -> (String, String) {

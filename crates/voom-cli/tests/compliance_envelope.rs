@@ -52,32 +52,7 @@ async fn apply_outputs_report_and_issue_summary() {
 }
 
 #[tokio::test]
-async fn execute_outputs_report_and_execution_summary() {
-    let seeded = seed(FixtureName::SyntheticNoncompliantTranscodeNeeded).await;
-    let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
-
-    let output = compliance_command(&seeded.url, "execute", seeded.version_id, seeded.input_id);
-    provider.shutdown().unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    let mut json = envelope(output.stdout);
-    assert_eq!(json["error"]["code"], "CONFIG_INVALID");
-    assert!(
-        json["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("workflow root payload binding"))
-    );
-    assert!(json["error"]["message"].as_str().is_some_and(|message| {
-        message.contains("remux requires file_version or file_location target")
-    }));
-    assert_eq!(json["data"]["execution"]["submitted_node_count"], 1);
-    assert_eq!(json["data"]["execution"]["dispatch_count"], 0);
-    redact_local(&mut json);
-    insta::assert_json_snapshot!("execute_outputs_report_and_execution_summary", json);
-}
-
-#[tokio::test]
-async fn execute_scanned_remux_outputs_ticket_result_ids() {
+async fn execute_scanned_remux_outputs_committed_file_phase() {
     let seeded = seed_scanned_remux().await;
     let mut provider = RemuxProviderLaunch::start(&seeded.url).await.unwrap();
 
@@ -99,30 +74,26 @@ async fn execute_scanned_remux_outputs_ticket_result_ids() {
     let mut json = envelope(output.stdout);
     assert_eq!(json["command"], "compliance");
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["tickets"].as_array().unwrap().len(), 1);
-    let result = &json["data"]["tickets"][0]["result"];
+    // The remux committed: one `completed` phase and one committed
+    // per-(file, phase) row carrying the produced references.
+    assert_eq!(json["data"]["phases"].as_array().unwrap().len(), 1);
+    assert_eq!(json["data"]["phases"][0]["outcome"], "completed");
+    let file_phases = json["data"]["file_phases"].as_array().unwrap();
+    assert_eq!(file_phases.len(), 1);
+    assert_eq!(file_phases[0]["outcome"], "committed");
     for field in [
-        "job_id",
-        "ticket_id",
-        "lease_id",
-        "source_file_version_id",
-        "source_file_location_id",
-        "staged_artifact_handle_id",
-        "staged_artifact_location_id",
-        "verification_id",
-        "commit_record_id",
-        "result_file_version_id",
-        "result_file_location_id",
-        "result_media_snapshot_id",
+        "produced_file_version_id",
+        "produced_file_location_id",
+        "reprobe_snapshot_id",
     ] {
         assert!(
-            result[field].is_number(),
+            file_phases[0][field].is_number(),
             "{field} should be a stable numeric id"
         );
     }
     redact_local(&mut json);
-    redact_remux_ticket_paths(&mut json);
-    insta::assert_json_snapshot!("execute_scanned_remux_outputs_ticket_result_ids", json);
+    redact_execute_ids(&mut json);
+    insta::assert_json_snapshot!("execute_scanned_remux_outputs_committed_file_phase", json);
 }
 
 #[tokio::test]
@@ -160,9 +131,10 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
         serde_json::to_string_pretty(&json).unwrap(),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(json["data"]["execution"]["dispatch_count"], 1);
-    assert_eq!(json["data"]["execution"]["failure_count"], 1);
+    assert_eq!(json["data"]["summary"]["dispatch_count"], 1);
+    assert_eq!(json["data"]["summary"]["failure_count"], 1);
     redact_local(&mut json);
+    redact_execute_ids(&mut json);
     redact_temp_path_values(&mut json, &remux_root);
     insta::assert_json_snapshot!(
         "execute_scanned_remux_existing_target_outputs_failure_envelope",
@@ -375,6 +347,7 @@ async fn seed_scanned_remux() -> Seeded {
             file_version_id,
             None,
             json!({
+                "container": { "format_name": "mp4" },
                 "streams": [
                     {
                         "id": "stream-0",
@@ -490,6 +463,7 @@ async fn seed_scanned_audio() -> Seeded {
 
 fn audio_snapshot_payload() -> Value {
     json!({
+        "container": { "format_name": "mkv" },
         "streams": [
             {
                 "id": "stream-0",
@@ -649,24 +623,33 @@ fn envelope(stdout: Vec<u8>) -> Value {
 fn redact_local(json: &mut Value) {
     json["local"]["db_url"] = Value::String("[db-url]".to_owned());
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
-    if json["data"]["execution"]["job_id"].is_number() {
-        json["data"]["execution"]["job_id"] = Value::String("[job-id]".to_owned());
+    if json["data"]["summary"]["job_id"].is_number() {
+        json["data"]["summary"]["job_id"] = Value::String("[job-id]".to_owned());
     }
 }
 
-fn redact_remux_ticket_paths(json: &mut Value) {
-    let Some(result) = json["data"]["tickets"]
-        .as_array_mut()
-        .and_then(|tickets| tickets.first_mut())
-        .and_then(|ticket| ticket.get_mut("result"))
-    else {
+/// Replace the volatile DB row ids a committed file-phase row carries (produced
+/// version/location, reprobe snapshot, and ticket ids) with stable placeholders
+/// so the golden does not pin autoincrement ids.
+fn redact_execute_ids(json: &mut Value) {
+    let Some(file_phases) = json["data"]["file_phases"].as_array_mut() else {
         return;
     };
-    if result["staging_path"].is_string() {
-        result["staging_path"] = Value::String("[staging-path]".to_owned());
-    }
-    if result["target_path"].is_string() {
-        result["target_path"] = Value::String("[target-path]".to_owned());
+    for file_phase in file_phases {
+        for field in [
+            "produced_file_version_id",
+            "produced_file_location_id",
+            "reprobe_snapshot_id",
+        ] {
+            if file_phase[field].is_number() {
+                file_phase[field] = Value::String(format!("[{field}]"));
+            }
+        }
+        if let Some(ticket_ids) = file_phase["ticket_ids"].as_array_mut() {
+            for id in ticket_ids {
+                *id = Value::String("[ticket-id]".to_owned());
+            }
+        }
     }
 }
 

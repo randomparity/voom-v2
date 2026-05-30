@@ -341,19 +341,33 @@ async fn create_primary_bundle(
     bundle.id
 }
 
+/// Read a succeeded operation ticket's durable result JSON for a job. The flat
+/// `tickets` field was removed from `ComplianceExecuteData`; the tickets a run
+/// executed remain queryable in the `tickets` table (`state = 'succeeded'`
+/// folds in the prior `ticket.state` assertion).
+async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::Value {
+    let pool = voom_store::connect(url).await.unwrap();
+    let kind = format!("synthetic.workflow.operation.{operation}");
+    let result: String = sqlx::query_scalar(
+        "SELECT result FROM tickets \
+         WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(i64::try_from(job_id).unwrap())
+    .bind(kind)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    serde_json::from_str(&result).unwrap()
+}
+
 async fn assert_extract_execution_result(
     url: &str,
     out_dir: &Path,
     source_bundle_id: BundleId,
     executed: &voom_control_plane::cases::compliance::ComplianceExecuteData,
 ) {
-    let ticket = executed
-        .tickets
-        .iter()
-        .find(|ticket| ticket.operation == "extract_audio")
-        .unwrap();
-    assert_eq!(ticket.state, "succeeded");
-    let result = ticket.result.as_ref().unwrap();
+    let result = ticket_result(url, executed.summary.job_id, "extract_audio").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();
     let verification_id = result["verification_id"].as_u64().unwrap();
     let commit_record_id = result["commit_record_id"].as_u64().unwrap();

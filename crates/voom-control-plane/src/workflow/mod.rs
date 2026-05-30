@@ -1,4 +1,5 @@
 pub mod binding;
+pub mod coordinator;
 pub mod executor;
 pub mod expansion;
 pub mod model;

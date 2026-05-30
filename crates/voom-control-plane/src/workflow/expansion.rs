@@ -435,7 +435,7 @@ fn scanner_files(scanner_ticket: &Ticket) -> Result<Vec<ScannerFile>, VoomError>
         .collect()
 }
 
-fn branch_id_from_path(path: &str) -> Result<String, VoomError> {
+pub(crate) fn branch_id_from_path(path: &str) -> Result<String, VoomError> {
     let stem = Path::new(path)
         .file_stem()
         .and_then(|stem| stem.to_str())

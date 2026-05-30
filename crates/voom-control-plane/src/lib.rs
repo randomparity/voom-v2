@@ -41,6 +41,7 @@ use voom_store::repo::{
     use_leases::SqliteUseLeaseRepo,
     video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo},
     workers::SqliteWorkerRepo,
+    workflow_summaries::SqliteWorkflowSummaryRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
@@ -85,6 +86,7 @@ pub struct ControlPlane {
     pub(crate) policies: SqlitePolicyRepo,
     pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
+    pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -114,6 +116,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("policies", &self.policies)
             .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
+            .field("workflow_summaries", &self.workflow_summaries)
             .finish()
     }
 }
@@ -211,6 +214,7 @@ impl ControlPlane {
             policies: SqlitePolicyRepo::new(pool.clone()),
             video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
+            workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -437,6 +441,17 @@ impl ControlPlane {
     #[must_use]
     pub(crate) fn identity(&self) -> &SqliteIdentityRepo {
         &self.identity
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
+        &self.workflow_summaries
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    #[must_use]
+    pub(crate) fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
+        &self.workflow_summaries
     }
 
     #[cfg(any(test, feature = "test-support"))]

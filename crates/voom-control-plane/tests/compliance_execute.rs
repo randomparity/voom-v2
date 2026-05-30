@@ -8,8 +8,13 @@ use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
 use voom_worker_protocol::OperationKind;
 
+/// The phase-barrier coordinator advances real file chains, so a policy whose
+/// only targets are synthetic has an empty active set: `compliance execute`
+/// succeeds with a zero-phase outcome and mints no workflow tickets or leases
+/// (Sprints 12–15 instead failed such a run at the root payload binding; the
+/// coordinator never reaches a binding because there is nothing to dispatch).
 #[tokio::test]
-async fn compliance_execute_rejects_synthetic_policy_remux_before_ticket_fallback()
+async fn compliance_execute_does_not_dispatch_synthetic_policy_targets()
 -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::NamedTempFile::new()?;
     let url = format!("sqlite://{}", tmp.path().display());
@@ -34,15 +39,13 @@ async fn compliance_execute_rejects_synthetic_policy_remux_before_ticket_fallbac
             .map_err(|err| err.source.to_string())
     }
     .await;
-    let Err(err) = combine_result_and_cleanup(result, provider.shutdown()) else {
-        return Err(std::io::Error::other(
-            "synthetic policy remux unexpectedly created workflow tickets",
-        )
-        .into());
-    };
+    let data =
+        combine_result_and_cleanup(result, provider.shutdown()).map_err(std::io::Error::other)?;
 
-    assert!(err.contains("workflow root payload binding"));
-    assert!(err.contains("remux requires file_version or file_location target"));
+    // Empty active set: no phases ran and no files committed.
+    assert!(data.phases.is_empty());
+    assert!(data.file_phases.is_empty());
+    assert_eq!(data.summary.dispatch_count, 0);
 
     let ticket_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM tickets WHERE kind = 'synthetic.workflow.operation.remux'",

@@ -163,13 +163,10 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
             .contains("audio target path already exists")
     );
     let partial = err.partial.unwrap();
-    assert_eq!(partial.execution.failure_count, 1);
-    assert!(
-        !partial
-            .tickets
-            .iter()
-            .any(|ticket| ticket.operation == "transcode_audio" && ticket.state == "succeeded")
-    );
+    assert_eq!(partial.summary.failure_count, 1);
+    // The audio transcode failed before committing, so no file advanced: the
+    // partial carries no committed per-(file, phase) row.
+    assert!(partial.file_phases.is_empty());
 }
 
 fn tempdir_in_repo() -> tempfile::TempDir {
@@ -290,18 +287,32 @@ async fn assert_source_audio_facts(
     }));
 }
 
+/// Read a succeeded operation ticket's durable result JSON for a job. The flat
+/// `tickets` field was removed from `ComplianceExecuteData`; the tickets a run
+/// executed remain queryable in the `tickets` table (`state = 'succeeded'`
+/// folds in the prior `ticket.state` assertion).
+async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::Value {
+    let pool = voom_store::connect(url).await.unwrap();
+    let kind = format!("synthetic.workflow.operation.{operation}");
+    let result: String = sqlx::query_scalar(
+        "SELECT result FROM tickets \
+         WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(i64::try_from(job_id).unwrap())
+    .bind(kind)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    serde_json::from_str(&result).unwrap()
+}
+
 async fn assert_audio_transcode_execution_result(
     url: &str,
     out_dir: &Path,
     executed: &voom_control_plane::cases::compliance::ComplianceExecuteData,
 ) -> (FileVersionId, MediaSnapshotId) {
-    let ticket = executed
-        .tickets
-        .iter()
-        .find(|ticket| ticket.operation == "transcode_audio")
-        .unwrap();
-    assert_eq!(ticket.state, "succeeded");
-    let result = ticket.result.as_ref().unwrap();
+    let result = ticket_result(url, executed.summary.job_id, "transcode_audio").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();
     let verification_id = result["verification_id"].as_u64().unwrap();
     let commit_record_id = result["commit_record_id"].as_u64().unwrap();

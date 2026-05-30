@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -8,7 +8,6 @@ use serde_json::json;
 use sqlx::Row;
 use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
-use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::{
     IssueRepo, PolicyInputRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind,
     PolicyIssueStatus, PolicyRepo,
@@ -18,10 +17,7 @@ use voom_worker_protocol::{HttpClient, OperationKind, WorkerCredentials};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::workflow::{
-    WorkerRuntimeRegistry, WorkflowExecutor,
-    executor::WorkflowExecutorOptions,
-    policy_bridge::{PolicyExecutionSummary, workflow_plan_from_compliance},
-    ticket_payload::{operation_name, ticket_operation},
+    WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::operation_name,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -44,40 +40,121 @@ pub struct ComplianceApplyData {
     pub issues: IssueApplicationSummary,
 }
 
+/// The durable result of a `compliance execute` run: the issues applied from
+/// the initial report, plus the phase-barrier coordinator's job-grain summary
+/// and per-phase / per-`(file, phase)` rows. The flat single-report / flat-ticket
+/// shape of Sprints 12–15 is relocated here — per-phase reports live on
+/// [`PhaseSummaryView`], and the tickets each branch ran live on
+/// [`FilePhaseSummaryView::ticket_ids`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceExecuteData {
-    pub report: voom_plan::ComplianceReport,
     pub issues: IssueApplicationSummary,
-    pub execution: PolicyExecutionSummary,
-    pub tickets: Vec<ComplianceExecutedTicket>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_diagnostic: Option<voom_plan::ComplianceDiagnostic>,
+    pub summary: WorkflowSummaryView,
+    pub phases: Vec<PhaseSummaryView>,
+    pub file_phases: Vec<FilePhaseSummaryView>,
 }
 
 impl ComplianceExecuteData {
-    fn from_apply(
-        apply_data: ComplianceApplyData,
-        execution: PolicyExecutionSummary,
-        tickets: Vec<ComplianceExecutedTicket>,
-        execution_diagnostic: Option<voom_plan::ComplianceDiagnostic>,
+    fn from_outcome(
+        issues: IssueApplicationSummary,
+        outcome: &crate::workflow::coordinator::CoordinatorOutcome,
     ) -> Self {
         Self {
-            report: apply_data.report,
-            issues: apply_data.issues,
-            execution,
-            tickets,
-            execution_diagnostic,
+            issues,
+            summary: WorkflowSummaryView::from(&outcome.summary),
+            phases: outcome.phases.iter().map(PhaseSummaryView::from).collect(),
+            file_phases: outcome
+                .file_phases
+                .iter()
+                .map(FilePhaseSummaryView::from)
+                .collect(),
         }
     }
 }
 
+/// Job-grain workflow summary, rendered without the nondeterministic
+/// `elapsed`/`created_at` columns so the CLI golden is stable.
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct ComplianceExecutedTicket {
-    pub ticket_id: voom_core::TicketId,
-    pub operation: String,
-    pub state: String,
+pub struct WorkflowSummaryView {
+    pub job_id: u64,
+    pub branch_count: u32,
+    pub ticket_count: u32,
+    pub dispatch_count: u64,
+    pub retry_count: u64,
+    pub failure_count: u64,
+    pub peak_active_workflow_leases: u32,
+    pub per_operation: serde_json::Value,
+}
+
+impl From<&voom_store::repo::workflow_summaries::WorkflowSummary> for WorkflowSummaryView {
+    fn from(summary: &voom_store::repo::workflow_summaries::WorkflowSummary) -> Self {
+        Self {
+            job_id: summary.job_id.0,
+            branch_count: summary.branch_count,
+            ticket_count: summary.ticket_count,
+            dispatch_count: summary.dispatch_count,
+            retry_count: summary.retry_count,
+            failure_count: summary.failure_count,
+            peak_active_workflow_leases: summary.peak_active_workflow_leases,
+            per_operation: summary.per_operation.clone(),
+        }
+    }
+}
+
+/// Per-phase summary, rendered without the row `id`/`created_at`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PhaseSummaryView {
+    pub phase_ordinal: u32,
+    pub phase_name: String,
+    pub outcome: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    pub report_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<serde_json::Value>,
+}
+
+impl From<&voom_store::repo::workflow_summaries::PhaseSummary> for PhaseSummaryView {
+    fn from(phase: &voom_store::repo::workflow_summaries::PhaseSummary) -> Self {
+        Self {
+            phase_ordinal: phase.phase_ordinal,
+            phase_name: phase.phase_name.clone(),
+            outcome: phase.outcome.as_str(),
+            report_id: phase.report.as_ref().map(|report| report.report_id.clone()),
+            report: phase.report.as_ref().map(|report| report.report.clone()),
+        }
+    }
+}
+
+/// Per-`(file, phase)` summary, rendered without the row `id`/`created_at`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FilePhaseSummaryView {
+    pub phase_ordinal: u32,
+    pub branch_id: String,
+    pub outcome: &'static str,
+    pub ticket_ids: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub produced_file_version_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub produced_file_location_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_handle_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reprobe_snapshot_id: Option<u64>,
+}
+
+impl From<&voom_store::repo::workflow_summaries::FilePhaseSummary> for FilePhaseSummaryView {
+    fn from(file_phase: &voom_store::repo::workflow_summaries::FilePhaseSummary) -> Self {
+        Self {
+            phase_ordinal: file_phase.phase_ordinal,
+            branch_id: file_phase.branch_id.clone(),
+            outcome: file_phase.outcome.as_str(),
+            ticket_ids: file_phase.ticket_ids.iter().map(|id| id.0).collect(),
+            produced_file_version_id: file_phase.produced_file_version_id.map(|id| id.0),
+            produced_file_location_id: file_phase.produced_file_location_id.map(|id| id.0),
+            artifact_handle_id: file_phase.artifact_handle_id.map(|id| id.0),
+            reprobe_snapshot_id: file_phase.reprobe_snapshot_id.map(|id| id.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -150,9 +227,9 @@ pub struct ComplianceExecuteError {
     pub partial: Option<ComplianceExecuteData>,
 }
 
-struct DurableComplianceInputs {
-    version: voom_store::repo::PolicyVersion,
-    input: voom_store::repo::PolicyInputSet,
+pub(crate) struct DurableComplianceInputs {
+    pub(crate) version: voom_store::repo::PolicyVersion,
+    pub(crate) input: voom_store::repo::PolicyInputSet,
 }
 
 impl ControlPlane {
@@ -170,21 +247,7 @@ impl ControlPlane {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
-        let mut policy: voom_policy::CompiledPolicy =
-            serde_json::from_value(inputs.version.compiled_json.clone()).map_err(|e| {
-                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
-            })?;
-        if policy.source_hash != inputs.version.source_hash
-            || policy.schema_version != inputs.version.schema_version
-        {
-            return Err(VoomError::PlanGeneration(format!(
-                "stored compiled policy identity mismatch for policy version {policy_version_id}"
-            )));
-        }
-        // Resolve video profile references in-memory (after the stored-identity
-        // check, so the mutation cannot affect `source_hash`) before the pure
-        // planner runs. Shared with the dry-run path for parity.
-        super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
+        let policy = self.compiled_policy_for_version(&inputs.version).await?;
         let plan = super::plans::plan_compiled_policy_with_input(
             policy,
             super::plans::input_set_to_draft(inputs.input),
@@ -362,6 +425,28 @@ impl ControlPlane {
         input_set_id: PolicyInputSetId,
         options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
+        let runtimes =
+            self.policy_runtime_registry()
+                .await
+                .map_err(|source| ComplianceExecuteError {
+                    source,
+                    partial: None,
+                })?;
+        self.execute_compliance_with_runtimes(policy_version_id, input_set_id, options, runtimes)
+            .await
+    }
+
+    /// Apply the initial report's findings to durable issues, then drive the
+    /// phase-barrier coordinator with the given runtime registry. Issue
+    /// application runs once up front (unchanged from Sprints 12–15); the
+    /// per-phase workflow execution is the coordinator's.
+    async fn execute_compliance_with_runtimes(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
@@ -376,79 +461,19 @@ impl ControlPlane {
                 source,
                 partial: None,
             })?;
-
-        let bridge = match workflow_plan_from_compliance(&report_data.plan, &apply_data.report) {
-            Ok(bridge) => bridge,
-            Err(source) => {
-                let partial = ComplianceExecuteData::from_apply(
-                    apply_data,
-                    empty_execution_summary(&report_data.plan, &report_data.report),
-                    Vec::new(),
-                    Some(execution_diagnostic(
-                        &source,
-                        &report_data.plan.plan_id,
-                        &report_data.report.report_id,
-                    )),
-                );
-                return Err(ComplianceExecuteError {
-                    source,
-                    partial: Some(partial),
-                });
-            }
-        };
-
-        let Some(workflow) = bridge.workflow else {
-            return Ok(ComplianceExecuteData::from_apply(
-                apply_data,
-                bridge.summary,
-                Vec::new(),
-                None,
-            ));
-        };
-
-        let runtimes = match self.policy_runtime_registry().await {
-            Ok(runtimes) => runtimes,
-            Err(source) => {
-                let partial =
-                    ComplianceExecuteData::from_apply(apply_data, bridge.summary, Vec::new(), None);
-                return Err(ComplianceExecuteError {
-                    source,
-                    partial: Some(partial),
-                });
-            }
-        };
-        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes, options)
+        let issues = apply_data.issues;
+        match self
+            .run_phase_barrier_with_runtimes(policy_version_id, input_set_id, options, runtimes)
             .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn execute_compliance_policy_without_runtime_for_test(
-        &self,
-        policy_version_id: PolicyVersionId,
-        input_set_id: PolicyInputSetId,
-    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        self.execute_compliance_policy_with_runtime_registry_for_test(
-            policy_version_id,
-            input_set_id,
-            WorkerRuntimeRegistry::new(),
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn execute_compliance_policy_with_runtime_registry_for_test(
-        &self,
-        policy_version_id: PolicyVersionId,
-        input_set_id: PolicyInputSetId,
-        runtimes: WorkerRuntimeRegistry,
-    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        self.execute_compliance_policy_with_runtime_registry_and_options_for_test(
-            policy_version_id,
-            input_set_id,
-            runtimes,
-            ComplianceExecutionOptions::default(),
-        )
-        .await
+        {
+            Ok(outcome) => Ok(ComplianceExecuteData::from_outcome(issues, &outcome)),
+            Err(err) => Err(ComplianceExecuteError {
+                source: err.source,
+                partial: err
+                    .partial
+                    .map(|outcome| ComplianceExecuteData::from_outcome(issues, &outcome)),
+            }),
+        }
     }
 
     #[cfg(test)]
@@ -459,141 +484,11 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
         options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let report_data = self
-            .generate_compliance_report(policy_version_id, input_set_id)
-            .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
-        let apply_data = self
-            .apply_generated_compliance_report(&report_data, policy_version_id)
-            .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
-        let bridge = workflow_plan_from_compliance(&report_data.plan, &apply_data.report).map_err(
-            |source| ComplianceExecuteError {
-                source,
-                partial: None,
-            },
-        )?;
-        let Some(workflow) = bridge.workflow else {
-            return Ok(ComplianceExecuteData::from_apply(
-                apply_data,
-                bridge.summary,
-                Vec::new(),
-                None,
-            ));
-        };
-        self.execute_compliance_workflow(apply_data, bridge.summary, workflow, runtimes, options)
+        self.execute_compliance_with_runtimes(policy_version_id, input_set_id, options, runtimes)
             .await
     }
 
-    async fn execute_compliance_workflow(
-        &self,
-        apply_data: ComplianceApplyData,
-        mut bridge_summary: PolicyExecutionSummary,
-        workflow: crate::workflow::WorkflowPlan,
-        runtimes: WorkerRuntimeRegistry,
-        options: ComplianceExecutionOptions,
-    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let executor_options = WorkflowExecutorOptions::from(options);
-        let executor = WorkflowExecutor::with_options(
-            self.clone(),
-            SingleWorkerPerKindSelector,
-            runtimes,
-            executor_options,
-        );
-        let result = executor.submit_and_run(workflow).await;
-        let run = match result {
-            Ok(summary) => summary,
-            Err(err) => {
-                merge_run_summary(&mut bridge_summary, &err.summary);
-                let partial =
-                    ComplianceExecuteData::from_apply(apply_data, bridge_summary, Vec::new(), None);
-                return Err(ComplianceExecuteError {
-                    source: err.source,
-                    partial: Some(partial),
-                });
-            }
-        };
-        merge_run_summary(&mut bridge_summary, &run);
-        let tickets = self
-            .compliance_executed_tickets(run.job_id)
-            .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: Some(ComplianceExecuteData::from_apply(
-                    ComplianceApplyData {
-                        report: apply_data.report.clone(),
-                        issues: apply_data.issues.clone(),
-                    },
-                    bridge_summary.clone(),
-                    Vec::new(),
-                    None,
-                )),
-            })?;
-        Ok(ComplianceExecuteData::from_apply(
-            apply_data,
-            bridge_summary,
-            tickets,
-            None,
-        ))
-    }
-
-    async fn compliance_executed_tickets(
-        &self,
-        job_id: voom_core::JobId,
-    ) -> Result<Vec<ComplianceExecutedTicket>, VoomError> {
-        let rows =
-            sqlx::query(
-                "SELECT id, kind, state, result FROM tickets WHERE job_id = ? ORDER BY id ASC",
-            )
-            .bind(i64::try_from(job_id.0).map_err(|err| {
-                VoomError::Internal(format!("job id exceeds SQLite integer: {err}"))
-            })?)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| VoomError::Database(format!("compliance tickets: {e}")))?;
-        rows.into_iter()
-            .map(|row| {
-                let ticket_id = voom_core::TicketId(
-                    row.try_get::<i64, _>("id")
-                        .map_err(|e| VoomError::Database(format!("compliance ticket id: {e}")))
-                        .and_then(|id| {
-                            u64::try_from(id).map_err(|err| {
-                                VoomError::Database(format!("compliance ticket id negative: {err}"))
-                            })
-                        })?,
-                );
-                let kind = row
-                    .try_get::<String, _>("kind")
-                    .map_err(|e| VoomError::Database(format!("compliance ticket kind: {e}")))?;
-                let state = row
-                    .try_get::<String, _>("state")
-                    .map_err(|e| VoomError::Database(format!("compliance ticket state: {e}")))?;
-                let result_json = row
-                    .try_get::<Option<String>, _>("result")
-                    .map_err(|e| VoomError::Database(format!("compliance ticket result: {e}")))?;
-                let result = result_json
-                    .map(|json| serde_json::from_str::<serde_json::Value>(&json))
-                    .transpose()
-                    .map_err(|e| {
-                        VoomError::Database(format!("compliance ticket result JSON: {e}"))
-                    })?;
-                Ok(ComplianceExecutedTicket {
-                    ticket_id,
-                    operation: operation_from_ticket_kind(&kind)?,
-                    state,
-                    result,
-                })
-            })
-            .collect()
-    }
-
-    async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
+    pub(crate) async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
         let mut registry = WorkerRuntimeRegistry::new();
         let rows = sqlx::query(
             "SELECT w.id, w.epoch, wc.extra \
@@ -639,7 +534,7 @@ impl ControlPlane {
         Ok(registry)
     }
 
-    async fn load_current_accepted_policy_and_input(
+    pub(crate) async fn load_current_accepted_policy_and_input(
         &self,
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
@@ -675,61 +570,32 @@ impl ControlPlane {
             })?;
         Ok(DurableComplianceInputs { version, input })
     }
-}
 
-fn empty_execution_summary(
-    plan: &voom_plan::ExecutionPlan,
-    report: &voom_plan::ComplianceReport,
-) -> PolicyExecutionSummary {
-    PolicyExecutionSummary {
-        plan_id: plan.plan_id.clone(),
-        report_id: report.report_id.clone(),
-        job_id: None,
-        submitted_node_count: 0,
-        skipped_no_op_count: 0,
-        blocked_count: 0,
-        dispatch_count: 0,
-        failure_count: 0,
-        per_operation: BTreeMap::new(),
+    /// Deserialize a policy version's stored compiled policy, verify its stored
+    /// identity, and resolve video-profile references in-memory before the pure
+    /// planner runs. Shared by the single-shot report path and the phase-barrier
+    /// coordinator so both plan against the same compiled policy.
+    pub(crate) async fn compiled_policy_for_version(
+        &self,
+        version: &voom_store::repo::PolicyVersion,
+    ) -> Result<voom_policy::CompiledPolicy, VoomError> {
+        let mut policy: voom_policy::CompiledPolicy =
+            serde_json::from_value(version.compiled_json.clone()).map_err(|e| {
+                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
+            })?;
+        if policy.source_hash != version.source_hash
+            || policy.schema_version != version.schema_version
+        {
+            return Err(VoomError::PlanGeneration(format!(
+                "stored compiled policy identity mismatch for policy version {}",
+                version.id
+            )));
+        }
+        // Resolve after the stored-identity check so the mutation cannot affect
+        // `source_hash`.
+        super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
+        Ok(policy)
     }
-}
-
-fn execution_diagnostic(
-    source: &VoomError,
-    plan_id: &str,
-    report_id: &str,
-) -> voom_plan::ComplianceDiagnostic {
-    voom_plan::ComplianceDiagnostic {
-        severity: voom_plan::ComplianceDiagnosticSeverity::Error,
-        code: voom_plan::ComplianceDiagnosticCode::UnsupportedExecutionOperation,
-        message: source.to_string(),
-        plan_id: Some(plan_id.to_owned()),
-        report_id: Some(report_id.to_owned()),
-        node_id: None,
-        check_id: None,
-        target: None,
-        suggestion: None,
-    }
-}
-
-fn operation_from_ticket_kind(kind: &str) -> Result<String, VoomError> {
-    let operation = ticket_operation(kind)
-        .map_err(|e| VoomError::Database(format!("compliance ticket workflow kind: {e}")))?;
-    Ok(operation_name(operation).to_owned())
-}
-
-fn merge_run_summary(
-    execution: &mut PolicyExecutionSummary,
-    run: &crate::workflow::WorkflowRunSummary,
-) {
-    execution.job_id = Some(run.job_id);
-    execution.dispatch_count = run.dispatch_count;
-    execution.failure_count = run.failure_count;
-    execution.per_operation = run
-        .per_operation
-        .iter()
-        .map(|(operation, summary)| (operation_name(*operation).to_owned(), summary.success_count))
-        .collect();
 }
 
 fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {

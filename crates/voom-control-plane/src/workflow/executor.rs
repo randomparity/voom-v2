@@ -49,7 +49,7 @@ use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
 
-const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
+pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -237,10 +237,6 @@ where
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "workflow run loop keeps scheduler state and terminal handling together"
-    )]
     pub async fn submit_and_run(
         &self,
         plan: WorkflowPlan,
@@ -270,19 +266,78 @@ where
                 return Err(WorkflowRunError { summary, source });
             }
         };
-        let workflow_id = format!("workflow-{}", job.id.0);
-        let mut summary = WorkflowRunSummary::empty(job.id, started.elapsed());
+
+        let summary = self.run_plan_in_job(job.id, plan, started).await?;
+        let _ = self
+            .control_plane
+            .succeed_job(job.id, self.control_plane.clock().now())
+            .await;
+        Ok(summary)
+    }
+
+    /// Run one plan inside a caller-owned, already-open job.
+    ///
+    /// Unlike [`Self::submit_and_run`], this does not open or succeed the job:
+    /// the caller owns the job lifecycle. The phase-barrier coordinator (#162)
+    /// calls this once per phase against a single job and calls `succeed_job`
+    /// itself after the last phase. On an in-phase ticket failure the job is
+    /// failed here (whole job fails); on a plan-validation error the existing
+    /// job is also failed since the caller cannot otherwise observe the cause.
+    /// First caller is the phase-barrier coordinator (#162 Phase 3); shipped as
+    /// a crate surface ahead of that caller, like `submit_and_run`.
+    pub async fn submit_and_run_in_job(
+        &self,
+        job_id: JobId,
+        plan: WorkflowPlan,
+    ) -> Result<WorkflowRunSummary, WorkflowRunError> {
+        let started = Instant::now();
+        if let Err(source) = plan
+            .validate()
+            .map_err(|e| VoomError::Config(format!("workflow plan invalid: {e}")))
+        {
+            let _ = self
+                .control_plane
+                .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
+                .await;
+            let summary = WorkflowRunSummary::empty(job_id, started.elapsed());
+            return Err(WorkflowRunError { summary, source });
+        }
+        self.run_plan_in_job(job_id, plan, started).await
+    }
+
+    /// Drive a validated plan to completion within an open job.
+    ///
+    /// Creates the plan's root tickets and runs the dispatch loop until every
+    /// ticket reaches a terminal state. **Never calls `succeed_job`** — on
+    /// success it returns `Ok(summary)` leaving the job open for the caller to
+    /// finalize. On an in-phase ticket failure it fails the job and returns the
+    /// error. On terminal failure it first drains every in-flight dispatch to a
+    /// terminal state (so any inline commit has landed) before failing the job,
+    /// keeping a caller's post-run inspection race-free.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "workflow run loop keeps scheduler state and terminal handling together"
+    )]
+    async fn run_plan_in_job(
+        &self,
+        job_id: JobId,
+        plan: WorkflowPlan,
+        started: Instant,
+    ) -> Result<WorkflowRunSummary, WorkflowRunError> {
+        let now = self.control_plane.clock().now();
+        let workflow_id = format!("workflow-{}", job_id.0);
+        let mut summary = WorkflowRunSummary::empty(job_id, started.elapsed());
 
         if let Err(source) = self
-            .create_root_tickets(&plan, &workflow_id, job.id, now)
+            .create_root_tickets(&plan, &workflow_id, job_id, now)
             .await
         {
             let _ = self
                 .control_plane
-                .fail_job(job.id, source.to_string(), self.control_plane.clock().now())
+                .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
                 .await;
             summary
-                .refresh_counts(&self.control_plane, job.id, started.elapsed())
+                .refresh_counts(&self.control_plane, job_id, started.elapsed())
                 .await;
             return Err(WorkflowRunError { summary, source });
         }
@@ -297,7 +352,7 @@ where
                     joined,
                     &plan,
                     &workflow_id,
-                    job.id,
+                    job_id,
                     &mut reservations,
                     &mut summary,
                     &mut terminal_error,
@@ -306,35 +361,47 @@ where
             }
 
             summary
-                .refresh_counts(&self.control_plane, job.id, started.elapsed())
+                .refresh_counts(&self.control_plane, job_id, started.elapsed())
                 .await;
             if let Some(source) = terminal_error.take() {
-                let _ = self
-                    .control_plane
-                    .fail_job(job.id, source.to_string(), self.control_plane.clock().now())
+                // Drain every still-running dispatch to a terminal state before
+                // failing the job, so any inline commit has landed (or released
+                // its lease) rather than being aborted when `active` is dropped.
+                // Keeps a caller's post-run inspection race-free.
+                while let Some(joined) = active.join_next().await {
+                    self.process_joined_dispatch(
+                        joined,
+                        &plan,
+                        &workflow_id,
+                        job_id,
+                        &mut reservations,
+                        &mut summary,
+                        &mut terminal_error,
+                    )
                     .await;
-                summary
-                    .refresh_counts(&self.control_plane, job.id, started.elapsed())
-                    .await;
-                return Err(WorkflowRunError { summary, source });
-            }
-            if active.is_empty() && self.workflow_finished(job.id).await {
-                if let Some(source) = self.first_failed_ticket_error(job.id).await {
-                    let _ = self
-                        .control_plane
-                        .fail_job(job.id, source.to_string(), self.control_plane.clock().now())
-                        .await;
-                    summary
-                        .refresh_counts(&self.control_plane, job.id, started.elapsed())
-                        .await;
-                    return Err(WorkflowRunError { summary, source });
                 }
                 let _ = self
                     .control_plane
-                    .succeed_job(job.id, self.control_plane.clock().now())
+                    .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
                     .await;
                 summary
-                    .refresh_counts(&self.control_plane, job.id, started.elapsed())
+                    .refresh_counts(&self.control_plane, job_id, started.elapsed())
+                    .await;
+                return Err(WorkflowRunError { summary, source });
+            }
+            if active.is_empty() && self.workflow_finished(job_id).await {
+                if let Some(source) = self.first_failed_ticket_error(job_id).await {
+                    let _ = self
+                        .control_plane
+                        .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
+                        .await;
+                    summary
+                        .refresh_counts(&self.control_plane, job_id, started.elapsed())
+                        .await;
+                    return Err(WorkflowRunError { summary, source });
+                }
+                summary
+                    .refresh_counts(&self.control_plane, job_id, started.elapsed())
                     .await;
                 return Ok(summary);
             }
@@ -342,7 +409,7 @@ where
             let mut dispatched_or_failed = false;
             let max_in_flight = plan.concurrency.max_in_flight_dispatches;
             while active.len() < max_in_flight {
-                let Some(ticket) = self.next_ready_workflow_ticket(job.id, &workflow_id).await
+                let Some(ticket) = self.next_ready_workflow_ticket(job_id, &workflow_id).await
                 else {
                     break;
                 };
@@ -369,22 +436,21 @@ where
 
             if active.is_empty() {
                 if let Some(delay) = self
-                    .retry_delay(job.id, &workflow_id, self.control_plane.clock().now())
+                    .retry_delay(job_id, &workflow_id, self.control_plane.clock().now())
                     .await
                 {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
                 let source = VoomError::Internal(format!(
-                    "workflow {} has no dispatchable work but is not finished",
-                    job.id
+                    "workflow {job_id} has no dispatchable work but is not finished"
                 ));
                 let _ = self
                     .control_plane
-                    .fail_job(job.id, source.to_string(), self.control_plane.clock().now())
+                    .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
                     .await;
                 summary
-                    .refresh_counts(&self.control_plane, job.id, started.elapsed())
+                    .refresh_counts(&self.control_plane, job_id, started.elapsed())
                     .await;
                 return Err(WorkflowRunError { summary, source });
             }
@@ -393,7 +459,7 @@ where
                     joined,
                     &plan,
                     &workflow_id,
-                    job.id,
+                    job_id,
                     &mut reservations,
                     &mut summary,
                     &mut terminal_error,
@@ -1343,6 +1409,7 @@ async fn dispatch_control_plane_ticket(
 struct RuntimeTranscodeDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
     control: &'a ControlPlane,
+    ticket_id: TicketId,
     lease_id: LeaseId,
     options: &'a WorkflowExecutorOptions,
 }
@@ -1353,6 +1420,7 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
         &self,
         request: TranscodeVideoRequest,
     ) -> Result<TranscodeVideoResult, VoomError> {
+        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1361,6 +1429,7 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
             crate::transcode::dispatch::dispatch_transcode_video_with_client(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
+                &idempotency_key,
                 request,
             ),
         )
@@ -1431,6 +1500,7 @@ async fn dispatch_control_plane_transcode(
         &RuntimeTranscodeDispatcher {
             runtime,
             control,
+            ticket_id: ticket.id,
             lease_id,
             options,
         },

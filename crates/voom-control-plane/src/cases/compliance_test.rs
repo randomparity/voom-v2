@@ -1,18 +1,11 @@
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
 
-use secrecy::SecretString;
 use time::OffsetDateTime;
-use tokio::io::AsyncWriteExt;
 use voom_events::EventKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
-use voom_worker_protocol::{
-    ClientHandle, DispatchStream, OperationKind, OperationRequest, OperationResponse,
-    ProgressFrame, ProtocolError, WorkerCredentials,
-};
+use voom_worker_protocol::OperationKind;
 
 use crate::cases::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};
@@ -127,19 +120,6 @@ fn apply_output_dir_sets_every_family_without_touching_staging_roots() {
     );
     assert_eq!(options.remux_staging_root, defaults.remux_staging_root);
     assert_eq!(options.audio_staging_root, defaults.audio_staging_root);
-}
-
-#[test]
-fn compliance_ticket_operation_is_derived_from_workflow_ticket_kind() {
-    assert_eq!(
-        super::operation_from_ticket_kind("synthetic.workflow.operation.remux").unwrap(),
-        "remux"
-    );
-    assert_eq!(
-        super::operation_from_ticket_kind("synthetic.workflow.operation.transcode_video").unwrap(),
-        "transcode_video"
-    );
-    assert!(super::operation_from_ticket_kind("synthetic.workflow.operation.unknown").is_err());
 }
 
 async fn seed_noncompliant(
@@ -409,66 +389,6 @@ async fn compliance_apply_does_not_create_issue_for_unsupported_operation() {
 }
 
 #[tokio::test]
-async fn compliance_execute_no_executable_work_creates_no_job() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_compliant(&cp).await;
-
-    let data = cp
-        .execute_compliance_policy(policy_version_id, input_set_id)
-        .await
-        .unwrap();
-
-    assert_eq!(data.execution.submitted_node_count, 0);
-    assert_eq!(data.execution.job_id, None);
-    assert_eq!(count_rows(&cp, "jobs").await, 0);
-}
-
-#[tokio::test]
-async fn compliance_execute_reports_issues_applied_when_workflow_submission_fails() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
-    register_policy_remux_worker(&cp).await;
-
-    let err = cp
-        .execute_compliance_policy_without_runtime_for_test(policy_version_id, input_set_id)
-        .await
-        .unwrap_err();
-
-    let partial = err.partial.unwrap();
-    assert_eq!(err.source.code(), "CONFIG_INVALID");
-    assert_eq!(partial.issues.created_count, 1);
-    assert_eq!(partial.execution.submitted_node_count, 1);
-    assert_eq!(partial.execution.failure_count, 0);
-    assert_eq!(count_rows(&cp, "issues").await, 1);
-}
-
-#[tokio::test]
-async fn compliance_execute_reports_issues_applied_when_runtime_registry_fails() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
-    register_policy_remux_worker_with_extra(
-        &cp,
-        serde_json::json!({
-            "endpoint": "not-a-socket",
-            "secret": "policy-test-secret",
-        }),
-    )
-    .await;
-
-    let err = cp
-        .execute_compliance_policy(policy_version_id, input_set_id)
-        .await
-        .unwrap_err();
-
-    let partial = err.partial.unwrap();
-    assert_eq!(err.source.code(), "CONFIG_INVALID");
-    assert_eq!(partial.issues.created_count, 1);
-    assert_eq!(partial.execution.submitted_node_count, 1);
-    assert_eq!(partial.execution.job_id, None);
-    assert_eq!(count_rows(&cp, "issues").await, 1);
-}
-
-#[tokio::test]
 async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
     let (cp, _tmp) = cp().await;
     let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
@@ -690,110 +610,6 @@ async fn apply_mutates_only_issues_and_issue_events() {
     );
 }
 
-#[tokio::test]
-async fn execute_mutates_issues_issue_events_and_workflow_tables_only() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
-    let worker_id = register_policy_remux_worker(&cp).await;
-    let runtimes = success_runtime_registry(worker_id);
-    let before = boundary_counts(&cp).await;
-
-    let err = cp
-        .execute_compliance_policy_with_runtime_registry_for_test(
-            policy_version_id,
-            input_set_id,
-            runtimes,
-        )
-        .await
-        .unwrap_err();
-
-    assert_synthetic_policy_remux_error(&err.source);
-    let partial = err.partial.unwrap();
-    assert_eq!(partial.issues.created_count, 1);
-    assert_eq!(partial.execution.submitted_node_count, 1);
-    assert_eq!(partial.tickets.len(), 0);
-
-    let after = boundary_counts(&cp).await;
-    assert!(after.count("issues") > before.count("issues"));
-    assert!(after.count("events") > before.count("events"));
-    assert!(after.count("jobs") > before.count("jobs"));
-    assert_eq!(after.count("tickets"), before.count("tickets"));
-    assert_eq!(after.count("leases"), before.count("leases"));
-    assert_eq!(after.count("workers"), before.count("workers"));
-    assert_eq!(
-        after.count("worker_capabilities"),
-        before.count("worker_capabilities")
-    );
-    assert_eq!(after.count("worker_grants"), before.count("worker_grants"));
-    assert_eq!(
-        after.count("artifact_handles"),
-        before.count("artifact_handles")
-    );
-    assert_eq!(
-        after.count("artifact_locations"),
-        before.count("artifact_locations")
-    );
-    assert_eq!(
-        after.count("artifact_lineage"),
-        before.count("artifact_lineage")
-    );
-}
-
-#[tokio::test]
-async fn compliance_ticket_reporting_uses_kind_without_parsing_payload() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
-    let worker_id = register_policy_remux_worker(&cp).await;
-    let runtimes = success_runtime_registry(worker_id);
-
-    let err = cp
-        .execute_compliance_policy_with_runtime_registry_for_test(
-            policy_version_id,
-            input_set_id,
-            runtimes,
-        )
-        .await
-        .unwrap_err();
-
-    assert_synthetic_policy_remux_error(&err.source);
-    let partial = err.partial.unwrap();
-    let job_id = partial.execution.job_id.unwrap();
-    assert_eq!(partial.tickets.len(), 0);
-
-    let tickets = cp.compliance_executed_tickets(job_id).await.unwrap();
-    assert_eq!(tickets.len(), 0);
-}
-
-#[tokio::test]
-async fn compliance_execute_uses_production_workflow_lease_defaults() {
-    let (cp, _tmp) = cp().await;
-    let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
-    let worker_id = register_policy_remux_worker(&cp).await;
-    let runtimes = success_runtime_registry(worker_id);
-
-    let err = cp
-        .execute_compliance_policy_with_runtime_registry_for_test(
-            policy_version_id,
-            input_set_id,
-            runtimes,
-        )
-        .await
-        .unwrap_err();
-
-    assert_synthetic_policy_remux_error(&err.source);
-    assert_eq!(err.partial.unwrap().tickets.len(), 0);
-    assert_eq!(count_rows(&cp, "leases").await, 0);
-}
-
-fn assert_synthetic_policy_remux_error(source: &voom_core::VoomError) {
-    assert_eq!(source.code(), "CONFIG_INVALID");
-    assert!(
-        source
-            .to_string()
-            .contains("remux requires file_version or file_location target")
-    );
-}
-
 const REPORT_READ_ONLY_TABLES: &[&str] = &[
     "issues",
     "events",
@@ -869,6 +685,7 @@ async fn scanned_snapshot_with_video(
             None,
             serde_json::json!({
                 "format": "test",
+                "container": { "format_name": "mp4" },
                 "streams": [
                     {
                         "id": "stream-0",
@@ -914,6 +731,7 @@ async fn scanned_snapshot_with_audio(
             None,
             serde_json::json!({
                 "format": "test",
+                "container": { "format_name": "mkv" },
                 "streams": [
                     {
                         "id": "stream-0",
@@ -968,13 +786,6 @@ async fn register_policy_remux_worker(cp: &crate::ControlPlane) -> voom_core::Wo
     .await
 }
 
-async fn register_policy_remux_worker_with_extra(
-    cp: &crate::ControlPlane,
-    extra: serde_json::Value,
-) -> voom_core::WorkerId {
-    register_policy_worker_with_extra(cp, OperationKind::Remux, "policy-test-remux", extra).await
-}
-
 async fn register_policy_worker_with_extra(
     cp: &crate::ControlPlane,
     operation: OperationKind,
@@ -1014,18 +825,6 @@ async fn register_policy_worker_with_extra(
     worker.id
 }
 
-fn success_runtime_registry(worker_id: voom_core::WorkerId) -> WorkerRuntimeRegistry {
-    WorkerRuntimeRegistry::new().with_in_process_runtime(
-        worker_id,
-        Arc::new(SuccessClient),
-        WorkerCredentials {
-            worker_id,
-            worker_epoch: 0,
-            secret: SecretString::from("policy-test-secret"),
-        },
-    )
-}
-
 async fn register_policy_audio_worker(
     cp: &crate::ControlPlane,
     operation: OperationKind,
@@ -1041,50 +840,6 @@ fn operation_name(operation: OperationKind) -> &'static str {
         OperationKind::TranscodeAudio => "transcode_audio",
         OperationKind::ExtractAudio => "extract_audio",
         _ => unreachable!("compliance tests only seed remux/transcode"),
-    }
-}
-
-#[derive(Debug)]
-struct SuccessClient;
-
-#[async_trait::async_trait]
-impl ClientHandle for SuccessClient {
-    async fn handshake(
-        &self,
-        _offered: u32,
-    ) -> Result<voom_worker_protocol::HandshakeResponse, ProtocolError> {
-        Err(ProtocolError::InternalServerError)
-    }
-
-    async fn dispatch(
-        &self,
-        _creds: &WorkerCredentials,
-        _idempotency_key: &str,
-        request: OperationRequest,
-    ) -> Result<DispatchStream, ProtocolError> {
-        let response = OperationResponse {
-            lease_id: request.lease_id,
-            accepted_at: chrono::Utc::now(),
-        };
-        let frame = ProgressFrame::Result {
-            lease_id: request.lease_id,
-            seq: 0,
-            emitted_at: chrono::Utc::now(),
-            payload: serde_json::json!({"status": "ok"}),
-        };
-        let body = serde_json::to_vec(&frame).map_err(|_| ProtocolError::InternalServerError)?;
-        let (mut writer, reader) = tokio::io::duplex(1024);
-        tokio::spawn(async move {
-            let _ = writer.write_all(&body).await;
-            let _ = writer.write_all(b"\n").await;
-        });
-        Ok(DispatchStream {
-            response,
-            frames: voom_worker_protocol::NdjsonReader::new(
-                Pin::from(Box::new(reader) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-                request.lease_id,
-            ),
-        })
     }
 }
 
