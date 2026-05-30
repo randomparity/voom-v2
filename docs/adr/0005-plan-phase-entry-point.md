@@ -56,6 +56,14 @@ alongside `generate_plan`, sharing the same `PlanBuilder`:
   `InvalidPlanningRequest` diagnostic. The bound is the declared phase count;
   a phase outside it can never be planned, and asking for one is a coordinator
   bug that must fail loud rather than silently return an empty plan.
+- **Phase in `phase_order` but absent from `phases`** (an internally
+  inconsistent compiled policy) is the *symmetric* structural error and is also
+  a hard `Err`. `generate_plan` tolerates this with a non-fatal diagnostic so it
+  can keep planning sibling phases, but `plan_phase` must not: a node-less `Ok`
+  plan here is indistinguishable from a legitimately skipped phase, exactly the
+  ambiguity the `phase_order` guard above exists to prevent. The two structural
+  errors therefore share one failure shape (`Err`), distinct from skip
+  (`Ok`, zero nodes, zero diagnostics).
 
 A single-phase plan carries no inter-phase edges: `build_phase_edges` only emits
 an edge when both endpoints' nodes are present, and only the target phase's

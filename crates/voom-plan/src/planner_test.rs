@@ -1968,6 +1968,58 @@ fn plan_phase_rejects_phase_not_in_phase_order() {
 }
 
 #[test]
+fn plan_phase_rejects_phase_declared_in_order_but_missing_from_phases() {
+    let mut policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+    // An internally inconsistent policy: the name is bounded by phase_order but
+    // has no phase body to plan. Fail loud rather than returning a node-less
+    // plan a coordinator could misread as a legitimately skipped phase.
+    policy.phases.clear();
+
+    let error = plan_phase(
+        request(policy, snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.diagnostics[0].code,
+        PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+    assert!(error.diagnostics[0].message.contains("normalize"));
+}
+
+#[test]
+fn plan_phase_blocks_phase_when_run_if_facts_are_insufficient() {
+    let mut policy = compiled_policy_with_phases(&[(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+    policy.phases[0].run_if = Some(CompiledCondition::Predicate {
+        name: "modified".to_owned(),
+    });
+
+    let plan = plan_phase(
+        request(policy, snapshot_with(Some("mp4"), None, None)),
+        "normalize",
+    )
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::InsufficientSnapshotFacts
+    );
+}
+
+#[test]
 fn plan_phase_is_deterministic_for_same_inputs() {
     let policy = compiled_policy_with_phases(&[(
         "normalize",

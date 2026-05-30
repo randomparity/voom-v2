@@ -87,15 +87,21 @@ pub fn plan_phase(
     validate_input(&input)?;
 
     if !policy.phase_order.iter().any(|name| name == phase_name) {
-        return Err(PlanGenerationError {
-            diagnostics: vec![
-                PlanningDiagnostic::error(
-                    PlanningDiagnosticCode::InvalidPlanningRequest,
-                    format!("phase {phase_name} is not declared in phase_order"),
-                )
-                .with_phase(phase_name),
-            ],
-        });
+        return Err(invalid_phase_request(
+            phase_name,
+            format!("phase {phase_name} is not declared in phase_order"),
+        ));
+    }
+    // A name bounded by phase_order but absent from `phases` is an internally
+    // inconsistent policy. Fail loud here rather than letting the shared
+    // expansion emit a node-less plan a coordinator could misread as a
+    // legitimately skipped phase (the symmetric structural error to the check
+    // above; see docs/adr/0005-plan-phase-entry-point.md).
+    if !policy.phases.iter().any(|phase| phase.name == phase_name) {
+        return Err(invalid_phase_request(
+            phase_name,
+            format!("phase {phase_name} is listed in phase_order but is missing"),
+        ));
     }
 
     let mut builder = PlanBuilder::new(&policy, &input, &context);
@@ -2130,6 +2136,15 @@ fn target_key(target: &TargetRef) -> String {
 
 fn checked_ordinal(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn invalid_phase_request(phase_name: &str, message: String) -> PlanGenerationError {
+    PlanGenerationError {
+        diagnostics: vec![
+            PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
+                .with_phase(phase_name),
+        ],
+    }
 }
 
 fn serialization_error(error: &serde_json::Error) -> PlanGenerationError {
