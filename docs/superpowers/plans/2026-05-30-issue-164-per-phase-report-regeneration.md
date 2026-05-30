@@ -60,6 +60,17 @@ Then, in its place (after the existing `let produced_version = phase0_commit.pro
         phase0_check["observed_state"]["video_codec"], "hevc",
         "phase 0's report must observe its committed hevc artifact"
     );
+    // Deterministic identity preserved (#164 acceptance): the regenerated report
+    // carries a content-addressed report_id, and the row's report_id column
+    // matches the identity embedded in the report JSON.
+    assert!(
+        !phase0.report_id.is_empty(),
+        "the recorded phase report carries a content-addressed report_id"
+    );
+    assert_eq!(
+        phase0.report_id, phase0.report["report_id"],
+        "the row's report_id column matches the embedded report identity"
+    );
 ```
 
 - [ ] **Step 2: Update the phase-1 report assertion to phase 1's produced artifact**
@@ -246,11 +257,16 @@ Expected: PASS — both phase-0 and phase-1 report assertions now hold.
 Run: `cargo test -p voom-control-plane`
 Expected: PASS. If `crates/voom-control-plane/src/workflow/coordinator_test.rs` or `compliance_execute`/`video_transcode_flow` assert per-phase report content, update those assertions to the produced-artifact facts (the report now reflects the committed artifact, not the entering snapshot). Re-run until green.
 
-- [ ] **Step 6: Regenerate the CLI golden snapshots whose per-phase report shifted**
+- [ ] **Step 6: Regenerate the CLI golden snapshots whose per-phase report shifted (non-interactive)**
 
-Run: `cargo test -p voom-cli` first to see which `compliance execute` insta snapshots changed.
-Then: `cargo insta review` and accept only the diffs where the per-phase `report` block now shows the produced artifact's facts (codec/container/target version) and reject anything unexpected. Re-run `cargo test -p voom-cli` until green.
-Expected: the accepted snapshot diffs are confined to per-phase `report` content; redacted ids (produced_*/reprobe/ticket_ids) are unchanged.
+`cargo insta review` is an interactive TUI — do not use it in agent-driven execution. Use the non-interactive flow:
+
+1. Run `cargo test -p voom-cli` to generate the pending `*.snap.new` files (the run fails where snapshots changed — expected).
+2. **Inspect** each pending snapshot before accepting: `git status --short crates/voom-cli/tests/snapshots` to list them, then Read / `git diff` each `*.snap.new` (or the failing test output). **Gate:** confirm the only changes are per-phase `report` content now showing the produced artifact's facts (codec/container/target version), with redacted ids (`produced_*`/`reprobe`/`ticket_ids`) unchanged. If any non-`report` content changed, stop and reconcile — that signals an unintended behavior shift.
+3. Apply: `cargo insta accept`.
+4. Re-run `cargo test -p voom-cli` to confirm green.
+
+Expected: accepted diffs are confined to per-phase `report` content; redacted ids unchanged.
 
 - [ ] **Step 7: Commit — stage every file changed in Steps 1-6, not a fixed list**
 
@@ -321,7 +337,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - [ ] **Step 1: Run the full workspace test suite**
 
 Run: `cargo test --workspace --all-features`
-Expected: PASS — including the multi-phase ffprobe-on-staged-output integration tests (`phase_barrier_flow`, `video_transcode_flow`, etc.). Fix any remaining report-content assertions and re-run.
+Expected: PASS — including the multi-phase ffprobe-on-staged-output integration tests (`phase_barrier_flow`, `video_transcode_flow`, etc.). This run also executes `voom-plan`'s report-id determinism tests (`crates/voom-plan/src/hash_test.rs`, `compliance_report_test.rs`), which are the guard for the "deterministic identity preserved" acceptance criterion — `compliance_report.rs` is untouched, so they must still pass unchanged. Fix any remaining report-content assertions and re-run.
 
 - [ ] **Step 2: Run the exact CI suite locally**
 
