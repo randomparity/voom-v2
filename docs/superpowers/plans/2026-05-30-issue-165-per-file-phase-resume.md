@@ -672,12 +672,109 @@ async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
 }
 ```
 
-Add the `advance_chain_tip` test helper. It mirrors the scan/commit path used by
-`seed_version` but appends a new `FileVersion` to the same asset with a recorded
-snapshot, so `active_version_with_snapshot` returns the new tip. Model it on the
-body of `seed_version` (read it first) — create a `NewFileVersion` with
-`ProducedBy::…` referencing `v0`, persist it via `self.identity`, then record a
-snapshot with the given payload. Keep it small and deterministic (clock `T0`).
+Also add a **pass-through** test that proves the heterogeneous loop skips a file
+for phases below its `resume_ordinal` and writes a row only at its resume phase.
+This is the only direct coverage of the `resume_ordinal > p` branch in
+`drive_phase_loop` (the integration test drops, rather than passes through, its
+advanced file). Drive it through `reconcile_resume` + `drive_phase_loop` with a
+no-dispatch policy where every phase blocks/skips, asserting the file gets **no**
+file-phase row for phase 0 and a row at phase 1. Use a two-phase
+`container-metadata`-style fixture if one exists; otherwise construct an
+in-memory two-phase `CompiledPolicy` (per the Task 1 `policy_with_on_error`
+pattern, with two named phases and `phase_order` of length 2) whose phase-0
+target is skipped for the file:
+
+```rust
+#[tokio::test]
+async fn drive_phase_loop_passes_through_file_below_its_resume_ordinal() {
+    let (cp, _tmp) = cp().await;
+    // A file recorded as committed through phase 0 under the prior job resumes at
+    // phase 1; assert it produces no NEW row for phase 0 in the resumed job.
+    let prior = open_workflow_job(&cp).await;
+    let v = seed_version(&cp, "/lib/pt/movie.mkv", "hash-pt", reprobe_payload("h264")).await;
+    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Skipped, None).await;
+
+    let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
+    let new_job = open_workflow_job(&cp).await;
+    let (survivors, _) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+    assert_eq!(survivors[0].resume_ordinal, 1, "skipped row at 0 => resume at 1");
+
+    // At phase 0 the file is below its resume_ordinal, so the partition leaves it
+    // in pass-through and no phase-0 row is written under new_job.
+    let phase0_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workflow_file_phase_summaries WHERE job_id = ? AND phase_ordinal = 0",
+    )
+    .bind(i64::try_from(new_job.0).unwrap())
+    .fetch_one(&cp.pool)
+    .await
+    .unwrap();
+    assert_eq!(phase0_rows, 0, "a file resuming at phase 1 gets no phase-0 row in the new job");
+}
+```
+
+If asserting the *positive* "row written at phase 1" requires real dispatch
+(it does, because phase 1 must classify/finalize the file), leave that to the
+Task 5 integration test and keep this unit test focused on the pass-through
+(no phase-0 row), which needs no worker. State this split in the commit message.
+
+Add the `advance_chain_tip` test helper. It appends a new `FileVersion` to the
+same asset, **registers a live location for it**, and records a snapshot, so the
+chain tip advances *and* the backfill's `ProducedRefs::resolve` (which calls
+`list_live_file_locations_by_version` and errors "no live location" otherwise)
+finds a location. Model the version+snapshot part on the existing chained-version
+test (`coordinator_test.rs`, `active_version_with_snapshot_picks_latest_committed_tip`,
+which uses `create_file_version` + `record_media_snapshot`) and add the location:
+
+```rust
+use voom_store::repo::identity::NewFileLocation;
+
+/// Append a transcode-produced version to `parent`'s asset, give it a live
+/// location and a recorded snapshot, and return the new version id. The live
+/// location is required because the resume backfill resolves `ProducedRefs`,
+/// which reads `list_live_file_locations_by_version`.
+async fn advance_chain_tip(
+    cp: &crate::ControlPlane,
+    parent: FileVersionId,
+    hash: &str,
+    payload: Value,
+) -> FileVersionId {
+    let asset_id = cp
+        .identity()
+        .get_file_version(parent)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id;
+    let version = cp
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: hash.to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Transcode,
+            produced_from_version_id: Some(parent),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    cp.create_file_location(NewFileLocation {
+        file_version_id: version.id,
+        kind: FileLocationKind::LocalPath,
+        value: format!("/lib/produced/{hash}.mkv"),
+        proof: None,
+        observed_at: T0,
+    })
+    .await
+    .unwrap();
+    cp.record_media_snapshot(version.id, None, payload, T0)
+        .await
+        .unwrap();
+    version.id
+}
+```
+
+(`create_file_location` is the control-plane wrapper at `cases/identity.rs:591`;
+`NewFileLocation` fields are `file_version_id`, `kind`, `value`, `proof`,
+`observed_at`.) Keep it deterministic (clock `T0`).
 
 - [ ] **Step 6: Run, lint, commit**
 
