@@ -18,7 +18,8 @@ use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, PhaseOutcome, SqliteWorkflowSummaryRepo, WorkflowSummaryRepo,
+    FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
+    WorkflowSummaryRepo,
 };
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
@@ -196,6 +197,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
         .unwrap();
 
     let file = scan_one(&cp, &source).await;
+    let scanned_version = file.file_version_id;
     let policy = cp
         .create_policy_document(
             "video-transcode-hevc-twice",
@@ -258,6 +260,76 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     assert_eq!(
         check["observed_state"]["video_codec"], "hevc",
         "phase 1 must observe the committed hevc artifact"
+    );
+
+    assert_reprobe_and_lineage_chain(&url, &outcome, scanned_version, phase0_commit).await;
+}
+
+/// Issue #163: the re-probe snapshot is keyed to the produced version, fed to
+/// the next phase, with a correct `source_lineage` chain. Phase 1 re-transcodes
+/// phase 0's output, committing a third version (V2) from V1, so the chain is
+/// V0 (scan) -> V1 (phase 0) -> V2 (phase 1).
+async fn assert_reprobe_and_lineage_chain(
+    url: &str,
+    outcome: &CoordinatorOutcome,
+    scanned_version: FileVersionId,
+    phase0_commit: &FilePhaseSummary,
+) {
+    let produced_v1 = phase0_commit
+        .produced_file_version_id
+        .expect("phase 0 committed row records its produced version");
+    let phase0_snapshot = phase0_commit
+        .reprobe_snapshot_id
+        .expect("phase 0 committed row records its reprobe snapshot");
+    let phase1_commit = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.phase_ordinal == 1 && row.outcome == FilePhaseOutcome::Committed)
+        .expect("phase 1 commits the re-transcoded file");
+    let produced_v2 = phase1_commit
+        .produced_file_version_id
+        .expect("phase 1 committed row records its produced version");
+    let phase1_snapshot = phase1_commit
+        .reprobe_snapshot_id
+        .expect("phase 1 committed row records its reprobe snapshot");
+
+    // produced_from chain is append-only and never retires the source.
+    assert_eq!(
+        produced_from(url, produced_v1).await,
+        Some(i64::try_from(scanned_version.0).unwrap()),
+        "phase 0's artifact must descend from the scanned source version"
+    );
+    assert_eq!(
+        produced_from(url, produced_v2).await,
+        Some(i64::try_from(produced_v1.0).unwrap()),
+        "phase 1's artifact must descend from phase 0's produced version"
+    );
+
+    // The refreshed snapshot is keyed to the produced version and is the only
+    // (hence chain-tip) snapshot on it, so it is exactly what the coordinator
+    // projects as the next phase's planning input. Combined with the phase-1
+    // report targeting V1 above, this proves phase 0's reprobe snapshot is fed
+    // forward into phase 1's planner.
+    assert_eq!(
+        snapshots_for_version(url, produced_v1).await,
+        vec![i64::try_from(phase0_snapshot.0).unwrap()],
+        "phase 0's produced version carries exactly its reprobe snapshot"
+    );
+    assert_eq!(
+        snapshots_for_version(url, produced_v2).await,
+        vec![i64::try_from(phase1_snapshot.0).unwrap()],
+        "phase 1's produced version carries exactly its reprobe snapshot"
+    );
+
+    // source_lineage is correct across the chain: phase 0 transcoded the scan,
+    // phase 1 transcoded phase 0's produced artifact (not the original scan).
+    assert_eq!(
+        transcode_lineage_sources(url).await,
+        vec![
+            i64::try_from(scanned_version.0).unwrap(),
+            i64::try_from(produced_v1.0).unwrap(),
+        ],
+        "each transcode's source_lineage must point at the prior phase's version"
     );
 }
 
@@ -354,6 +426,49 @@ async fn job_state(url: &str, job_id: voom_core::JobId) -> String {
         .fetch_one(&pool)
         .await
         .unwrap()
+}
+
+/// The `produced_from_version_id` (chain parent) recorded for a file version,
+/// read directly so the test pins the durable lineage column, not an in-memory
+/// projection.
+async fn produced_from(url: &str, version: FileVersionId) -> Option<i64> {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT produced_from_version_id FROM file_versions WHERE id = ?",
+    )
+    .bind(i64::try_from(version.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+}
+
+/// Every media-snapshot id keyed to a file version, in id order. A produced
+/// version carries exactly one — its post-commit reprobe snapshot.
+async fn snapshots_for_version(url: &str, version: FileVersionId) -> Vec<i64> {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM media_snapshots WHERE file_version_id = ? ORDER BY id ASC",
+    )
+    .bind(i64::try_from(version.0).unwrap())
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+}
+
+/// The `source_file_version_id` recorded in each `transcode_video` artifact
+/// handle's `source_lineage`, in creation order — the source each mutation
+/// transcoded.
+async fn transcode_lineage_sources(url: &str) -> Vec<i64> {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, i64>(
+        "SELECT json_extract(source_lineage, '$.source_file_version_id') \
+         FROM artifact_handles \
+         WHERE json_extract(source_lineage, '$.operation') = 'transcode_video' \
+         ORDER BY id ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap()
 }
 
 async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
