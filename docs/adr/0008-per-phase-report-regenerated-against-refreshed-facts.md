@@ -47,9 +47,13 @@ unchanged.
   are written to `NewPhaseSummary.report`. This is a read-only pass: it submits no
   tickets, advances no active version, and adds no phase.
 - **File set = every file that entered the phase, re-projected at its refreshed chain
-  tip.** A file that committed is projected at its new produced version + re-probe
-  snapshot; a file that was skipped/no-op or blocked did not commit, so its tip is
-  unchanged and it is projected at the same snapshot it entered with. Blocked files are
+  tip.** `refreshed` is reconstructed as the *full* set of files that entered the phase,
+  each re-read at its current chain tip *after* `finalize_phase` — not the
+  post-`finalize_phase` survivor vector, which has already dropped blocked files and
+  would silently reintroduce the rejected survivors-only behavior. A file that committed
+  is projected at its new produced version + re-probe snapshot; a file that was
+  skipped/no-op or blocked did not commit, so its tip is unchanged and it is projected at
+  the same snapshot it entered with. Blocked files are
   *kept in the report* even though they are dropped from the working set carried to the
   next phase (abort-for-file, ADR-0007): the report is a per-phase snapshot of the whole
   input set, and the planner re-derives each blocked file's `Blocked` node + diagnostic,
@@ -88,15 +92,28 @@ applied to reporting.
 
 ## Consequences
 
-- Each committed file's check in the recorded report has its `target` set to that
-  phase's produced `FileVersion` and its `observed_state` set to the produced artifact's
-  re-probed facts; the final phase's output is now recorded (it previously was not). Note
-  the compliance **verdict** for a freshly-produced artifact may still read non-compliant:
-  by ADR-0007 the planner compares the raw probe `format_name` (e.g. `matroska,webm`)
-  against a policy's canonical container (`mkv`), so a container-bearing transform can
-  re-plan its own output as `Planned`. "Reflects produced artifacts" is therefore a claim
-  about the `target`/`observed_state` the report records, not about a compliant verdict —
-  acceptance tests assert the former, not the latter.
+- For a committed file *whose phase still plans a node against the produced artifact*,
+  the check's `target` is that phase's produced `FileVersion` and its `observed_state` is
+  the produced artifact's re-probed facts; the final phase's output is now recorded (it
+  previously was not). Two caveats follow from re-planning the same phase against the
+  produced facts (`plan_phase` re-evaluates per-file `run_if`/`skip_if` and operation
+  status against the refreshed snapshot, `planner.rs:210-226`):
+  - The compliance **verdict** for a freshly-produced artifact may still read
+    non-compliant: by ADR-0007 the planner compares the raw probe `format_name` (e.g.
+    `matroska,webm`) against a policy's canonical container (`mkv`), so a container-bearing
+    transform can re-plan its own output as `Planned`.
+  - A phase whose `run_if`/`skip_if` guard is *satisfied* by the produced artifact emits
+    **no node** for that file, so the regenerated report contains no check for it; a guard
+    that reads a fact the re-probe snapshot omits yields a `Blocked` node (the `Unknown`
+    arm). In both cases the file's commit is still recorded in its per-`(file, phase)`
+    `Committed` row — that row, not the report, is the authoritative produced-version
+    linkage.
+
+  "Reflects produced artifacts" is therefore a claim about the `target`/`observed_state`
+  a check records *when the phase plans one*, not a guarantee that every committed file
+  yields a compliant check. Acceptance tests pin the produced-version linkage via the
+  `Committed` per-`(file, phase)` row, and the `observed_state` via an unguarded phase's
+  check; they do not assert a compliant verdict.
 - A completed phase runs two plan passes: one to dispatch, one to regenerate the report.
   Both are pure functions over snapshots; the second runs only after commits land and
   over the files that entered the phase (re-projected at refreshed tips).
