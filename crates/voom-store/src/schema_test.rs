@@ -132,12 +132,13 @@ async fn workflow_summary_schema_links_grains_to_jobs_and_artifacts() {
         "workflow_phase_summaries",
         "workflow_file_phase_summaries",
     ] {
-        let table_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?")
-                .bind(table)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(table_count, 1, "missing table {table}");
     }
 
@@ -148,7 +149,9 @@ async fn workflow_summary_schema_links_grains_to_jobs_and_artifacts() {
     .await
     .unwrap();
     assert!(
-        phase_sql.contains("CHECK (outcome IN ('completed', 'partially-committed', 'skipped', 'blocked'))")
+        phase_sql.contains(
+            "CHECK (outcome IN ('completed', 'partially-committed', 'skipped', 'blocked'))"
+        )
     );
     assert!(phase_sql.contains("report_id IS NULL AND report IS NULL"));
 
