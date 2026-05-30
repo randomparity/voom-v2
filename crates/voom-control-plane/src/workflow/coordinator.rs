@@ -4,10 +4,10 @@
 //! existing executor one phase at a time across every file in a policy input
 //! set, phases acting as barriers across files. Each phase projects every
 //! still-active file's current chain-tip snapshot into the planner
-//! ([`project_media_snapshot_input`]), plans that one phase, bridges its planned
+//! (`project_media_snapshot_input`), plans that one phase, bridges its planned
 //! nodes to a workflow, and runs them in the owned job; blocked files drop,
 //! compliant/skipped files stay, committed files advance their chain tip
-//! ([`active_version_with_snapshot`]). It persists a durable per-phase /
+//! (`active_version_with_snapshot`). It persists a durable per-phase /
 //! per-`(file, phase)` workflow summary as it goes.
 
 use std::collections::HashMap;
@@ -267,11 +267,12 @@ impl ControlPlane {
             .await
     }
 
-    /// [`run_phase_barrier`] with an injected worker-runtime registry, so tests
-    /// can drive the loop against in-process fakes without discovering workers.
+    /// [`Self::run_phase_barrier`] with an injected worker-runtime registry, so
+    /// tests can drive the loop against in-process fakes without discovering
+    /// workers.
     ///
     /// # Errors
-    /// See [`run_phase_barrier`].
+    /// See [`Self::run_phase_barrier`].
     pub async fn run_phase_barrier_with_runtimes(
         &self,
         policy_version_id: PolicyVersionId,
