@@ -579,6 +579,8 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
         .produced_file_version_id
         .expect("Good produced a version");
     assert_eq!(job_state(&url, partial.job_id).await, "failed");
+    // Pin Good's chain length after the failed run; resume must not extend it.
+    let good_chain_before = asset_version_count(&url, good_v1).await;
 
     // Restore Doomed to its scanned bytes so its re-planned transcode can commit.
     std::fs::copy(&doomed_bak, &doomed).unwrap();
@@ -593,13 +595,17 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     assert_ne!(outcome.job_id, partial.job_id, "resume opens a new job");
     assert_eq!(job_state(&url, outcome.job_id).await, "succeeded");
 
-    // Good is complete (single-phase policy), so reconciliation drops it: no Good
-    // row in the resumed job, and certainly none producing a version past good_v1.
+    // Good is complete (single-phase policy), so reconciliation drops it and it
+    // is never re-dispatched. Assert that durably: its asset's chain length is
+    // unchanged, so no new version was produced for Good on resume.
+    assert_eq!(
+        asset_version_count(&url, good_v1).await,
+        good_chain_before,
+        "Good's chain must not grow on resume (no re-mutation)"
+    );
     assert!(
-        outcome.file_phases.iter().all(|r| r.branch_id != "Good"
-            || r.produced_file_version_id.is_none()
-            || r.produced_file_version_id == Some(good_v1)),
-        "Good must not be re-mutated on resume: {:?}",
+        outcome.file_phases.iter().all(|r| r.branch_id != "Good"),
+        "Good is complete and must not appear in the resumed job's rows: {:?}",
         outcome.file_phases
     );
 
@@ -620,6 +626,20 @@ async fn job_state(url: &str, job_id: voom_core::JobId) -> String {
         .fetch_one(&pool)
         .await
         .unwrap()
+}
+
+/// Number of `file_versions` rows sharing the asset that `version` belongs to —
+/// the chain length. Resume must not lengthen a committed file's chain.
+async fn asset_version_count(url: &str, version: FileVersionId) -> i64 {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM file_versions \
+         WHERE file_asset_id = (SELECT file_asset_id FROM file_versions WHERE id = ?)",
+    )
+    .bind(i64::try_from(version.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap()
 }
 
 /// The `produced_from_version_id` (chain parent) recorded for a file version,
