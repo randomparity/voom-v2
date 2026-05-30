@@ -672,50 +672,39 @@ async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
 }
 ```
 
-Also add a **pass-through** test that proves the heterogeneous loop skips a file
-for phases below its `resume_ordinal` and writes a row only at its resume phase.
-This is the only direct coverage of the `resume_ordinal > p` branch in
-`drive_phase_loop` (the integration test drops, rather than passes through, its
-advanced file). Drive it through `reconcile_resume` + `drive_phase_loop` with a
-no-dispatch policy where every phase blocks/skips, asserting the file gets **no**
-file-phase row for phase 0 and a row at phase 1. Use a two-phase
-`container-metadata`-style fixture if one exists; otherwise construct an
-in-memory two-phase `CompiledPolicy` (per the Task 1 `policy_with_on_error`
-pattern, with two named phases and `phase_order` of length 2) whose phase-0
-target is skipped for the file:
+Also add a reconciliation test for the **skipped-row → resume_ordinal = 1** case
+(a file the prior run recorded as `Skipped` at phase 0 resumes at phase 1, not 0):
 
 ```rust
 #[tokio::test]
-async fn drive_phase_loop_passes_through_file_below_its_resume_ordinal() {
+async fn reconcile_resume_resumes_after_skipped_phase() {
     let (cp, _tmp) = cp().await;
-    // A file recorded as committed through phase 0 under the prior job resumes at
-    // phase 1; assert it produces no NEW row for phase 0 in the resumed job.
     let prior = open_workflow_job(&cp).await;
     let v = seed_version(&cp, "/lib/pt/movie.mkv", "hash-pt", reprobe_payload("h264")).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Skipped, None).await;
 
     let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
     let new_job = open_workflow_job(&cp).await;
-    let (survivors, _) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
+    let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
     assert_eq!(survivors[0].resume_ordinal, 1, "skipped row at 0 => resume at 1");
-
-    // At phase 0 the file is below its resume_ordinal, so the partition leaves it
-    // in pass-through and no phase-0 row is written under new_job.
-    let phase0_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workflow_file_phase_summaries WHERE job_id = ? AND phase_ordinal = 0",
-    )
-    .bind(i64::try_from(new_job.0).unwrap())
-    .fetch_one(&cp.pool)
-    .await
-    .unwrap();
-    assert_eq!(phase0_rows, 0, "a file resuming at phase 1 gets no phase-0 row in the new job");
+    assert!(backfilled.is_empty(), "a skipped phase did not advance the tip");
 }
 ```
 
-If asserting the *positive* "row written at phase 1" requires real dispatch
-(it does, because phase 1 must classify/finalize the file), leave that to the
-Task 5 integration test and keep this unit test focused on the pass-through
-(no phase-0 row), which needs no worker. State this split in the commit message.
+**Coverage limitation (surface, don't hide — AGENTS.md Rule 12).** This unit test
+covers *reconciliation* (the per-file `resume_ordinal` computation), not the
+`drive_phase_loop` partition itself. The partition's `resume_ordinal <= p` branch
+is exercised two ways: the fresh-path regression (Task 2 Step 6) proves the
+all-`resume_ordinal = 0` case is byte-for-byte unchanged, and the Task 5
+integration test exercises a resumed file re-entering and committing at its resume
+phase. **Multi-phase *heterogeneous* pass-through** — two files at different
+`resume_ordinal`s within a single multi-phase resumed run, where one file sits out
+an early phase and re-enters later — has **no dedicated end-to-end test this
+sprint**, because constructing a deterministic multi-phase no-dispatch fixture is
+brittle against planner semantics. If the implementer can cheaply drive
+`drive_phase_loop` with an empty `WorkerRuntimeRegistry` and a two-phase policy
+whose early phase is a no-op for the pass-through file, add that assertion; treat
+it as a stretch, not a gate. Note this limitation in the commit message.
 
 Add the `advance_chain_tip` test helper. It appends a new `FileVersion` to the
 same asset, **registers a live location for it**, and records a snapshot, so the
