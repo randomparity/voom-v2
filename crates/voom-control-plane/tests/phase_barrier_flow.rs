@@ -504,6 +504,115 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     assert_eq!(job_state(&url, partial.job_id).await, "failed");
 }
 
+/// Partial-barrier failure + resume (issue #165, spec §8). Two files transcode in
+/// one phase: `Good` commits, `Doomed` (corrupted after scan) fails and fails the
+/// whole job. After restoring `Doomed`'s bytes, resuming against the failed job
+/// re-enters `Doomed` (it commits) without re-mutating `Good`, under a new job.
+#[tokio::test]
+async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling() {
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let good = tmp.path().join("Good.mp4");
+    let doomed = tmp.path().join("Doomed.mp4");
+    let doomed_bak = tmp.path().join("Doomed.bak");
+    generate_h264_fixture(&good);
+    generate_h264_fixture(&doomed);
+    std::fs::copy(&doomed, &doomed_bak).unwrap();
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let good_file = scan_one(&cp, &good).await;
+    let doomed_file = scan_one(&cp, &doomed).await;
+    // Corrupt the doomed source after scanning so its transcode fails the
+    // source-facts check, while the good file commits inline.
+    std::fs::write(&doomed, b"not a video anymore").unwrap();
+
+    let policy = cp
+        .create_policy_document(
+            "video-transcode-hevc",
+            &load_policy_fixture("fixtures/policies/video-transcode-hevc.voom").unwrap(),
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[
+            ("good", good_file),
+            ("doomed", doomed_file),
+        ]))
+        .await
+        .unwrap();
+    let out_dir = tmp.path().join("out");
+    let options = ComplianceExecutionOptions {
+        transcode_staging_root: tmp.path().join("stage"),
+        transcode_target_dir: out_dir.clone(),
+        ..ComplianceExecutionOptions::default()
+    };
+
+    // One worker serves both the failing run and the resume (re-registering the
+    // same worker name would hit a UNIQUE constraint).
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+
+    // First run: Doomed fails, Good commits, the whole job fails.
+    let failed = cp
+        .run_phase_barrier(policy.version.id, input.id, options.clone())
+        .await
+        .expect_err("the corrupt file must fail the run");
+    let partial = failed
+        .partial
+        .expect("Good must be recorded as a committed partial");
+    let good_committed = partial
+        .file_phases
+        .iter()
+        .find(|r| r.branch_id == "Good")
+        .expect("Good committed");
+    let good_v1 = good_committed
+        .produced_file_version_id
+        .expect("Good produced a version");
+    assert_eq!(job_state(&url, partial.job_id).await, "failed");
+
+    // Restore Doomed to its scanned bytes so its re-planned transcode can commit.
+    std::fs::copy(&doomed_bak, &doomed).unwrap();
+
+    // Resume against the failed job.
+    let outcome = cp
+        .resume_phase_barrier(partial.job_id, policy.version.id, input.id, options)
+        .await
+        .expect("resume succeeds once the doomed file is valid");
+    worker.shutdown().unwrap();
+
+    assert_ne!(outcome.job_id, partial.job_id, "resume opens a new job");
+    assert_eq!(job_state(&url, outcome.job_id).await, "succeeded");
+
+    // Good is complete (single-phase policy), so reconciliation drops it: no Good
+    // row in the resumed job, and certainly none producing a version past good_v1.
+    assert!(
+        outcome.file_phases.iter().all(|r| r.branch_id != "Good"
+            || r.produced_file_version_id.is_none()
+            || r.produced_file_version_id == Some(good_v1)),
+        "Good must not be re-mutated on resume: {:?}",
+        outcome.file_phases
+    );
+
+    // Doomed re-entered and committed under the new job.
+    let doomed_committed = outcome
+        .file_phases
+        .iter()
+        .find(|r| r.branch_id == "Doomed" && r.outcome == FilePhaseOutcome::Committed)
+        .expect("Doomed commits on resume");
+    assert!(doomed_committed.produced_file_version_id.is_some());
+    assert!(out_dir.join("Doomed.default-hevc.hevc.mkv").is_file());
+}
+
 async fn job_state(url: &str, job_id: voom_core::JobId) -> String {
     let pool = voom_store::connect(url).await.unwrap();
     sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE id = ?")
