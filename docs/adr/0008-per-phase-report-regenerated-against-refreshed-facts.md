@@ -42,18 +42,20 @@ per-phase summary row.** The pre-dispatch plan and report continue to drive disp
 unchanged.
 
 - Regeneration re-plans the *same* phase against the refreshed snapshots:
-  `phase_draft(&base_draft, &refreshed)` → `voom_plan::plan_phase(request, phase_name)`
+  `regenerate_phase_report` re-projects them → `voom_plan::plan_phase(request, phase_name)`
   → `voom_plan::generate_compliance_report(&plan)`. The resulting `report_id` + JSON
-  are written to `NewPhaseSummary.report`. This is a read-only pass: it submits no
-  tickets, advances no active version, and adds no phase.
+  are written to `NewPhaseSummary.report`. It is a **pure** pass: it does no database
+  reads (the snapshots are supplied by `finalize_phase`), submits no tickets, advances no
+  active version, and adds no phase.
 - **File set = every file that entered the phase, re-projected at its refreshed chain
-  tip.** `refreshed` is reconstructed as the *full* set of files that entered the phase,
-  each re-read at its current chain tip *after* `finalize_phase` — not the
-  post-`finalize_phase` survivor vector, which has already dropped blocked files and
-  would silently reintroduce the rejected survivors-only behavior. A file that committed
-  is projected at its new produced version + re-probe snapshot; a file that was
-  skipped/no-op or blocked did not commit, so its tip is unchanged and it is projected at
-  the same snapshot it entered with. Blocked files are
+  tip.** `finalize_phase` returns, alongside the per-`(file, phase)` rows, each entered
+  file's `(ordinal, refreshed snapshot)` — the snapshots it already holds while resolving
+  outcomes — so regeneration covers the *full* entered set without re-reading the
+  database, and without the post-`finalize_phase` survivor vector (which has already
+  dropped blocked files and would silently reintroduce the rejected survivors-only
+  behavior). A file that committed is projected at its new produced version + re-probe
+  snapshot; a file that was skipped/no-op or blocked did not commit, so its tip is
+  unchanged and it is projected at the same snapshot it entered with. Blocked files are
   *kept in the report* even though they are dropped from the working set carried to the
   next phase (abort-for-file, ADR-0007): the report is a per-phase snapshot of the whole
   input set, and the planner re-derives each blocked file's `Blocked` node + diagnostic,
@@ -64,15 +66,20 @@ unchanged.
 - **Failed phase (in-phase ticket failure):** `finalize_failed_phase` writes no
   phase-grain row, so there is no report to regenerate — unchanged.
 - **Regeneration failure contract:** the regeneration pass runs after commits have
-  landed (append-only, durable). A `plan_phase`/`generate_compliance_report` error on the
-  refreshed facts is treated as `VoomError::Internal` and fails the job, exactly as the
-  pre-dispatch generation does today (`coordinator.rs:433-435`) — except it now fails
-  *after* the phase's files have advanced, leaving their committed per-`(file, phase)`
-  rows durable with no phase-grain row for that phase. This is the same coherent partial
-  state a mid-barrier job failure leaves (§6/§8), and the path is near-unreachable: a
-  re-plan of an already-in-`phase_order` phase cannot raise the only hard `plan_phase`
-  error (ADR-0005), and `generate_compliance_report` errors only on a serialization
-  failure of a valid plan.
+  landed (append-only, durable), so its failure surface is deliberately kept minimal —
+  it does **no database reads** (the snapshots come from `finalize_phase`). A
+  `plan_phase`/`generate_compliance_report` error is treated as `VoomError::Internal` and
+  fails the job, but the path is near-unreachable: a re-plan of an
+  already-in-`phase_order` phase cannot raise the only hard `plan_phase` error
+  (ADR-0005), and `generate_compliance_report`/`serde_json::to_value` error only on a
+  serialization failure of a valid plan. Were such a failure to occur after commits, it
+  fails the job like any other post-commit step (`upsert_phase_summary`, `succeed_job`,
+  `insert_summary` already `?`-propagate the same way), leaving the committed per-`(file,
+  phase)` rows durable with no phase-grain row for that phase — the same coherent partial
+  state a mid-barrier job failure leaves (§6/§8), recoverable by re-reading the durable
+  summary. Keeping the pass database-free is what makes this near-unreachability hold; an
+  earlier draft re-read each file's tip here, which a transient `DbUnreachable` could trip
+  post-commit.
 - **Deterministic identity preserved:** the `report_id` algorithm
   (`voom-plan/src/compliance_report.rs:30-52`) is unchanged. Its preimage excludes the
   volatile `generated_at`/`plan_hash`/`plan_id` (`voom-plan/src/hash.rs:50-52`), so the
