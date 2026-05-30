@@ -150,9 +150,9 @@ pub struct ComplianceExecuteError {
     pub partial: Option<ComplianceExecuteData>,
 }
 
-struct DurableComplianceInputs {
-    version: voom_store::repo::PolicyVersion,
-    input: voom_store::repo::PolicyInputSet,
+pub(crate) struct DurableComplianceInputs {
+    pub(crate) version: voom_store::repo::PolicyVersion,
+    pub(crate) input: voom_store::repo::PolicyInputSet,
 }
 
 impl ControlPlane {
@@ -170,21 +170,7 @@ impl ControlPlane {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
-        let mut policy: voom_policy::CompiledPolicy =
-            serde_json::from_value(inputs.version.compiled_json.clone()).map_err(|e| {
-                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
-            })?;
-        if policy.source_hash != inputs.version.source_hash
-            || policy.schema_version != inputs.version.schema_version
-        {
-            return Err(VoomError::PlanGeneration(format!(
-                "stored compiled policy identity mismatch for policy version {policy_version_id}"
-            )));
-        }
-        // Resolve video profile references in-memory (after the stored-identity
-        // check, so the mutation cannot affect `source_hash`) before the pure
-        // planner runs. Shared with the dry-run path for parity.
-        super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
+        let policy = self.compiled_policy_for_version(&inputs.version).await?;
         let plan = super::plans::plan_compiled_policy_with_input(
             policy,
             super::plans::input_set_to_draft(inputs.input),
@@ -593,7 +579,7 @@ impl ControlPlane {
             .collect()
     }
 
-    async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
+    pub(crate) async fn policy_runtime_registry(&self) -> Result<WorkerRuntimeRegistry, VoomError> {
         let mut registry = WorkerRuntimeRegistry::new();
         let rows = sqlx::query(
             "SELECT w.id, w.epoch, wc.extra \
@@ -639,7 +625,7 @@ impl ControlPlane {
         Ok(registry)
     }
 
-    async fn load_current_accepted_policy_and_input(
+    pub(crate) async fn load_current_accepted_policy_and_input(
         &self,
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
@@ -674,6 +660,32 @@ impl ControlPlane {
                 VoomError::NotFound(format!("policy input set {input_set_id} not found"))
             })?;
         Ok(DurableComplianceInputs { version, input })
+    }
+
+    /// Deserialize a policy version's stored compiled policy, verify its stored
+    /// identity, and resolve video-profile references in-memory before the pure
+    /// planner runs. Shared by the single-shot report path and the phase-barrier
+    /// coordinator so both plan against the same compiled policy.
+    pub(crate) async fn compiled_policy_for_version(
+        &self,
+        version: &voom_store::repo::PolicyVersion,
+    ) -> Result<voom_policy::CompiledPolicy, VoomError> {
+        let mut policy: voom_policy::CompiledPolicy =
+            serde_json::from_value(version.compiled_json.clone()).map_err(|e| {
+                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
+            })?;
+        if policy.source_hash != version.source_hash
+            || policy.schema_version != version.schema_version
+        {
+            return Err(VoomError::PlanGeneration(format!(
+                "stored compiled policy identity mismatch for policy version {}",
+                version.id
+            )));
+        }
+        // Resolve after the stored-identity check so the mutation cannot affect
+        // `source_hash`.
+        super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
+        Ok(policy)
     }
 }
 

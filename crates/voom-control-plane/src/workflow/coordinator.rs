@@ -6,12 +6,166 @@
 //! projects them into a [`MediaSnapshotInput`]. The coordinator core
 //! (`run_phase_barrier`) arrives in Phase 3 and reuses these helpers.
 
-use serde_json::Value;
-use voom_core::{FileAssetId, VoomError};
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_policy::{MediaSnapshotInput, TargetRef};
 use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
+use voom_store::repo::jobs::NewJob;
+use voom_store::repo::policy_inputs::PolicyInputTargetRef;
+use voom_store::repo::workflow_summaries::{
+    FilePhaseSummary, NewWorkflowSummary, PhaseSummary, WorkflowSummary, WorkflowSummaryRepo,
+};
 
+use crate::ControlPlane;
+use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::policy_inputs::stream_summary_from_snapshot_payload;
+
+use super::executor::WORKFLOW_JOB_KIND;
+
+/// Durable result of a phase-barrier run: the owning job's summary plus the
+/// per-phase and per-`(file, phase)` rows the run wrote.
+#[derive(Debug, Clone)]
+pub struct CoordinatorOutcome {
+    pub job_id: JobId,
+    pub summary: WorkflowSummary,
+    pub phases: Vec<PhaseSummary>,
+    pub file_phases: Vec<FilePhaseSummary>,
+}
+
+/// A phase-barrier run that failed after the job opened. `partial` carries the
+/// per-`(file, phase)` rows for files that committed inline before the failure.
+#[derive(Debug)]
+pub struct CoordinatorError {
+    pub source: VoomError,
+    pub partial: Option<CoordinatorOutcome>,
+}
+
+impl ControlPlane {
+    /// Drive the existing workflow executor one phase at a time across every
+    /// file in a policy input set, phases acting as barriers across files
+    /// (issue #162, Sprint 16 §3/§6). The coordinator owns one job for the whole
+    /// run (ADR-0007) and persists a durable per-phase / per-`(file, phase)`
+    /// summary.
+    ///
+    /// # Errors
+    /// Returns [`CoordinatorError`] when durable inputs are missing, the policy
+    /// fails to compile, or a phase's tickets fail. Any error after the job
+    /// opens finalizes the job as `failed`.
+    pub async fn run_phase_barrier(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let inputs = self
+            .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
+            .await
+            .map_err(|source| CoordinatorError {
+                source,
+                partial: None,
+            })?;
+        let policy = self
+            .compiled_policy_for_version(&inputs.version)
+            .await
+            .map_err(|source| CoordinatorError {
+                source,
+                partial: None,
+            })?;
+        let active: Vec<FileVersionId> = inputs
+            .input
+            .media_snapshots
+            .iter()
+            .filter_map(|snapshot| match snapshot.target {
+                PolicyInputTargetRef::FileVersion { id } => Some(id),
+                _ => None,
+            })
+            .collect();
+
+        let now = self.clock().now();
+        let job = self
+            .open_job(NewJob {
+                kind: WORKFLOW_JOB_KIND.to_owned(),
+                priority: 0,
+                created_at: now,
+            })
+            .await
+            .map_err(|source| CoordinatorError {
+                source,
+                partial: None,
+            })?;
+
+        // Job-cleanup contract: once the job is open, every error path finalizes
+        // it as `failed` rather than orphaning it in `open`.
+        match self
+            .run_phase_barrier_in_job(job.id, &policy, &active, options)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(source) => {
+                let _ = self
+                    .fail_job(job.id, source.to_string(), self.clock().now())
+                    .await;
+                Err(CoordinatorError {
+                    source,
+                    partial: None,
+                })
+            }
+        }
+    }
+
+    async fn run_phase_barrier_in_job(
+        &self,
+        job_id: JobId,
+        policy: &voom_policy::CompiledPolicy,
+        active: &[FileVersionId],
+        _options: ComplianceExecutionOptions,
+    ) -> Result<CoordinatorOutcome, VoomError> {
+        if active.is_empty() || policy.phase_order.is_empty() {
+            return self.finalize_zero_phase_run(job_id).await;
+        }
+        // The dispatching phase loop (project → plan_phase → bridge → run →
+        // finalize) lands in the next #162 Phase 3 step. No production caller
+        // reaches this path yet; `compliance execute` is wired in Phase 4.
+        Err(VoomError::Internal(
+            "multi-file phase-barrier execution is not yet implemented".to_owned(),
+        ))
+    }
+
+    /// Succeed the job and write a zero-count job-grain summary for a run with no
+    /// active files or no declared phases (no work, no phase or file rows).
+    async fn finalize_zero_phase_run(
+        &self,
+        job_id: JobId,
+    ) -> Result<CoordinatorOutcome, VoomError> {
+        let now = self.clock().now();
+        self.succeed_job(job_id, now).await?;
+        let summary = self
+            .workflow_summaries()
+            .insert_summary(
+                NewWorkflowSummary {
+                    job_id,
+                    branch_count: 0,
+                    ticket_count: 0,
+                    dispatch_count: 0,
+                    retry_count: 0,
+                    failure_count: 0,
+                    peak_active_workflow_leases: 0,
+                    elapsed: Duration::ZERO,
+                    per_operation: json!({}),
+                },
+                now,
+            )
+            .await?;
+        Ok(CoordinatorOutcome {
+            job_id,
+            summary,
+            phases: Vec::new(),
+            file_phases: Vec::new(),
+        })
+    }
+}
 
 /// First stream in the reprobe payload tagged with the given `kind`.
 fn first_stream_of_kind<'a>(payload: &'a Value, kind: &str) -> Option<&'a Value> {

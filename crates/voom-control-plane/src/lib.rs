@@ -449,10 +449,6 @@ impl ControlPlane {
         &self.workflow_summaries
     }
     #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "first non-test caller is the phase-barrier coordinator core (#162 Phase 3)"
-    )]
     #[must_use]
     pub(crate) fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
         &self.workflow_summaries

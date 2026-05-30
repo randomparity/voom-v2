@@ -3,8 +3,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
-use voom_core::FileVersionId;
-use voom_policy::TargetRef;
+use voom_core::{FileVersionId, JobId};
+use voom_policy::{FixtureName, TargetRef, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaSnapshot, NewFileVersion,
     ProducedBy,
@@ -12,11 +12,20 @@ use voom_store::repo::identity::{
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{NewWorkflowSummary, WorkflowSummaryRepo};
 
+use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::cp;
 
 use super::{active_version_with_snapshot, project_media_snapshot_input};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+async fn job_state(cp: &crate::ControlPlane, job_id: JobId) -> String {
+    sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
+        .bind(i64::try_from(job_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap()
+}
 
 fn reprobe_payload(video_codec: &str) -> Value {
     json!({
@@ -190,6 +199,51 @@ async fn active_version_with_snapshot_skips_retired_tip() {
 
     assert_eq!(tip.id, v1);
     assert_eq!(snapshot.id, v1_snapshot.id);
+}
+
+#[tokio::test]
+async fn run_phase_barrier_with_no_file_targets_succeeds_with_zero_phase_summary() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    // The compliant-baseline fixture's snapshot targets are synthetic, so the
+    // coordinator's active *file* set is empty: no FileVersion to advance.
+    let input = cp
+        .create_policy_input_set(load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap())
+        .await
+        .unwrap();
+
+    let outcome = cp
+        .run_phase_barrier(
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(job_state(&cp, outcome.job_id).await, "succeeded");
+    assert_eq!(outcome.summary.branch_count, 0);
+    assert_eq!(outcome.summary.ticket_count, 0);
+    assert!(outcome.phases.is_empty());
+    assert!(outcome.file_phases.is_empty());
+    assert!(
+        cp.workflow_summaries()
+            .phases_for_job(outcome.job_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        cp.workflow_summaries()
+            .get_summary(outcome.job_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]

@@ -49,7 +49,7 @@ use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
 
-const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
+pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
