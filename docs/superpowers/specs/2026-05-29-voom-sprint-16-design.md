@@ -248,7 +248,8 @@ A `SqliteWorkflowSummaryRepo` follows the existing repository conventions
 ## 5. Policy And Planning
 
 No grammar, AST, or compiled-model changes. The planner is extended so it can be
-invoked for a single phase against a supplied snapshot:
+invoked for a single phase against a supplied snapshot (the `plan_phase` entry
+point and its failure contract are pinned by `docs/adr/0005-plan-phase-entry-point.md`):
 
 - The planner already iterates `phase_order` and expands per phase. Sprint 16
   factors out a per-phase entry point that plans exactly one named phase against
