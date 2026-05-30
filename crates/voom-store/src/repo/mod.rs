@@ -20,6 +20,7 @@ pub mod tickets;
 pub mod use_leases;
 pub mod video_profiles;
 pub mod workers;
+pub mod workflow_summaries;
 
 pub use artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
@@ -78,6 +79,11 @@ pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
     WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerRepo,
     WorkerStatus,
+};
+pub use workflow_summaries::{
+    FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, NewPhaseSummary, NewWorkflowSummary,
+    PhaseOutcome, PhaseReport, PhaseSummary, SqliteWorkflowSummaryRepo, WorkflowSummary,
+    WorkflowSummaryRepo,
 };
 
 /// Marker trait so future repository traits compose uniformly.

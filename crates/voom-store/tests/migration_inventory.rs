@@ -35,6 +35,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0012_staged_artifact_commit.sql",
     "0013_audio_sidecar_support.sql",
     "0014_video_profiles.sql",
+    "0015_workflow_summaries.sql",
 ];
 
 fn workspace_root() -> PathBuf {
