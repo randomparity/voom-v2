@@ -10,7 +10,9 @@ use voom_store::repo::identity::{
     ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
-use voom_store::repo::workflow_summaries::{NewWorkflowSummary, WorkflowSummaryRepo};
+use voom_store::repo::workflow_summaries::{
+    FilePhaseOutcome, NewWorkflowSummary, WorkflowSummaryRepo,
+};
 
 use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::cp;
@@ -201,6 +203,16 @@ async fn active_version_with_snapshot_skips_retired_tip() {
     assert_eq!(snapshot.id, v1_snapshot.id);
 }
 
+fn payload_without_container() -> Value {
+    json!({
+        "format": "sprint16-v1",
+        "probe": { "provider": "ffprobe", "provider_version": "7.0" },
+        "streams": [
+            { "id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264" }
+        ]
+    })
+}
+
 fn file_draft(slug: &str, snapshots: &[MediaSnapshot]) -> voom_policy::PolicyInputSetDraft {
     voom_policy::PolicyInputSetDraft {
         slug: slug.to_owned(),
@@ -271,6 +283,60 @@ async fn run_phase_barrier_rejects_colliding_branch_ids_before_opening_job() {
         .await
         .unwrap();
     assert_eq!(jobs, 0, "no job should open when branch ids collide");
+}
+
+#[tokio::test]
+async fn run_phase_barrier_drops_unplannable_file_as_blocked() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    let version = seed_version(
+        &cp,
+        "/lib/blocked/movie.mkv",
+        "hash-blocked",
+        payload_without_container(),
+    )
+    .await;
+    let snapshot = latest_snapshot(&cp, version).await;
+    let input = cp
+        .create_policy_input_set(file_draft("blocked-file", &[snapshot]))
+        .await
+        .unwrap();
+
+    let outcome = cp
+        .run_phase_barrier(
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(job_state(&cp, outcome.job_id).await, "succeeded");
+    assert!(
+        outcome
+            .file_phases
+            .iter()
+            .any(|row| row.outcome == FilePhaseOutcome::Blocked),
+        "expected a blocked file-phase row, got {:?}",
+        outcome.file_phases
+    );
+    assert!(
+        outcome
+            .file_phases
+            .iter()
+            .all(|row| row.outcome != FilePhaseOutcome::Committed),
+        "no file should commit when the only file is blocked"
+    );
+    let tickets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets WHERE job_id = ?")
+        .bind(i64::try_from(outcome.job_id.0).unwrap())
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(tickets, 0, "a blocked phase dispatches no tickets");
 }
 
 #[tokio::test]
