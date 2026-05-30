@@ -294,18 +294,32 @@ async fn execute_with_worker(
     executed
 }
 
+/// Read a succeeded operation ticket's durable result JSON for a job. The flat
+/// `tickets` field was removed from `ComplianceExecuteData`; the tickets a run
+/// executed remain queryable in the `tickets` table.
+async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::Value {
+    let pool = voom_store::connect(url).await.unwrap();
+    let kind = format!("synthetic.workflow.operation.{operation}");
+    let result: String = sqlx::query_scalar(
+        "SELECT result FROM tickets \
+         WHERE job_id = ? AND kind = ? AND state = 'succeeded' AND result IS NOT NULL \
+         ORDER BY id ASC LIMIT 1",
+    )
+    .bind(i64::try_from(job_id).unwrap())
+    .bind(kind)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    serde_json::from_str(&result).unwrap()
+}
+
 async fn assert_committed_result(
     url: &str,
     tmp: &Path,
     executed: &ComplianceExecuteData,
     case: &Case,
 ) -> CommittedResult {
-    let ticket = executed
-        .tickets
-        .iter()
-        .find(|ticket| ticket.operation == "transcode_video")
-        .unwrap();
-    let result = ticket.result.as_ref().unwrap();
+    let result = ticket_result(url, executed.summary.job_id, "transcode_video").await;
     let file_version_id = FileVersionId(result["result_file_version_id"].as_u64().unwrap());
     let media_snapshot_id = MediaSnapshotId(result["result_media_snapshot_id"].as_u64().unwrap());
     assert!(result["staged_artifact_handle_id"].as_u64().unwrap() > 0);
