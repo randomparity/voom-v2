@@ -1409,6 +1409,7 @@ async fn dispatch_control_plane_ticket(
 struct RuntimeTranscodeDispatcher<'a> {
     runtime: &'a super::runtime::WorkerRuntime,
     control: &'a ControlPlane,
+    ticket_id: TicketId,
     lease_id: LeaseId,
     options: &'a WorkflowExecutorOptions,
 }
@@ -1419,6 +1420,7 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
         &self,
         request: TranscodeVideoRequest,
     ) -> Result<TranscodeVideoResult, VoomError> {
+        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
         await_with_lease_heartbeats(
             self.control,
             self.lease_id,
@@ -1427,6 +1429,7 @@ impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
             crate::transcode::dispatch::dispatch_transcode_video_with_client(
                 self.runtime.client.as_ref(),
                 &self.runtime.credentials,
+                &idempotency_key,
                 request,
             ),
         )
@@ -1497,6 +1500,7 @@ async fn dispatch_control_plane_transcode(
         &RuntimeTranscodeDispatcher {
             runtime,
             control,
+            ticket_id: ticket.id,
             lease_id,
             options,
         },
