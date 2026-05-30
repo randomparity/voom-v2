@@ -5,11 +5,11 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
 use voom_core::{FileVersionId, JobId};
 use voom_policy::{FixtureName, TargetRef, load_fixture, load_policy_fixture};
+use voom_store::repo::identity::NewFileLocation;
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaSnapshot, NewFileVersion,
     ProducedBy,
 };
-use voom_store::repo::identity::NewFileLocation;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary, WorkflowSummaryRepo,
@@ -458,7 +458,9 @@ async fn active_version_with_snapshot_returns_none_for_unknown_asset() {
 /// Build a single-phase compiled policy whose phase carries the given `on_error`
 /// strategy. `CompiledPolicy::minimal_for_test` is `#[cfg(test)]`-private to
 /// `voom-policy`, so this builds it from public fields instead.
-fn policy_with_on_error(strategy: Option<voom_policy::ErrorStrategy>) -> voom_policy::CompiledPolicy {
+fn policy_with_on_error(
+    strategy: Option<voom_policy::ErrorStrategy>,
+) -> voom_policy::CompiledPolicy {
     voom_policy::CompiledPolicy {
         policy_name: "guarded".to_owned(),
         slug: "guarded".to_owned(),
@@ -487,8 +489,14 @@ fn reject_unhandled_on_error_rejects_continue() {
     )))
     .unwrap_err();
     assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
-    assert!(err.to_string().contains("normalize"), "names the phase: {err}");
-    assert!(err.to_string().contains("continue"), "names the strategy: {err}");
+    assert!(
+        err.to_string().contains("normalize"),
+        "names the phase: {err}"
+    );
+    assert!(
+        err.to_string().contains("continue"),
+        "names the strategy: {err}"
+    );
 }
 
 #[test]
@@ -620,13 +628,19 @@ async fn reconcile_resume_resumes_after_highest_recorded_phase() {
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Committed, Some(v)).await;
     record_file_phase(&cp, prior, 1, "movie", FilePhaseOutcome::Committed, Some(v)).await;
 
-    let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
 
     assert_eq!(survivors.len(), 1);
     assert_eq!(survivors[0].resume_ordinal, 2, "highest recorded (1) + 1");
-    assert!(backfilled.is_empty(), "tip == recorded committed version, no backfill");
+    assert!(
+        backfilled.is_empty(),
+        "tip == recorded committed version, no backfill"
+    );
 }
 
 #[tokio::test]
@@ -636,7 +650,10 @@ async fn reconcile_resume_excludes_blocked_file() {
     let v = seed_version(&cp, "/lib/b/movie.mkv", "hash-b1", reprobe_payload("h264")).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Blocked, None).await;
 
-    let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
 
@@ -650,12 +667,26 @@ async fn reconcile_resume_drops_fully_recorded_file() {
     let prior = open_workflow_job(&cp).await;
     let v = seed_version(&cp, "/lib/c/movie.mkv", "hash-c1", reprobe_payload("h264")).await;
     for ordinal in 0..2 {
-        record_file_phase(&cp, prior, ordinal, "movie", FilePhaseOutcome::Committed, Some(v)).await;
+        record_file_phase(
+            &cp,
+            prior,
+            ordinal,
+            "movie",
+            FilePhaseOutcome::Committed,
+            Some(v),
+        )
+        .await;
     }
-    let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, _) = cp.reconcile_resume(prior, new_job, files, 2).await.unwrap();
-    assert!(survivors.is_empty(), "resume_ordinal (2) >= phase_count (2) => complete");
+    assert!(
+        survivors.is_empty(),
+        "resume_ordinal (2) >= phase_count (2) => complete"
+    );
 }
 
 #[tokio::test]
@@ -663,19 +694,37 @@ async fn reconcile_resume_backfills_committed_tip_without_row() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
     let v0 = seed_version(&cp, "/lib/d/movie.mkv", "hash-d0", reprobe_payload("h264")).await;
-    record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Committed, Some(v0)).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "movie",
+        FilePhaseOutcome::Committed,
+        Some(v0),
+    )
+    .await;
     let v1 = advance_chain_tip(&cp, v0, "hash-d1", reprobe_payload("hevc")).await;
 
-    let files = cp.initial_phase_files(&[(v0, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v0, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
 
-    assert_eq!(backfilled.len(), 1, "the un-rowed phase-1 commit is backfilled");
+    assert_eq!(
+        backfilled.len(),
+        1,
+        "the un-rowed phase-1 commit is backfilled"
+    );
     assert_eq!(backfilled[0].phase_ordinal, 1);
     assert_eq!(backfilled[0].outcome, FilePhaseOutcome::Committed);
     assert_eq!(backfilled[0].produced_file_version_id, Some(v1));
     assert!(backfilled[0].ticket_ids.is_empty());
-    assert_eq!(survivors[0].resume_ordinal, 2, "resume past the backfilled phase");
+    assert_eq!(
+        survivors[0].resume_ordinal, 2,
+        "resume past the backfilled phase"
+    );
 }
 
 #[tokio::test]
@@ -685,10 +734,17 @@ async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
     let v0 = seed_version(&cp, "/lib/e/movie.mkv", "hash-e0", reprobe_payload("h264")).await;
     let _v1 = advance_chain_tip(&cp, v0, "hash-e1", reprobe_payload("hevc")).await;
 
-    let files = cp.initial_phase_files(&[(v0, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v0, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
-    assert_eq!(backfilled.len(), 1, "advanced-without-rows is backfilled at ordinal 0");
+    assert_eq!(
+        backfilled.len(),
+        1,
+        "advanced-without-rows is backfilled at ordinal 0"
+    );
     assert_eq!(backfilled[0].phase_ordinal, 0);
     assert_eq!(survivors[0].resume_ordinal, 1);
 }
@@ -700,11 +756,20 @@ async fn reconcile_resume_resumes_after_skipped_phase() {
     let v = seed_version(&cp, "/lib/pt/movie.mkv", "hash-pt", reprobe_payload("h264")).await;
     record_file_phase(&cp, prior, 0, "movie", FilePhaseOutcome::Skipped, None).await;
 
-    let files = cp.initial_phase_files(&[(v, "movie".to_owned())]).await.unwrap();
+    let files = cp
+        .initial_phase_files(&[(v, "movie".to_owned())])
+        .await
+        .unwrap();
     let new_job = open_workflow_job(&cp).await;
     let (survivors, backfilled) = cp.reconcile_resume(prior, new_job, files, 4).await.unwrap();
-    assert_eq!(survivors[0].resume_ordinal, 1, "skipped row at 0 => resume at 1");
-    assert!(backfilled.is_empty(), "a skipped phase did not advance the tip");
+    assert_eq!(
+        survivors[0].resume_ordinal, 1,
+        "skipped row at 0 => resume at 1"
+    );
+    assert!(
+        backfilled.is_empty(),
+        "a skipped phase did not advance the tip"
+    );
 }
 
 #[tokio::test]

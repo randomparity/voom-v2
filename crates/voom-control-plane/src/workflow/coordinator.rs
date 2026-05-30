@@ -539,14 +539,7 @@ impl ControlPlane {
             .reconcile_resume(prior_job_id, job_id, files, phase_count)
             .await?;
         self.drive_phase_loop(
-            job_id,
-            policy,
-            context,
-            base_draft,
-            files,
-            backfilled,
-            options,
-            runtimes,
+            job_id, policy, context, base_draft, files, backfilled, options, runtimes,
         )
         .await
     }
@@ -644,7 +637,9 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if files.is_empty() || policy.phase_order.is_empty() {
-            return Ok(self.finalize_zero_phase_run(job_id, seed_file_phases).await?);
+            return Ok(self
+                .finalize_zero_phase_run(job_id, seed_file_phases)
+                .await?);
         }
         let executor = WorkflowExecutor::with_options(
             self.clone(),
@@ -736,11 +731,25 @@ impl ControlPlane {
             files.extend(passthrough);
         }
 
+        self.finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
+            .await
+            .map_err(CoordinatorError::from)
+    }
+
+    /// Succeed the owned job and write its job-grain summary, returning the
+    /// completed [`CoordinatorOutcome`].
+    async fn finalize_succeeded_run(
+        &self,
+        job_id: JobId,
+        last_run: Option<&crate::workflow::WorkflowRunSummary>,
+        phases: Vec<PhaseSummary>,
+        file_phases: Vec<FilePhaseSummary>,
+    ) -> Result<CoordinatorOutcome, VoomError> {
         let now = self.clock().now();
         self.succeed_job(job_id, now).await?;
         let summary = self
             .workflow_summaries()
-            .insert_summary(job_grain_summary(job_id, last_run.as_ref()), now)
+            .insert_summary(job_grain_summary(job_id, last_run), now)
             .await?;
         Ok(CoordinatorOutcome {
             job_id,
