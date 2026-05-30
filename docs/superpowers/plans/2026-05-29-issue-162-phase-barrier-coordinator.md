@@ -153,6 +153,10 @@ durable summary or hangs.
      (re-probe already recorded in dispatch), then return the error with the
      partial summary — satisfying ADR-0007's "records which files advanced even on
      terminal failure." Files whose tip did not advance get no committed row.
+     On this failure path the coordinator writes per-`(file, phase)` rows for
+     committed branches but **no** phase-grain row for the failed phase (the four
+     `PhaseOutcome` variants have no "failed" state) — the absent phase-grain row
+     plus the `failed` job state denote the incomplete phase.
   5. For each committed branch: read new active version + reprobe snapshot,
      advance active version, `upsert_file_phase_summary` (`Committed`). Per-phase
      `per_operation` is a delta (see cross-phase accounting), not the cumulative
