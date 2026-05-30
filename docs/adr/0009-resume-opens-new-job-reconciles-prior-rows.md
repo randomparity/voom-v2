@@ -55,7 +55,14 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   job owns the rows the resumed run writes. The caller already holds
   `prior_job_id` from the failed run's `CoordinatorError.partial.job_id` /
   `CoordinatorOutcome.job_id`, so no job lookup table is introduced (consistent
-  with ADR-0007's "no new tables").
+  with ADR-0007's "no new tables"). Resume **verifies `prior_job_id` exists**
+  (a `synthetic.workflow` job) and rejects a non-existent id with
+  `VoomError::NotFound` before opening the job. It deliberately does **not**
+  require the prior job to be terminal: a crash — the primary resume trigger
+  (spec §8) — leaves the job stuck `Open` because the process died before
+  `fail_job`. Resume therefore assumes a **single writer** (the caller guarantees
+  the prior run is no longer executing); automated liveness detection and
+  recovery are deferred (Sprint 16 §11).
 
 - **Reconciliation reads `file_phases_for_job(prior_job_id)`, grouped by
   `branch_id`** (the same path-stem identity the fresh run derives, so prior rows
@@ -69,18 +76,25 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
     version the next phase plans against.
   - A file with a row for every phase has nothing to resume and is dropped.
 
-- **Backfill on resume.** Before a file re-enters at `resume_ordinal`, compare
-  its current chain tip (`active_version_with_snapshot`) against the produced
-  version of its highest `Committed` prior row (or its starting version if none).
-  If the tip advanced past that recorded version, a phase committed inline
-  without a row (a crash between the inline commit and the row write). The
-  coordinator backfills a `Committed` row at `resume_ordinal` by re-probing the
-  already-committed tip and advances `resume_ordinal` by one — **no re-mutation,
-  no dispatch**. Inline commit and row write are adjacent, so at most the last
-  row can be lost; the missing phase is therefore exactly `resume_ordinal` and is
-  unambiguous. The backfilled row carries empty `ticket_ids`: the crashed phase's
-  ticket linkage is not reconstructed, and the committed artifact plus its
-  reprobe snapshot are the durable evidence.
+- **Backfill on resume (the consistency guard).** Before a file re-enters at
+  `resume_ordinal`, compare its current chain tip (`active_version_with_snapshot`)
+  against `recorded_tip` = the produced version of its highest `Committed` prior
+  row, or — when the file has **no** `Committed` row — its **input-set starting
+  version**. If the tip advanced past `recorded_tip`, a phase committed inline
+  without a row (a crash between the inline commit and the row write, or a
+  stale/wrong `prior_job_id`). The coordinator backfills a `Committed` row at
+  `resume_ordinal` by re-probing the already-committed tip and advances
+  `resume_ordinal` by one — **no re-mutation, no dispatch**. The phase loop runs
+  every entering file's inline commit in `dispatch_phase` and then writes all
+  their rows in `finalize_phase` before advancing, so per file the rows form a
+  contiguous prefix `[0, m)` and at most the boundary row `m = resume_ordinal`
+  can be lost; the backfilled artifact is unambiguously that phase's product.
+  Defaulting `recorded_tip` to the starting version means this one guard also
+  protects a file with zero prior rows whose tip already advanced: it is
+  backfilled, never re-planned from scratch against its own product. The
+  backfilled row carries empty `ticket_ids`: the crashed phase's ticket linkage
+  is not reconstructed, and the committed artifact plus its reprobe snapshot are
+  the durable evidence.
 
 - **Heterogeneous per-file start.** The phase loop carries a per-file
   `resume_ordinal` (`0` for a fresh run, so `run_phase_barrier` is byte-for-byte
@@ -105,6 +119,10 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   phase)` history therefore spans two jobs after a resume. This is the cost of
   the terminal `jobs` state machine; it keeps job lifecycle and ADR-0007's
   single-job-per-run invariant intact (each *run* still owns exactly one job).
+  A phase whose resumed entering set is a strict subset of the run's files
+  regenerates its report from the entering files only (as ADR-0008 already does
+  for the fresh run); stitching the prior and resumed jobs' per-phase reports
+  into one cross-job participant view is out of scope.
 - Idempotency rests on two facts, not on replanning: (a) fully-recorded `(file,
   phase)` pairs are skipped by the recorded-row check, and (b) committed
   artifacts are append-only and are the active version the next phase plans
@@ -124,6 +142,12 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   invariant, and a successfully-resumed run would have to leave the job in
   `Succeeded` after it was `Failed`, erasing the record of the original failure.
   ADR-0007 explicitly rejected adding job-lifecycle concepts.
+- **Require the prior job to be in a terminal state before resuming.** Rejected:
+  a crash — the primary resume trigger — kills the process before `fail_job`, so
+  the job is stuck `Open`, not terminal; a terminal precondition would reject the
+  exact case spec §8 targets. Reliably distinguishing a crashed `Open` job from a
+  still-running one needs liveness/lease detection, which is deferred (§11). This
+  sprint resume verifies the job *exists* and assumes a single writer.
 - **Auto-discover the resumable job from `(policy_version, input_set)`.** Rejected:
   `jobs` rows do not store the policy/input identity, and ADR-0006/0007 rejected
   adding tables or columns for it. An explicit `prior_job_id` (which the caller

@@ -66,6 +66,22 @@ Both share the existing resolve prologue with `run_phase_barrier`
 enter the shared phase loop with per-file `resume_ordinal` set from
 reconciliation.
 
+`resume_phase_barrier` additionally **verifies `prior_job_id` exists** (a
+`synthetic.workflow` job) and fails with `VoomError::NotFound` otherwise, so a
+typo'd id is rejected rather than silently reconciling against nothing. It does
+**not** require the prior job to be in a terminal state: a crash (the primary §8
+case) leaves the job stuck `Open` because the process died before `fail_job`
+ran. Resume therefore assumes a **single writer** — the caller guarantees the
+prior run is no longer executing. Automated liveness detection and recovery
+(lease expiry, watcher) are deferred (Sprint 16 §11); this sprint the caller
+passes the prior run's own job id verbatim from the failed run's
+`CoordinatorError.partial.job_id` / `CoordinatorOutcome.job_id`. A `prior_job_id`
+that points to a *different* real run is a caller-contract violation that the
+coordinator cannot detect (jobs do not store policy/input identity, ADR-0006/0007);
+the consistency guard in §3.1 step 3 still prevents the worst outcome
+(re-mutating an already-advanced file) by backfilling rather than re-planning
+from scratch whenever a file's chain tip has advanced past what the rows record.
+
 ### 3.1 Per-file reconciliation
 
 Read `file_phases_for_job(prior_job_id)` once and index rows by
@@ -77,13 +93,26 @@ Read `file_phases_for_job(prior_job_id)` once and index rows by
 2. **Resume ordinal.** `resume_ordinal` = the smallest ordinal in
    `[0, phase_count)` with no prior row for the file. If every phase has a row,
    the file is complete — drop it.
-3. **Backfill detection.** Let `recorded_tip` = the produced version of the
-   file's highest `Committed` prior row, or its starting version if none. If the
-   current chain tip ≠ `recorded_tip`, a phase committed inline without a row.
-   Backfill a `Committed` row at `resume_ordinal` (re-probe the current tip via
-   `ProducedRefs::resolve`, empty `ticket_ids`), then `resume_ordinal += 1`.
-   Invariant: inline commit and row write are adjacent, so at most one row is
-   lost; the missing phase is exactly `resume_ordinal`.
+3. **Backfill detection (the consistency guard).** Let `recorded_tip` = the
+   produced version of the file's highest `Committed` prior row, or **the file's
+   input-set starting version if it has no `Committed` row**. If the current
+   chain tip ≠ `recorded_tip`, a phase committed inline without a row. Backfill a
+   `Committed` row at `resume_ordinal` (re-probe the current tip via
+   `ProducedRefs::resolve`, empty `ticket_ids`), then `resume_ordinal += 1`. This
+   one mechanism covers every "advanced-without-a-row" case, including a file
+   with **zero** prior rows whose tip already advanced (a crash before the very
+   first row write, or a stale/wrong `prior_job_id`): such a file is backfilled
+   at ordinal 0 and resumes at 1 — it is **never** re-planned from scratch
+   against its own product. So an already-advanced file is never re-mutated even
+   when the prior rows are absent.
+
+   *At-most-one-un-rowed-commit invariant.* The phase loop runs every entering
+   file's inline commit during `dispatch_phase`, then writes **all** their rows
+   in `finalize_phase`, then advances to the next phase. A crash can therefore
+   lose at most the row(s) of the phase currently finalizing, never of an earlier
+   phase; per file the rows form a contiguous prefix `[0, m)` and the only
+   possibly-missing row is at the boundary `m = resume_ordinal`. The backfilled
+   artifact is unambiguously the product of that boundary phase.
 
 The file enters the phase loop with its computed `resume_ordinal` and its
 current chain-tip snapshot.
@@ -102,6 +131,17 @@ generalizes:
   remain (an all-pass-through phase still advances `p`).
 - A phase whose entering set is empty writes no phase-grain row (no work
   happened at that phase in this run) and regenerates no report.
+- A phase whose entering set is a **strict subset** of the run's files (some
+  files re-enter, others already advanced past it) regenerates its report from
+  the entering files' refreshed facts only — exactly as ADR-0008 already does
+  for the fresh run, which regenerates from the files that entered the phase.
+  The resumed job's phase-*p* report therefore covers fewer files than the prior
+  job's phase-*p* report. This is intentional: the prior job's rows remain the
+  durable record for the files that advanced earlier, and the resumed job's rows
+  record what this run did. **Stitching the two jobs' per-phase reports into a
+  single cross-job participant view is out of scope** (the durable summary is
+  per-job by ADR-0006/0009); a reader reconstructs a file's full phase history by
+  following its chain tip and the per-`(file, phase)` rows across both job ids.
 
 A fresh `run_phase_barrier` sets every `resume_ordinal = 0`, so every file enters
 every phase from phase 0 — identical to today's behavior.
@@ -130,13 +170,39 @@ phase and strategy. `None` and `Some(Abort)` pass (default whole-job abort,
 unchanged). Because the guard precedes `open_job`, a rejected policy opens **no**
 job (asserted, mirroring the branch-collision guard).
 
+**This is an intentional fail-fast compatibility break.** The guard rejects on
+`phase_order` membership alone, regardless of whether the offending phase would
+actually run (its `run_if` may be false for every file). A policy that "worked"
+only because its `continue`/`skip` phase was never reached now hard-fails at
+resolve — which is the point: a silent no-op is indistinguishable at runtime
+from real handling, so a future half-implementation of `continue` would regress
+undetected (spec §9 "on_error tests … so the limitation cannot silently
+regress"). One committed fixture already carries this shape —
+`crates/voom-policy/fixtures/policies/production-normalize-reduced.voom` (policy
+`ln`, `on_error: continue`) — but it is **not** wired through
+`run_phase_barrier` / `execute_compliance_policy` by any current coordinator or
+CLI golden test. The plan's verification step confirms no live execute/golden
+path drives a `continue`/`skip` policy before the guard lands, so the reject
+adds a test for a new failure mode rather than breaking an existing green one.
+
 ## 6. Error handling and edges
 
-- **Resume of a non-existent / mismatched `prior_job_id`:** reading
-  `file_phases_for_job` of an unknown job returns no rows; every file then
-  reconciles to `resume_ordinal = 0` and resume degrades to a fresh run against
-  the current chain tips. This is safe (committed artifacts are still the active
-  version) and is the documented behavior, not an error.
+- **Resume of a non-existent `prior_job_id`:** rejected with `VoomError::NotFound`
+  before the job opens (§3). Resume is for continuing a known prior run, not a
+  cold start — a fresh start uses `run_phase_barrier`.
+- **Resume of an existing but mismatched `prior_job_id`** (a real job from a
+  different run whose rows do not key to these files): the coordinator cannot
+  detect this (jobs store no policy/input identity). It does **not** silently
+  re-plan an advanced file from scratch, because the §3.1 step-3 consistency
+  guard backfills any file whose chain tip has advanced past its `recorded_tip`
+  (which defaults to the input-set starting version when the file has no
+  `Committed` row). So a file that advanced under the *real* prior run is
+  backfilled and skipped rather than re-mutated, even when the supplied
+  `prior_job_id` is wrong. A file that genuinely never advanced (tip == starting
+  version) runs all phases from 0, which is correct. The only residual risk is a
+  wrong id whose foreign rows collide by `branch_id` *and* mislead reconciliation
+  toward skipping real work — a caller-contract violation called out in §3, not a
+  silent data-loss path.
 - **A file present in the prior rows but absent from the current input set, or
   vice versa:** reconciliation is per current-input-set file; prior rows for
   files not in the current set are ignored, and current files with no prior rows
@@ -158,9 +224,18 @@ Unit (`coordinator_test.rs`, handler-level, no real dispatch):
   naming the phase; **no job opened**. `abort` and unset accepted (reach the loop).
 - Reconciliation: a file with prior `Committed` rows through phase *k* resumes at
   *k+1*; a file with a prior `Blocked` row is excluded; a file with all phases
-  recorded is dropped; an unknown `prior_job_id` degrades to a fresh run.
-- Backfill: a committed-tip-without-row file gets a `Committed` row backfilled at
-  the first missing ordinal with empty `ticket_ids`, and is not re-dispatched.
+  recorded is dropped.
+- `prior_job_id` that does not exist is rejected with `NOT_FOUND`, **no job
+  opened**.
+- Backfill: a committed-tip-without-row file (rows present through *k-1*, tip
+  advanced) gets a `Committed` row backfilled at the first missing ordinal with
+  empty `ticket_ids`, and is not re-dispatched.
+- Backfill with **zero** prior rows: a file whose tip already advanced past its
+  input-set starting version but has no rows is backfilled at ordinal 0 and not
+  re-mutated (the consistency guard for a stale/wrong prior id).
+- Compatibility check (not a test, a pre-implementation grep, recorded in the
+  plan): confirm no coordinator/CLI golden currently drives a `continue`/`skip`
+  policy through `execute`, so the §5 reject introduces no pre-existing failure.
 
 Integration (`tests/phase_barrier_flow.rs`, real ffprobe on staged output, run
 only under `cargo test --workspace`):
