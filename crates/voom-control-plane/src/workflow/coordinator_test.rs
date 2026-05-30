@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
@@ -7,6 +9,8 @@ use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaSnapshot, NewFileVersion,
     ProducedBy,
 };
+use voom_store::repo::jobs::NewJob;
+use voom_store::repo::workflow_summaries::{NewWorkflowSummary, WorkflowSummaryRepo};
 
 use crate::cases::cp;
 
@@ -186,6 +190,48 @@ async fn active_version_with_snapshot_skips_retired_tip() {
 
     assert_eq!(tip.id, v1);
     assert_eq!(snapshot.id, v1_snapshot.id);
+}
+
+#[tokio::test]
+async fn control_plane_persists_workflow_summary_over_shared_pool() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    cp.workflow_summaries()
+        .insert_summary(
+            NewWorkflowSummary {
+                job_id: job.id,
+                branch_count: 2,
+                ticket_count: 3,
+                dispatch_count: 3,
+                retry_count: 0,
+                failure_count: 0,
+                peak_active_workflow_leases: 1,
+                elapsed: Duration::from_millis(5),
+                per_operation: json!({ "transcode_video": 1 }),
+            },
+            T0,
+        )
+        .await
+        .unwrap();
+
+    let summary = cp
+        .workflow_summaries()
+        .get_summary(job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.job_id, job.id);
+    assert_eq!(summary.branch_count, 2);
+    assert_eq!(summary.ticket_count, 3);
+    assert_eq!(summary.per_operation, json!({ "transcode_video": 1 }));
 }
 
 #[tokio::test]
