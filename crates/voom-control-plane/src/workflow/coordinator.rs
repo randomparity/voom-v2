@@ -6,12 +6,13 @@
 //! projects them into a [`MediaSnapshotInput`]. The coordinator core
 //! (`run_phase_barrier`) arrives in Phase 3 and reuses these helpers.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_policy::{MediaSnapshotInput, TargetRef};
-use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{FileLocationKind, FileVersion, IdentityRepo, MediaSnapshot};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 use voom_store::repo::workflow_summaries::{
@@ -23,6 +24,7 @@ use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::policy_inputs::stream_summary_from_snapshot_payload;
 
 use super::executor::WORKFLOW_JOB_KIND;
+use super::expansion::branch_id_from_path;
 
 /// Durable result of a phase-barrier run: the owning job's summary plus the
 /// per-phase and per-`(file, phase)` rows the run wrote.
@@ -83,6 +85,18 @@ impl ControlPlane {
             })
             .collect();
 
+        // Derive each active file's branch id and fail fast on a collision
+        // *before* opening the job: the per-`(file, phase)` upsert is
+        // `ON CONFLICT DO NOTHING` and would silently drop a colliding file's
+        // row, losing it from the durable summary.
+        let branch_ids =
+            self.active_branch_ids(&active)
+                .await
+                .map_err(|source| CoordinatorError {
+                    source,
+                    partial: None,
+                })?;
+
         let now = self.clock().now();
         let job = self
             .open_job(NewJob {
@@ -99,7 +113,7 @@ impl ControlPlane {
         // Job-cleanup contract: once the job is open, every error path finalizes
         // it as `failed` rather than orphaning it in `open`.
         match self
-            .run_phase_barrier_in_job(job.id, &policy, &active, options)
+            .run_phase_barrier_in_job(job.id, &policy, &branch_ids, options)
             .await
         {
             Ok(outcome) => Ok(outcome),
@@ -115,14 +129,55 @@ impl ControlPlane {
         }
     }
 
+    /// Derive a stable branch id (the file's location path stem) for every
+    /// active file, rejecting a stem collision across the set.
+    async fn active_branch_ids(
+        &self,
+        active: &[FileVersionId],
+    ) -> Result<Vec<(FileVersionId, String)>, VoomError> {
+        let mut branch_ids = Vec::with_capacity(active.len());
+        let mut seen: HashMap<String, FileVersionId> = HashMap::with_capacity(active.len());
+        for &file_version_id in active {
+            let branch_id = self.file_branch_id(file_version_id).await?;
+            if let Some(previous) = seen.insert(branch_id.clone(), file_version_id) {
+                return Err(VoomError::Config(format!(
+                    "active files {previous} and {file_version_id} both derive branch id \
+                     `{branch_id}`; phase-barrier summaries require a unique branch id per file"
+                )));
+            }
+            branch_ids.push((file_version_id, branch_id));
+        }
+        Ok(branch_ids)
+    }
+
+    /// A file's branch id is the stem of its live location path, matching the
+    /// scanner-completion binding (`expansion::branch_id_from_path`).
+    async fn file_branch_id(&self, file_version_id: FileVersionId) -> Result<String, VoomError> {
+        let locations = self
+            .identity
+            .list_live_file_locations_by_version(file_version_id)
+            .await?;
+        let path = locations
+            .iter()
+            .find(|location| location.kind == FileLocationKind::LocalPath)
+            .or_else(|| locations.first())
+            .map(|location| location.value.clone())
+            .ok_or_else(|| {
+                VoomError::NotFound(format!(
+                    "file version {file_version_id} has no live location to derive a branch id"
+                ))
+            })?;
+        branch_id_from_path(&path)
+    }
+
     async fn run_phase_barrier_in_job(
         &self,
         job_id: JobId,
         policy: &voom_policy::CompiledPolicy,
-        active: &[FileVersionId],
+        branch_ids: &[(FileVersionId, String)],
         _options: ComplianceExecutionOptions,
     ) -> Result<CoordinatorOutcome, VoomError> {
-        if active.is_empty() || policy.phase_order.is_empty() {
+        if branch_ids.is_empty() || policy.phase_order.is_empty() {
             return self.finalize_zero_phase_run(job_id).await;
         }
         // The dispatching phase loop (project → plan_phase → bridge → run →

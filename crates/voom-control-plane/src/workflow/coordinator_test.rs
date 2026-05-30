@@ -201,6 +201,78 @@ async fn active_version_with_snapshot_skips_retired_tip() {
     assert_eq!(snapshot.id, v1_snapshot.id);
 }
 
+fn file_draft(slug: &str, snapshots: &[MediaSnapshot]) -> voom_policy::PolicyInputSetDraft {
+    voom_policy::PolicyInputSetDraft {
+        slug: slug.to_owned(),
+        display_name: slug.to_owned(),
+        schema_version: 1,
+        source_kind: voom_policy::PolicyInputSourceKind::Imported,
+        created_at: T0,
+        description: None,
+        fixture_labels: vec![slug.replace('-', "_")],
+        synthetic_targets: Vec::new(),
+        media_snapshots: snapshots
+            .iter()
+            .enumerate()
+            .map(|(index, snapshot)| {
+                project_media_snapshot_input(u32::try_from(index + 1).unwrap(), snapshot)
+            })
+            .collect(),
+        identity_evidence: Vec::new(),
+        bundle_targets: Vec::new(),
+        quality_profiles: Vec::new(),
+        issues: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn run_phase_barrier_rejects_colliding_branch_ids_before_opening_job() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    // Two files under different directories share the stem `movie`.
+    let v1 = seed_version(
+        &cp,
+        "/lib/a/movie.mkv",
+        "hash-collide-1",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let v2 = seed_version(
+        &cp,
+        "/lib/b/movie.mkv",
+        "hash-collide-2",
+        reprobe_payload("hevc"),
+    )
+    .await;
+    let s1 = latest_snapshot(&cp, v1).await;
+    let s2 = latest_snapshot(&cp, v2).await;
+    let input = cp
+        .create_policy_input_set(file_draft("collide", &[s1, s2]))
+        .await
+        .unwrap();
+
+    let err = cp
+        .run_phase_barrier(
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    assert!(err.source.to_string().contains("movie"));
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0, "no job should open when branch ids collide");
+}
+
 #[tokio::test]
 async fn run_phase_barrier_with_no_file_targets_succeeds_with_zero_phase_summary() {
     let (cp, _tmp) = cp().await;
