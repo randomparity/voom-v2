@@ -153,6 +153,11 @@ pub struct PhaseSummary {
 pub struct NewFilePhaseSummary {
     pub job_id: JobId,
     pub phase_ordinal: u32,
+    /// The file's branch identity. This is the executor's `branch_id` (the path
+    /// stem; `workflow/binding.rs`), assumed unique within a `(job, phase)`. The
+    /// idempotent upsert keys on it, so a job whose input set admits two files
+    /// with the same stem would record only the first — guarding against
+    /// same-stem inputs is the branch-binding layer's job, not this repo's.
     pub branch_id: String,
     pub ticket_ids: Vec<TicketId>,
     pub produced_file_version_id: Option<FileVersionId>,
@@ -381,6 +386,10 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
     ) -> Result<FilePhaseSummary, VoomError> {
         let created = iso8601(now)?;
         let ticket_ids = serialize_ticket_ids(&input.ticket_ids)?;
+        // First-write-wins on (job_id, phase_ordinal, branch_id): the finalize
+        // (§6) and resume (§8) backfill paths can re-issue this for an already-
+        // recorded file, and that must be a no-op, not a UNIQUE error. This
+        // relies on branch_id being unique per (job, phase) (see NewFilePhaseSummary).
         let res = sqlx::query(
             "INSERT INTO workflow_file_phase_summaries \
              (job_id, phase_ordinal, branch_id, ticket_ids, produced_file_version_id, \

@@ -230,6 +230,22 @@ async fn committed_requires_produced_lineage() {
 }
 
 #[tokio::test]
+async fn committed_requires_reprobe_snapshot() {
+    let (repo, _tmp) = repo().await;
+
+    // The re-probe arm of the committed CHECK: a committed row written without
+    // a re-probe snapshot violates the "written only after re-probe" invariant.
+    let mut input = committed_file_phase("a");
+    input.reprobe_snapshot_id = None;
+
+    let err = repo.upsert_file_phase_summary(input, T0).await.unwrap_err();
+    assert!(
+        matches!(err, voom_core::VoomError::Database(_)),
+        "expected a Database CHECK violation, got {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn produced_ids_must_reference_real_rows() {
     let (repo, _tmp) = repo().await;
 
