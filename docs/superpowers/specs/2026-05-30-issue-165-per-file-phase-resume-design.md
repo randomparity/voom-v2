@@ -88,11 +88,24 @@ Read `file_phases_for_job(prior_job_id)` once and index rows by
 `(branch_id, phase_ordinal)`. For each active file (current chain tip resolved by
 `initial_phase_files`, branch id derived as in the fresh run):
 
-1. **Terminal check.** If any prior row for the file has outcome `Blocked`, the
-   file already aborted-for-file (§8). Exclude it from resume entirely.
-2. **Resume ordinal.** `resume_ordinal` = the smallest ordinal in
-   `[0, phase_count)` with no prior row for the file. If every phase has a row,
-   the file is complete — drop it.
+1. **Terminal check.** If the file's **highest** recorded prior row has outcome
+   `Blocked`, the file already aborted-for-file (§8). Exclude it from resume
+   entirely.
+2. **Resume ordinal.** `resume_ordinal` = the file's **highest recorded phase
+   ordinal + 1**, or `0` if the file has no prior row. A committed/skipped row at
+   ordinal *h* means the file passed every phase `≤ h`, so this is correct even
+   when the visible rows are **not** a prefix from 0. If `resume_ordinal ≥
+   phase_count`, the file is complete — drop it.
+
+   *Why highest-plus-one, not smallest-missing.* Within any **single** job a
+   file's rows are a contiguous range `[r, m]` where `r` is that run's resume
+   point for the file (`0` for a fresh run): the phase loop adds a row for every
+   entering file at every phase it participates in, until the file drops or the
+   job ends. After a prior resume, the prior job's rows therefore start at `r >
+   0`, not at 0. "Smallest ordinal with no row" would wrongly return `0` for such
+   a job and re-enter a phase the file already passed; "highest recorded + 1"
+   reads the contiguous tail correctly. See §3.3 for the chained-resume case this
+   protects.
 3. **Backfill detection (the consistency guard).** Let `recorded_tip` = the
    produced version of the file's highest `Committed` prior row, or **the file's
    input-set starting version if it has no `Committed` row**. If the current
@@ -110,12 +123,39 @@ Read `file_phases_for_job(prior_job_id)` once and index rows by
    file's inline commit during `dispatch_phase`, then writes **all** their rows
    in `finalize_phase`, then advances to the next phase. A crash can therefore
    lose at most the row(s) of the phase currently finalizing, never of an earlier
-   phase; per file the rows form a contiguous prefix `[0, m)` and the only
-   possibly-missing row is at the boundary `m = resume_ordinal`. The backfilled
-   artifact is unambiguously the product of that boundary phase.
+   phase; within the job the file's rows are a contiguous range ending at the
+   last finalized phase, and the only possibly-missing row is the one just past
+   the highest recorded ordinal — `resume_ordinal`. The backfilled artifact is
+   unambiguously the product of that phase.
 
 The file enters the phase loop with its computed `resume_ordinal` and its
 current chain-tip snapshot.
+
+### 3.3 Repeated (chained) resume
+
+A resume can itself crash or fail, so resume must survive being run against a job
+that is *already* a resume. Because a single job's rows for a file are the
+contiguous tail `[r, m]` (§3.1 step 2), reading **one** prior job is not a full
+per-file history after a prior resume — yet the algorithm stays correct under two
+combined rules:
+
+- **Highest-recorded-plus-one** reads that tail correctly: a prior **resumed** job
+  J2 holding `{F: phase 1 = Committed}` yields `resume_ordinal(F) = 2`, not `0`,
+  so F is not re-entered at a phase it already passed.
+- **The consistency-backfill** absorbs commits a *sibling* job recorded: if the
+  caller instead passes the **original** job J1 (which holds `{F: phase 0}`),
+  `resume_ordinal(F) = 1`, but F's chain tip already advanced to phase 1's product
+  under J2, so `tip ≠ recorded_tip` backfills F at phase 1 and resumes at 2.
+
+So resume is correct whether the caller passes the original or the most-recent
+failed job id — the case the round-1/2 review flagged. A file that a sibling job
+recorded as `Blocked` and that is invisible to the passed job is the one residual
+imperfection: it may be re-entered, but a blocked phase re-plans to the same
+diagnostic and **commits nothing** (no tickets, no mutation), so the worst case is
+a redundant re-block, never re-mutation or data loss. Full cross-job history
+stitching (a per-file cursor spanning jobs) is deferred (§11); this sprint's
+guarantee is *no re-mutation under repeated resume*, verified by a two-failure
+unit test (§7).
 
 ### 3.2 Heterogeneous per-file start in the phase loop
 
@@ -144,7 +184,9 @@ generalizes:
   following its chain tip and the per-`(file, phase)` rows across both job ids.
 
 A fresh `run_phase_barrier` sets every `resume_ordinal = 0`, so every file enters
-every phase from phase 0 — identical to today's behavior.
+every phase from phase 0 — the phase loop is identical to today's behavior. The
+only change to the fresh path is the §5 `on_error` reject in its resolve
+prologue.
 
 ## 4. Idempotency contract
 
@@ -233,6 +275,10 @@ Unit (`coordinator_test.rs`, handler-level, no real dispatch):
 - Backfill with **zero** prior rows: a file whose tip already advanced past its
   input-set starting version but has no rows is backfilled at ordinal 0 and not
   re-mutated (the consistency guard for a stale/wrong prior id).
+- Chained resume (§3.3): a file whose only visible prior row is `Committed` at
+  ordinal *h* (a resumed prior job, no rows `< h`) resumes at *h+1*, not 0 —
+  asserting `highest-recorded + 1`, so the already-passed phases are not
+  re-entered or re-mutated.
 - Compatibility check (not a test, a pre-implementation grep, recorded in the
   plan): confirm no coordinator/CLI golden currently drives a `continue`/`skip`
   policy through `execute`, so the §5 reject introduces no pre-existing failure.

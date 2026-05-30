@@ -70,11 +70,16 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   - A prior row with outcome `Blocked` makes the file **terminal**: the
     abort-for-file already fired (spec §8), so resume excludes the file entirely
     — it is neither re-planned nor revived.
-  - `resume_ordinal` is the smallest phase ordinal in `[0, phase_count)` with no
-    prior row. Phases below it are recorded (`Committed`/`Skipped`) and are
-    **never re-run**; the file's committed artifact (chain tip) is the active
-    version the next phase plans against.
-  - A file with a row for every phase has nothing to resume and is dropped.
+  - `resume_ordinal` is the file's **highest recorded phase ordinal + 1** (or `0`
+    with no rows). Within a single job a file's rows are a contiguous range
+    `[r, m]` starting at that run's resume point, so after a prior resume the rows
+    are a *tail*, not a prefix from 0; "highest + 1" reads the tail correctly
+    where "smallest missing ordinal" would wrongly return 0 and re-enter an
+    already-passed phase. Phases at or below `m` are recorded and **never
+    re-run**; the committed artifact (chain tip) is the active version the next
+    phase plans against.
+  - A file with `resume_ordinal ≥ phase_count` has nothing to resume and is
+    dropped.
 
 - **Backfill on resume (the consistency guard).** Before a file re-enters at
   `resume_ordinal`, compare its current chain tip (`active_version_with_snapshot`)
@@ -152,6 +157,14 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   `jobs` rows do not store the policy/input identity, and ADR-0006/0007 rejected
   adding tables or columns for it. An explicit `prior_job_id` (which the caller
   already has) needs no new schema and is agent-native.
+- **Compute `resume_ordinal` as the smallest phase ordinal with no prior row.**
+  Rejected: a resumed prior job records a file's rows as the contiguous *tail*
+  `[r, m]` (`r > 0`), not a prefix from 0, so "smallest missing" returns 0 for
+  such a job and re-enters phases the file already passed — re-mutating a
+  container phase under chained resume. "Highest recorded + 1" plus the
+  consistency-backfill keeps resume correct whether the caller passes the
+  original or the most-recent failed job id; cross-job per-file cursors are
+  deferred (§11).
 - **Rely on replanning seeing a no-op for already-advanced files.** Rejected: ADR-0007
   documents that a container transform re-runs on replanning against the produced
   artifact, so this would re-mutate recorded phases — exactly what spec §8 forbids.
