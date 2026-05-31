@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::PlanOperationKind;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportStatus {
@@ -80,7 +82,7 @@ pub struct ComplianceSummary {
     pub noncompliant_check_count: u32,
     pub blocked_check_count: u32,
     pub executable_check_count: u32,
-    pub operation_counts_by_kind: BTreeMap<String, u32>,
+    pub operation_counts_by_kind: BTreeMap<PlanOperationKind, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -89,7 +91,7 @@ pub struct ComplianceCheck {
     pub node_id: String,
     pub target: crate::TargetRef,
     pub compliance_kind: String,
-    pub operation_kind: String,
+    pub operation_kind: PlanOperationKind,
     pub desired_state: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_state: Option<serde_json::Value>,

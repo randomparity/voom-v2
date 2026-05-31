@@ -25,6 +25,7 @@ use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
+use voom_plan::PlanOperationKind;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
@@ -206,7 +207,10 @@ async fn run_case(case: &Case) -> CaseOutcome {
         .generate_compliance_report(policy.version.id, input.id)
         .await
         .unwrap();
-    assert_eq!(plan.plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
 
     let executed = execute_with_worker(&cp, policy.version.id, input.id, &root).await;

@@ -9,8 +9,8 @@ use voom_policy::{
 };
 
 use crate::{
-    DependencyKind, NodeStatus, PlanGenerationError, PlanningContext, PlanningDiagnosticCode,
-    PlanningRequest, generate_plan, plan_phase,
+    DependencyKind, NodeStatus, PlanGenerationError, PlanOperationKind, PlanningContext,
+    PlanningDiagnosticCode, PlanningRequest, generate_plan, plan_phase,
 };
 
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
@@ -286,7 +286,7 @@ fn groups_container_and_track_operations_into_one_remux_node() {
     let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(plan.nodes[0].operation_payload["type"], "remux");
     assert_eq!(plan.nodes[0].operation_payload["container"], "mkv");
@@ -328,7 +328,7 @@ fn remux_payload_includes_existing_media_snapshot_id_when_available() {
 
     let plan = generate_plan(request(policy, snapshot)).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(
         plan.nodes[0].operation_payload["source_media_snapshot_id"],
         99
@@ -343,7 +343,7 @@ fn container_mkv_alone_is_no_op_when_snapshot_is_already_mkv() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -359,7 +359,7 @@ fn container_mkv_alone_plans_when_snapshot_container_is_not_mkv() {
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -377,7 +377,7 @@ fn container_mkv_alone_blocks_when_snapshot_container_is_unknown() {
 
     let plan = generate_plan(request(policy, snapshot)).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -398,7 +398,7 @@ fn container_mkv_alone_blocks_when_stream_summary_has_zero_video_and_no_streams_
 
     let plan = generate_plan(request(policy, snapshot)).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -431,7 +431,7 @@ fn intervening_non_remux_operation_does_not_split_same_phase_remux_group() {
     let remux_nodes = plan
         .nodes
         .iter()
-        .filter(|node| node.operation_kind == "remux")
+        .filter(|node| node.operation_kind == PlanOperationKind::Remux)
         .collect::<Vec<_>>();
     assert_eq!(remux_nodes.len(), 1);
     assert_eq!(
@@ -441,7 +441,8 @@ fn intervening_non_remux_operation_does_not_split_same_phase_remux_group() {
     assert!(
         plan.nodes
             .iter()
-            .any(|node| node.operation_kind == "set_tag" && node.status == NodeStatus::Blocked)
+            .any(|node| node.operation_kind == PlanOperationKind::SetTag
+                && node.status == NodeStatus::Blocked)
     );
 }
 
@@ -470,7 +471,7 @@ fn remux_operations_in_different_phases_remain_separate_nodes() {
     let remux_nodes = plan
         .nodes
         .iter()
-        .filter(|node| node.operation_kind == "remux")
+        .filter(|node| node.operation_kind == PlanOperationKind::Remux)
         .collect::<Vec<_>>();
     assert_eq!(remux_nodes.len(), 2);
     assert_eq!(remux_nodes[0].phase_name, "normalize");
@@ -497,11 +498,15 @@ fn defaults_best_blocks_instead_of_joining_executable_group() {
     assert!(
         plan.nodes
             .iter()
-            .any(|node| node.operation_kind == "remux" && node.status == NodeStatus::Planned)
+            .any(|node| node.operation_kind == PlanOperationKind::Remux
+                && node.status == NodeStatus::Planned)
     );
-    assert!(plan.nodes.iter().any(
-        |node| node.operation_kind == "set_defaults" && node.status == NodeStatus::Blocked
-    ));
+    assert!(
+        plan.nodes
+            .iter()
+            .any(|node| node.operation_kind == PlanOperationKind::SetDefaults
+                && node.status == NodeStatus::Blocked)
+    );
 }
 
 #[test]
@@ -546,7 +551,7 @@ fn container_remux_blocks_when_source_snapshot_has_attachment_streams() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -573,7 +578,7 @@ fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -594,7 +599,7 @@ fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -614,7 +619,7 @@ fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -638,7 +643,7 @@ fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -655,7 +660,7 @@ fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -676,7 +681,7 @@ fn track_remux_defaults_none_no_ops_when_target_track_kind_is_absent() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -697,7 +702,7 @@ fn track_remux_defaults_preserve_no_ops_when_target_track_kind_is_absent() {
     ))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -717,7 +722,7 @@ fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -746,7 +751,7 @@ fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -762,7 +767,10 @@ fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "reorder_tracks");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::ReorderTracks
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -778,7 +786,7 @@ fn track_remux_container_only_blocks_when_stream_facts_have_no_video() {
 
     let plan = generate_plan(request(policy, snapshot_mp4_with_audio_only_stream_facts())).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code,
@@ -798,7 +806,7 @@ fn set_container_plans_non_mkv_snapshot() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(
         plan.nodes[0].status_reason,
@@ -822,7 +830,10 @@ fn set_container_plans_non_mkv_snapshot() {
         })
     );
     assert_eq!(plan.summary.executable_node_count, 1);
-    assert_eq!(plan.summary.operation_counts_by_kind["remux"], 1);
+    assert_eq!(
+        plan.summary.operation_counts_by_kind[&PlanOperationKind::Remux],
+        1
+    );
 }
 
 #[test]
@@ -838,7 +849,7 @@ fn set_container_plan_nodes_carry_structured_observed_container_when_known() {
     let node = plan
         .nodes
         .iter()
-        .find(|node| node.operation_kind == "remux")
+        .find(|node| node.operation_kind == PlanOperationKind::Remux)
         .unwrap();
 
     assert_eq!(
@@ -860,7 +871,7 @@ fn set_container_plan_nodes_leave_observed_state_absent_when_unknown() {
     let node = plan
         .nodes
         .iter()
-        .find(|node| node.operation_kind == "remux")
+        .find(|node| node.operation_kind == PlanOperationKind::Remux)
         .unwrap();
 
     assert_eq!(node.status, NodeStatus::Blocked);
@@ -916,7 +927,10 @@ fn transcode_video_plans_non_hevc_or_non_mkv_single_video_snapshot() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(plan.nodes[0].operation_payload["target_codec"], "hevc");
     assert_eq!(plan.nodes[0].operation_payload["container"], "mkv");
@@ -939,7 +953,10 @@ fn transcode_video_no_ops_hevc_mkv_single_video_snapshot() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
 }
 
@@ -952,7 +969,10 @@ fn transcode_video_no_ops_h265_mkv_single_video_snapshot() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
 }
 
@@ -1108,7 +1128,7 @@ fn plan_transcode_with_container(
 }
 
 fn node_status(plan: &crate::ExecutionPlan) -> NodeStatus {
-    plan.nodes[0].status.clone()
+    plan.nodes[0].status
 }
 
 fn blocked_reason(plan: &crate::ExecutionPlan) -> &str {
@@ -1281,7 +1301,10 @@ fn transcode_audio_plans_selected_aac_audio_to_opus() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(plan.nodes[0].operation_payload["type"], "transcode_audio");
     assert_eq!(plan.nodes[0].operation_payload["target_codec"], "opus");
@@ -1307,7 +1330,10 @@ fn transcode_audio_no_ops_selected_opus_audio_in_mkv() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
 }
 
@@ -1319,7 +1345,10 @@ fn transcode_audio_blocks_when_selector_matches_zero_audio_streams() {
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].operation_kind.as_deref(),
@@ -1338,7 +1367,10 @@ fn extract_audio_where_commentary_plans_for_exactly_one_known_commentary_stream(
     )))
     .unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::ExtractAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
     assert_eq!(plan.nodes[0].operation_payload["type"], "extract_audio");
     assert_eq!(plan.nodes[0].operation_payload["target_codec"], "opus");
@@ -1374,7 +1406,10 @@ fn extract_audio_where_commentary_blocks_on_zero_multiple_or_unknown_commentary(
 fn assert_extract_audio_blocked(snapshot: MediaSnapshotInput) {
     let plan = generate_plan(request_with_extract_audio(snapshot)).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::ExtractAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(plan.summary.blocked_node_count, 1);
 }
@@ -1382,7 +1417,10 @@ fn assert_extract_audio_blocked(snapshot: MediaSnapshotInput) {
 fn assert_transcode_blocked(snapshot: MediaSnapshotInput) {
     let plan = generate_plan(request_with_transcode(snapshot)).unwrap();
 
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(plan.summary.blocked_node_count, 1);
     assert_eq!(plan.diagnostics.len(), 1);
@@ -1512,7 +1550,10 @@ fn unresolved_phase_run_if_blocks_phase_operations() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::SetContainer
+    );
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
@@ -1557,7 +1598,10 @@ fn unresolved_condition_emits_blocked_node_for_nested_operation() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::SetContainer
+    );
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
@@ -1578,7 +1622,7 @@ fn track_operations_block_when_snapshot_stream_facts_are_missing() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.summary.blocked_node_count, 1);
     assert_eq!(plan.diagnostics.len(), 1);
     assert_eq!(
@@ -1598,7 +1642,7 @@ fn tag_operations_emit_blocked_nodes_instead_of_disappearing() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "clear_tags");
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::ClearTags);
     assert_eq!(plan.summary.blocked_node_count, 1);
     assert_eq!(plan.diagnostics.len(), 1);
 }
@@ -1688,7 +1732,10 @@ fn missing_condition_field_blocks_nested_operation() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::SetContainer
+    );
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
@@ -1717,7 +1764,10 @@ fn unsupported_condition_comparison_blocks_nested_operation() {
 
     assert_eq!(plan.nodes.len(), 1);
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(plan.nodes[0].operation_kind, "set_container");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::SetContainer
+    );
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
         "insufficient_snapshot_facts"
@@ -1749,7 +1799,10 @@ fn rules_first_uses_first_matching_rule_only() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
 }
 
@@ -1777,9 +1830,12 @@ fn rules_all_preserves_matching_rule_order() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 2);
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
-    assert_eq!(plan.nodes[1].operation_kind, "clear_tags");
+    assert_eq!(plan.nodes[1].operation_kind, PlanOperationKind::ClearTags);
     assert_eq!(plan.nodes[1].status, NodeStatus::Blocked);
 }
 
@@ -1802,7 +1858,10 @@ fn rules_unknown_condition_blocks_nested_leaf_operation() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert_eq!(
         plan.diagnostics[0].code.as_str(),
@@ -1935,7 +1994,10 @@ fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
     .unwrap();
 
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::ExtractAudio
+    );
     assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
     assert!(
         plan.diagnostics

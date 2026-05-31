@@ -9,9 +9,9 @@ use voom_policy::{
 
 use crate::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
-    NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext, PlanningDiagnostic,
-    PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
-    SchedulingHints, TargetRef,
+    NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary, PlanningContext,
+    PlanningDiagnostic, PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates,
+    SafetyHints, SchedulingHints, TargetRef,
     audio::{
         AudioOperationPayload, AudioOperationType, AudioPlanShape, AudioPlanningBlock,
         extract_audio_shape, selected_audio_streams, transcode_audio_shape,
@@ -441,7 +441,7 @@ impl<'a> PlanBuilder<'a> {
             phase_name,
             checked_ordinal(self.nodes.len()),
             snapshot,
-            "remux",
+            PlanOperationKind::Remux,
             payload,
             observed_state,
             status,
@@ -460,7 +460,7 @@ impl<'a> PlanBuilder<'a> {
         self.diagnostics.push(
             PlanningDiagnostic::error(code, message)
                 .with_phase(phase_name)
-                .with_operation_kind("remux")
+                .with_operation_kind(PlanOperationKind::Remux.as_str())
                 .with_target(snapshot.target.clone()),
         );
     }
@@ -491,7 +491,7 @@ impl<'a> PlanBuilder<'a> {
                         message,
                     )
                     .with_phase(phase_name)
-                    .with_operation_kind("set_container")
+                    .with_operation_kind(PlanOperationKind::SetContainer.as_str())
                     .with_target(snapshot.target.clone()),
                 );
                 (NodeStatus::Blocked, message.to_owned(), None)
@@ -502,7 +502,7 @@ impl<'a> PlanBuilder<'a> {
             phase_name,
             ordinal,
             snapshot,
-            "set_container",
+            PlanOperationKind::SetContainer,
             json!({ "container": container }),
             snapshot
                 .container
@@ -571,7 +571,7 @@ impl<'a> PlanBuilder<'a> {
             phase_name,
             checked_ordinal(self.nodes.len()),
             snapshot,
-            "transcode_video",
+            PlanOperationKind::TranscodeVideo,
             payload,
             observed_state,
             status,
@@ -587,7 +587,7 @@ impl<'a> PlanBuilder<'a> {
         let diagnostic =
             PlanningDiagnostic::error(PlanningDiagnosticCode::InvalidPlanningRequest, message)
                 .with_phase(phase_name)
-                .with_operation_kind("transcode_video")
+                .with_operation_kind(PlanOperationKind::TranscodeVideo.as_str())
                 .with_target(snapshot.target.clone());
         match &mut self.fatal {
             Some(fatal) => fatal.diagnostics.push(diagnostic),
@@ -609,7 +609,7 @@ impl<'a> PlanBuilder<'a> {
         self.diagnostics.push(
             PlanningDiagnostic::error(code, message)
                 .with_phase(phase_name)
-                .with_operation_kind("transcode_video")
+                .with_operation_kind(PlanOperationKind::TranscodeVideo.as_str())
                 .with_target(snapshot.target.clone()),
         );
     }
@@ -622,7 +622,7 @@ impl<'a> PlanBuilder<'a> {
         container: &str,
         filter: Option<&TrackFilter>,
     ) {
-        let operation_kind = "transcode_audio";
+        let operation_kind = PlanOperationKind::TranscodeAudio;
         let payload = AudioOperationPayload {
             operation_type: AudioOperationType::TranscodeAudio,
             target_codec: target_codec.to_owned(),
@@ -672,7 +672,7 @@ impl<'a> PlanBuilder<'a> {
         container: &str,
         filter: Option<&TrackFilter>,
     ) {
-        let operation_kind = "extract_audio";
+        let operation_kind = PlanOperationKind::ExtractAudio;
         let payload = AudioOperationPayload {
             operation_type: AudioOperationType::ExtractAudio,
             target_codec: target_codec.to_owned(),
@@ -718,13 +718,13 @@ impl<'a> PlanBuilder<'a> {
         code: PlanningDiagnosticCode,
         phase_name: &str,
         snapshot: &MediaSnapshotInput,
-        operation_kind: &str,
+        operation_kind: PlanOperationKind,
         message: &str,
     ) {
         self.diagnostics.push(
             PlanningDiagnostic::error(code, message)
                 .with_phase(phase_name)
-                .with_operation_kind(operation_kind)
+                .with_operation_kind(operation_kind.as_str())
                 .with_target(snapshot.target.clone()),
         );
     }
@@ -740,7 +740,7 @@ impl<'a> PlanBuilder<'a> {
         self.diagnostics.push(
             PlanningDiagnostic::error(PlanningDiagnosticCode::InsufficientSnapshotFacts, message)
                 .with_phase(phase_name)
-                .with_operation_kind(operation_kind)
+                .with_operation_kind(operation_kind.as_str())
                 .with_target(snapshot.target.clone()),
         );
         self.nodes.push(make_node(
@@ -760,7 +760,7 @@ impl<'a> PlanBuilder<'a> {
         &mut self,
         phase_name: &str,
         snapshot: &MediaSnapshotInput,
-        operation_kind: &str,
+        operation_kind: PlanOperationKind,
         payload: serde_json::Value,
         message: &str,
     ) {
@@ -770,7 +770,7 @@ impl<'a> PlanBuilder<'a> {
                 message,
             )
             .with_phase(phase_name)
-            .with_operation_kind(operation_kind)
+            .with_operation_kind(operation_kind.as_str())
             .with_target(snapshot.target.clone()),
         );
         self.nodes.push(make_node(
@@ -790,14 +790,14 @@ impl<'a> PlanBuilder<'a> {
         &mut self,
         phase_name: &str,
         snapshot: &MediaSnapshotInput,
-        operation_kind: &str,
+        operation_kind: PlanOperationKind,
         payload: serde_json::Value,
         message: &str,
     ) {
         self.diagnostics.push(
             PlanningDiagnostic::error(PlanningDiagnosticCode::UnsupportedMediaShape, message)
                 .with_phase(phase_name)
-                .with_operation_kind(operation_kind)
+                .with_operation_kind(operation_kind.as_str())
                 .with_target(snapshot.target.clone()),
         );
         self.nodes.push(make_node(
@@ -1016,13 +1016,13 @@ fn append_blocked_insufficient_operations<'a>(
     }
 }
 
-fn remux_candidate_kind(operation: &CompiledOperation) -> Option<&'static str> {
+fn remux_candidate_kind(operation: &CompiledOperation) -> Option<PlanOperationKind> {
     match operation {
-        CompiledOperation::SetContainer { .. } => Some("set_container"),
-        CompiledOperation::KeepTracks { .. } => Some("keep_tracks"),
-        CompiledOperation::RemoveTracks { .. } => Some("remove_tracks"),
-        CompiledOperation::ReorderTracks { .. } => Some("reorder_tracks"),
-        CompiledOperation::SetDefaults { .. } => Some("set_defaults"),
+        CompiledOperation::SetContainer { .. } => Some(PlanOperationKind::SetContainer),
+        CompiledOperation::KeepTracks { .. } => Some(PlanOperationKind::KeepTracks),
+        CompiledOperation::RemoveTracks { .. } => Some(PlanOperationKind::RemoveTracks),
+        CompiledOperation::ReorderTracks { .. } => Some(PlanOperationKind::ReorderTracks),
+        CompiledOperation::SetDefaults { .. } => Some(PlanOperationKind::SetDefaults),
         _ => None,
     }
 }
@@ -1685,7 +1685,7 @@ fn audio_observed_state(
 
 fn audio_block_diagnostic(
     block: AudioPlanningBlock,
-    operation_kind: &str,
+    operation_kind: PlanOperationKind,
 ) -> (PlanningDiagnosticCode, &'static str) {
     match block {
         AudioPlanningBlock::InsufficientSnapshotFacts => (
@@ -1698,7 +1698,7 @@ fn audio_block_diagnostic(
         ),
         AudioPlanningBlock::ZeroMatches => (
             PlanningDiagnosticCode::UnsupportedMediaShape,
-            if operation_kind == "extract_audio" {
+            if operation_kind == PlanOperationKind::ExtractAudio {
                 "extract_audio selector matched zero audio streams"
             } else {
                 "transcode_audio selector matched zero audio streams"
@@ -2001,7 +2001,7 @@ fn make_node(
     phase_name: &str,
     ordinal: u32,
     snapshot: &MediaSnapshotInput,
-    operation_kind: &str,
+    operation_kind: PlanOperationKind,
     operation_payload: serde_json::Value,
     observed_state: Option<serde_json::Value>,
     status: NodeStatus,
@@ -2014,11 +2014,11 @@ fn make_node(
         ..SchedulingHints::default()
     };
     PlanNode {
-        node_id: node_id(phase_name, ordinal, operation_kind, &target_key),
+        node_id: node_id(phase_name, ordinal, operation_kind.as_str(), &target_key),
         phase_name: phase_name.to_owned(),
         ordinal,
         target: snapshot.target.clone(),
-        operation_kind: operation_kind.to_owned(),
+        operation_kind,
         operation_payload,
         observed_state,
         status,
@@ -2049,7 +2049,7 @@ fn summarize_nodes(nodes: &[PlanNode]) -> PlanSummary {
         target_keys.insert(target_key(&node.target));
         *summary
             .operation_counts_by_kind
-            .entry(node.operation_kind.clone())
+            .entry(node.operation_kind)
             .or_insert(0) += 1;
     }
 
@@ -2101,22 +2101,22 @@ fn build_phase_edges(policy: &CompiledPolicy, nodes: &[PlanNode]) -> Vec<Edge> {
     edges
 }
 
-fn operation_kind(operation: &CompiledOperation) -> &'static str {
+fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
     match operation {
-        CompiledOperation::SetContainer { .. } => "set_container",
-        CompiledOperation::KeepTracks { .. } => "keep_tracks",
-        CompiledOperation::RemoveTracks { .. } => "remove_tracks",
-        CompiledOperation::ReorderTracks { .. } => "reorder_tracks",
-        CompiledOperation::SetDefaults { .. } => "set_defaults",
-        CompiledOperation::ClearTrackActions { .. } => "clear_track_actions",
-        CompiledOperation::ClearTags => "clear_tags",
-        CompiledOperation::SetTag { .. } => "set_tag",
-        CompiledOperation::DeleteTag { .. } => "delete_tag",
-        CompiledOperation::TranscodeVideo { .. } => "transcode_video",
-        CompiledOperation::TranscodeAudio { .. } => "transcode_audio",
-        CompiledOperation::ExtractAudio { .. } => "extract_audio",
-        CompiledOperation::Conditional { .. } => "conditional",
-        CompiledOperation::Rules { .. } => "rules",
+        CompiledOperation::SetContainer { .. } => PlanOperationKind::SetContainer,
+        CompiledOperation::KeepTracks { .. } => PlanOperationKind::KeepTracks,
+        CompiledOperation::RemoveTracks { .. } => PlanOperationKind::RemoveTracks,
+        CompiledOperation::ReorderTracks { .. } => PlanOperationKind::ReorderTracks,
+        CompiledOperation::SetDefaults { .. } => PlanOperationKind::SetDefaults,
+        CompiledOperation::ClearTrackActions { .. } => PlanOperationKind::ClearTrackActions,
+        CompiledOperation::ClearTags => PlanOperationKind::ClearTags,
+        CompiledOperation::SetTag { .. } => PlanOperationKind::SetTag,
+        CompiledOperation::DeleteTag { .. } => PlanOperationKind::DeleteTag,
+        CompiledOperation::TranscodeVideo { .. } => PlanOperationKind::TranscodeVideo,
+        CompiledOperation::TranscodeAudio { .. } => PlanOperationKind::TranscodeAudio,
+        CompiledOperation::ExtractAudio { .. } => PlanOperationKind::ExtractAudio,
+        CompiledOperation::Conditional { .. } => PlanOperationKind::Conditional,
+        CompiledOperation::Rules { .. } => PlanOperationKind::Rules,
     }
 }
 

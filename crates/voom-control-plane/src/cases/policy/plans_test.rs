@@ -1,3 +1,4 @@
+use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 
 use super::*;
@@ -132,7 +133,7 @@ async fn dry_run_known_named_profile_resolves_default_hevc_before_planning() {
     let node = plan
         .nodes
         .iter()
-        .find(|node| node.operation_kind == "transcode_video")
+        .find(|node| node.operation_kind == PlanOperationKind::TranscodeVideo)
         .unwrap();
     assert_eq!(node.status, voom_plan::NodeStatus::Planned);
     assert_eq!(node.operation_payload["profile"], "default-hevc");

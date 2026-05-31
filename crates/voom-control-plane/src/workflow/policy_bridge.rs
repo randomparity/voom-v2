@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use voom_core::VoomError;
-use voom_plan::{ExecutionPlan, NodeStatus};
+use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind};
 use voom_worker_protocol::OperationKind;
 
 use super::{
@@ -24,7 +24,7 @@ pub struct PolicyExecutionSummary {
     pub blocked_count: u32,
     pub dispatch_count: u64,
     pub failure_count: u64,
-    pub per_operation: BTreeMap<String, u64>,
+    pub per_operation: BTreeMap<PlanOperationKind, u64>,
 }
 
 pub fn workflow_plan_from_compliance(
@@ -48,18 +48,7 @@ pub fn workflow_plan_from_compliance(
     for node in &plan.nodes {
         match node.status {
             NodeStatus::Planned => {
-                let operation = match node.operation_kind.as_str() {
-                    "remux" => OperationKind::Remux,
-                    "transcode_video" => OperationKind::TranscodeVideo,
-                    "transcode_audio" => OperationKind::TranscodeAudio,
-                    "extract_audio" => OperationKind::ExtractAudio,
-                    _ => {
-                        return Err(VoomError::PolicyExecution(format!(
-                            "unsupported execution operation {}",
-                            node.operation_kind
-                        )));
-                    }
-                };
+                let operation = execution_operation(node.operation_kind)?;
                 let workflow_node_id = format!("policy-node_{}", node.node_id);
                 workflow_node_ids_by_plan_node_id
                     .insert(node.node_id.clone(), workflow_node_id.clone());
@@ -75,7 +64,7 @@ pub fn workflow_plan_from_compliance(
                 summary.submitted_node_count += 1;
                 *summary
                     .per_operation
-                    .entry(node.operation_kind.clone())
+                    .entry(node.operation_kind)
                     .or_insert(0) += 1;
             }
             NodeStatus::NoOp => summary.skipped_no_op_count += 1,
@@ -104,6 +93,18 @@ pub fn workflow_plan_from_compliance(
     };
 
     Ok(PolicyExecutionPlan { workflow, summary })
+}
+
+fn execution_operation(operation_kind: PlanOperationKind) -> Result<OperationKind, VoomError> {
+    match operation_kind {
+        PlanOperationKind::Remux => Ok(OperationKind::Remux),
+        PlanOperationKind::TranscodeVideo => Ok(OperationKind::TranscodeVideo),
+        PlanOperationKind::TranscodeAudio => Ok(OperationKind::TranscodeAudio),
+        PlanOperationKind::ExtractAudio => Ok(OperationKind::ExtractAudio),
+        _ => Err(VoomError::PolicyExecution(format!(
+            "unsupported execution operation {operation_kind}"
+        ))),
+    }
 }
 
 fn apply_plan_dependencies(

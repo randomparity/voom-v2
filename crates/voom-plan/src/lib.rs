@@ -31,8 +31,9 @@ pub use fixtures::{GoldenPlanFixtureError, load_golden_compliance_report, load_g
 pub use hash::{edge_id, node_id, plan_hash, plan_id};
 pub use model::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, Estimate, ExecutionPlan,
-    InputIdentity, NodeStatus, PlanNode, PlanProvenance, PlanSummary, PlanningContext,
-    PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints, TargetRef,
+    InputIdentity, NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary,
+    PlanningContext, PlanningRequest, PolicyIdentity, ResourceEstimates, SafetyHints,
+    SchedulingHints, TargetRef,
 };
 pub use planner::{PlanGenerationError, generate_plan, plan_phase, video_stream_field};
 pub use transcode_video_profile::{cpu_cost, inline_profile_id};

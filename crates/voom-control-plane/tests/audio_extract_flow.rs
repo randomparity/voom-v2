@@ -13,6 +13,7 @@ use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
 use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{BundleId, FileAssetId, FileVersionId, MediaSnapshotId};
+use voom_plan::PlanOperationKind;
 use voom_store::repo::bundles::{
     BundleMemberRole, BundleRepo, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
 };
@@ -94,7 +95,10 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
         .await
         .unwrap();
     assert_eq!(plan.plan.nodes.len(), 1);
-    assert_eq!(plan.plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(
+        plan.plan.nodes[0].operation_kind,
+        PlanOperationKind::ExtractAudio
+    );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
 
     let mut worker = ExtractAudioWorkerLaunch::start(&cp).await.unwrap();
@@ -160,7 +164,10 @@ async fn audio_extract_multi_match_blocks_before_sidecar_commit() {
         .unwrap();
 
     assert_eq!(plan.plan.nodes.len(), 1);
-    assert_eq!(plan.plan.nodes[0].operation_kind, "extract_audio");
+    assert_eq!(
+        plan.plan.nodes[0].operation_kind,
+        PlanOperationKind::ExtractAudio
+    );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Blocked);
     assert!(
         plan.plan.nodes[0]

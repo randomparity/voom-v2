@@ -6,7 +6,7 @@ use crate::{
     CheckStatus, ComplianceCheck, ComplianceDiagnostic, ComplianceDiagnosticCode,
     ComplianceDiagnosticSeverity, ComplianceInputIdentity, CompliancePolicyIdentity,
     ComplianceProvenance, ComplianceReport, ComplianceSummary, ExecutionEligibility, ExecutionPlan,
-    IssueActionHint, NodeStatus, PlanNode, ReportStatus,
+    IssueActionHint, NodeStatus, PlanNode, PlanOperationKind, ReportStatus,
 };
 
 #[derive(Debug)]
@@ -97,12 +97,12 @@ fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck
         check_id: crate::compliance_hash::check_id(
             report_id_preimage,
             &node.node_id,
-            &node.operation_kind,
+            node.operation_kind.as_str(),
         ),
         node_id: node.node_id.clone(),
         target: node.target.clone(),
         compliance_kind: compliance_kind(node).to_owned(),
-        operation_kind: node.operation_kind.clone(),
+        operation_kind: node.operation_kind,
         desired_state: node.operation_payload.clone(),
         observed_state: node.observed_state.clone(),
         check_status: check_status(node),
@@ -113,11 +113,13 @@ fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck
 }
 
 fn compliance_kind(node: &PlanNode) -> &'static str {
-    match (&node.status, node.operation_kind.as_str()) {
-        (_, "remux") | (NodeStatus::NoOp, "set_container") => "container",
-        (_, "transcode_video") => "transcode_video",
-        (_, "transcode_audio") => "transcode_audio",
-        (_, "extract_audio") => "extract_audio",
+    match (node.status, node.operation_kind) {
+        (_, PlanOperationKind::Remux) | (NodeStatus::NoOp, PlanOperationKind::SetContainer) => {
+            "container"
+        }
+        (_, PlanOperationKind::TranscodeVideo) => "transcode_video",
+        (_, PlanOperationKind::TranscodeAudio) => "transcode_audio",
+        (_, PlanOperationKind::ExtractAudio) => "extract_audio",
         _ => "unsupported",
     }
 }
@@ -131,30 +133,42 @@ fn check_status(node: &PlanNode) -> CheckStatus {
 }
 
 fn issue_action_hint(node: &PlanNode) -> IssueActionHint {
-    match (&node.status, node.operation_kind.as_str()) {
+    match (node.status, node.operation_kind) {
         (NodeStatus::NoOp, _) => IssueActionHint::ResolveMatching,
         (
             NodeStatus::Planned,
-            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+            PlanOperationKind::Remux
+            | PlanOperationKind::TranscodeVideo
+            | PlanOperationKind::TranscodeAudio
+            | PlanOperationKind::ExtractAudio,
         ) => IssueActionHint::CreateOrUpdatePlanned,
         (
             NodeStatus::Blocked,
-            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+            PlanOperationKind::Remux
+            | PlanOperationKind::TranscodeVideo
+            | PlanOperationKind::TranscodeAudio
+            | PlanOperationKind::ExtractAudio,
         ) => IssueActionHint::CreateOrUpdateOpen,
         _ => IssueActionHint::None,
     }
 }
 
 fn execution_eligibility(node: &PlanNode) -> ExecutionEligibility {
-    match (&node.status, node.operation_kind.as_str()) {
+    match (node.status, node.operation_kind) {
         (
             NodeStatus::Planned,
-            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+            PlanOperationKind::Remux
+            | PlanOperationKind::TranscodeVideo
+            | PlanOperationKind::TranscodeAudio
+            | PlanOperationKind::ExtractAudio,
         ) => ExecutionEligibility::Supported,
         (NodeStatus::NoOp, _) => ExecutionEligibility::NoOp,
         (
             NodeStatus::Blocked,
-            "remux" | "transcode_video" | "transcode_audio" | "extract_audio",
+            PlanOperationKind::Remux
+            | PlanOperationKind::TranscodeVideo
+            | PlanOperationKind::TranscodeAudio
+            | PlanOperationKind::ExtractAudio,
         ) => ExecutionEligibility::Blocked,
         _ => ExecutionEligibility::Unsupported,
     }
@@ -198,7 +212,7 @@ fn summarize_checks(checks: &[ComplianceCheck]) -> ComplianceSummary {
     for check in checks {
         *summary
             .operation_counts_by_kind
-            .entry(check.operation_kind.clone())
+            .entry(check.operation_kind)
             .or_insert(0) += 1;
         match check.check_status {
             CheckStatus::Compliant => summary.compliant_check_count += 1,

@@ -14,6 +14,7 @@ use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
 use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
+use voom_plan::PlanOperationKind;
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
@@ -81,7 +82,10 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
         .generate_compliance_report(policy.version.id, input.id)
         .await
         .unwrap();
-    assert_eq!(plan.plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();

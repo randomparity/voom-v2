@@ -1,8 +1,8 @@
 use serde_json::json;
 use voom_plan::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
-    NodeStatus, PlanNode, PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates,
-    SafetyHints, SchedulingHints,
+    NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary, PolicyIdentity,
+    ResourceEstimates, SafetyHints, SchedulingHints,
 };
 use voom_policy::TargetRef;
 use voom_worker_protocol::OperationKind;
@@ -11,7 +11,7 @@ use super::*;
 
 #[test]
 fn bridge_maps_planned_remux_with_policy_target_and_payload() {
-    let plan = plan(vec![node("remux", NodeStatus::Planned)]);
+    let plan = plan(vec![node(PlanOperationKind::Remux, NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
@@ -30,12 +30,18 @@ fn bridge_maps_planned_remux_with_policy_target_and_payload() {
     assert_eq!(workflow.nodes[0].operation_payload()["type"], "remux");
     assert_eq!(workflow.nodes[0].operation_payload()["container"], "mkv");
     assert_eq!(execution.summary.submitted_node_count, 1);
-    assert_eq!(execution.summary.per_operation["remux"], 1);
+    assert_eq!(
+        execution.summary.per_operation[&PlanOperationKind::Remux],
+        1
+    );
 }
 
 #[test]
 fn bridge_rejects_legacy_planned_set_container() {
-    let plan = plan(vec![node("set_container", NodeStatus::Planned)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::SetContainer,
+        NodeStatus::Planned,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
@@ -50,8 +56,8 @@ fn bridge_rejects_legacy_planned_set_container() {
 #[test]
 fn bridge_counts_non_planned_remux_nodes_without_submission() {
     let plan = plan(vec![
-        node("remux", NodeStatus::NoOp),
-        node("remux", NodeStatus::Blocked),
+        node(PlanOperationKind::Remux, NodeStatus::NoOp),
+        node(PlanOperationKind::Remux, NodeStatus::Blocked),
     ]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
@@ -65,7 +71,10 @@ fn bridge_counts_non_planned_remux_nodes_without_submission() {
 
 #[test]
 fn bridge_returns_empty_summary_without_job_for_no_executable_nodes() {
-    let plan = plan(vec![node("set_container", NodeStatus::NoOp)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::SetContainer,
+        NodeStatus::NoOp,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
@@ -80,7 +89,10 @@ fn bridge_returns_empty_summary_without_job_for_no_executable_nodes() {
 
 #[test]
 fn bridge_rejects_planned_unsupported_operation_before_job_creation() {
-    let plan = plan(vec![node("unsupported_operation", NodeStatus::Planned)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::KeepTracks,
+        NodeStatus::Planned,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
@@ -88,20 +100,26 @@ fn bridge_rejects_planned_unsupported_operation_before_job_creation() {
     assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
     assert_eq!(
         err.to_string(),
-        "policy execution error: unsupported execution operation unsupported_operation"
+        "policy execution error: unsupported execution operation keep_tracks"
     );
 }
 
 #[test]
 fn bridge_maps_planned_transcode_video() {
-    let plan = plan(vec![node("transcode_video", NodeStatus::Planned)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::TranscodeVideo,
+        NodeStatus::Planned,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeVideo);
-    assert_eq!(bridged.summary.per_operation["transcode_video"], 1);
+    assert_eq!(
+        bridged.summary.per_operation[&PlanOperationKind::TranscodeVideo],
+        1
+    );
     assert_eq!(
         workflow.nodes[0].policy_target(),
         Some(&TargetRef::FileVersion {
@@ -116,14 +134,20 @@ fn bridge_maps_planned_transcode_video() {
 
 #[test]
 fn bridge_maps_planned_transcode_audio() {
-    let plan = plan(vec![node("transcode_audio", NodeStatus::Planned)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::TranscodeAudio,
+        NodeStatus::Planned,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeAudio);
-    assert_eq!(bridged.summary.per_operation["transcode_audio"], 1);
+    assert_eq!(
+        bridged.summary.per_operation[&PlanOperationKind::TranscodeAudio],
+        1
+    );
     assert_eq!(
         workflow.nodes[0].operation_payload()["type"],
         "transcode_audio"
@@ -132,14 +156,20 @@ fn bridge_maps_planned_transcode_audio() {
 
 #[test]
 fn bridge_maps_planned_extract_audio() {
-    let plan = plan(vec![node("extract_audio", NodeStatus::Planned)]);
+    let plan = plan(vec![node(
+        PlanOperationKind::ExtractAudio,
+        NodeStatus::Planned,
+    )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
     let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::ExtractAudio);
-    assert_eq!(bridged.summary.per_operation["extract_audio"], 1);
+    assert_eq!(
+        bridged.summary.per_operation[&PlanOperationKind::ExtractAudio],
+        1
+    );
     assert_eq!(
         workflow.nodes[0].operation_payload()["type"],
         "extract_audio"
@@ -151,10 +181,15 @@ fn bridge_preserves_plan_edges_between_included_planned_nodes() {
     let first = node_with_id(
         "node_remux_first",
         "normalize",
-        "remux",
+        PlanOperationKind::Remux,
         NodeStatus::Planned,
     );
-    let second = node_with_id("node_remux_second", "tracks", "remux", NodeStatus::Planned);
+    let second = node_with_id(
+        "node_remux_second",
+        "tracks",
+        PlanOperationKind::Remux,
+        NodeStatus::Planned,
+    );
     let plan = plan_with_edges(
         vec![first, second],
         vec![Edge {
@@ -179,8 +214,18 @@ fn bridge_preserves_plan_edges_between_included_planned_nodes() {
 
 #[test]
 fn bridge_omits_dependencies_to_skipped_nodes() {
-    let skipped = node_with_id("node_remux_noop", "normalize", "remux", NodeStatus::NoOp);
-    let planned = node_with_id("node_remux_planned", "tracks", "remux", NodeStatus::Planned);
+    let skipped = node_with_id(
+        "node_remux_noop",
+        "normalize",
+        PlanOperationKind::Remux,
+        NodeStatus::NoOp,
+    );
+    let planned = node_with_id(
+        "node_remux_planned",
+        "tracks",
+        PlanOperationKind::Remux,
+        NodeStatus::Planned,
+    );
     let plan = plan_with_edges(
         vec![skipped, planned],
         vec![Edge {
@@ -230,7 +275,7 @@ fn plan_with_edges(nodes: Vec<PlanNode>, edges: Vec<Edge>) -> ExecutionPlan {
     }
 }
 
-fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
+fn node(operation_kind: PlanOperationKind, status: NodeStatus) -> PlanNode {
     node_with_id(
         &format!("node_{operation_kind}_{status:?}"),
         "normalize",
@@ -242,7 +287,7 @@ fn node(operation_kind: &str, status: NodeStatus) -> PlanNode {
 fn node_with_id(
     node_id: &str,
     phase_name: &str,
-    operation_kind: &str,
+    operation_kind: PlanOperationKind,
     status: NodeStatus,
 ) -> PlanNode {
     PlanNode {
@@ -252,7 +297,7 @@ fn node_with_id(
         target: TargetRef::FileVersion {
             id: voom_core::FileVersionId(42),
         },
-        operation_kind: operation_kind.to_owned(),
+        operation_kind,
         operation_payload: operation_payload(operation_kind),
         observed_state: Some(json!({"container": "mp4"})),
         status,
@@ -265,28 +310,28 @@ fn node_with_id(
     }
 }
 
-fn operation_payload(operation_kind: &str) -> serde_json::Value {
+fn operation_payload(operation_kind: PlanOperationKind) -> serde_json::Value {
     match operation_kind {
-        "remux" => json!({
+        PlanOperationKind::Remux => json!({
             "type": "remux",
             "container": "mkv",
             "track_actions": [],
             "track_order": ["video", "audio", "subtitle"],
             "defaults": []
         }),
-        "transcode_video" => json!({
+        PlanOperationKind::TranscodeVideo => json!({
             "type": "transcode_video",
             "target_codec": "hevc",
             "container": "mkv",
             "profile": "default-hevc"
         }),
-        "transcode_audio" => json!({
+        PlanOperationKind::TranscodeAudio => json!({
             "type": "transcode_audio",
             "target_codec": "opus",
             "container": "mkv",
             "source_media_snapshot_id": 99
         }),
-        "extract_audio" => json!({
+        PlanOperationKind::ExtractAudio => json!({
             "type": "extract_audio",
             "target_codec": "opus",
             "container": "ogg",

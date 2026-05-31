@@ -13,6 +13,7 @@ use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
 use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
+use voom_plan::PlanOperationKind;
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
@@ -90,7 +91,7 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
         .await
         .unwrap();
     assert_eq!(plan.plan.nodes.len(), 1);
-    assert_eq!(plan.plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
     assert_eq!(
         plan.plan.nodes[0].operation_payload["source_media_snapshot_id"],

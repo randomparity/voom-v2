@@ -2,7 +2,8 @@ use serde_json::json;
 
 use crate::{
     ArtifactExpectations, CapabilityHints, ExecutionPlan, InputIdentity, NodeStatus, PlanNode,
-    PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates, SafetyHints, SchedulingHints,
+    PlanOperationKind, PlanProvenance, PlanSummary, PolicyIdentity, ResourceEstimates, SafetyHints,
+    SchedulingHints,
 };
 
 use super::*;
@@ -16,7 +17,7 @@ fn target() -> crate::TargetRef {
 
 fn node(
     status: NodeStatus,
-    operation_kind: &str,
+    operation_kind: PlanOperationKind,
     observed_state: Option<serde_json::Value>,
 ) -> PlanNode {
     PlanNode {
@@ -24,7 +25,7 @@ fn node(
         phase_name: "normalize".to_owned(),
         ordinal: 0,
         target: target(),
-        operation_kind: operation_kind.to_owned(),
+        operation_kind,
         operation_payload: json!({"container": "mkv"}),
         observed_state,
         status,
@@ -50,7 +51,7 @@ fn transcode_node(status: NodeStatus) -> PlanNode {
             "video_codec": "h264",
             "video_stream_count": 1
         })),
-        ..node(status, "transcode_video", None)
+        ..node(status, PlanOperationKind::TranscodeVideo, None)
     }
 }
 
@@ -67,7 +68,7 @@ fn transcode_audio_node(status: NodeStatus) -> PlanNode {
             "audio_codec": "aac",
             "selected_audio_stream_count": 1
         })),
-        ..node(status, "transcode_audio", None)
+        ..node(status, PlanOperationKind::TranscodeAudio, None)
     }
 }
 
@@ -82,7 +83,7 @@ fn extract_audio_node(status: NodeStatus) -> PlanNode {
         observed_state: Some(json!({
             "selected_audio_stream_count": 1
         })),
-        ..node(status, "extract_audio", None)
+        ..node(status, PlanOperationKind::ExtractAudio, None)
     }
 }
 
@@ -96,7 +97,7 @@ fn remux_node(status: NodeStatus) -> PlanNode {
             "defaults": []
         }),
         observed_state: Some(json!({"container": "mp4"})),
-        ..node(status, "remux", None)
+        ..node(status, PlanOperationKind::Remux, None)
     }
 }
 
@@ -131,7 +132,7 @@ fn plan(nodes: Vec<PlanNode>) -> ExecutionPlan {
 fn no_op_node_maps_to_compliant_check_and_report() {
     let report = generate_compliance_report(&plan(vec![node(
         NodeStatus::NoOp,
-        "set_container",
+        PlanOperationKind::SetContainer,
         Some(json!({"container": "mkv"})),
     )]))
     .unwrap();
@@ -152,7 +153,7 @@ fn no_op_node_maps_to_compliant_check_and_report() {
 fn legacy_set_container_planned_node_maps_to_unsupported_check() {
     let report = generate_compliance_report(&plan(vec![node(
         NodeStatus::Planned,
-        "set_container",
+        PlanOperationKind::SetContainer,
         Some(json!({"container": "mp4"})),
     )]))
     .unwrap();
@@ -188,7 +189,7 @@ fn legacy_set_container_planned_node_maps_to_unsupported_check() {
 fn legacy_set_container_blocked_node_maps_to_unsupported_check() {
     let report = generate_compliance_report(&plan(vec![node(
         NodeStatus::Blocked,
-        "set_container",
+        PlanOperationKind::SetContainer,
         None,
     )]))
     .unwrap();
@@ -312,10 +313,10 @@ fn planned_plus_blocked_maps_to_mixed_report() {
     let report = generate_compliance_report(&plan(vec![
         node(
             NodeStatus::Planned,
-            "set_container",
+            PlanOperationKind::SetContainer,
             Some(json!({"container": "mp4"})),
         ),
-        node(NodeStatus::Blocked, "set_container", None),
+        node(NodeStatus::Blocked, PlanOperationKind::SetContainer, None),
     ]))
     .unwrap();
 
@@ -336,13 +337,13 @@ fn empty_plan_maps_to_not_applicable_report() {
 fn identical_plans_produce_identical_report_id_and_hash() {
     let left = generate_compliance_report(&plan(vec![node(
         NodeStatus::Planned,
-        "set_container",
+        PlanOperationKind::SetContainer,
         Some(json!({"container": "mp4"})),
     )]))
     .unwrap();
     let right = generate_compliance_report(&plan(vec![node(
         NodeStatus::Planned,
-        "set_container",
+        PlanOperationKind::SetContainer,
         Some(json!({"container": "mp4"})),
     )]))
     .unwrap();

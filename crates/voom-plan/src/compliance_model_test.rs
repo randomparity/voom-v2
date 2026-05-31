@@ -1,5 +1,7 @@
 use serde_json::json;
 
+use crate::PlanOperationKind;
+
 use super::*;
 
 #[test]
@@ -49,7 +51,7 @@ fn compliance_report_serializes_expected_public_shape() {
             noncompliant_check_count: 1,
             blocked_check_count: 0,
             executable_check_count: 1,
-            operation_counts_by_kind: [("set_container".to_owned(), 1)].into_iter().collect(),
+            operation_counts_by_kind: [(PlanOperationKind::SetContainer, 1)].into_iter().collect(),
         },
         checks: vec![ComplianceCheck {
             check_id: "check_test".to_owned(),
@@ -59,7 +61,7 @@ fn compliance_report_serializes_expected_public_shape() {
                 kind: voom_policy::TargetKind::MediaWork,
             },
             compliance_kind: "container".to_owned(),
-            operation_kind: "set_container".to_owned(),
+            operation_kind: PlanOperationKind::SetContainer,
             desired_state: json!({"container": "mkv"}),
             observed_state: Some(json!({"container": "mp4"})),
             check_status: CheckStatus::Noncompliant,
