@@ -1,11 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const REMUX_CONTAINER_MKV: &str = "mkv";
-
-#[must_use]
-pub fn is_supported_remux_container(container: &str) -> bool {
-    container.eq_ignore_ascii_case(REMUX_CONTAINER_MKV)
-}
+pub use voom_core::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,15 +36,6 @@ pub struct RemuxOutput {
     pub path: String,
     pub container: String,
     pub overwrite: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RemuxTrackGroup {
-    Video,
-    Audio,
-    Subtitle,
-    Attachment,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

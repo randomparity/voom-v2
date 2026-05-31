@@ -518,7 +518,7 @@ impl<'a> PlanBuilder<'a> {
         &mut self,
         phase_name: &str,
         snapshot: &MediaSnapshotInput,
-        resolved: &voom_worker_protocol::TranscodeVideoProfile,
+        resolved: &voom_core::TranscodeVideoProfile,
         container: &str,
     ) {
         let target_codec = &resolved.target_codec;
@@ -1175,12 +1175,12 @@ fn track_action_payload(
     }
 }
 
-fn remux_track_group(target: TrackTarget) -> voom_worker_protocol::RemuxTrackGroup {
+fn remux_track_group(target: TrackTarget) -> voom_core::RemuxTrackGroup {
     match target {
-        TrackTarget::Video => voom_worker_protocol::RemuxTrackGroup::Video,
-        TrackTarget::Audio => voom_worker_protocol::RemuxTrackGroup::Audio,
-        TrackTarget::Subtitle => voom_worker_protocol::RemuxTrackGroup::Subtitle,
-        TrackTarget::Attachment => voom_worker_protocol::RemuxTrackGroup::Attachment,
+        TrackTarget::Video => voom_core::RemuxTrackGroup::Video,
+        TrackTarget::Audio => voom_core::RemuxTrackGroup::Audio,
+        TrackTarget::Subtitle => voom_core::RemuxTrackGroup::Subtitle,
+        TrackTarget::Attachment => voom_core::RemuxTrackGroup::Attachment,
     }
 }
 
@@ -1386,7 +1386,7 @@ fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {
 
 fn transcode_video_shape(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
     target_container: &str,
 ) -> TranscodeVideoShape {
     let Some(video_stream_count) = video_stream_count(snapshot) else {
@@ -1420,7 +1420,7 @@ fn transcode_video_shape(
         Err(shape) => return shape,
     };
 
-    if target_container.eq_ignore_ascii_case(voom_worker_protocol::TRANSCODE_VIDEO_CONTAINER_MP4)
+    if target_container.eq_ignore_ascii_case(voom_core::TRANSCODE_VIDEO_CONTAINER_MP4)
         && let Some(shape) = mp4_gate_shape(snapshot)
     {
         return shape;
@@ -1438,7 +1438,7 @@ fn transcode_video_shape(
 /// constrained observable is unknown (`InsufficientFacts`).
 fn transcode_video_needs_change(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
     container: &str,
     video_codec: &str,
     target_container: &str,
@@ -1447,7 +1447,7 @@ fn transcode_video_needs_change(
 
     // Canonicalize the observed codec (e.g. the `h265` alias maps to `hevc`)
     // before comparing against the resolved target codec.
-    let codec_matches = voom_worker_protocol::canonical_video_codec(video_codec)
+    let codec_matches = voom_core::canonical_video_codec(video_codec)
         .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&resolved.target_codec));
     if !codec_matches {
         needs_change = true;
@@ -1466,7 +1466,7 @@ fn transcode_video_needs_change(
 
 fn dimensions_need_change(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
     let mut needs_change = false;
     if let Some(cap_w) = resolved.max_width {
@@ -1490,7 +1490,7 @@ fn dimensions_need_change(
 
 fn pixel_format_needs_change(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
     let Some(target) = resolved.pixel_format.as_deref() else {
         return Ok(false);
@@ -1505,7 +1505,7 @@ fn pixel_format_needs_change(
 
 fn codec_profile_needs_change(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
     let Some(target) = resolved.codec_profile.as_deref() else {
         return Ok(false);
@@ -1515,13 +1515,12 @@ fn codec_profile_needs_change(
             "snapshot video codec profile is unknown".to_owned(),
         ));
     };
-    Ok(voom_worker_protocol::normalize_codec_token(observed)
-        != voom_worker_protocol::normalize_codec_token(target))
+    Ok(voom_core::normalize_codec_token(observed) != voom_core::normalize_codec_token(target))
 }
 
 fn codec_level_needs_change(
     snapshot: &MediaSnapshotInput,
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
 ) -> Result<bool, TranscodeVideoShape> {
     let Some(target) = resolved.codec_level.as_deref() else {
         return Ok(false);
@@ -1531,8 +1530,7 @@ fn codec_level_needs_change(
             "snapshot video codec level is unknown".to_owned(),
         ));
     };
-    Ok(voom_worker_protocol::normalize_codec_token(observed)
-        != voom_worker_protocol::normalize_codec_token(target))
+    Ok(voom_core::normalize_codec_token(observed) != voom_core::normalize_codec_token(target))
 }
 
 /// MP4 muxability gate. Returns `Some(shape)` to block; `None` when every
@@ -1604,7 +1602,7 @@ pub fn video_stream_field<'a>(snapshot: &'a MediaSnapshotInput, key: &str) -> Op
 }
 
 fn transcode_video_payload(
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
     container: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
     Ok(json!({
@@ -1617,7 +1615,7 @@ fn transcode_video_payload(
 }
 
 fn transcode_video_notes(
-    resolved: &voom_worker_protocol::TranscodeVideoProfile,
+    resolved: &voom_core::TranscodeVideoProfile,
     snapshot: &MediaSnapshotInput,
 ) -> Vec<String> {
     let mut notes = vec![

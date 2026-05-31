@@ -712,7 +712,7 @@ impl<'a> Validator<'a> {
         let Some(encoder) = self.inline_required_str(span, &by_key, "encoder") else {
             return;
         };
-        let Some(descriptor) = voom_worker_protocol::encoder_descriptor(&encoder) else {
+        let Some(descriptor) = voom_core::encoder_descriptor(&encoder) else {
             self.error(
                 DiagnosticCode::InvalidVideoProfileSetting,
                 span,
@@ -778,7 +778,7 @@ impl<'a> Validator<'a> {
     fn validate_inline_crf_preset(
         &mut self,
         span: SourceSpan,
-        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        descriptor: &voom_core::EncoderDescriptor,
         by_key: &BTreeMap<&str, &ExprAst>,
     ) {
         if let Some(crf) = self.inline_required_str(span, by_key, "crf") {
@@ -808,7 +808,7 @@ impl<'a> Validator<'a> {
     fn validate_inline_optionals(
         &mut self,
         span: SourceSpan,
-        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        descriptor: &voom_core::EncoderDescriptor,
         by_key: &BTreeMap<&str, &ExprAst>,
     ) {
         let tune = self.inline_optional_str(span, by_key, "tune");
@@ -860,7 +860,7 @@ impl<'a> Validator<'a> {
     fn validate_inline_pixel_format(
         &mut self,
         span: SourceSpan,
-        descriptor: &voom_worker_protocol::EncoderDescriptor,
+        descriptor: &voom_core::EncoderDescriptor,
         pixel_format: Option<&str>,
         codec_profile: Option<&str>,
     ) {

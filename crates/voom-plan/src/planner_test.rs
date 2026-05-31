@@ -232,7 +232,7 @@ fn request_with_transcode(snapshot: MediaSnapshotInput) -> PlanningRequest {
             target_codec: "hevc".to_owned(),
             container: "mkv".to_owned(),
             profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
-            resolved_profile: Some(voom_worker_protocol::TranscodeVideoProfile::default_hevc()),
+            resolved_profile: Some(voom_core::TranscodeVideoProfile::default_hevc()),
         }),
         input: input_with_snapshot(snapshot),
         context: PlanningContext::default(),
@@ -965,20 +965,20 @@ fn transcode_video_blocks_unknown_or_multi_video_snapshots() {
     assert_transcode_blocked(snapshot_with(Some("mkv"), Some("h264"), Some(2)));
 }
 
-fn profile_hevc_1080p_mkv() -> voom_worker_protocol::TranscodeVideoProfile {
-    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+fn profile_hevc_1080p_mkv() -> voom_core::TranscodeVideoProfile {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.pixel_format = Some("yuv420p".to_owned());
     profile.max_width = Some(1920);
     profile.max_height = Some(1080);
     profile
 }
 
-fn profile_hevc_mp4() -> voom_worker_protocol::TranscodeVideoProfile {
-    voom_worker_protocol::TranscodeVideoProfile::default_hevc()
+fn profile_hevc_mp4() -> voom_core::TranscodeVideoProfile {
+    voom_core::TranscodeVideoProfile::default_hevc()
 }
 
-fn profile_hevc_10bit() -> voom_worker_protocol::TranscodeVideoProfile {
-    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+fn profile_hevc_10bit() -> voom_core::TranscodeVideoProfile {
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.codec_profile = Some("main10".to_owned());
     profile.pixel_format = Some("yuv420p10le".to_owned());
     profile
@@ -1094,7 +1094,7 @@ fn source_stream_missing_codec() -> MediaSnapshotInput {
 }
 
 fn plan_transcode_with_container(
-    profile: voom_worker_protocol::TranscodeVideoProfile,
+    profile: voom_core::TranscodeVideoProfile,
     snapshot: MediaSnapshotInput,
     container: &str,
 ) -> crate::ExecutionPlan {
@@ -1209,7 +1209,7 @@ fn resource_notes_are_format_stable() {
 
 #[test]
 fn downscale_note_emits_when_only_width_is_constrained() {
-    let mut profile = voom_worker_protocol::TranscodeVideoProfile::default_hevc();
+    let mut profile = voom_core::TranscodeVideoProfile::default_hevc();
     profile.pixel_format = Some("yuv420p".to_owned());
     profile.max_width = Some(1920);
     let plan = plan_transcode_with_container(profile, source_hevc_2160_mkv(), "mkv");
@@ -2128,7 +2128,7 @@ fn transcode_video() -> CompiledOperation {
         target_codec: "hevc".to_owned(),
         container: "mkv".to_owned(),
         profile: voom_policy::VideoProfileRef::Named("default-hevc".to_owned()),
-        resolved_profile: Some(voom_worker_protocol::TranscodeVideoProfile::default_hevc()),
+        resolved_profile: Some(voom_core::TranscodeVideoProfile::default_hevc()),
     }
 }
 

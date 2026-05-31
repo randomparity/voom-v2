@@ -26,7 +26,7 @@ async fn every_seeded_builtin_is_valid_against_its_descriptor() {
     let (repo, _pool, _tmp) = repo().await;
     for profile in repo.list().await.unwrap() {
         let typed = profile.to_worker_profile();
-        voom_worker_protocol::validate_profile_against_descriptor(&typed)
+        voom_core::validate_profile_against_descriptor(&typed)
             .unwrap_or_else(|e| panic!("seed `{}` invalid: {e}", profile.name));
     }
 }

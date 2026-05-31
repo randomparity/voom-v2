@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
-use voom_core::VoomError;
-use voom_worker_protocol::TranscodeVideoProfile;
+use voom_core::{TranscodeVideoProfile, VoomError};
 
 use crate::repo::Repository;
 
@@ -24,7 +23,7 @@ pub struct VideoProfile {
 }
 
 impl VideoProfile {
-    /// Projects the durable row into the worker-protocol profile, preserving the
+    /// Projects the durable row into the shared transcode profile, preserving the
     /// registry `name` as the resolved identity.
     #[must_use]
     pub fn to_worker_profile(&self) -> TranscodeVideoProfile {

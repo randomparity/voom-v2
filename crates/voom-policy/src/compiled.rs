@@ -116,7 +116,7 @@ pub enum CompiledOperation {
         /// rows and `source_hash` are unaffected and legacy bare-string
         /// policies still deserialize.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        resolved_profile: Option<voom_worker_protocol::TranscodeVideoProfile>,
+        resolved_profile: Option<voom_core::TranscodeVideoProfile>,
     },
     TranscodeAudio {
         target_codec: String,

@@ -11,16 +11,20 @@ pub mod clock;
 #[cfg(any(test, feature = "test-support"))]
 pub mod clock_test_support;
 pub mod config;
+pub mod encoder_caps;
 pub mod error;
 pub mod failure;
 pub mod ids;
 pub mod issue;
+pub mod remux;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rng_test_support;
+pub mod transcode_video_profile;
 pub mod version;
 
 pub use clock::{Clock, SystemClock, format_iso8601};
 pub use config::{Config, EnvSource, LogFormat, MapEnv, ProcessEnv};
+pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
 pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};
 pub use ids::{
@@ -30,6 +34,14 @@ pub use ids::{
     PolicyVersionId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
+pub use remux::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
+pub use transcode_video_profile::{
+    TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
+    TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
+    TranscodeVideoProfile, canonical_video_codec, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container, normalize_codec_token,
+    validate_profile_against_descriptor,
+};
 pub use version::VersionInfo;
 
 /// Worker-protocol wire version (Sprint 2). Consumed by

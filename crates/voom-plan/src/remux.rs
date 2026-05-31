@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use serde_json::Value;
+use voom_core::RemuxTrackGroup;
 use voom_policy::{ComparisonOp, DefaultStrategy, TrackFilter, TrackTarget};
-use voom_worker_protocol::RemuxTrackGroup;
 
 const REMUX_PAYLOAD_TYPE: &str = "remux";
 const REMUX_CONTAINER: &str = "mkv";

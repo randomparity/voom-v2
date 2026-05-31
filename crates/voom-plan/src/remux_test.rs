@@ -1,8 +1,8 @@
 use serde_json::json;
+use voom_core::RemuxTrackGroup;
 use voom_policy::{
     ComparisonOp, MediaSnapshotInput, TargetKind, TargetRef, TrackFilter, TrackTarget,
 };
-use voom_worker_protocol::RemuxTrackGroup;
 
 use super::{
     RemuxOperationPayload, RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts,
