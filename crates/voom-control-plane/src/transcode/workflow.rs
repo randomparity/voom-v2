@@ -9,12 +9,12 @@ use crate::workflow::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
 
-use super::{
+use crate::workflow::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
     workflow_idempotency_key,
 };
 
-pub(super) async fn dispatch_control_plane_transcode(
+pub(crate) async fn dispatch_control_plane_transcode(
     context: OperationAdapterContext<'_>,
 ) -> Result<(), VoomError> {
     let resolved_profile: voom_core::TranscodeVideoProfile = serde_json::from_value(

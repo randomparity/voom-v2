@@ -9,12 +9,8 @@ use crate::ControlPlane;
 use crate::workflow::executor::WorkflowExecutorOptions;
 use crate::workflow::runtime::WorkerRuntime;
 
-mod audio;
-mod remux;
-mod transcode_video;
-
 #[cfg(test)]
-pub(super) use remux::dispatch_control_plane_remux;
+pub(super) use crate::remux::workflow::dispatch_control_plane_remux;
 
 pub(super) async fn dispatch_control_plane_ticket(
     control: &ControlPlane,
@@ -36,31 +32,33 @@ pub(super) async fn dispatch_control_plane_ticket(
     };
     match operation {
         OperationKind::TranscodeVideo => {
-            Some(transcode_video::dispatch_control_plane_transcode(context).await)
+            Some(crate::transcode::workflow::dispatch_control_plane_transcode(context).await)
         }
-        OperationKind::Remux => Some(remux::dispatch_control_plane_remux_context(context).await),
+        OperationKind::Remux => {
+            Some(crate::remux::workflow::dispatch_control_plane_remux_context(context).await)
+        }
         OperationKind::TranscodeAudio => {
-            Some(audio::dispatch_control_plane_transcode_audio(context).await)
+            Some(crate::audio::workflow::dispatch_control_plane_transcode_audio(context).await)
         }
         OperationKind::ExtractAudio => {
-            Some(audio::dispatch_control_plane_extract_audio(context).await)
+            Some(crate::audio::workflow::dispatch_control_plane_extract_audio(context).await)
         }
         _ => None,
     }
 }
 
 #[derive(Clone, Copy)]
-struct OperationAdapterContext<'a> {
-    control: &'a ControlPlane,
-    runtime: &'a WorkerRuntime,
-    ticket: &'a Ticket,
-    lease_id: LeaseId,
-    payload: &'a Value,
-    options: &'a WorkflowExecutorOptions,
+pub(crate) struct OperationAdapterContext<'a> {
+    pub(crate) control: &'a ControlPlane,
+    pub(crate) runtime: &'a WorkerRuntime,
+    pub(crate) ticket: &'a Ticket,
+    pub(crate) lease_id: LeaseId,
+    pub(crate) payload: &'a Value,
+    pub(crate) options: &'a WorkflowExecutorOptions,
 }
 
 impl<'a> OperationAdapterContext<'a> {
-    fn runtime_dispatch_context(self) -> RuntimeDispatchContext<'a> {
+    pub(crate) fn runtime_dispatch_context(self) -> RuntimeDispatchContext<'a> {
         RuntimeDispatchContext {
             control: self.control,
             runtime: self.runtime,
@@ -70,7 +68,7 @@ impl<'a> OperationAdapterContext<'a> {
         }
     }
 
-    fn job_id(self, operation: &str) -> Result<JobId, VoomError> {
+    pub(crate) fn job_id(self, operation: &str) -> Result<JobId, VoomError> {
         self.ticket.job_id.ok_or_else(|| {
             VoomError::Config(format!(
                 "{operation} ticket {} missing job_id",
@@ -79,28 +77,28 @@ impl<'a> OperationAdapterContext<'a> {
         })
     }
 
-    fn source_file_version_id(self) -> Result<FileVersionId, VoomError> {
+    pub(crate) fn source_file_version_id(self) -> Result<FileVersionId, VoomError> {
         Ok(FileVersionId(required_u64(
             self.payload,
             "source_file_version_id",
         )?))
     }
 
-    fn source_location_id(self) -> Option<FileLocationId> {
+    pub(crate) fn source_location_id(self) -> Option<FileLocationId> {
         optional_u64(self.payload, "source_location_id").map(FileLocationId)
     }
 }
 
 #[derive(Clone, Copy)]
-struct RuntimeDispatchContext<'a> {
-    control: &'a ControlPlane,
-    runtime: &'a WorkerRuntime,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    options: &'a WorkflowExecutorOptions,
+pub(crate) struct RuntimeDispatchContext<'a> {
+    pub(crate) control: &'a ControlPlane,
+    pub(crate) runtime: &'a WorkerRuntime,
+    pub(crate) ticket_id: TicketId,
+    pub(crate) lease_id: LeaseId,
+    pub(crate) options: &'a WorkflowExecutorOptions,
 }
 
-async fn await_with_lease_heartbeats<F, T>(
+pub(crate) async fn await_with_lease_heartbeats<F, T>(
     context: RuntimeDispatchContext<'_>,
     operation: OperationKind,
     future: F,
@@ -129,7 +127,7 @@ where
     }
 }
 
-fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {
+pub(crate) fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {
     format!("ticket-{}-lease-{}", ticket_id.0, lease_id.0)
 }
 

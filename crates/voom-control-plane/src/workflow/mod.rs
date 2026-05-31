@@ -5,7 +5,7 @@ pub mod executor;
 pub mod expansion;
 pub(crate) mod leases;
 pub mod model;
-mod operation_adapters;
+pub(crate) mod operation_adapters;
 pub mod policy_bridge;
 pub mod runtime;
 pub(crate) mod summary;

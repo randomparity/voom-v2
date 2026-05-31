@@ -15,12 +15,12 @@ use crate::workflow::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
 
-use super::{
+use crate::workflow::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
     workflow_idempotency_key,
 };
 
-pub(super) async fn dispatch_control_plane_transcode_audio(
+pub(crate) async fn dispatch_control_plane_transcode_audio(
     context: OperationAdapterContext<'_>,
 ) -> Result<(), VoomError> {
     let input = match transcode_audio_input_for_workflow_ticket(context) {
@@ -62,7 +62,7 @@ pub(super) async fn dispatch_control_plane_transcode_audio(
     release_lease_with_retry(context.control, context.lease_id, result).await
 }
 
-pub(super) async fn dispatch_control_plane_extract_audio(
+pub(crate) async fn dispatch_control_plane_extract_audio(
     context: OperationAdapterContext<'_>,
 ) -> Result<(), VoomError> {
     let input = match extract_audio_input_for_workflow_ticket(context).await {

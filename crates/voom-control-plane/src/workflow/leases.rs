@@ -19,7 +19,7 @@ pub(super) async fn acquire_lease_with_retry(
     .await
 }
 
-pub(super) async fn release_lease_with_retry(
+pub(crate) async fn release_lease_with_retry(
     control: &ControlPlane,
     lease_id: LeaseId,
     payload: Value,
@@ -36,7 +36,7 @@ pub(super) async fn release_lease_with_retry(
     .await
 }
 
-pub(super) async fn fail_lease_and_return<T>(
+pub(crate) async fn fail_lease_and_return<T>(
     control: &ControlPlane,
     lease_id: LeaseId,
     class: FailureClass,
@@ -118,7 +118,7 @@ pub(super) async fn heartbeat_workflow_lease(
     Ok(())
 }
 
-pub(super) async fn retry_on_database_locked<T, Fut, Op>(mut operation: Op) -> Result<T, VoomError>
+pub(crate) async fn retry_on_database_locked<T, Fut, Op>(mut operation: Op) -> Result<T, VoomError>
 where
     Fut: Future<Output = Result<T, VoomError>>,
     Op: FnMut() -> Fut,
@@ -137,7 +137,7 @@ where
     Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
 }
 
-pub(super) fn failure_class_for_error(source: &VoomError) -> FailureClass {
+pub(crate) fn failure_class_for_error(source: &VoomError) -> FailureClass {
     FailureClass::from_error_code(source.error_code()).unwrap_or(FailureClass::WorkerCrash)
 }
 

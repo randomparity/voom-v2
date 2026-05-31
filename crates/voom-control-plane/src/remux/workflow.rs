@@ -13,12 +13,12 @@ use crate::workflow::leases::{
     retry_on_database_locked,
 };
 
-use super::{
+use crate::workflow::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
     workflow_idempotency_key,
 };
 
-pub(super) async fn dispatch_control_plane_remux_context(
+pub(crate) async fn dispatch_control_plane_remux_context(
     context: OperationAdapterContext<'_>,
 ) -> Result<(), VoomError> {
     let input = match remux_input_for_workflow_ticket(context) {
@@ -77,7 +77,7 @@ pub(super) async fn dispatch_control_plane_remux_context(
 }
 
 #[cfg(test)]
-pub(in crate::workflow) async fn dispatch_control_plane_remux(
+pub(crate) async fn dispatch_control_plane_remux(
     control: &crate::ControlPlane,
     runtime: &crate::workflow::runtime::WorkerRuntime,
     ticket: &voom_store::repo::tickets::Ticket,

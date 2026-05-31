@@ -24,6 +24,7 @@ pub mod events;
 pub mod resolve;
 pub mod source;
 pub mod stage;
+pub(crate) mod workflow;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteTranscodeVideoInput {
