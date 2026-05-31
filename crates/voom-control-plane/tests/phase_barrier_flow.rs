@@ -43,8 +43,9 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source_one = tmp.path().join("Movie1.mp4");
-    let source_two = tmp.path().join("Movie2.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source_one = root.join("Movie1.mp4");
+    let source_two = root.join("Movie2.mp4");
     generate_h264_fixture(&source_one);
     generate_h264_fixture(&source_two);
 
@@ -75,13 +76,13 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let outcome = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -234,7 +235,8 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source = tmp.path().join("Chain.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Chain.mp4");
     generate_h264_fixture(&source);
 
     let db = NamedTempFile::new().unwrap();
@@ -262,13 +264,13 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let outcome = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -432,8 +434,9 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let good = tmp.path().join("Good.mp4");
-    let doomed = tmp.path().join("Doomed.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let good = root.join("Good.mp4");
+    let doomed = root.join("Doomed.mp4");
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
 
@@ -468,13 +471,13 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let result = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -516,9 +519,10 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let good = tmp.path().join("Good.mp4");
-    let doomed = tmp.path().join("Doomed.mp4");
-    let doomed_bak = tmp.path().join("Doomed.bak");
+    let root = tmp.path().canonicalize().unwrap();
+    let good = root.join("Good.mp4");
+    let doomed = root.join("Doomed.mp4");
+    let doomed_bak = root.join("Doomed.bak");
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
     std::fs::copy(&doomed, &doomed_bak).unwrap();
@@ -551,9 +555,9 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
         ]))
         .await
         .unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let options = ComplianceExecutionOptions {
-        transcode_staging_root: tmp.path().join("stage"),
+        transcode_staging_root: root.join("stage"),
         transcode_target_dir: out_dir.clone(),
         ..ComplianceExecutionOptions::default()
     };
