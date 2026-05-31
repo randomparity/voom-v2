@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
-#[command(name = "voom", about = "VOOM control plane CLI", long_about = None)]
+#[command(name = "voom", version, about = "VOOM control plane CLI", long_about = None)]
 pub struct Cli {
     /// Override the database URL (default: XDG data dir).
     #[arg(long, env = "VOOM_DATABASE_URL", global = true)]
