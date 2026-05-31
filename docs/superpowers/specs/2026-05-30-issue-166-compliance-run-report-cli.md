@@ -1,6 +1,6 @@
 ---
 name: issue-166-compliance-run-report-cli
-description: Issue #166 design — grow the `compliance` CLI family into the Sprint 16 scan → plan → execute (run) → report surface. Adds a durable post-run read mode to `compliance report` that returns a completed job's latest-phase report and ordered per-phase chain, and a multi-phase golden-output flow that exercises a real transcode → remux policy end-to-end.
+description: Issue #166 design — grow the `compliance` CLI family into the Sprint 16 scan → plan → execute (run) → report surface. Adds a durable post-run read mode to `compliance report` that returns a completed job's latest-phase report and ordered per-phase chain, and a multi-phase golden-output flow that exercises a two-phase mutation policy end-to-end.
 status: draft
 date: 2026-05-30
 issue: 166
@@ -67,9 +67,9 @@ This issue delivers, and is bounded to:
   `production-normalize-reduced.voom` declares `on_error: continue`, which ADR-0009
   rejects at resolve time and so cannot drive a run). The two phases and the
   worker pairing are chosen by the §5 proof-of-commit gate; the leading candidate
-  is a `transcode` phase (`transcode video to hevc`) and a dependent `remux` phase
-  (`container mkv`, `depends_on: [transcode]`), with the worker pairing decided by
-  the gate, so phase 2 plans and runs against the artifact phase 1 produced.
+  is a `remux` phase (`container mkv`) and a dependent `audio` phase (`transcode
+  audio to aac`, `depends_on: [remux]`) — two ops the fake workers can actually
+  commit — so phase 2 plans and runs against the artifact phase 1 produced.
 - **CLI golden-output (`insta`) snapshots** for the full flow against that
   fixture: `plan show` (or `compliance report`) pre-run preview, `compliance
   execute` multi-phase run with summary + per-phase chain, and `compliance report
@@ -226,23 +226,38 @@ including each check's `observed_state`. Two prober choices differ sharply here:
   (`observed_state.video_codec == "hevc"`) **instead of snapshotting**. A
   whole-envelope `insta` golden over real-ffmpeg output would churn.
 
+**Which fake ops can actually commit.** A phase commits only if its worker stages
+a real output file with typed observed facts that the host commit + re-probe path
+accepts. In `voom-fake-support/src/lib.rs`, three fake operations do this —
+`remux` (`fake_remux_result`, writes `tiny.mp4` + facts), `transcode_audio`
+(`fake_transcode_audio_result`), and `extract_audio` (`fake_extract_audio_result`,
+both via `fake_audio_output_facts`, also `tiny.mp4` + facts). **`transcode_video`
+via the fake transcoder does *not*** — it falls through to
+`fake_transcoder_legacy_payload`, which emits only an `output_path`/`target_codec`
+marker with no staged artifact, so a fake `transcode video` phase cannot commit.
+A committed *video* phase therefore requires the real-ffmpeg fallback (candidate 2).
+
 Candidate combinations, in preference order:
 
-1. **A fake-worker pairing + the fake ffprobe stub** — e.g. `transcode video to
-   hevc` (`fake-transcoder`) → `remux` to `mkv` (`fake-remuxer`), both re-probed
-   by the fake ffprobe. Deterministic `observed_state`, and it reuses the seeding
-   path the existing remux CLI golden uses (fake bytes, no real media). The single
-   open question the gate resolves is whether the fake-transcoder CLI commit
-   reaches exit 0 deterministically (the existing audio test tolerates exit 2 and
-   so does not establish this). This is the **only** candidate that yields a stable
-   whole-envelope `insta` golden.
-2. **Real `voom-ffmpeg-worker` + real ffprobe** — the stack `phase_barrier_flow.rs`
-   proves commits two transcode phases. Used **only as a fallback** if no fake
-   pairing commits twice. If this fallback is taken, the multi-phase coverage
-   becomes a **field-assertion test** (like `phase_barrier_flow.rs`), **not** a
-   whole-envelope snapshot, and it requires real media (`generate_h264_fixture`),
-   not the `seed_scanned_remux` fake-bytes path. The spec records this so the
-   fallback does not silently produce a flaky snapshot.
+1. **A fake-worker pairing of two committable ops + the fake ffprobe stub** — e.g.
+   `remux` to `mkv` (`fake-remuxer`) → `transcode audio to aac` (`fake-transcoder`),
+   or `transcode audio to aac` → `extract audio where commentary` (both
+   `fake-transcoder`), re-probed by the fake ffprobe. Deterministic
+   `observed_state`, reusing the fake-bytes seeding path the existing remux/audio
+   CLI tests use (no real media). The gate resolves the exact pairing, the seeding
+   snapshot that makes *both* phases plan non-trivially against one file (e.g. a
+   container mismatch for the remux phase plus an opus audio stream for the
+   transcode-audio phase), and that each phase commits to exit 0 — the existing
+   audio CLI test tolerates exit 2 and so does not yet establish the commit. This
+   is the **only** candidate that yields a stable whole-envelope `insta` golden.
+2. **Real `voom-ffmpeg-worker` + real ffprobe** (the only way to commit a
+   `transcode video` phase) — the stack `phase_barrier_flow.rs` proves commits two
+   transcode phases. Used **only as a fallback** if no fake pairing commits twice.
+   If this fallback is taken, the multi-phase coverage becomes a **field-assertion
+   test** (like `phase_barrier_flow.rs`), **not** a whole-envelope snapshot, and it
+   requires real media (`generate_h264_fixture`), not the `seed_scanned_remux`
+   fake-bytes path. The spec records this so the fallback does not silently produce
+   a flaky snapshot.
 
 The gate's result — which combination commits — **decides the fixture's phases,
 the prober, the test's worker launch, and whether the multi-phase coverage is an
@@ -255,23 +270,27 @@ commit).
 ### Fixture
 
 `crates/voom-policy/fixtures/policies/<name>.voom` — name and body fixed by the
-gate. The leading-candidate shape:
+gate. The leading-candidate shape pairs two committable fake ops:
 
 ```text
-policy "transcode-then-remux" {
-  phase transcode {
-    transcode video to hevc
-  }
+policy "remux-then-audio" {
   phase remux {
-    depends_on: [transcode]
     container mkv
+  }
+  phase audio {
+    depends_on: [remux]
+    transcode audio to aac where lang in [eng, und]
   }
 }
 ```
 
 Default `on_error` (abort) so the policy is accepted at resolve time (ADR-0009).
-Both operations are planner-supported and map to workers, so the run dispatches a
-ticket per phase rather than blocking.
+Both operations stage committable fake output (`remux`, `transcode_audio`) and are
+planner-supported, so the run dispatches a ticket per phase rather than blocking.
+The seeding snapshot must make both phases plan non-trivially — a container that
+differs from `mkv` (so the remux phase plans) carrying an opus audio stream (so the
+audio phase plans against the remuxed artifact). The gate confirms the exact
+snapshot.
 
 ### Golden flow test (`compliance_envelope.rs`)
 
