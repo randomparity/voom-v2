@@ -894,3 +894,120 @@ async fn known_named_profile_resolves_default_hevc_before_planning() {
     );
     assert_eq!(node.operation_payload["resolved_profile"]["crf"], 23);
 }
+
+#[tokio::test]
+async fn read_compliance_run_report_unknown_job_is_not_found() {
+    let (cp, _tmp) = cp().await;
+
+    let err = cp
+        .read_compliance_run_report(voom_core::JobId(999_999))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, voom_core::VoomError::NotFound(_)),
+        "unknown job must be NotFound, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_compliance_run_report_zero_phase_job_is_ok_and_empty() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    // The compliant-baseline input set targets synthetic variants, so the
+    // coordinator's active *file* set is empty: a job opens with a summary row
+    // but records zero phase rows.
+    let input = cp
+        .create_policy_input_set(load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap())
+        .await
+        .unwrap();
+    let outcome = cp
+        .run_phase_barrier(
+            created.version.id,
+            input.id,
+            crate::cases::compliance::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    let view = cp.read_compliance_run_report(outcome.job_id).await.unwrap();
+
+    assert_eq!(view.summary.job_id, outcome.job_id.0);
+    assert!(view.phases.is_empty(), "no file targets => no phase rows");
+    assert!(view.file_phases.is_empty());
+    assert_eq!(view.latest_phase_index, None);
+}
+
+#[tokio::test]
+async fn read_compliance_run_report_orders_phases_and_points_at_latest() {
+    use voom_store::repo::workflow_summaries::{
+        NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport, WorkflowSummaryRepo,
+    };
+
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(voom_store::repo::jobs::NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    cp.workflow_summaries()
+        .insert_summary(
+            NewWorkflowSummary {
+                job_id: job.id,
+                branch_count: 1,
+                ticket_count: 2,
+                dispatch_count: 2,
+                retry_count: 0,
+                failure_count: 0,
+                peak_active_workflow_leases: 1,
+                elapsed: std::time::Duration::from_millis(1),
+                per_operation: serde_json::json!({}),
+            },
+            T0,
+        )
+        .await
+        .unwrap();
+    // Insert ordinal 1 before ordinal 0 to prove the read returns them ascending
+    // regardless of write order.
+    for (ordinal, name) in [(1u32, "audio"), (0u32, "remux")] {
+        cp.workflow_summaries()
+            .upsert_phase_summary(
+                NewPhaseSummary {
+                    job_id: job.id,
+                    phase_ordinal: ordinal,
+                    phase_name: name.to_owned(),
+                    outcome: PhaseOutcome::Completed,
+                    report: Some(PhaseReport {
+                        report_id: format!("report_{name}"),
+                        report: serde_json::json!({ "report_id": format!("report_{name}") }),
+                    }),
+                },
+                T0,
+            )
+            .await
+            .unwrap();
+    }
+
+    let view = cp.read_compliance_run_report(job.id).await.unwrap();
+
+    assert_eq!(view.phases.len(), 2);
+    assert_eq!(view.phases[0].phase_ordinal, 0);
+    assert_eq!(view.phases[0].phase_name, "remux");
+    assert_eq!(view.phases[1].phase_ordinal, 1);
+    assert_eq!(view.phases[1].phase_name, "audio");
+    assert_eq!(view.latest_phase_index, Some(1));
+    assert_eq!(
+        view.phases[view.latest_phase_index.unwrap()]
+            .report_id
+            .as_deref(),
+        Some("report_audio"),
+        "latest index points at the highest-ordinal phase's report"
+    );
+}
