@@ -111,12 +111,16 @@ pub enum PolicyInputCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ComplianceCommand {
-    /// Generate a compliance report from durable policy and input rows.
+    /// Generate a compliance report from durable policy and input rows
+    /// (preview: `--policy-version-id` + `--input-set-id`), or read a completed
+    /// run's durable per-phase chain (`--job-id`). Exactly one mode.
     Report {
-        #[arg(long)]
-        policy_version_id: u64,
-        #[arg(long)]
-        input_set_id: u64,
+        #[arg(long, requires = "input_set_id", conflicts_with = "job_id")]
+        policy_version_id: Option<u64>,
+        #[arg(long, requires = "policy_version_id", conflicts_with = "job_id")]
+        input_set_id: Option<u64>,
+        #[arg(long, conflicts_with_all = ["policy_version_id", "input_set_id"])]
+        job_id: Option<u64>,
     },
     /// Apply compliance report findings to durable issues.
     Apply {

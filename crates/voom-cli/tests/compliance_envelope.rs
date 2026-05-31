@@ -208,6 +208,74 @@ async fn execute_audio_uses_cli_staging_and_output_overrides() {
 }
 
 #[tokio::test]
+async fn report_unknown_job_id_uses_not_found() {
+    let seeded = seed(FixtureName::SyntheticNoncompliantTranscodeNeeded).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &seeded.url,
+            "compliance",
+            "report",
+            "--job-id",
+            "999999",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    let mut json = envelope(output.stdout);
+    assert_eq!(json["command"], "compliance");
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+    redact_local(&mut json);
+    insta::assert_json_snapshot!("report_unknown_job_id_uses_not_found", json);
+}
+
+#[test]
+fn report_with_no_selector_args_is_bad_args() {
+    // The argument combination is rejected before any DB open, so an in-memory
+    // url is enough.
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args(["--database-url", "sqlite::memory:", "compliance", "report"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "no selector => BAD_ARGS exit 1"
+    );
+    let json = envelope(output.stdout);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[test]
+fn report_with_job_id_and_preview_arg_is_bad_args() {
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            "sqlite::memory:",
+            "compliance",
+            "report",
+            "--job-id",
+            "1",
+            "--policy-version-id",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "clap conflict => BAD_ARGS exit 1"
+    );
+    let json = envelope(output.stdout);
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[tokio::test]
 async fn report_missing_input_set_uses_not_found() {
     let seeded = seed(FixtureName::SyntheticNoncompliantTranscodeNeeded).await;
 

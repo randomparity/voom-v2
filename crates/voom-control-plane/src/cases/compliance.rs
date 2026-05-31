@@ -221,6 +221,20 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
     }
 }
 
+/// Read-only view of a completed run's durable workflow summary: the job-grain
+/// counters, the ordered per-phase chain (each carrying its folded report), the
+/// per-`(file, phase)` rows, and an index into `phases` of the latest (highest
+/// `phase_ordinal`) phase. An index, not a duplicated row, so the latest
+/// report has a single wire representation (ADR-0010).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComplianceRunReportData {
+    pub summary: WorkflowSummaryView,
+    pub phases: Vec<PhaseSummaryView>,
+    pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_phase_index: Option<usize>,
+}
+
 #[derive(Debug)]
 pub struct ComplianceExecuteError {
     pub source: VoomError,
@@ -595,6 +609,48 @@ impl ControlPlane {
         // `source_hash`.
         super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
         Ok(policy)
+    }
+
+    /// Read a completed phase-barrier run's durable summary by job id.
+    ///
+    /// Read-only: opens no transaction, submits no tickets, and regenerates no
+    /// report. The reports it returns are the ones the run already folded into
+    /// the per-phase rows (ADR-0008/0010), so post-run identity equals what
+    /// `execute` returned. The per-phase and per-`(file, phase)` rows preserve
+    /// the repo's `phase_ordinal` (then `branch_id`) ordering.
+    ///
+    /// # Errors
+    /// Returns `NotFound` when the job has no workflow summary row; propagates
+    /// database errors from the underlying repo reads.
+    pub async fn read_compliance_run_report(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<ComplianceRunReportData, VoomError> {
+        use voom_store::repo::workflow_summaries::WorkflowSummaryRepo;
+
+        let repo = self.workflow_summaries();
+        let summary = repo.get_summary(job_id).await?.ok_or_else(|| {
+            VoomError::NotFound(format!("workflow summary for job {} not found", job_id.0))
+        })?;
+        let phases: Vec<PhaseSummaryView> = repo
+            .phases_for_job(job_id)
+            .await?
+            .iter()
+            .map(PhaseSummaryView::from)
+            .collect();
+        let file_phases = repo
+            .file_phases_for_job(job_id)
+            .await?
+            .iter()
+            .map(FilePhaseSummaryView::from)
+            .collect();
+        let latest_phase_index = phases.len().checked_sub(1);
+        Ok(ComplianceRunReportData {
+            summary: WorkflowSummaryView::from(&summary),
+            phases,
+            file_phases,
+            latest_phase_index,
+        })
     }
 }
 
