@@ -325,8 +325,9 @@ where
                     .await;
                 return Err(WorkflowRunError { summary, source });
             }
-            if active.is_empty() && self.workflow_finished(job_id).await {
-                if let Some(source) = self.first_failed_ticket_error(job_id).await {
+            let finished = match self.workflow_finished(job_id).await {
+                Ok(finished) => finished,
+                Err(source) => {
                     let _ = self
                         .control_plane
                         .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
@@ -336,18 +337,39 @@ where
                         .await;
                     return Err(WorkflowRunError { summary, source });
                 }
-                summary
-                    .refresh_counts(&self.control_plane, job_id, started.elapsed())
-                    .await;
-                return Ok(summary);
+            };
+            if active.is_empty() && finished {
+                match self.first_failed_ticket_error(job_id).await {
+                    Ok(None) => {
+                        summary
+                            .refresh_counts(&self.control_plane, job_id, started.elapsed())
+                            .await;
+                        return Ok(summary);
+                    }
+                    Ok(Some(source)) | Err(source) => {
+                        let _ = self
+                            .control_plane
+                            .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
+                            .await;
+                        summary
+                            .refresh_counts(&self.control_plane, job_id, started.elapsed())
+                            .await;
+                        return Err(WorkflowRunError { summary, source });
+                    }
+                }
             }
 
             let mut dispatched_or_failed = false;
             let max_in_flight = plan.concurrency.max_in_flight_dispatches;
             while active.len() < max_in_flight {
-                let Some(ticket) = self.next_ready_workflow_ticket(job_id, &workflow_id).await
-                else {
-                    break;
+                let ticket = match self.next_ready_workflow_ticket(job_id, &workflow_id).await {
+                    Ok(Some(ticket)) => ticket,
+                    Ok(None) => break,
+                    Err(source) => {
+                        terminal_error = Some(source);
+                        dispatched_or_failed = true;
+                        break;
+                    }
                 };
                 match self
                     .try_spawn_dispatch(&mut active, &mut reservations, &mut summary, ticket)
@@ -371,12 +393,25 @@ where
             }
 
             if active.is_empty() {
-                if let Some(delay) = self
+                match self
                     .retry_delay(job_id, &workflow_id, self.control_plane.clock().now())
                     .await
                 {
-                    tokio::time::sleep(delay).await;
-                    continue;
+                    Ok(Some(delay)) => {
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(source) => {
+                        let _ = self
+                            .control_plane
+                            .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
+                            .await;
+                        summary
+                            .refresh_counts(&self.control_plane, job_id, started.elapsed())
+                            .await;
+                        return Err(WorkflowRunError { summary, source });
+                    }
                 }
                 let source = VoomError::Internal(format!(
                     "workflow {job_id} has no dispatchable work but is not finished"
@@ -697,10 +732,15 @@ where
                 }
             }
             DispatchTerminal::Failure { source } => {
-                let class = self
-                    .ticket_failure_class(outcome.ticket_id)
-                    .await
-                    .unwrap_or_else(|| failure_class_for_error(&source));
+                let class = match self.ticket_failure_class(outcome.ticket_id).await {
+                    Ok(Some(class)) => class,
+                    Ok(None) => failure_class_for_error(&source),
+                    Err(err) => {
+                        summary.record_failure(outcome.operation, failure_class_for_error(&source));
+                        *terminal_error = Some(err);
+                        return;
+                    }
+                };
                 summary.record_failure(outcome.operation, class);
                 match self.control_plane.tickets.get(outcome.ticket_id).await {
                     Ok(Some(ticket)) if ticket.state == TicketState::Failed => {
@@ -857,8 +897,12 @@ where
         Ok(count > 0)
     }
 
-    async fn next_ready_workflow_ticket(&self, job_id: JobId, workflow_id: &str) -> Option<Ticket> {
-        let now = format_time(self.control_plane.clock().now()).ok()?;
+    async fn next_ready_workflow_ticket(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<Option<Ticket>, VoomError> {
+        let now = format_time(self.control_plane.clock().now())?;
         let rows = sqlx::query(
             "SELECT id FROM tickets \
              WHERE job_id = ? \
@@ -874,58 +918,98 @@ where
         .bind(i64::from(self.options.ready_batch_size))
         .fetch_all(&self.control_plane.pool)
         .await
-        .ok()?;
-        for row in rows {
-            let id: i64 = row.try_get("id").ok()?;
-            let ticket = self
-                .control_plane
-                .tickets
-                .get(TicketId(sqlite_u64(id)))
-                .await
-                .ok()??;
-            if WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone()).is_ok() {
-                return Some(ticket);
-            }
-        }
-        None
+        .map_err(|e| VoomError::Database(format!("workflow ready tickets for {job_id}: {e}")))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| VoomError::Database(format!("workflow ready ticket id: {e}")))?;
+        let ticket_id = TicketId(sqlite_u64(id));
+        let ticket = self
+            .control_plane
+            .tickets
+            .get(ticket_id)
+            .await
+            .map_err(|e| {
+                VoomError::Database(format!(
+                    "load workflow ready ticket {ticket_id} for {job_id}: {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                VoomError::NotFound(format!("workflow ready ticket {ticket_id} for {job_id}"))
+            })?;
+        WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone()).map_err(|e| {
+            VoomError::Internal(format!(
+                "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
+                ticket.id
+            ))
+        })?;
+        Ok(Some(ticket))
     }
 
-    async fn workflow_finished(&self, job_id: JobId) -> bool {
-        let Ok((unfinished,)): Result<(i64,), _> = sqlx::query_as(
+    async fn workflow_finished(&self, job_id: JobId) -> Result<bool, VoomError> {
+        let (unfinished,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM tickets \
              WHERE job_id = ? AND state IN ('pending', 'ready', 'leased')",
         )
         .bind(sqlite_i64(job_id.0))
         .fetch_one(&self.control_plane.pool)
         .await
-        else {
-            return false;
-        };
-        unfinished == 0
+        .map_err(|e| {
+            VoomError::Database(format!("workflow unfinished tickets for {job_id}: {e}"))
+        })?;
+        Ok(unfinished == 0)
     }
 
-    async fn first_failed_ticket_error(&self, job_id: JobId) -> Option<VoomError> {
+    async fn first_failed_ticket_error(
+        &self,
+        job_id: JobId,
+    ) -> Result<Option<VoomError>, VoomError> {
         let row = sqlx::query(
-            "SELECT kind, payload FROM tickets \
+            "SELECT id, kind, payload FROM tickets \
              WHERE job_id = ? AND state = 'failed' ORDER BY id ASC LIMIT 1",
         )
         .bind(sqlite_i64(job_id.0))
         .fetch_optional(&self.control_plane.pool)
         .await
-        .ok()??;
-        let kind: String = row.try_get("kind").ok()?;
-        let payload: String = row.try_get("payload").ok()?;
-        let payload: Value = serde_json::from_str(&payload).ok()?;
-        let workflow_payload = WorkflowTicketPayload::parse_ticket(&kind, payload).ok()?;
-        Some(VoomError::Internal(format!(
+        .map_err(|e| VoomError::Database(format!("workflow failed ticket for {job_id}: {e}")))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let id: i64 = row
+            .try_get("id")
+            .map_err(|e| VoomError::Database(format!("workflow failed ticket id: {e}")))?;
+        let ticket_id = TicketId(sqlite_u64(id));
+        let kind: String = row.try_get("kind").map_err(|e| {
+            VoomError::Database(format!("workflow failed ticket {ticket_id} kind: {e}"))
+        })?;
+        let payload: String = row.try_get("payload").map_err(|e| {
+            VoomError::Database(format!("workflow failed ticket {ticket_id} payload: {e}"))
+        })?;
+        let payload: Value = serde_json::from_str(&payload).map_err(|e| {
+            VoomError::Internal(format!(
+                "workflow failed ticket {ticket_id} payload JSON: {e}"
+            ))
+        })?;
+        let workflow_payload =
+            WorkflowTicketPayload::parse_ticket(&kind, payload).map_err(|e| {
+                VoomError::Internal(format!(
+                    "workflow failed ticket {ticket_id} payload decode: {e}"
+                ))
+            })?;
+        Ok(Some(VoomError::Internal(format!(
             "workflow ticket {} failed",
             workflow_payload.node_id
-        )))
+        ))))
     }
 
-    async fn ticket_failure_class(&self, ticket_id: TicketId) -> Option<FailureClass> {
+    async fn ticket_failure_class(
+        &self,
+        ticket_id: TicketId,
+    ) -> Result<Option<FailureClass>, VoomError> {
         let row = sqlx::query(
-            "SELECT payload FROM events \
+            "SELECT event_id, payload FROM events \
              WHERE kind IN ('ticket.failed_terminal', 'ticket.failed_retriable') \
                AND subject_type = 'ticket' \
                AND subject_id = ? \
@@ -934,10 +1018,35 @@ where
         .bind(sqlite_i64(ticket_id.0))
         .fetch_optional(&self.control_plane.pool)
         .await
-        .ok()??;
-        let payload: String = row.try_get("payload").ok()?;
-        let payload: Value = serde_json::from_str(&payload).ok()?;
-        serde_json::from_value(payload.get("class")?.clone()).ok()
+        .map_err(|e| VoomError::Database(format!("workflow failure event for {ticket_id}: {e}")))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let event_id: i64 = row.try_get("event_id").map_err(|e| {
+            VoomError::Database(format!("workflow failure event id for {ticket_id}: {e}"))
+        })?;
+        let payload: String = row.try_get("payload").map_err(|e| {
+            VoomError::Database(format!(
+                "workflow failure event {event_id} payload for {ticket_id}: {e}"
+            ))
+        })?;
+        let payload: Value = serde_json::from_str(&payload).map_err(|e| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id} payload JSON for {ticket_id}: {e}"
+            ))
+        })?;
+        let class = payload.get("class").ok_or_else(|| {
+            VoomError::Internal(format!(
+                "workflow failure event {event_id} for {ticket_id} missing class"
+            ))
+        })?;
+        serde_json::from_value(class.clone())
+            .map(Some)
+            .map_err(|e| {
+                VoomError::Internal(format!(
+                    "workflow failure event {event_id} class for {ticket_id}: {e}"
+                ))
+            })
     }
 
     async fn retry_delay(
@@ -945,7 +1054,7 @@ where
         job_id: JobId,
         workflow_id: &str,
         now: OffsetDateTime,
-    ) -> Option<Duration> {
+    ) -> Result<Option<Duration>, VoomError> {
         let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT MIN(next_eligible_at) FROM tickets \
              WHERE job_id = ? \
@@ -954,20 +1063,25 @@ where
                AND json_extract(payload, '$.workflow_id') = ?",
         )
         .bind(sqlite_i64(job_id.0))
-        .bind(format_time(now).ok()?)
+        .bind(format_time(now)?)
         .bind(workflow_id)
         .fetch_optional(&self.control_plane.pool)
         .await
-        .ok()?;
-        let (next_eligible,) = row?;
-        let next_eligible = next_eligible?;
+        .map_err(|e| VoomError::Database(format!("workflow retry delay for {job_id}: {e}")))?;
+        let Some((Some(next_eligible),)) = row else {
+            return Ok(None);
+        };
         let next_eligible = OffsetDateTime::parse(
             &next_eligible,
             &time::format_description::well_known::Iso8601::DEFAULT,
         )
-        .ok()?;
+        .map_err(|e| {
+            VoomError::Internal(format!("workflow retry delay timestamp for {job_id}: {e}"))
+        })?;
         let wait = next_eligible - now;
-        Duration::try_from(wait).ok()
+        Duration::try_from(wait)
+            .map(Some)
+            .map_err(|e| VoomError::Internal(format!("workflow retry delay for {job_id}: {e}")))
     }
 
     async fn candidate_workers(

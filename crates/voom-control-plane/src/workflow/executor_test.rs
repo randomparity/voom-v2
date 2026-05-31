@@ -14,7 +14,7 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock,
-    VoomError, WorkerId,
+    TicketId, VoomError, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
@@ -298,6 +298,53 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
 
     assert_eq!(summary.dispatch_count, 1);
     assert_eq!(fixture.other_job_ready_count().await, 1);
+}
+
+#[tokio::test]
+async fn malformed_ready_ticket_payload_reports_read_error() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let job_id = fixture.open_workflow_job().await;
+    fixture.seed_malformed_ready_workflow_ticket(job_id).await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let err = executor
+        .submit_and_run_in_job(job_id, independent_hash_plan(0))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::Internal);
+    assert!(err.source.to_string().contains("workflow ready tickets"));
+    assert!(err.source.to_string().contains("payload decode"));
+    assert!(!err.source.to_string().contains("no dispatchable work"));
+}
+
+#[tokio::test]
+async fn malformed_failure_event_payload_reports_event_id() {
+    let fixture = ExecutorFixture::without_workers(0).await;
+    let ticket_id = TicketId(42);
+    let result = sqlx::query(
+        "INSERT INTO events \
+         (occurred_at, kind, subject_type, subject_id, trace_id, payload) \
+         VALUES (?, ?, ?, ?, NULL, ?)",
+    )
+    .bind("1970-01-01T00:00:00Z")
+    .bind("ticket.failed_terminal")
+    .bind("ticket")
+    .bind(i64::try_from(ticket_id.0).unwrap())
+    .bind(json!({"reason": "missing class"}).to_string())
+    .execute(&fixture.cp.pool)
+    .await
+    .unwrap();
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let err = executor.ticket_failure_class(ticket_id).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Internal);
+    assert!(err.to_string().contains(&format!(
+        "workflow failure event {}",
+        result.last_insert_rowid()
+    )));
+    assert!(err.to_string().contains("missing class"));
 }
 
 #[tokio::test]
@@ -1787,6 +1834,54 @@ impl ExecutorFixture {
             .await
             .unwrap();
         self.other_job_id = Some(job.id);
+    }
+
+    async fn seed_malformed_ready_workflow_ticket(&self, job_id: JobId) {
+        let operation = OperationKind::HashFile;
+        let workflow_id = format!("workflow-{}", job_id.0);
+        let payload = WorkflowTicketPayload::new_for_test(
+            &workflow_id,
+            "executor-test-0",
+            "hash-bad",
+            "bad",
+            operation,
+            json!({
+                "operation": operation_name(operation),
+                "branch_id": "bad",
+                "path": "/library/bad.mkv",
+                "duration_ms": 10_u64,
+                "progress_interval_ms": 1_u64,
+            }),
+        )
+        .to_ticket_payload()
+        .unwrap();
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: Some(job_id),
+                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                priority: 0,
+                payload,
+                max_attempts: 1,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, T0)
+            .await
+            .unwrap();
+        let malformed = json!({
+            "workflow_id": workflow_id,
+            "plan_id": "executor-test-0",
+            "node_id": "hash-bad"
+        });
+        sqlx::query("UPDATE tickets SET payload = ? WHERE id = ?")
+            .bind(malformed.to_string())
+            .bind(i64::try_from(ticket.id.0).unwrap())
+            .execute(&self.cp.pool)
+            .await
+            .unwrap();
     }
 
     async fn other_job_ready_count(&self) -> i64 {
