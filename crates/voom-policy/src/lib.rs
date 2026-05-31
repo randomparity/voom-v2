@@ -21,6 +21,8 @@ pub mod span;
 pub mod validate;
 pub mod video_profile;
 
+mod text;
+
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
