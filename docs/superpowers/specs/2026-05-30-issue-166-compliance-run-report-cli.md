@@ -192,6 +192,25 @@ emit under `command: "compliance"`.
 
 ## 5. Multi-phase fixture and golden flow
 
+### Gate outcome (resolved during implementation)
+
+The proof-of-commit gate below ran and **ruled out candidate 1**: no hermetic
+fake-worker pairing commits two mutation phases. `fake-remuxer` commits, but the
+fake transcoder's audio result hardcodes null stream facts
+(`fake_transcode_audio_result`) that can satisfy **neither** the planner's
+preservation-fact gate (`voom-plan` `has_transcode_preservation_facts`, which
+needs `language`/`title`/`channels`/`commentary` present) **nor** the host's
+preserved-facts commit check (`voom-control-plane/src/audio/dispatch.rs`, which
+requires the worker to echo those same facts) — the two are mutually exclusive,
+and `transcode_video` via the fake stages no committable artifact at all. The
+implementation therefore took **candidate 2**: a two-`transcode video` policy
+driven through the CLI against the real `voom-ffmpeg-worker` + real ffprobe (the
+`phase_barrier_flow.rs` stack), with the multi-phase coverage as **field
+assertions, not an `insta` golden** (real-ffmpeg output embeds nondeterministic
+`bitrate`/`duration`). The hermetic `compliance report --job-id` NOT_FOUND and
+BAD_ARGS cases remain `insta` snapshots. See
+`crates/voom-cli/tests/multi_phase_flow.rs`.
+
 ### Proof-of-commit gate (must pass before any golden is captured)
 
 The headline deliverable — a CLI `insta` golden of a two-phase run with **two
