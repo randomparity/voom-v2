@@ -50,9 +50,9 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() 
         .await
         .unwrap();
 
-    assert_eq!(worker.worker_id, worker_id);
-    assert_eq!(worker.credentials.worker_id, worker_id);
-    let handshake = worker.client.handshake(voom_core::PROTOCOL_VERSION).await;
+    assert_eq!(worker.worker_id(), worker_id);
+    assert_eq!(worker.credentials().worker_id, worker_id);
+    let handshake = worker.client().handshake(voom_core::PROTOCOL_VERSION).await;
     assert!(handshake.is_ok());
     assert_worker_rejects_different_presented_id(&worker).await;
     let result = worker
@@ -253,10 +253,10 @@ fn bundled_worker_command_from_allows_sibling_tool_env() {
 }
 
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {
-    let mut wrong_credentials = worker.credentials.clone();
-    wrong_credentials.worker_id = WorkerId(worker.worker_id.0 + 1);
+    let mut wrong_credentials = worker.credentials().clone();
+    wrong_credentials.worker_id = WorkerId(worker.worker_id().0 + 1);
     let err = worker
-        .client
+        .client()
         .dispatch(
             &wrong_credentials,
             "wrong-presented-worker-id",

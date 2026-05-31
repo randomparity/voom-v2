@@ -309,7 +309,7 @@ impl ScanWorkerLauncher for BundledFfprobeLauncher {
 #[async_trait::async_trait]
 impl ProbeWorkerSession for worker::BundledWorkerProcess {
     fn worker_id(&self) -> WorkerId {
-        self.worker_id
+        self.worker_id()
     }
 
     async fn dispatch_probe_file(

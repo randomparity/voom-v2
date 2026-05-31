@@ -12,7 +12,7 @@ use voom_worker_protocol::{
 use super::RemuxDispatcher;
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
-use crate::artifact::worker::{
+use crate::worker_process::{
     BundledWorkerProcess, WorkerCommand, WorkerOperationDispatch, WorkerProgressHandler,
     WorkerStreamLabels, bundled_worker_command_from, dispatch_operation_with_client,
 };

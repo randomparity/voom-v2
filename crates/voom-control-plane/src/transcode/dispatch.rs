@@ -13,7 +13,7 @@ use super::TranscodeVideoDispatcher;
 use super::resolve::ResolvedProfile;
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
-use crate::artifact::worker::{
+use crate::worker_process::{
     BundledWorkerProcess, NoopWorkerProgressHandler, WorkerCommand, WorkerOperationDispatch,
     WorkerStreamLabels, bundled_worker_command_from, dispatch_operation_with_client,
 };

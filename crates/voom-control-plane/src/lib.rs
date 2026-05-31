@@ -53,6 +53,7 @@ pub mod node_auth;
 pub mod remux;
 pub mod scan;
 pub mod transcode;
+pub(crate) mod worker_process;
 pub mod workflow;
 
 pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};

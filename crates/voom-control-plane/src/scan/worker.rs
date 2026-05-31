@@ -1,32 +1,26 @@
 use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::ExitStatus;
 use std::time::Duration;
 
-use rand::rngs::StdRng;
-use rand::{RngCore, SeedableRng};
-use secrecy::{ExposeSecret, SecretString};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
-use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
+use voom_core::{ErrorCode, FailureClass, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest,
     ProbeFileResult, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
-use crate::artifact::worker::{WorkerCommand, bundled_worker_command_from};
+pub use crate::worker_process::WorkerCommand;
+use crate::worker_process::{
+    self, BundledWorkerProcess as WorkerProcess, bundled_worker_command_from, fresh_lease_id,
+    random_hex_128,
+};
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const DISPATCH_IDLE_DEADLINE_MS: u32 = 30_000;
 const HEARTBEAT_DEADLINE_MS: u32 = 30_000;
 const FFPROBE_WORKER_BIN_ENV: &str = "VOOM_FFPROBE_WORKER_BIN";
-
-static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanWorkerError {
@@ -110,23 +104,19 @@ impl Display for ScanWorkerError {
 
 impl std::error::Error for ScanWorkerError {}
 
+impl From<worker_process::WorkerProcessError> for ScanWorkerError {
+    fn from(err: worker_process::WorkerProcessError) -> Self {
+        Self::worker_crash(err.to_string())
+    }
+}
+
 pub struct BundledWorkerProcess {
-    pub worker_id: WorkerId,
-    pub credentials: WorkerCredentials,
-    pub client: HttpClient,
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    reaped: bool,
+    inner: WorkerProcess,
 }
 
 impl std::fmt::Debug for BundledWorkerProcess {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BundledWorkerProcess")
-            .field("worker_id", &self.worker_id)
-            .field("credentials", &self.credentials)
-            .field("client", &self.client)
-            .field("reaped", &self.reaped)
-            .finish_non_exhaustive()
+        std::fmt::Debug::fmt(&self.inner, f)
     }
 }
 
@@ -139,57 +129,24 @@ impl BundledWorkerProcess {
         worker_id: WorkerId,
         command: WorkerCommand,
     ) -> Result<Self, ScanWorkerError> {
-        let credentials = random_credentials(worker_id);
-        let mut child = spawn_worker(command, &credentials)?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| ScanWorkerError::worker_crash("worker process missing stdin pipe"))?;
-        let Some(stdout) = child.stdout.take() else {
-            kill_and_wait(&mut child).await;
-            return Err(ScanWorkerError::worker_crash(
-                "worker process missing stdout pipe",
-            ));
-        };
-        let mut lines = BufReader::new(stdout).lines();
-        let line_result = timeout(STARTUP_TIMEOUT, lines.next_line()).await;
-        let line = match line_result {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => {
-                kill_and_wait(&mut child).await;
-                return Err(ScanWorkerError::worker_crash(
-                    "worker exited before printing bound address",
-                ));
-            }
-            Ok(Err(err)) => {
-                kill_and_wait(&mut child).await;
-                return Err(ScanWorkerError::worker_crash(format!(
-                    "failed reading worker bound address: {err}"
-                )));
-            }
-            Err(_) => {
-                kill_and_wait(&mut child).await;
-                return Err(ScanWorkerError::worker_crash(format!(
-                    "timed out after {STARTUP_TIMEOUT:?} waiting for worker bound address"
-                )));
-            }
-        };
-        let bound = match parse_bound_line(&line) {
-            Ok(bound) => bound,
-            Err(err) => {
-                kill_and_wait(&mut child).await;
-                return Err(err);
-            }
-        };
-
         Ok(Self {
-            worker_id,
-            credentials,
-            client: HttpClient::new(bound),
-            child: Some(child),
-            stdin: Some(stdin),
-            reaped: false,
+            inner: WorkerProcess::launch(worker_id, command).await?,
         })
+    }
+
+    #[must_use]
+    pub const fn worker_id(&self) -> WorkerId {
+        self.inner.worker_id
+    }
+
+    #[must_use]
+    pub const fn credentials(&self) -> &WorkerCredentials {
+        &self.inner.credentials
+    }
+
+    #[must_use]
+    pub const fn client(&self) -> &HttpClient {
+        &self.inner.client
     }
 
     pub async fn dispatch_probe_file(
@@ -197,7 +154,8 @@ impl BundledWorkerProcess {
         request: ProbeFileRequest,
     ) -> Result<ProbeFileResult, ScanWorkerError> {
         let result =
-            dispatch_probe_file_with_client(&self.client, &self.credentials, request).await;
+            dispatch_probe_file_with_client(&self.inner.client, &self.inner.credentials, request)
+                .await;
         if let Err(err) = &result
             && err.should_shutdown_worker()
         {
@@ -206,43 +164,12 @@ impl BundledWorkerProcess {
         result
     }
 
-    pub async fn shutdown(mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-        self.shutdown_inner(grace).await
-    }
-
-    async fn shutdown_inner(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-        drop(self.stdin.take());
-        let Some(mut child) = self.child.take() else {
-            return Err(std::io::Error::other("worker process already reaped"));
-        };
-        if let Ok(status) = timeout(grace, child.wait()).await {
-            self.reaped = true;
-            return status;
-        }
-        child.kill().await?;
-        let status = child.wait().await?;
-        self.reaped = true;
-        Ok(status)
+    pub async fn shutdown(self, grace: Duration) -> std::io::Result<ExitStatus> {
+        self.inner.shutdown(grace).await
     }
 
     async fn terminate(&mut self) {
-        let _status = self.shutdown_inner(SHUTDOWN_TIMEOUT).await;
-    }
-}
-
-impl Drop for BundledWorkerProcess {
-    fn drop(&mut self) {
-        drop(self.stdin.take());
-        if !self.reaped
-            && let Some(mut child) = self.child.take()
-        {
-            let _kill = child.start_kill();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let _status = child.wait().await;
-                });
-            }
-        }
+        self.inner.terminate(SHUTDOWN_TIMEOUT).await;
     }
 }
 
@@ -354,78 +281,6 @@ fn bundled_ffprobe_command_from(
             command
         },
     )
-}
-
-fn spawn_worker(
-    worker_command: WorkerCommand,
-    credentials: &WorkerCredentials,
-) -> Result<Child, ScanWorkerError> {
-    let mut command = Command::new(worker_command.program);
-    command
-        .args(worker_command.args)
-        .env("VOOM_WORKER_ID", credentials.worker_id.0.to_string())
-        .env("VOOM_WORKER_EPOCH", credentials.worker_epoch.to_string())
-        .env("VOOM_WORKER_SECRET", credentials.secret.expose_secret())
-        .env("VOOM_WORKER_BIND", "127.0.0.1:0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-    for (key, value) in worker_command.env {
-        command.env(key, value);
-    }
-    command
-        .spawn()
-        .map_err(|err| ScanWorkerError::worker_crash(format!("failed spawning worker: {err}")))
-}
-
-fn parse_bound_line(line: &str) -> Result<SocketAddr, ScanWorkerError> {
-    let Some(addr) = line.strip_prefix("BOUND addr=") else {
-        return Err(ScanWorkerError::worker_crash(format!(
-            "unexpected worker stdout line: {line}"
-        )));
-    };
-    addr.trim().parse::<SocketAddr>().map_err(|err| {
-        ScanWorkerError::worker_crash(format!("worker printed invalid bound address: {err}"))
-    })
-}
-
-async fn kill_and_wait(child: &mut Child) {
-    let _kill = child.kill().await;
-    let _status = child.wait().await;
-}
-
-fn random_credentials(worker_id: WorkerId) -> WorkerCredentials {
-    WorkerCredentials {
-        worker_id,
-        worker_epoch: 0,
-        secret: SecretString::from(random_hex_bytes(32)),
-    }
-}
-
-fn random_hex_128() -> String {
-    random_hex_bytes(16)
-}
-
-fn random_hex_bytes(len: usize) -> String {
-    let mut bytes = vec![0_u8; len];
-    let mut rng = StdRng::from_os_rng();
-    rng.fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
-
-fn fresh_lease_id() -> LeaseId {
-    let next = NEXT_LEASE_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(
-                current
-                    .checked_add(1)
-                    .filter(|value| *value != 0)
-                    .unwrap_or(1),
-            )
-        })
-        .unwrap_or(1);
-    if next == 0 { LeaseId(1) } else { LeaseId(next) }
 }
 
 fn map_dispatch_protocol_error(err: &ProtocolError) -> ScanWorkerError {
