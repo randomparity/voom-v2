@@ -44,6 +44,24 @@ async fn output_path_escape_is_config_invalid() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_video_output_symlink_is_config_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = request(dir.path(), &input).await;
+    std::os::unix::fs::symlink(dir.path().join("missing-target.mkv"), &request.output.path)
+        .unwrap();
+
+    let err = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("already exists"));
+}
+
 #[tokio::test]
 async fn unsupported_output_contract_is_rejected_before_ffmpeg() {
     let dir = tempfile::tempdir().unwrap();
