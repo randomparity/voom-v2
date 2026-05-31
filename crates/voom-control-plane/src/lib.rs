@@ -257,54 +257,17 @@ impl ControlPlane {
         }
     }
 
-    // Writable repo accessors: production builds hide them behind
-    // `pub(crate)` so external callers must route every durable state change
-    // through a case handler (which pairs the repo write with an
-    // `EventRepo::append_in_tx`). The `test-support` feature (also
-    // implicitly enabled under `#[cfg(test)]`) re-exports them as `pub` so
-    // the voom-store integration suite can seed state directly. Each
-    // accessor is declared twice (once per cfg arm) rather than as a single
-    // method, so the visibility shows literally at every call site and the
-    // production build cannot accidentally leak the wider surface.
-    //
-    // The production arm uses `#[expect(dead_code, …)]` because case
-    // handlers currently reach into the repo fields directly (`self.tickets
-    // .…`), not via the accessor. The methods exist so that callers can
-    // switch over without re-changing visibility; the `expect` will fire if
-    // an internal caller is ever added, which is the signal to remove the
-    // attribute.
+    // Test-support accessors let integration tests seed and inspect durable
+    // state directly; production code uses the fields inside case handlers.
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn events(&self) -> &SqliteEventRepo {
         &self.events
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.events` directly today")]
-    #[must_use]
-    pub(crate) fn events(&self) -> &SqliteEventRepo {
-        &self.events
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn jobs(&self) -> &SqliteJobRepo {
-        &self.jobs
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[must_use]
-    pub(crate) fn jobs(&self) -> &SqliteJobRepo {
-        &self.jobs
-    }
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn tickets(&self) -> &SqliteTicketRepo {
-        &self.tickets
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.tickets` directly today")]
-    #[must_use]
-    pub(crate) fn tickets(&self) -> &SqliteTicketRepo {
         &self.tickets
     }
 
@@ -313,50 +276,11 @@ impl ControlPlane {
     pub fn workers(&self) -> &SqliteWorkerRepo {
         &self.workers
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.workers` directly today")]
-    #[must_use]
-    pub(crate) fn workers(&self) -> &SqliteWorkerRepo {
-        &self.workers
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn nodes(&self) -> &SqliteNodeRepo {
-        &self.nodes
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.nodes` directly today")]
-    #[must_use]
-    pub(crate) fn nodes(&self) -> &SqliteNodeRepo {
-        &self.nodes
-    }
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn leases(&self) -> &SqliteLeaseRepo {
         &self.leases
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.leases` directly today")]
-    #[must_use]
-    pub(crate) fn leases(&self) -> &SqliteLeaseRepo {
-        &self.leases
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
-        &self.remote_idempotency
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.remote_idempotency` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
-        &self.remote_idempotency
     }
 
     /// Read one durable scheduler decision.
@@ -408,25 +332,10 @@ impl ControlPlane {
     pub fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
         &self.artifact_access_plans
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.artifact_access_plans` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
-        &self.artifact_access_plans
-    }
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn artifacts(&self) -> &SqliteArtifactRepo {
-        &self.artifacts
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.artifacts` directly today")]
-    #[must_use]
-    pub(crate) fn artifacts(&self) -> &SqliteArtifactRepo {
         &self.artifacts
     }
 
@@ -435,34 +344,11 @@ impl ControlPlane {
     pub fn identity(&self) -> &SqliteIdentityRepo {
         &self.identity
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.identity` directly today")]
-    #[must_use]
-    pub(crate) fn identity(&self) -> &SqliteIdentityRepo {
-        &self.identity
-    }
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
         &self.workflow_summaries
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[must_use]
-    pub(crate) fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
-        &self.workflow_summaries
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn bundles(&self) -> &SqliteBundleRepo {
-        &self.bundles
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.bundles` directly today")]
-    #[must_use]
-    pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
-        &self.bundles
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -470,38 +356,11 @@ impl ControlPlane {
     pub fn use_leases(&self) -> &SqliteUseLeaseRepo {
         &self.use_leases
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.use_leases` directly today")]
-    #[must_use]
-    pub(crate) fn use_leases(&self) -> &SqliteUseLeaseRepo {
-        &self.use_leases
-    }
 
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
         &self.policy_inputs
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.policy_inputs` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
-        &self.policy_inputs
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn policies(&self) -> &SqlitePolicyRepo {
-        &self.policies
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.policies` directly today")]
-    #[must_use]
-    pub(crate) fn policies(&self) -> &SqlitePolicyRepo {
-        &self.policies
     }
 }
 

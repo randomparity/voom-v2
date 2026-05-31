@@ -454,7 +454,7 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         use voom_store::repo::jobs::JobRepo;
-        if self.jobs().get(prior_job_id).await?.is_none() {
+        if self.jobs.get(prior_job_id).await?.is_none() {
             return Err(VoomError::NotFound(format!(
                 "resume: prior job {prior_job_id} does not exist"
             ))
@@ -711,7 +711,7 @@ impl ControlPlane {
             let report =
                 regenerate_phase_report(policy, context, &base_draft, phase_name, &refreshed)?;
             let phase_row = self
-                .workflow_summaries()
+                .workflow_summaries
                 .upsert_phase_summary(
                     NewPhaseSummary {
                         job_id,
@@ -748,7 +748,7 @@ impl ControlPlane {
         let now = self.clock().now();
         self.succeed_job(job_id, now).await?;
         let summary = self
-            .workflow_summaries()
+            .workflow_summaries
             .insert_summary(job_grain_summary(job_id, last_run), now)
             .await?;
         Ok(CoordinatorOutcome {
@@ -812,7 +812,7 @@ impl ControlPlane {
         phase_count: u32,
     ) -> Result<(Vec<PhaseFile>, Vec<FilePhaseSummary>), VoomError> {
         let prior = self
-            .workflow_summaries()
+            .workflow_summaries
             .file_phases_for_job(prior_job_id)
             .await?;
         let mut survivors = Vec::with_capacity(files.len());
@@ -969,7 +969,7 @@ impl ControlPlane {
             file_phases.push(row);
         }
         let summary = self
-            .workflow_summaries()
+            .workflow_summaries
             .insert_summary(
                 job_grain_summary(job_id, Some(&run_summary)),
                 self.clock().now(),
@@ -1108,7 +1108,7 @@ impl ControlPlane {
         produced: Option<ProducedRefs>,
     ) -> Result<FilePhaseSummary, VoomError> {
         let produced = produced.unwrap_or_default();
-        self.workflow_summaries()
+        self.workflow_summaries
             .upsert_file_phase_summary(
                 NewFilePhaseSummary {
                     job_id,
@@ -1166,7 +1166,7 @@ impl ControlPlane {
         let now = self.clock().now();
         self.succeed_job(job_id, now).await?;
         let summary = self
-            .workflow_summaries()
+            .workflow_summaries
             .insert_summary(
                 NewWorkflowSummary {
                     job_id,

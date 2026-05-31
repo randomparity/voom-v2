@@ -646,9 +646,9 @@ impl ControlPlane {
         use voom_store::repo::jobs::JobRepo;
         use voom_store::repo::workflow_summaries::WorkflowSummaryRepo;
 
-        let repo = self.workflow_summaries();
+        let repo = &self.workflow_summaries;
         let Some(summary) = repo.get_summary(job_id).await? else {
-            let message = if self.jobs().get(job_id).await?.is_some() {
+            let message = if self.jobs.get(job_id).await?.is_some() {
                 format!(
                     "job {} has no completed workflow summary (still running or not a workflow job)",
                     job_id.0
