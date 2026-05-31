@@ -16,7 +16,6 @@ blake3 = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tower = "0.5.3"
 voom-control-plane = { workspace = true }
 voom-core = { workspace = true }
 

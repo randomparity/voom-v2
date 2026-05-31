@@ -2535,20 +2535,14 @@ dependencies = [
 name = "voom-conformance"
 version = "0.1.0-dev"
 dependencies = [
- "async-trait",
  "bytes",
  "chrono",
- "http",
- "hyper",
- "hyper-util",
  "secrecy",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
- "tokio-util",
  "toml",
- "tracing",
  "voom-core",
  "voom-worker-protocol",
 ]
@@ -2628,7 +2622,6 @@ version = "0.1.0-dev"
 dependencies = [
  "axum",
  "blake3",
- "bytes",
  "chrono",
  "rand 0.9.4",
  "reqwest",
@@ -2792,8 +2785,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tokio-util",
- "tracing",
  "trybuild",
  "voom-core",
 ]

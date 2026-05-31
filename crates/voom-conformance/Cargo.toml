@@ -11,20 +11,14 @@ repository.workspace = true
 voom-core.workspace = true
 voom-worker-protocol.workspace = true
 
-async-trait.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-http.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "process", "sync", "time"] }
-tokio-util.workspace = true
-tracing.workspace = true
 
 [[bin]]
 name = "echo-worker"
