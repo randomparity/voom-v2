@@ -84,12 +84,25 @@ re-run. Record the working form in the fixture.
 Add to `compliance_envelope.rs`. This reuses the seeding + worker-launch helpers
 already in the file (`seed_scanned_remux`, `RemuxProviderLaunch`,
 `TestWorkerLaunch`, `compliance_execute_command_with_dirs`, `fake_ffprobe_bin`).
-The seed must use the `remux-then-audio` policy and a snapshot carrying a container
-≠ mkv plus an audio stream, so both phases plan. Add a sibling
-`seed_scanned_remux_then_audio` modeled on `seed_scanned_remux` but using the new
-policy and an audio-bearing snapshot (the `seed_scanned_audio` snapshot payload is
-a good template — it has eng-tagged opus audio + a non-mkv source container set via
-`create_policy_input_set_from_scan(container: "mp4")`).
+
+**Seed invariant (do not skip):** both phases must plan a ticket, so the seed must
+satisfy *both*:
+- source **container ≠ `mkv`** (so `phase remux { container mkv }` is noncompliant
+  and plans) — use `mp4`, as `seed_scanned_remux` does; and
+- the snapshot carries an **audio stream** the `audio` phase can transform (so it
+  plans against the remuxed artifact's re-probe).
+
+Therefore base `seed_scanned_remux_then_audio` on **`seed_scanned_remux`** (it
+already sets `create_policy_input_set_from_scan(container: "mp4")` and writes a
+2-stream video+audio snapshot), changing only the policy document to
+`remux-then-audio.voom`. Do **not** copy `seed_scanned_audio` — it sets
+`container: "mkv"`, which would make the remux phase a compliant no-op (no ticket,
+no commit) and the gate would record only one phase. `seed_scanned_remux`'s
+existing snapshot already includes an `aac` eng audio stream (stream-1), which is
+what the `audio` phase plans against; if the audio phase does not plan, widen that
+stream's facts to match the fixture selector. Assert both phases dispatched ≥1
+ticket (the `phases[*].outcome == "completed"` + two committed `file_phases` checks
+below enforce this).
 
 ```rust
 #[tokio::test]
