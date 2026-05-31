@@ -40,13 +40,20 @@ nothing.**
   - both preview args together → preview (regenerate, unchanged), or
   - `--job-id` alone → post-run read.
   Any other combination (all three, only one preview arg, or none) is `BAD_ARGS`
-  (exit 1), enforced by a clap `ArgGroup` so the parser rejects it before the
-  handler runs and stdout stays a single parseable envelope.
+  (exit 1). A clap `ArgGroup` alone cannot enforce this — it expresses
+  at-most-one / at-least-one membership but cannot require the two preview args to
+  co-occur. The contract is therefore enforced by clap `conflicts_with_all` /
+  `requires` attributes plus a handler validation arm for the combinations the
+  attribute model does not cover, both routed through `envelope::emit_err` so
+  stdout stays a single parseable envelope (the design doc §3 pins the exact
+  layering).
 - The control-plane method `read_compliance_run_report(job_id)` reads
   `get_summary` (NotFound → `NOT_FOUND` envelope, exit 2), then `phases_for_job`
   and `file_phases_for_job`, preserving the repo's `phase_ordinal` / `branch_id`
-  ordering. `latest_phase` is the max-`phase_ordinal` row, or `None` for a job
-  that opened with zero phase rows (a successful read, not an error).
+  ordering. The returned view carries a `latest_phase_index: Option<usize>` into
+  the ordered `phases` (the last/max-`phase_ordinal` element), or `None` for a job
+  that opened with zero phase rows (a successful read, not an error) — an index
+  rather than a duplicated row so the latest report cannot drift from `phases`.
 - The mode is **read-only**: no transaction, no ticket submission, no report
   regeneration. The reports returned are byte-for-byte the ones the run folded
   into the rows (ADR-0008), so post-run identity equals what `execute` returned.
@@ -82,8 +89,14 @@ nothing.**
 - **Returning only the latest phase's report**, dropping the per-phase chain.
   Rejected by Sprint 16 §7 ("expose the per-phase chain by reading the ordered
   summary rows") and §4 (lineage *is* the ordered rows): collapsing to the latest
-  report discards the lineage the durable rows exist to carry. `latest_phase` is
-  provided as a convenience *in addition to* the full chain, not instead of it.
+  report discards the lineage the durable rows exist to carry. `latest_phase_index`
+  is provided as a convenience pointer *in addition to* the full chain, not
+  instead of it.
+- **A duplicated `latest_phase: Option<PhaseSummaryView>` field** (a copy of the
+  max-ordinal row). Rejected: it is a second representation of a row already in
+  `phases` that can drift in serialization and doubles the golden's exposure to
+  report-id churn; an index into `phases` carries the same "latest phase's report"
+  affordance with one source of truth.
 - **Regenerating the report at read time** from the policy/input rows. Rejected:
   the run already folded each phase's report against its refreshed facts
   (ADR-0008). Regenerating at read time could diverge from what the run recorded
