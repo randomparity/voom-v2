@@ -6,13 +6,13 @@ use serde_json::Value;
 use sqlx::Row;
 use time::OffsetDateTime;
 use tokio::task::JoinSet;
+use voom_core::OperationKind;
 use voom_core::{FailureClass, JobId, TicketId, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::identity::IdentityRepo;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
-use voom_worker_protocol::OperationKind;
 
 use super::binding::{
     BranchContext, PolicyFileSource, render_default_payload, render_default_payload_with_fan_out,

@@ -8,9 +8,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use voom_core::{LeaseId, WorkerId};
-
-use crate::operation_kind::OperationKind;
+use voom_core::{LeaseId, OperationKind, WorkerId};
 
 /// 0..=10000 basis points so `Eq` is derivable and on-wire JSON is
 /// integer (no NaN, no float-equality foot-guns). 0 → 0%, 10000 → 100%.

@@ -12,8 +12,8 @@
 //! behind the same trait without changing supervisor or test code.
 
 use serde_json::{Value as JsonValue, json};
+use voom_core::OperationKind;
 use voom_core::{FailureClass, NodeId, TicketId, VoomError, WorkerId};
-use voom_worker_protocol::OperationKind;
 
 pub const SCORING_VERSION: u32 = 1;
 

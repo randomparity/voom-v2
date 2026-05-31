@@ -4,11 +4,11 @@ use std::path::Path;
 use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
+use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
-use voom_worker_protocol::OperationKind;
 
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{WorkflowNode, WorkflowPlan};

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use sqlx::Row;
+use voom_core::OperationKind;
 use voom_core::{FailureClass, JobId, WorkerId};
-use voom_worker_protocol::OperationKind;
 
 use super::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;

@@ -21,7 +21,6 @@ pub mod handshake;
 pub mod http;
 pub mod low_level;
 pub mod ndjson;
-pub mod operation_kind;
 pub mod probe_file;
 pub mod remux;
 pub mod transcode_video;
@@ -45,7 +44,6 @@ pub use http::{
     route_policy,
 };
 pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
-pub use operation_kind::OperationKind;
 pub use probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
@@ -68,3 +66,4 @@ pub use verify_artifact::{
     VerifyArtifactExpectedFacts, VerifyArtifactObservedFacts, VerifyArtifactRequest,
     VerifyArtifactResult, VerifyArtifactStatus,
 };
+pub use voom_core::OperationKind;

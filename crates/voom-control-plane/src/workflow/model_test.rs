@@ -1,7 +1,7 @@
 use crate::workflow::model::{
     ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
 };
-use voom_worker_protocol::OperationKind;
+use voom_core::OperationKind;
 
 #[test]
 fn default_ci_plan_has_seed_two_three_files_and_parallel_dispatches() {

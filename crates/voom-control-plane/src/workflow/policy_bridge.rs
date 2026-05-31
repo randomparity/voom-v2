@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
+use voom_core::OperationKind;
 use voom_core::VoomError;
 use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind};
-use voom_worker_protocol::OperationKind;
 
 use super::{
     ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,

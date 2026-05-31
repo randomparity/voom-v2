@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use time::OffsetDateTime;
+use voom_core::OperationKind;
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
-use voom_worker_protocol::OperationKind;
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};

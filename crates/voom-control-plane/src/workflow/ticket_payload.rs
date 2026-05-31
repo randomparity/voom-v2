@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use voom_worker_protocol::OperationKind;
+use voom_core::OperationKind;
 
 use super::timing::EffectiveTiming;
 

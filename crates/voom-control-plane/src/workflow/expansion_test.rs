@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use time::OffsetDateTime;
+use voom_core::OperationKind;
 use voom_core::{JobId, SystemClock, TicketId};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
-use voom_worker_protocol::OperationKind;
 
 use crate::ControlPlane;
 use crate::workflow::binding::{

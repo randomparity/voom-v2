@@ -1,11 +1,11 @@
 use serde_json::json;
+use voom_core::OperationKind;
 use voom_plan::{
     ArtifactExpectations, CapabilityHints, DependencyKind, Edge, ExecutionPlan, InputIdentity,
     NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary, PolicyIdentity,
     ResourceEstimates, SafetyHints, SchedulingHints,
 };
 use voom_policy::TargetRef;
-use voom_worker_protocol::OperationKind;
 
 use super::*;
 

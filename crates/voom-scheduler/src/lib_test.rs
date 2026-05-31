@@ -1,6 +1,6 @@
 use super::*;
+use voom_core::OperationKind;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_worker_protocol::OperationKind;
 
 fn scored_candidate(
     ticket_id: u64,

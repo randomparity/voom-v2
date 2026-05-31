@@ -1,9 +1,9 @@
 use std::future::Future;
 
 use serde_json::Value;
+use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId, JobId, LeaseId, TicketId, VoomError};
 use voom_store::repo::tickets::Ticket;
-use voom_worker_protocol::OperationKind;
 
 use crate::ControlPlane;
 use crate::workflow::executor::WorkflowExecutorOptions;

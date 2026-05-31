@@ -5,8 +5,8 @@ use crate::workflow::binding::{
 };
 use crate::workflow::model::WorkflowPlan;
 use crate::workflow::timing::EffectiveTiming;
+use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId};
-use voom_worker_protocol::OperationKind;
 
 #[test]
 fn default_payload_rendering_preserves_static_fields_then_applies_bindings() {

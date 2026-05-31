@@ -16,6 +16,7 @@ pub mod error;
 pub mod failure;
 pub mod ids;
 pub mod issue;
+pub mod operation_kind;
 pub mod remux;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rng_test_support;
@@ -34,6 +35,7 @@ pub use ids::{
     PolicyVersionId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
+pub use operation_kind::OperationKind;
 pub use remux::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
 pub use transcode_video_profile::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,

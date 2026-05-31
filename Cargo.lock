@@ -2719,7 +2719,6 @@ version = "0.1.0-dev"
 dependencies = [
  "serde_json",
  "voom-core",
- "voom-worker-protocol",
 ]
 
 [[package]]

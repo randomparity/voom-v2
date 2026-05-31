@@ -1,10 +1,10 @@
 use serde_json::Map;
 use serde_json::{Value, json};
 use std::path::Path;
+use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId};
 use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::remux::RemuxOperationPayload;
-use voom_worker_protocol::OperationKind;
 
 use super::ticket_payload::operation_name;
 use super::timing::EffectiveTiming;

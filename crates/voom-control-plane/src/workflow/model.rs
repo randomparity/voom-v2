@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
+use voom_core::OperationKind;
 use voom_plan::TargetRef;
-use voom_worker_protocol::OperationKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WorkflowPlan {

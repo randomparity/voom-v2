@@ -6,13 +6,13 @@ use std::sync::Arc;
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::Row;
-use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
+use voom_core::{OperationKind, PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_store::repo::{
     IssueRepo, PolicyInputRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind,
     PolicyIssueStatus, PolicyRepo,
 };
-use voom_worker_protocol::{HttpClient, OperationKind, WorkerCredentials};
+use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};

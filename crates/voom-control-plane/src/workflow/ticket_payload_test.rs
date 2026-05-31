@@ -1,5 +1,5 @@
 use crate::workflow::ticket_payload::WorkflowTicketPayload;
-use voom_worker_protocol::OperationKind;
+use voom_core::OperationKind;
 
 #[test]
 fn workflow_ticket_payload_rejects_operation_mismatch() {
