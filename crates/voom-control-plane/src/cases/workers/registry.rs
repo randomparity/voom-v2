@@ -345,5 +345,5 @@ impl ControlPlane {
 }
 
 #[cfg(test)]
-#[path = "workers_test.rs"]
+#[path = "registry_test.rs"]
 mod tests;
