@@ -346,7 +346,17 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
         ComplianceCommand::Report {
             policy_version_id,
             input_set_id,
-        } => compliance::report(&cfg.database_url, local, policy_version_id, input_set_id).await?,
+            job_id,
+        } => {
+            compliance::report(
+                &cfg.database_url,
+                local,
+                policy_version_id,
+                input_set_id,
+                job_id,
+            )
+            .await?
+        }
         ComplianceCommand::Apply {
             policy_version_id,
             input_set_id,
