@@ -254,10 +254,10 @@ Candidate combinations, in preference order:
 
 1. **A fake-worker pairing of two committable ops + the fake ffprobe stub** — e.g.
    `remux` to `mkv` (`fake-remuxer`) → `transcode audio to opus` (`fake-transcoder`),
-   or `transcode audio to opus` → `extract audio where commentary` (both
-   `fake-transcoder`), re-probed by the fake ffprobe. Each phase's desired state
-   diverges from `basic-mp4.json` (mkv ≠ mov/mp4; opus ≠ aac; extract always
-   produces), so both plan a ticket and commit. Deterministic `observed_state`,
+   re-probed by the fake ffprobe. Each phase's desired state diverges from
+   `basic-mp4.json` (mkv ≠ mov/mp4; opus ≠ aac), so both plan a ticket and commit —
+   provided any audio `where` selector matches the re-probe's untagged stream (see
+   Fixture). Deterministic `observed_state`,
    reusing the fake-bytes seeding path the existing remux/audio CLI tests use (no
    real media). The gate resolves the exact pairing, the seeding snapshot that
    makes *both* phases plan non-trivially against one file, and that each phase
@@ -293,7 +293,7 @@ policy "remux-then-audio" {
   }
   phase audio {
     depends_on: [remux]
-    transcode audio to opus where lang in [eng, und]
+    transcode audio to opus
   }
 }
 ```
@@ -304,8 +304,16 @@ planner-supported. Phase 1 desires `mkv`, which diverges from the re-probe's
 `mov,mp4…` container, so it plans and commits; phase 2 desires `opus`, which
 diverges from the re-probe's `aac` audio, so it too plans and commits (a `to aac`
 audio phase would be a no-op against the already-aac fixed re-probe — see above).
-The seeding snapshot must additionally make phase 1 plan non-trivially (a container
-≠ `mkv`, with an eng/und audio stream). The gate confirms the exact snapshot.
+
+The audio phase deliberately carries **no `where` selector**: the fixed
+`basic-mp4.json` audio stream is untagged (no `language`), so a `where lang in
+[…]` clause risks matching nothing → a blocked/no-op phase that never commits
+(Sprint 16 §8). If the gate finds a bare `transcode audio to opus` does not parse
+or must carry a selector, the selector **must** match the re-probe's actual stream
+(e.g. select by stream index/kind, not by a tag the fixture omits) — a gate
+obligation, not an assumption. The gate likewise confirms the seeding snapshot
+makes phase 1 plan non-trivially (a container ≠ `mkv` with an audio stream) and
+that both phases reach a `Committed` row.
 
 ### Golden flow test (`compliance_envelope.rs`)
 
