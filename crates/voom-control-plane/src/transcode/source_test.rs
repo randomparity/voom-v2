@@ -30,8 +30,9 @@ async fn implicit_source_requires_exactly_one_live_local_location() {
         .unwrap_err();
     assert_eq!(zero_err.error_code(), ErrorCode::ConfigInvalid);
 
-    let source = dir.path().join("source.bin");
-    let alias = dir.path().join("alias.bin");
+    let root = dir.path().canonicalize().unwrap();
+    let source = root.join("source.bin");
+    let alias = root.join("alias.bin");
     std::fs::write(&source, b"source bytes").unwrap();
     std::fs::write(&alias, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
@@ -52,8 +53,9 @@ async fn implicit_source_requires_exactly_one_live_local_location() {
 #[tokio::test]
 async fn explicit_source_location_must_match_and_be_live_local() {
     let (cp, _db, dir) = fixture().await;
-    let source_a = dir.path().join("a.bin");
-    let source_b = dir.path().join("b.bin");
+    let root = dir.path().canonicalize().unwrap();
+    let source_a = root.join("a.bin");
+    let source_b = root.join("b.bin");
     std::fs::write(&source_a, b"a").unwrap();
     std::fs::write(&source_b, b"b").unwrap();
     let seeded_a = seed_source(&cp, &source_a, b"a").await;
@@ -81,10 +83,29 @@ async fn explicit_source_location_must_match_and_be_live_local() {
     assert_eq!(non_local_err.error_code(), ErrorCode::ConfigInvalid);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn source_selection_rejects_final_path_symlink() {
+    let (cp, _db, dir) = fixture().await;
+    let root = dir.path().canonicalize().unwrap();
+    let real = root.join("real.mkv");
+    let link = root.join("link.mkv");
+    std::fs::write(&real, b"source bytes").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let seeded = seed_source(&cp, &link, b"source bytes").await;
+
+    let err = select_source(&cp, seeded.file_version_id, None)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+}
+
 #[tokio::test]
 async fn valid_live_local_location_is_selected() {
     let (cp, _db, dir) = fixture().await;
-    let source = dir.path().join("source.bin");
+    let source = dir.path().canonicalize().unwrap().join("source.bin");
     std::fs::write(&source, b"source bytes").unwrap();
     let seeded = seed_source(&cp, &source, b"source bytes").await;
 

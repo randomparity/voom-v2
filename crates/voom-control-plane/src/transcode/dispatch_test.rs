@@ -1,6 +1,7 @@
 use super::*;
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
 use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
@@ -95,6 +96,7 @@ fn selected_source() -> SelectedSource {
             retired_at: None,
             epoch: 0,
         },
+        canonical_path: PathBuf::from("/canonical/library/Movie.mkv"),
     }
 }
 
@@ -113,6 +115,7 @@ fn request_for_carries_resolved_profile_codec_and_container() {
     // The dispatched request must carry the RESOLVED profile verbatim, not a
     // hardcoded default.
     assert_eq!(request.profile, resolved.profile);
+    assert_eq!(request.input.path, "/canonical/library/Movie.mkv");
     assert_eq!(request.output.container, "mp4");
     assert_eq!(request.output.video_codec, "av1");
     assert!(request.copy_video);

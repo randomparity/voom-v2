@@ -58,7 +58,7 @@ pub fn request_for(
 ) -> Result<TranscodeVideoRequest, VoomError> {
     Ok(TranscodeVideoRequest {
         input: TranscodeVideoInput {
-            path: selected.location.value.clone(),
+            path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: TranscodeVideoExpectedFacts {
                 size_bytes: selected.version.size_bytes,
                 content_hash: selected.version.content_hash.clone(),
@@ -76,6 +76,19 @@ pub fn request_for(
         profile: resolved.profile.clone(),
         copy_video,
     })
+}
+
+pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {
+    let facts = observe_regular_file(&selected.canonical_path).await?;
+    if facts.size_bytes != selected.version.size_bytes
+        || facts.content_hash != selected.version.content_hash
+    {
+        return Err(VoomError::ArtifactChecksumMismatch(format!(
+            "transcode_video source facts do not match selected file_version at {}",
+            selected.location.value
+        )));
+    }
+    Ok(())
 }
 
 pub fn validate_result(

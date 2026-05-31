@@ -440,6 +440,7 @@ async fn seed_source(
     path: &std::path::Path,
     bytes: &[u8],
 ) -> (voom_core::FileVersionId, voom_core::FileLocationId) {
+    let path = path.canonicalize().unwrap();
     let outcome = cp
         .record_discovered_file(
             DiscoveredFile {

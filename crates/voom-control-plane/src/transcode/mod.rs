@@ -153,6 +153,7 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let target_path = stage::target_path(&input.target_dir, &output_name).await?;
 
     events::record_started(cp, &input, selected.location.id, &staging_path).await?;
+    dispatch::revalidate_source_file(&selected).await?;
     let request = dispatch::request_for(
         &selected,
         &input.resolved,

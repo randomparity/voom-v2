@@ -1,12 +1,17 @@
+use std::io::ErrorKind;
+use std::path::PathBuf;
+
 use voom_core::{FileLocationId, FileVersionId, VoomError};
 use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, IdentityRepo};
 
 use crate::ControlPlane;
+use crate::artifact::fs::canonical_existing_file_no_symlink;
 
 #[derive(Debug, Clone)]
 pub struct SelectedSource {
     pub version: FileVersion,
     pub location: FileLocation,
+    pub canonical_path: PathBuf,
 }
 
 pub async fn select_source(
@@ -25,7 +30,12 @@ pub async fn select_source(
         )));
     }
     let location = select_location(cp, file_version_id, source_location_id).await?;
-    Ok(SelectedSource { version, location })
+    let canonical_path = canonical_source_path(&location.value).await?;
+    Ok(SelectedSource {
+        version,
+        location,
+        canonical_path,
+    })
 }
 
 async fn select_location(
@@ -81,6 +91,36 @@ fn require_live_local_location(
         )));
     }
     Ok(())
+}
+
+/// Operation source selection protocol: source selection owns canonical local
+/// path validation, while staging and target naming may still use the persisted
+/// location value for stable filenames.
+async fn canonical_source_path(path: &str) -> Result<PathBuf, VoomError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return Err(VoomError::ArtifactUnavailable(format!(
+                "transcode source artifact unavailable: {path}: {err}"
+            )));
+        }
+        Err(err) => {
+            return Err(VoomError::ArtifactUnavailable(format!(
+                "cannot inspect transcode source artifact {path}: {err}"
+            )));
+        }
+    }
+    canonical_existing_file_no_symlink(path)
+        .await
+        .map_err(|err| match err {
+            VoomError::Config(message)
+                if message.contains("artifact path must exist")
+                    || message.contains("cannot canonicalize artifact path") =>
+            {
+                VoomError::ArtifactUnavailable(message)
+            }
+            other => other,
+        })
 }
 
 #[cfg(test)]
