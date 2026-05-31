@@ -1,0 +1,56 @@
+{
+  "policy_name": "remux-then-audio",
+  "slug": "remux-then-audio",
+  "source_hash": "f1f796fc2e4b69b1d378cfdb48380077be120d286d19070ceea32edbbf5575ab",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "remux",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        }
+      ]
+    },
+    {
+      "name": "audio",
+      "depends_on": [
+        "remux"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "opus",
+          "container": "mkv",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng",
+              "und"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "remux",
+    "audio"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

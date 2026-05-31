@@ -60,6 +60,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         source_path: "fixtures/policies/audio-transcode-extract.voom",
         expected_json_path: "fixtures/compiled/audio-transcode-extract.json",
     },
+    PolicyFixture {
+        source_path: "fixtures/policies/remux-then-audio.voom",
+        expected_json_path: "fixtures/compiled/remux-then-audio.json",
+    },
 ];
 
 const INVALID_POLICY_FIXTURES: &[PolicyFixture] = &[

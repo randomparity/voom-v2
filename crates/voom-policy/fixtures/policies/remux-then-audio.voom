@@ -1,0 +1,9 @@
+policy "remux-then-audio" {
+  phase remux {
+    container mkv
+  }
+  phase audio {
+    depends_on: [remux]
+    transcode audio to opus where lang in [eng, und]
+  }
+}
