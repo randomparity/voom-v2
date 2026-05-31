@@ -16,8 +16,8 @@ use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AliasResolver, CommitGateResult, CommitTarget, DestructiveCommit, PrepareOutcome,
-    prepare_destructive_commit,
+    AliasResolver, CommitGateContext, CommitGateResult, CommitTarget, DestructiveCommit,
+    PrepareOutcome, prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -29,6 +29,20 @@ use voom_store::repo::use_leases::{
     UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 struct Seeded {
     asset: FileAssetId,
@@ -133,10 +147,7 @@ async fn land_pending_intent(pool: &SqlitePool, location_id: FileLocationId) {
         FileVersionId,
     >()));
     let outcome = prepare_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(pool, &identity, &events, resolver.as_ref()),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
@@ -347,10 +358,7 @@ async fn second_prepare_against_overlapping_scope_is_blocked_by_pending_commit()
         FileVersionId,
     >()));
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location),
             accepted_evidence_ids: Vec::new(),

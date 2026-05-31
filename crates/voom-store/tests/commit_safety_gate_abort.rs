@@ -24,14 +24,29 @@ use time::Duration;
 use voom_core::{FileLocationId, FileVersionId, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AbortOutcome, AbortReason, AuthorizeOutcome, CommitTarget, DestructiveCommit, PrepareOutcome,
-    abort_destructive_commit, authorize_destructive_commit, prepare_destructive_commit,
+    AbortOutcome, AbortReason, AliasResolver, AuthorizeOutcome, CommitGateContext, CommitTarget,
+    DestructiveCommit, PrepareOutcome, abort_destructive_commit, authorize_destructive_commit,
+    prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 async fn open_pool() -> (SqlitePool, NamedTempFile) {
     let tmp = NamedTempFile::new().unwrap();
@@ -83,10 +98,7 @@ async fn abort_authorized_row_rejects_with_conflict_encoding_recovery_contract()
     // commit.authorized event is on the log alongside the
     // commit.intent_recorded event from prepare.
     let prepared = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
@@ -103,10 +115,7 @@ async fn abort_authorized_row_rejects_with_conflict_encoding_recovery_contract()
         }
     };
     let authorize_outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + Duration::seconds(1),
     )
@@ -183,10 +192,7 @@ async fn abort_pending_succeeds_end_to_end_with_event_payload() {
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let prepared = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),

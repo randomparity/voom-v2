@@ -600,6 +600,35 @@ pub trait AliasResolver: Send + Sync {
     ) -> Result<Vec<FileLocationId>, AliasResolutionError>;
 }
 
+/// Shared dependencies for the destructive commit safety gate phases.
+///
+/// The three phase entry points all need the same store connection,
+/// identity repository, event repository, and external alias resolver.
+/// Grouping them keeps each public phase API focused on its phase-specific
+/// inputs.
+#[derive(Clone, Copy)]
+pub struct CommitGateContext<'a> {
+    /// Pool used to open the gate's IMMEDIATE transactions.
+    pub pool: &'a SqlitePool,
+    /// Identity repository used for closure walks and Phase C mutations.
+    pub identity_repo: &'a dyn IdentityRepo,
+    /// Event repository used to append gate audit events.
+    pub event_repo: &'a dyn EventRepo,
+    /// External alias resolver used during closure walks.
+    pub alias_resolver: &'a dyn AliasResolver,
+}
+
+impl std::fmt::Debug for CommitGateContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommitGateContext")
+            .field("pool", self.pool)
+            .field("identity_repo", &"<dyn IdentityRepo>")
+            .field("event_repo", &"<dyn EventRepo>")
+            .field("alias_resolver", &"<dyn AliasResolver>")
+            .finish()
+    }
+}
+
 // ============================================================================
 // Pending-commit lock helper (sub-slice 5)
 // ============================================================================
@@ -1308,13 +1337,16 @@ fn encode_target_row_epochs(triples: &[TargetRowEpochTriple]) -> Result<String, 
 /// `Err` — `Err` is reserved for genuine storage failures that the
 /// caller cannot reason about.
 pub async fn prepare_destructive_commit(
-    pool: &SqlitePool,
-    identity_repo: &dyn IdentityRepo,
-    event_repo: &dyn EventRepo,
-    alias_resolver: &dyn AliasResolver,
+    context: CommitGateContext<'_>,
     input: DestructiveCommit,
     now: OffsetDateTime,
 ) -> Result<PrepareOutcome, VoomError> {
+    let CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    } = context;
     let DestructiveCommit {
         target,
         accepted_evidence_ids,
@@ -2217,13 +2249,16 @@ pub enum AuthorizeOutcome {
 ///   `Err` — `Err` is reserved for genuine storage failures and
 ///   precondition violations the caller cannot reason about.
 pub async fn authorize_destructive_commit(
-    pool: &SqlitePool,
-    identity_repo: &dyn IdentityRepo,
-    event_repo: &dyn EventRepo,
-    alias_resolver: &dyn AliasResolver,
+    context: CommitGateContext<'_>,
     commit_id: CommitId,
     now: OffsetDateTime,
 ) -> Result<AuthorizeOutcome, VoomError> {
+    let CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    } = context;
     let mut tx = begin_gate_tx(pool).await?;
 
     let row = read_pending_intent_in_tx(&mut tx, commit_id).await?;
@@ -3057,14 +3092,17 @@ pub enum FinalizeOutcome {
 ///   reserved for genuine storage failures and precondition violations
 ///   the caller cannot reason about.
 pub async fn finalize_destructive_commit(
-    pool: &SqlitePool,
-    identity_repo: &dyn IdentityRepo,
-    event_repo: &dyn EventRepo,
-    alias_resolver: &dyn AliasResolver,
+    context: CommitGateContext<'_>,
     permit: CommitPermit,
     outcome: MutationOutcome,
     now: OffsetDateTime,
 ) -> Result<FinalizeOutcome, VoomError> {
+    let CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    } = context;
     let mut tx = begin_gate_tx(pool).await?;
 
     let row = read_authorized_intent_in_tx(&mut tx, permit.commit_id(), permit.epoch()).await?;

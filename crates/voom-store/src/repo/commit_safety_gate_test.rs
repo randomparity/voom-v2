@@ -9,6 +9,20 @@
 use super::*;
 use voom_core::ids::{FileLocationId, FileVersionId};
 
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
+
 #[test]
 fn commit_target_constructors_compile_for_every_sprint_1_variant() {
     let _ = CommitTarget::DeleteFileLocation(FileLocationId(1));
@@ -726,10 +740,7 @@ async fn prepare_phase_a_success_lands_pending_row_plus_intent_recorded_event() 
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(seeded.location_id),
         T0,
     )
@@ -804,10 +815,7 @@ async fn prepare_phase_a_blocked_by_use_lease_lands_aborted_row_plus_event() {
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(seeded.location_id),
         T0 + time::Duration::seconds(1),
     )
@@ -858,10 +866,7 @@ async fn prepare_phase_a_advisory_lease_does_not_block() {
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(seeded.location_id),
         T0,
     )
@@ -944,10 +949,7 @@ async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event(
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
@@ -988,10 +990,7 @@ async fn prepare_phase_a_blocked_by_closure_incomplete_lands_aborted_row_plus_ev
     let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(seeded.location_id),
         T0 + time::Duration::seconds(3),
     )
@@ -1029,10 +1028,7 @@ async fn prepare_phase_a_missing_target_location_aborts_as_closure_incomplete() 
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(CoreFileLocationId(99_999)),
         T0,
     )
@@ -1059,10 +1055,7 @@ async fn prepare_pending_intent(pool: &SqlitePool, location_id: FileLocationId) 
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(pool, &identity, &events, &resolver),
         delete_target_for(location_id),
         T0,
     )
@@ -1106,10 +1099,7 @@ async fn authorize_phase_b_success_lands_authorized_row_plus_event() {
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(1),
     )
@@ -1188,10 +1178,7 @@ async fn authorize_phase_b_blocked_by_closure_incomplete_lands_aborted_row_plus_
     let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(1),
     )
@@ -1247,10 +1234,7 @@ async fn authorize_phase_b_blocked_by_closure_grew_lands_aborted_row_plus_event(
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(3),
     )
@@ -1310,10 +1294,7 @@ async fn authorize_phase_b_blocked_by_use_lease_lands_aborted_row_plus_event() {
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(4),
     )
@@ -1382,10 +1363,7 @@ async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_even
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
@@ -1410,10 +1388,7 @@ async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_even
         .unwrap();
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(5),
     )
@@ -1451,10 +1426,7 @@ async fn authorize_phase_b_already_authorized_row_returns_conflict() {
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     // First authorize lands `authorized`.
     let _ok = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(1),
     )
@@ -1462,10 +1434,7 @@ async fn authorize_phase_b_already_authorized_row_returns_conflict() {
     .unwrap();
     // Second authorize on the same commit_id is `Conflict`.
     let err = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(2),
     )
@@ -1481,10 +1450,13 @@ async fn authorize_phase_b_missing_row_returns_conflict() {
     let events = SqliteEventRepo::new(pool.clone());
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
-    let err =
-        authorize_destructive_commit(&pool, &identity, &events, &resolver, CommitId(99_999), T0)
-            .await
-            .unwrap_err();
+    let err = authorize_destructive_commit(
+        gate(&pool, &identity, &events, &resolver),
+        CommitId(99_999),
+        T0,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, VoomError::Conflict(_)), "got {err:?}");
 }
 
@@ -1497,10 +1469,7 @@ async fn authorize_phase_b_aborted_row_returns_conflict() {
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = crate::test_support::FailingAliasResolver::new([seeded.version_id]);
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         delete_target_for(seeded.location_id),
         T0,
     )
@@ -1514,10 +1483,7 @@ async fn authorize_phase_b_aborted_row_returns_conflict() {
     let resolver2 =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let err = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver2,
+        gate(&pool, &identity, &events, &resolver2),
         commit_id,
         T0 + time::Duration::seconds(1),
     )
@@ -1563,9 +1529,10 @@ async fn authorize_pending_intent(
     let events = SqliteEventRepo::new(pool.clone());
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
-    let outcome = authorize_destructive_commit(pool, &identity, &events, &resolver, commit_id, now)
-        .await
-        .unwrap();
+    let outcome =
+        authorize_destructive_commit(gate(pool, &identity, &events, &resolver), commit_id, now)
+            .await
+            .unwrap();
     match outcome {
         AuthorizeOutcome::Authorized(p) => p,
         AuthorizeOutcome::Blocked { result, .. } => {
@@ -1615,10 +1582,7 @@ async fn finalize_phase_c_wrong_state_returns_conflict() {
     };
 
     let err = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -1647,10 +1611,7 @@ async fn finalize_phase_c_wrong_epoch_returns_conflict() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let err = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -1672,10 +1633,7 @@ async fn finalize_phase_c_not_performed_cancels_after_authorize() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::NotPerformed,
         T0 + time::Duration::seconds(2),
@@ -1727,10 +1685,7 @@ async fn finalize_phase_c_silent_delete_dispatches_retire() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -1776,10 +1731,7 @@ async fn finalize_phase_c_silent_replace_dispatches_replace() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::ReplaceFileLocation {
                 retired: seeded.location_id,
@@ -1806,10 +1758,7 @@ async fn finalize_phase_c_silent_replace_dispatches_replace() {
     let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
 
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -1846,10 +1795,7 @@ async fn finalize_phase_c_silent_move_dispatches_replace() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::MoveFileLocation {
                 retired: seeded.location_id,
@@ -1876,10 +1822,7 @@ async fn finalize_phase_c_silent_move_dispatches_replace() {
     let permit = authorize_pending_intent(&pool, commit_id, T0 + time::Duration::seconds(1)).await;
 
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -1931,10 +1874,7 @@ async fn finalize_phase_c_closure_grew_drives_recovery_required() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(3),
@@ -2011,10 +1951,7 @@ async fn finalize_phase_c_fresh_lease_drives_recovery_required() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(3),
@@ -2086,10 +2023,7 @@ async fn finalize_phase_c_closure_grew_and_fresh_lease_drives_recovery_required(
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(3),
@@ -2139,10 +2073,7 @@ async fn finalize_phase_c_stale_target_epoch_drives_recovery_required() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(3),
@@ -2214,10 +2145,7 @@ async fn finalize_phase_c_applied_mutation_failure_drives_recovery_required() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -2303,10 +2231,7 @@ async fn finalize_phase_c_observed_alias_drives_closure_grew() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied {
             observed: Some(observed),
@@ -2391,10 +2316,7 @@ async fn prepare_blocked_by_overlapping_pending_commit_on_location() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
@@ -2474,10 +2396,7 @@ async fn finalize_phase_c_trip_wire_recompute_failure_drives_recovery_required()
         bypass,
     };
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
@@ -2496,10 +2415,7 @@ async fn finalize_phase_c_trip_wire_recompute_failure_drives_recovery_required()
     let commit_id = intent.commit_id;
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + time::Duration::seconds(1),
     )
@@ -2517,10 +2433,7 @@ async fn finalize_phase_c_trip_wire_recompute_failure_drives_recovery_required()
     // The closure walker hits `Unreachable`, builds `ClosureIncomplete`
     // abort, the Phase C recompute converts to `VoomError::Internal`.
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -2601,10 +2514,7 @@ async fn finalize_phase_c_silent_dispatch_failure_still_drives_recovery_required
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -2705,10 +2615,7 @@ async fn concurrent_overlapping_prepares_cannot_both_land_pending() {
         let resolver =
             crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
         prepare_destructive_commit(
-            &pool1,
-            &identity,
-            &events,
-            &resolver,
+            gate(&pool1, &identity, &events, &resolver),
             delete_target_for(seeded.location_id),
             T0,
         )
@@ -2720,10 +2627,7 @@ async fn concurrent_overlapping_prepares_cannot_both_land_pending() {
         let resolver =
             crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
         prepare_destructive_commit(
-            &pool2,
-            &identity,
-            &events,
-            &resolver,
+            gate(&pool2, &identity, &events, &resolver),
             delete_target_for(seeded.location_id),
             T0,
         )
@@ -2932,10 +2836,7 @@ async fn abort_completed_row_rejects_with_conflict() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -2973,10 +2874,7 @@ async fn abort_recovery_required_row_rejects_with_conflict() {
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + time::Duration::seconds(2),
@@ -3116,10 +3014,7 @@ async fn prepare_pending_intent_at(
     let resolver =
         crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(pool, &identity, &events, &resolver),
         delete_target_for(location_id),
         now,
     )

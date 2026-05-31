@@ -1417,7 +1417,7 @@ async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
 // deadlock the gate.
 
 use crate::repo::commit_safety_gate::{
-    CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
+    CommitGateContext, CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
 };
 use crate::repo::events::SqliteEventRepo;
 use crate::test_support::FailingAliasResolver;
@@ -1462,10 +1462,12 @@ async fn seed_pending_intent_on_location(repo: &SqliteIdentityRepo, location_id:
     let events = SqliteEventRepo::new(repo.pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        &repo.pool,
-        repo,
-        &events,
-        &resolver,
+        CommitGateContext {
+            pool: &repo.pool,
+            identity_repo: repo,
+            event_repo: &events,
+            alias_resolver: &resolver,
+        },
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),

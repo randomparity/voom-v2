@@ -16,8 +16,8 @@ use time::{Duration, OffsetDateTime};
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
 use voom_store::repo::commit_safety_gate::{
-    AliasResolver, CommitGateResult, CommitTarget, DestructiveCommit, EvidenceDrift,
-    PrepareOutcome, prepare_destructive_commit,
+    AliasResolver, CommitGateContext, CommitGateResult, CommitTarget, DestructiveCommit,
+    EvidenceDrift, PrepareOutcome, prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -29,6 +29,20 @@ use voom_store::repo::use_leases::{
     UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 struct Seeded {
     version_id: FileVersionId,
@@ -125,10 +139,7 @@ async fn phase_a_success_lands_pending_intent_plus_scope_members_and_event() {
     >()));
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         delete_target(seeded.location_id),
         T0,
     )
@@ -186,10 +197,7 @@ async fn phase_a_blocked_by_use_lease_lands_aborted_intent_plus_event() {
     >()));
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         delete_target(seeded.location_id),
         T0 + Duration::seconds(1),
     )
@@ -270,10 +278,7 @@ async fn phase_a_blocked_by_stale_evidence_lands_aborted_intent_plus_event() {
     >()));
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: vec![recorded.id],
@@ -312,10 +317,7 @@ async fn phase_a_blocked_by_closure_incomplete_lands_aborted_intent_plus_event()
     let resolver: Box<dyn AliasResolver> = Box::new(FailingAliasResolver::new([seeded.version_id]));
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         delete_target(seeded.location_id),
         T0 + Duration::seconds(3),
     )
@@ -371,10 +373,7 @@ async fn phase_a_disk_mode_parity_survives_reconnect() {
     >()));
 
     let pending = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         delete_target(seeded_a.location_id),
         OffsetDateTime::UNIX_EPOCH,
     )
@@ -387,10 +386,7 @@ async fn phase_a_disk_mode_parity_survives_reconnect() {
         }
     };
     let blocked = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        resolver.as_ref(),
+        gate(&pool, &identity, &events, resolver.as_ref()),
         delete_target(seeded_b.location_id),
         OffsetDateTime::UNIX_EPOCH + Duration::seconds(1),
     )

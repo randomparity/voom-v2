@@ -981,7 +981,7 @@ async fn reanchor_on_move_with_same_location_is_noop() {
 // path is unchanged.
 
 use crate::repo::commit_safety_gate::{
-    CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
+    CommitGateContext, CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
 };
 use crate::repo::events::SqliteEventRepo;
 use crate::repo::identity::{NewFileLocation, NewFileVersion, ProducedBy};
@@ -1038,10 +1038,12 @@ async fn seed_pending_intent(pool: &SqlitePool, location_id: FileLocationId) {
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        &resolver,
+        CommitGateContext {
+            pool,
+            identity_repo: &identity,
+            event_repo: &events,
+            alias_resolver: &resolver,
+        },
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),

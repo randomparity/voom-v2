@@ -32,11 +32,11 @@ pub use artifacts::{
 };
 pub use commit_safety_gate::{
     AbortReason, AffectedScopeClosure, AliasResolutionError, AliasResolver, BypassKind,
-    ClosureFailure, ClosureMemberDelta, ClosureWarning, CommitGateOutcome, CommitGateResult,
-    CommitIntent, CommitIntentState, CommitPermit, CommitTarget, DestructiveCommit, EvidenceDrift,
-    EvidenceRevalidationResult, FileLocationProposal, ForcePathToken, MutationOutcome,
-    PendingCommitIntent, PrepareOutcome, TargetEpochDrift, TargetMemberKind,
-    prepare_destructive_commit, validate_bypass,
+    ClosureFailure, ClosureMemberDelta, ClosureWarning, CommitGateContext, CommitGateOutcome,
+    CommitGateResult, CommitIntent, CommitIntentState, CommitPermit, CommitTarget,
+    DestructiveCommit, EvidenceDrift, EvidenceRevalidationResult, FileLocationProposal,
+    ForcePathToken, MutationOutcome, PendingCommitIntent, PrepareOutcome, TargetEpochDrift,
+    TargetMemberKind, prepare_destructive_commit, validate_bypass,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use issues::{
