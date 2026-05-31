@@ -16,8 +16,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, PercentBps,
-    ProgressFrame, WorkerCredentials,
+    ClientHandle, DispatchStream, HttpClient, NdjsonOutcome, OperationKind, OperationRequest,
+    PercentBps, ProgressFrame, WorkerCredentials,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -95,6 +95,36 @@ pub(crate) struct WorkerOperationDispatch<'a, Request> {
     pub(crate) heartbeat_deadline_ms: u32,
     pub(crate) progress_idle_deadline_ms: u32,
     pub(crate) labels: WorkerStreamLabels,
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkerStreamError {
+    ProgressIdleTimeout {
+        message: String,
+    },
+    StreamProtocol {
+        message: String,
+    },
+    TerminalFrameAsProgress {
+        message: String,
+    },
+    ProgressFrameAsTerminal {
+        message: String,
+    },
+    StreamEnded {
+        message: String,
+    },
+    ResultDecode {
+        message: String,
+    },
+    Terminal {
+        class: FailureClass,
+        code: ErrorCode,
+        message: String,
+    },
+    ProgressHandler {
+        source: VoomError,
+    },
 }
 
 #[async_trait::async_trait]
@@ -321,7 +351,7 @@ async fn read_bound_address(
 }
 
 async fn consume_operation_stream<Response, P>(
-    mut dispatch: voom_worker_protocol::DispatchStream,
+    dispatch: DispatchStream,
     progress_idle_deadline_ms: u32,
     labels: WorkerStreamLabels,
     progress: &mut P,
@@ -330,30 +360,54 @@ where
     Response: DeserializeOwned,
     P: WorkerProgressHandler + ?Sized,
 {
+    consume_worker_stream(
+        dispatch,
+        Duration::from_millis(u64::from(progress_idle_deadline_ms)),
+        labels,
+        progress,
+    )
+    .await
+    .map_err(worker_stream_error_to_voom_error)
+}
+
+pub(crate) async fn consume_worker_stream<Response, P>(
+    mut dispatch: DispatchStream,
+    idle_timeout: Duration,
+    labels: WorkerStreamLabels,
+    progress: &mut P,
+) -> Result<Response, WorkerStreamError>
+where
+    Response: DeserializeOwned,
+    P: WorkerProgressHandler + ?Sized,
+{
     loop {
-        let outcome = timeout(
-            Duration::from_millis(u64::from(progress_idle_deadline_ms)),
-            dispatch.frames.next_frame(),
-        )
-        .await
-        .map_err(|_| VoomError::WorkerTimeout(labels.progress_idle_timeout.to_owned()))?
-        .map_err(|err| {
-            VoomError::MalformedWorkerResult(format!("{}: {err}", labels.stream_protocol))
-        })?;
+        let outcome = timeout(idle_timeout, dispatch.frames.next_frame())
+            .await
+            .map_err(|_| WorkerStreamError::ProgressIdleTimeout {
+                message: labels.progress_idle_timeout.to_owned(),
+            })?
+            .map_err(|err| WorkerStreamError::StreamProtocol {
+                message: format!("{}: {err}", labels.stream_protocol),
+            })?;
         match outcome {
             NdjsonOutcome::Frame(ProgressFrame::Progress {
                 percent, message, ..
             }) => {
-                progress.record_progress(percent, message).await?;
+                progress
+                    .record_progress(percent, message)
+                    .await
+                    .map_err(|source| WorkerStreamError::ProgressHandler { source })?;
             }
             NdjsonOutcome::Frame(_) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    labels.terminal_frame_as_progress.to_owned(),
-                ));
+                return Err(WorkerStreamError::TerminalFrameAsProgress {
+                    message: labels.terminal_frame_as_progress.to_owned(),
+                });
             }
             NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
                 return serde_json::from_value::<Response>(payload).map_err(|err| {
-                    VoomError::MalformedWorkerResult(format!("{}: {err}", labels.result_decode))
+                    WorkerStreamError::ResultDecode {
+                        message: format!("{}: {err}", labels.result_decode),
+                    }
                 });
             }
             NdjsonOutcome::Terminated(ProgressFrame::Error {
@@ -362,17 +416,40 @@ where
                 message,
                 ..
             }) => {
-                return Err(worker_terminal_error(class, code, message));
+                return Err(WorkerStreamError::Terminal {
+                    class,
+                    code,
+                    message,
+                });
             }
             NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
-                return Err(VoomError::MalformedWorkerResult(
-                    labels.progress_terminal.to_owned(),
-                ));
+                return Err(WorkerStreamError::ProgressFrameAsTerminal {
+                    message: labels.progress_terminal.to_owned(),
+                });
             }
             NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
-                return Err(VoomError::WorkerCrash(labels.stream_ended.to_owned()));
+                return Err(WorkerStreamError::StreamEnded {
+                    message: labels.stream_ended.to_owned(),
+                });
             }
         }
+    }
+}
+
+fn worker_stream_error_to_voom_error(err: WorkerStreamError) -> VoomError {
+    match err {
+        WorkerStreamError::ProgressIdleTimeout { message } => VoomError::WorkerTimeout(message),
+        WorkerStreamError::StreamProtocol { message }
+        | WorkerStreamError::TerminalFrameAsProgress { message }
+        | WorkerStreamError::ProgressFrameAsTerminal { message }
+        | WorkerStreamError::ResultDecode { message } => VoomError::MalformedWorkerResult(message),
+        WorkerStreamError::StreamEnded { message } => VoomError::WorkerCrash(message),
+        WorkerStreamError::Terminal {
+            class,
+            code,
+            message,
+        } => worker_terminal_error(class, code, message),
+        WorkerStreamError::ProgressHandler { source } => source,
     }
 }
 

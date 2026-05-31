@@ -83,6 +83,7 @@ async fn worker_terminal_error_becomes_verify_worker_error() {
 
     assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
     assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(!err.should_shutdown_worker());
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
@@ -120,6 +121,7 @@ async fn malformed_request_payload_is_terminal_worker_domain_error() {
 
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(!err.should_shutdown_worker());
     let _send = running.shutdown.send(());
     running.joined.await.unwrap();
 }
@@ -184,6 +186,7 @@ async fn malformed_result_payload_is_verify_worker_error() {
 
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(err.should_shutdown_worker());
     let _send = running.shutdown.send(());
     running.joined.await.unwrap();
 }

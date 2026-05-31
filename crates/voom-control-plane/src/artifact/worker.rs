@@ -4,16 +4,16 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, WorkerId};
 use voom_worker_protocol::{
-    ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame,
-    ProtocolError, VerifyArtifactRequest, VerifyArtifactResult, WorkerCredentials,
+    ClientHandle, HttpClient, OperationKind, OperationRequest, ProtocolError,
+    VerifyArtifactRequest, VerifyArtifactResult, WorkerCredentials,
 };
 
 pub use crate::worker_process::WorkerCommand;
 use crate::worker_process::{
-    self, BundledWorkerProcess as WorkerProcess, bundled_worker_command_from, fresh_lease_id,
+    self, BundledWorkerProcess as WorkerProcess, NoopWorkerProgressHandler, WorkerStreamError,
+    WorkerStreamLabels, bundled_worker_command_from, consume_worker_stream, fresh_lease_id,
     random_hex_128,
 };
 
@@ -210,56 +210,18 @@ where
 }
 
 async fn consume_verify_artifact_stream(
-    mut dispatch: voom_worker_protocol::DispatchStream,
+    dispatch: voom_worker_protocol::DispatchStream,
     idle_timeout: Duration,
 ) -> Result<VerifyArtifactResult, VerifyWorkerError> {
-    loop {
-        let outcome = timeout(idle_timeout, dispatch.frames.next_frame())
-            .await
-            .map_err(|_| {
-                VerifyWorkerError::progress_timeout(format!(
-                    "worker progress idle timeout after {idle_timeout:?}"
-                ))
-            })?
-            .map_err(|err| {
-                VerifyWorkerError::malformed_worker_result(format!(
-                    "worker progress stream protocol error: {err}"
-                ))
-            })?;
-        match outcome {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {}
-            NdjsonOutcome::Frame(_) => {
-                return Err(VerifyWorkerError::malformed_worker_result(
-                    "worker sent terminal frame as non-terminal progress frame",
-                ));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
-                return serde_json::from_value::<VerifyArtifactResult>(payload).map_err(|err| {
-                    VerifyWorkerError::malformed_worker_result(format!(
-                        "verify_artifact result decode: {err}"
-                    ))
-                });
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Error {
-                class,
-                code,
-                message,
-                ..
-            }) => {
-                return Err(VerifyWorkerError::terminal_error(class, code, message));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
-                return Err(VerifyWorkerError::malformed_worker_result(
-                    "progress frame cannot terminate worker stream",
-                ));
-            }
-            NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
-                return Err(VerifyWorkerError::worker_crash(
-                    "worker stream ended before terminal frame",
-                ));
-            }
-        }
-    }
+    let mut progress = NoopWorkerProgressHandler;
+    consume_worker_stream(
+        dispatch,
+        idle_timeout,
+        verify_stream_labels(),
+        &mut progress,
+    )
+    .await
+    .map_err(map_verify_stream_error)
 }
 
 fn bundled_verify_artifact_command() -> WorkerCommand {
@@ -303,6 +265,44 @@ fn map_dispatch_protocol_error(err: &ProtocolError) -> VerifyWorkerError {
             VerifyWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
         }
         _ => VerifyWorkerError::malformed_worker_result(format!("worker dispatch failed: {err}")),
+    }
+}
+
+fn map_verify_stream_error(err: WorkerStreamError) -> VerifyWorkerError {
+    match err {
+        WorkerStreamError::ProgressIdleTimeout { message } => {
+            VerifyWorkerError::progress_timeout(message)
+        }
+        WorkerStreamError::StreamProtocol { message }
+        | WorkerStreamError::TerminalFrameAsProgress { message }
+        | WorkerStreamError::ProgressFrameAsTerminal { message }
+        | WorkerStreamError::ResultDecode { message } => {
+            VerifyWorkerError::malformed_worker_result(message)
+        }
+        WorkerStreamError::StreamEnded { message } => VerifyWorkerError::worker_crash(message),
+        WorkerStreamError::Terminal {
+            class,
+            code,
+            message,
+        } => VerifyWorkerError::terminal_error(class, code, message),
+        WorkerStreamError::ProgressHandler { source } => {
+            VerifyWorkerError::malformed_worker_result(format!(
+                "verify_artifact progress handler failed: {source}"
+            ))
+        }
+    }
+}
+
+const fn verify_stream_labels() -> WorkerStreamLabels {
+    WorkerStreamLabels {
+        payload_encode: "verify_artifact payload encode",
+        dispatch_failed: "verify_artifact dispatch failed",
+        progress_idle_timeout: "verify_artifact worker progress idle timeout",
+        stream_protocol: "worker progress stream protocol error",
+        terminal_frame_as_progress: "worker sent terminal frame as non-terminal progress frame",
+        progress_terminal: "progress frame cannot terminate worker stream",
+        stream_ended: "worker stream ended before terminal frame",
+        result_decode: "verify_artifact result decode",
     }
 }
 
