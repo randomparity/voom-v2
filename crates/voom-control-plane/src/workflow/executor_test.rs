@@ -1163,7 +1163,7 @@ async fn invalid_policy_remux_payload_fails_acquired_lease() {
 #[tokio::test]
 async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1278,7 +1278,7 @@ fn workflow_tempdir() -> tempfile::TempDir {
 #[tokio::test]
 async fn policy_transcode_success_result_includes_generated_staging_path() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1315,7 +1315,7 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 #[tokio::test]
 async fn policy_transcode_heartbeats_outer_workflow_lease_while_running() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1348,7 +1348,7 @@ async fn policy_transcode_heartbeats_outer_workflow_lease_while_running() {
 #[tokio::test]
 async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1380,7 +1380,7 @@ async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
 #[tokio::test]
 async fn policy_transcode_dispatch_rejects_wrong_output_facts() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")
@@ -1413,7 +1413,7 @@ async fn policy_transcode_dispatch_rejects_wrong_output_facts() {
 #[tokio::test]
 async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = workflow_tempdir();
     let source_path = dir.path().join("Movie.mkv");
     let (source_file_version_id, _source_location_id) = fixture
         .seed_local_source_at_path(&source_path, b"movie-bytes")

@@ -32,7 +32,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = test_tempdir();
     let source = tmp.path().join("Movie.mp4");
     generate_h264_fixture(&source);
 
@@ -335,6 +335,10 @@ fn generate_h264_fixture(path: &Path) {
         status.success(),
         "ffmpeg fixture generation failed: {status}"
     );
+}
+
+fn test_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 struct TranscodeWorkerLaunch {

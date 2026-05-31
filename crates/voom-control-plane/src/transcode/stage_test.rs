@@ -87,7 +87,7 @@ fn fallback_stem_when_source_has_no_stem() {
 
 #[tokio::test]
 async fn staging_path_uses_ticket_and_lease_scoped_parent() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = stage_tempdir();
 
     let path = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
         .await
@@ -99,7 +99,7 @@ async fn staging_path_uses_ticket_and_lease_scoped_parent() {
 
 #[tokio::test]
 async fn staging_path_is_retry_unique_by_lease() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = stage_tempdir();
 
     let first = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
         .await
@@ -112,22 +112,44 @@ async fn staging_path_is_retry_unique_by_lease() {
 }
 
 #[tokio::test]
-async fn existing_ticket_lease_parent_is_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let _first = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
+async fn staging_path_rejects_existing_output() {
+    let dir = stage_tempdir();
+    let first = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
         .await
         .unwrap();
+    tokio::fs::write(&first, b"stale").await.unwrap();
 
     let err = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
         .await
         .unwrap_err();
 
     assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("staging path already exists"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_path_makes_lease_directory_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = stage_tempdir();
+
+    let path = staging_path(dir.path(), TicketId(7), LeaseId(9), &default_output())
+        .await
+        .unwrap();
+
+    let mode = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+
+    assert_eq!(mode, 0o700);
 }
 
 #[tokio::test]
 async fn target_path_rejects_existing_target_for_same_profile() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = stage_tempdir();
 
     let first = target_path(dir.path(), &default_output()).await.unwrap();
     std::fs::write(&first, b"committed output").unwrap();
@@ -144,7 +166,7 @@ async fn target_path_rejects_existing_target_for_same_profile() {
 #[cfg(unix)]
 #[tokio::test]
 async fn staging_root_symlink_is_rejected() {
-    let dir = tempfile::TempDir::new().unwrap();
+    let dir = stage_tempdir();
     let real = dir.path().join("real");
     let link = dir.path().join("link");
     std::fs::create_dir(&real).unwrap();
@@ -159,23 +181,61 @@ async fn staging_root_symlink_is_rejected() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn staging_root_may_have_symlink_ancestor() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let real_parent = dir.path().join("real-parent");
-    let link_parent = dir.path().join("link-parent");
+async fn staging_path_rejects_symlink_ancestor_before_creation() {
+    let dir = stage_tempdir();
+    let root = dir.path().canonicalize().unwrap();
+    let real_parent = root.join("real-parent");
+    let link_parent = root.join("link-parent");
     std::fs::create_dir(&real_parent).unwrap();
     std::os::unix::fs::symlink(&real_parent, &link_parent).unwrap();
 
-    let path = staging_path(
+    let err = staging_path(
         &link_parent.join("stage"),
         TicketId(7),
         LeaseId(9),
         &default_output(),
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    let canonical_real_parent = std::fs::canonicalize(&real_parent).unwrap();
-    assert!(path.ends_with("ticket-7/lease-9/Movie.default-hevc.hevc.mkv"));
-    assert!(path.starts_with(canonical_real_parent));
+    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+    assert!(!real_parent.join("stage").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn target_path_rejects_dangling_symlink_output() {
+    let dir = stage_tempdir();
+    let root = dir.path().canonicalize().unwrap();
+    let target = root.join("Movie.default-hevc.hevc.mkv");
+    std::os::unix::fs::symlink(root.join("missing"), &target).unwrap();
+
+    let err = target_path(&root, &default_output()).await.unwrap_err();
+
+    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("target path already exists"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn target_path_rejects_symlink_ancestor_before_creation() {
+    let dir = stage_tempdir();
+    let root = dir.path().canonicalize().unwrap();
+    let real = root.join("real");
+    let linked = root.join("linked");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    let err = target_path(&linked.join("nested"), &default_output())
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("symlink"));
+    assert!(!real.join("nested").exists());
+}
+
+fn stage_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
