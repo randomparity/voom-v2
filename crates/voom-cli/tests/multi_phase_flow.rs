@@ -178,10 +178,16 @@ fn assert_report_reads_back_chain(url: &str, job_id: u64, run_phases: &[Value]) 
         report_phases.iter().all(|p| p["report_id"].is_string()),
         "each phase carries its folded report id"
     );
-    assert_eq!(
-        report_phases[0]["report_id"], run_phases[0]["report_id"],
-        "read-back phase 0 report id matches the run"
-    );
+    for (index, (run_phase, report_phase)) in run_phases.iter().zip(report_phases).enumerate() {
+        assert_eq!(
+            run_phase["report_id"], report_phase["report_id"],
+            "report_id mismatch at index {index} across execute and report",
+        );
+        assert_eq!(
+            run_phase["report"], report_phase["report"],
+            "report body mismatch at index {index} across execute and report",
+        );
+    }
     assert_eq!(
         report_json["data"]["file_phases"].as_array().unwrap().len(),
         2,

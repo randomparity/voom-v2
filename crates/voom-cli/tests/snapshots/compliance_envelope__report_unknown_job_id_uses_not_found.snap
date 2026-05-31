@@ -15,6 +15,6 @@ expression: json
   "warnings": [],
   "error": {
     "code": "NOT_FOUND",
-    "message": "not found: workflow summary for job 999999 not found"
+    "message": "not found: no job with id 999999"
   }
 }

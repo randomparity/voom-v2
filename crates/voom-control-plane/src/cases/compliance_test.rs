@@ -905,8 +905,38 @@ async fn read_compliance_run_report_unknown_job_is_not_found() {
         .unwrap_err();
 
     assert!(
-        matches!(err, voom_core::VoomError::NotFound(_)),
-        "unknown job must be NotFound, got {err:?}"
+        matches!(
+            err,
+            voom_core::VoomError::NotFound(ref message)
+                if message.contains("no job with id 999999")
+        ),
+        "unknown job must be NotFound(no job with id), got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn read_compliance_run_report_in_flight_job_has_no_summary() {
+    let (cp, _tmp) = cp().await;
+    // A job that opened but never finalized a workflow summary row: the read must
+    // distinguish "still running / not a workflow job" from an unknown job id.
+    let job = cp
+        .open_job(voom_store::repo::jobs::NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let err = cp.read_compliance_run_report(job.id).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            voom_core::VoomError::NotFound(ref message)
+                if message.contains("no completed workflow summary")
+        ),
+        "in-flight job must be NotFound(no completed workflow summary), got {err:?}"
     );
 }
 

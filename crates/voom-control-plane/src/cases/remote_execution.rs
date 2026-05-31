@@ -217,9 +217,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_node_heartbeat(replay)?;
+                let out = replay_node_heartbeat(replay);
                 commit_tx(tx).await?;
-                return Ok(out);
+                return out;
             }
         }
 
@@ -289,9 +289,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_acquire(replay)?;
+                let out = replay_acquire(replay);
                 commit_tx(tx).await?;
-                return Ok(out);
+                return out;
             }
         }
 
@@ -701,9 +701,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_lease_heartbeat(replay)?;
+                let out = replay_lease_heartbeat(replay);
                 commit_tx(tx).await?;
-                return Ok(out);
+                return out;
             }
         }
 
@@ -830,9 +830,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_complete(replay)?;
+                let out = replay_complete(replay);
                 commit_tx(tx).await?;
-                return Ok(out);
+                return out;
             }
         }
 
@@ -980,9 +980,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_fail(replay)?;
+                let out = replay_fail(replay);
                 commit_tx(tx).await?;
-                return Ok(out);
+                return out;
             }
         }
 

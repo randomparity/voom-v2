@@ -1,5 +1,6 @@
 ---
 source: crates/voom-cli/tests/compliance_envelope.rs
+assertion_line: 96
 expression: json
 ---
 {
@@ -217,7 +218,8 @@ expression: json
         "produced_file_location_id": "[produced_file_location_id]",
         "reprobe_snapshot_id": "[reprobe_snapshot_id]"
       }
-    ]
+    ],
+    "latest_phase_index": 0
   },
   "local": {
     "db_url": "[db-url]",

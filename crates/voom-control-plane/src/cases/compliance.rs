@@ -48,10 +48,15 @@ pub struct ComplianceApplyData {
 /// [`FilePhaseSummaryView::ticket_ids`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceExecuteData {
+    /// Execute-only: the applied-findings summary from this run's initial report.
+    /// Intentionally absent from `report --job-id`, which regenerates and applies
+    /// nothing; every other field here matches [`ComplianceRunReportData`].
     pub issues: IssueApplicationSummary,
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_phase_index: Option<usize>,
 }
 
 impl ComplianceExecuteData {
@@ -59,17 +64,28 @@ impl ComplianceExecuteData {
         issues: IssueApplicationSummary,
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
     ) -> Self {
+        let phases: Vec<PhaseSummaryView> =
+            outcome.phases.iter().map(PhaseSummaryView::from).collect();
+        let latest_phase_index = latest_phase_index(&phases);
         Self {
             issues,
             summary: WorkflowSummaryView::from(&outcome.summary),
-            phases: outcome.phases.iter().map(PhaseSummaryView::from).collect(),
+            phases,
             file_phases: outcome
                 .file_phases
                 .iter()
                 .map(FilePhaseSummaryView::from)
                 .collect(),
+            latest_phase_index,
         }
     }
+}
+
+/// Index into an ascending-`phase_ordinal` phase chain of the latest (highest
+/// `phase_ordinal`) phase. `None` for a zero-phase run. Shared by `execute` and
+/// `report --job-id` so both modes compute the latest-phase pointer identically.
+fn latest_phase_index(phases: &[PhaseSummaryView]) -> Option<usize> {
+    phases.len().checked_sub(1)
 }
 
 /// Job-grain workflow summary, rendered without the nondeterministic
@@ -620,18 +636,28 @@ impl ControlPlane {
     /// the repo's `phase_ordinal` (then `branch_id`) ordering.
     ///
     /// # Errors
-    /// Returns `NotFound` when the job has no workflow summary row; propagates
-    /// database errors from the underlying repo reads.
+    /// Returns `NotFound` for both an unknown job id and a known job that has no
+    /// workflow summary yet (still running or not a workflow job), with distinct
+    /// messages; propagates database errors from the underlying repo reads.
     pub async fn read_compliance_run_report(
         &self,
         job_id: voom_core::JobId,
     ) -> Result<ComplianceRunReportData, VoomError> {
+        use voom_store::repo::jobs::JobRepo;
         use voom_store::repo::workflow_summaries::WorkflowSummaryRepo;
 
         let repo = self.workflow_summaries();
-        let summary = repo.get_summary(job_id).await?.ok_or_else(|| {
-            VoomError::NotFound(format!("workflow summary for job {} not found", job_id.0))
-        })?;
+        let Some(summary) = repo.get_summary(job_id).await? else {
+            let message = if self.jobs().get(job_id).await?.is_some() {
+                format!(
+                    "job {} has no completed workflow summary (still running or not a workflow job)",
+                    job_id.0
+                )
+            } else {
+                format!("no job with id {}", job_id.0)
+            };
+            return Err(VoomError::NotFound(message));
+        };
         let phases: Vec<PhaseSummaryView> = repo
             .phases_for_job(job_id)
             .await?
@@ -644,7 +670,7 @@ impl ControlPlane {
             .iter()
             .map(FilePhaseSummaryView::from)
             .collect();
-        let latest_phase_index = phases.len().checked_sub(1);
+        let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
             summary: WorkflowSummaryView::from(&summary),
             phases,
