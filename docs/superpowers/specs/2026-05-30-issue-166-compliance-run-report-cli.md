@@ -68,8 +68,9 @@ This issue delivers, and is bounded to:
   rejects at resolve time and so cannot drive a run). The two phases and the
   worker pairing are chosen by the §5 proof-of-commit gate; the leading candidate
   is a `remux` phase (`container mkv`) and a dependent `audio` phase (`transcode
-  audio to aac`, `depends_on: [remux]`) — two ops the fake workers can actually
-  commit — so phase 2 plans and runs against the artifact phase 1 produced.
+  audio to opus`, `depends_on: [remux]`) — two ops the fake workers can actually
+  commit, each desiring a state that diverges from the fixed re-probe so both plan
+  a ticket — so phase 2 plans and runs against the artifact phase 1 produced.
 - **CLI golden-output (`insta`) snapshots** for the full flow against that
   fixture: `plan show` (or `compliance report`) pre-run preview, `compliance
   execute` multi-phase run with summary + per-phase chain, and `compliance report
@@ -237,19 +238,32 @@ via the fake transcoder does *not*** — it falls through to
 marker with no staged artifact, so a fake `transcode video` phase cannot commit.
 A committed *video* phase therefore requires the real-ffmpeg fallback (candidate 2).
 
+**Phase 2 plans against the *fixed* re-probe, not the seed.** The fake ffprobe
+returns a constant `basic-mp4.json` for every probe — container
+`mov,mp4,m4a,3gp,3g2,mj2`, video `h264`, audio `aac`. After phase 1 commits, the
+coordinator re-probes its output and gets exactly those facts, and phase 2 plans
+against them (not against the seeded input snapshot, which only feeds phase 1).
+**Every post-phase-1 phase must therefore desire a state that diverges from
+`basic-mp4.json`** or it re-plans as a compliant no-op (no ticket, recorded
+`skipped`, not committed). Concretely: a remux phase desiring `mkv` diverges from
+the `mov,mp4…` container (commits), but a `transcode audio to aac` phase against
+already-`aac` audio is a no-op (does **not** commit) — it must target `opus`, or
+use `extract audio`, which produces an artifact regardless of codec.
+
 Candidate combinations, in preference order:
 
 1. **A fake-worker pairing of two committable ops + the fake ffprobe stub** — e.g.
-   `remux` to `mkv` (`fake-remuxer`) → `transcode audio to aac` (`fake-transcoder`),
-   or `transcode audio to aac` → `extract audio where commentary` (both
-   `fake-transcoder`), re-probed by the fake ffprobe. Deterministic
-   `observed_state`, reusing the fake-bytes seeding path the existing remux/audio
-   CLI tests use (no real media). The gate resolves the exact pairing, the seeding
-   snapshot that makes *both* phases plan non-trivially against one file (e.g. a
-   container mismatch for the remux phase plus an opus audio stream for the
-   transcode-audio phase), and that each phase commits to exit 0 — the existing
-   audio CLI test tolerates exit 2 and so does not yet establish the commit. This
-   is the **only** candidate that yields a stable whole-envelope `insta` golden.
+   `remux` to `mkv` (`fake-remuxer`) → `transcode audio to opus` (`fake-transcoder`),
+   or `transcode audio to opus` → `extract audio where commentary` (both
+   `fake-transcoder`), re-probed by the fake ffprobe. Each phase's desired state
+   diverges from `basic-mp4.json` (mkv ≠ mov/mp4; opus ≠ aac; extract always
+   produces), so both plan a ticket and commit. Deterministic `observed_state`,
+   reusing the fake-bytes seeding path the existing remux/audio CLI tests use (no
+   real media). The gate resolves the exact pairing, the seeding snapshot that
+   makes *both* phases plan non-trivially against one file, and that each phase
+   commits to exit 0 — the existing audio CLI test tolerates exit 2 and so does
+   not yet establish the commit. This is the **only** candidate that yields a
+   stable whole-envelope `insta` golden.
 2. **Real `voom-ffmpeg-worker` + real ffprobe** (the only way to commit a
    `transcode video` phase) — the stack `phase_barrier_flow.rs` proves commits two
    transcode phases. Used **only as a fallback** if no fake pairing commits twice.
@@ -279,18 +293,19 @@ policy "remux-then-audio" {
   }
   phase audio {
     depends_on: [remux]
-    transcode audio to aac where lang in [eng, und]
+    transcode audio to opus where lang in [eng, und]
   }
 }
 ```
 
 Default `on_error` (abort) so the policy is accepted at resolve time (ADR-0009).
 Both operations stage committable fake output (`remux`, `transcode_audio`) and are
-planner-supported, so the run dispatches a ticket per phase rather than blocking.
-The seeding snapshot must make both phases plan non-trivially — a container that
-differs from `mkv` (so the remux phase plans) carrying an opus audio stream (so the
-audio phase plans against the remuxed artifact). The gate confirms the exact
-snapshot.
+planner-supported. Phase 1 desires `mkv`, which diverges from the re-probe's
+`mov,mp4…` container, so it plans and commits; phase 2 desires `opus`, which
+diverges from the re-probe's `aac` audio, so it too plans and commits (a `to aac`
+audio phase would be a no-op against the already-aac fixed re-probe — see above).
+The seeding snapshot must additionally make phase 1 plan non-trivially (a container
+≠ `mkv`, with an eng/und audio stream). The gate confirms the exact snapshot.
 
 ### Golden flow test (`compliance_envelope.rs`)
 
