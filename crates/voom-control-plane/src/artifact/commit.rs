@@ -11,11 +11,11 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
     VoomError,
 };
+use voom_events::Event;
 use voom_events::payload::{
     ArtifactCommitCompletedPayload, ArtifactCommitFailedPreMutationPayload,
     ArtifactCommitRecoveryRequiredPayload, ArtifactCommitStartedPayload,
 };
-use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{
     ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactRepo,
     ArtifactVerification, NewArtifactCommitRecord,
@@ -25,11 +25,15 @@ use voom_store::repo::identity::{
 };
 
 use crate::ControlPlane;
+use crate::artifact::commit_pipeline::{
+    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
+    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
+};
 use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, copy_regular_file_checked,
     observe_regular_file, unique_temp_sibling_path,
 };
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{begin_tx, commit_tx};
 
 #[derive(Debug)]
 pub struct CommitArtifactInput {
@@ -413,47 +417,43 @@ async fn prepare_commit_in_tx(
     let temp_path = unique_temp_sibling_path(&target_path)
         .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
 
-    let record = cp
-        .artifacts
-        .create_pending_commit_in_tx(
-            tx,
-            NewArtifactCommitRecord {
-                artifact_handle_id: input.artifact_handle_id,
-                source_file_version_id,
-                verification_id: verification.id,
-                target_path: target_path.display().to_string(),
-                temp_path: Some(temp_path.display().to_string()),
-                report: json!({
-                    "phase": "prepared",
-                    "staging_path": staging_path.display().to_string(),
-                    "target_path": target_path.display().to_string(),
-                    "temp_path": temp_path.display().to_string(),
-                    "expected_size_bytes": expected_facts.size_bytes,
-                    "expected_checksum": expected_facts.content_hash,
-                    "staging_local_file_key": expected_facts.local_file_key,
-                }),
-                started_at: now,
-            },
-        )
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    append_event(
-        &cp.events,
-        tx,
-        SubjectType::ArtifactHandle,
-        Some(input.artifact_handle_id.0),
-        now,
-        Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
-            commit_record_id: record.id.0,
-            artifact_handle_id: input.artifact_handle_id.0,
-            source_file_version_id: source_file_version_id.0,
-            verification_id: verification.id.0,
-            target_path: target_path.display().to_string(),
-            temp_path: temp_path.display().to_string(),
+    let target_path_string = target_path.display().to_string();
+    let temp_path_string = temp_path.display().to_string();
+    let pending_input = NewArtifactCommitRecord {
+        artifact_handle_id: input.artifact_handle_id,
+        source_file_version_id,
+        verification_id: verification.id,
+        target_path: target_path_string.clone(),
+        temp_path: Some(temp_path_string.clone()),
+        report: json!({
+            "phase": "prepared",
+            "staging_path": staging_path.display().to_string(),
+            "target_path": target_path_string,
+            "temp_path": temp_path_string,
+            "expected_size_bytes": expected_facts.size_bytes,
+            "expected_checksum": expected_facts.content_hash,
+            "staging_local_file_key": expected_facts.local_file_key,
         }),
-    )
-    .await
-    .map_err(PrepareCommitError::AfterPending)?;
+        started_at: now,
+    };
+    let record =
+        create_pending_commit_with_started_event_in_tx(cp, tx, pending_input, |commit_record_id| {
+            Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
+                commit_record_id: commit_record_id.0,
+                artifact_handle_id: input.artifact_handle_id.0,
+                source_file_version_id: source_file_version_id.0,
+                verification_id: verification.id.0,
+                target_path: target_path.display().to_string(),
+                temp_path: temp_path.display().to_string(),
+            })
+        })
+        .await
+        .map_err(|err| match err {
+            PendingCommitRecordError::BeforePending(err) => {
+                PrepareCommitError::PreMutation(pre_mutation(&context, &err))
+            }
+            PendingCommitRecordError::AfterPending(err) => PrepareCommitError::AfterPending(err),
+        })?;
 
     Ok(PreparedCommit {
         record,
@@ -605,11 +605,10 @@ async fn append_failed_pre_mutation(
     failure: &CommitArtifactPreMutationReport,
     occurred_at: time::OffsetDateTime,
 ) -> Result<(), VoomError> {
-    append_event(
-        &cp.events,
+    append_commit_event_in_tx(
+        cp,
         tx,
-        SubjectType::ArtifactHandle,
-        Some(failure.artifact_handle_id.0),
+        failure.artifact_handle_id,
         occurred_at,
         Event::ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload {
             artifact_handle_id: failure.artifact_handle_id.0,
@@ -775,11 +774,10 @@ async fn finalize_commit(
             now,
         )
         .await?;
-    append_event(
-        &cp.events,
+    append_commit_event_in_tx(
+        cp,
         &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(prepared.artifact_handle_id.0),
+        prepared.artifact_handle_id,
         now,
         Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
             commit_record_id: committed.id.0,
@@ -805,36 +803,32 @@ async fn transition_recovery(
     update_commit_report_in_tx(&mut tx, prepared.record.id, &recovery)
         .await
         .map_err(CommitArtifactCommandError::from)?;
-    let recovered = cp
-        .artifacts
-        .mark_commit_recovery_required_in_tx(
-            &mut tx,
-            prepared.record.id,
-            ArtifactCommitFailure {
+    let error_code = err.error_code().as_str().to_owned();
+    let message = err.to_string();
+    let recovered = mark_recovery_required_with_event_in_tx(
+        cp,
+        &mut tx,
+        RecoveryRequiredCommit {
+            commit_record_id: prepared.record.id,
+            artifact_handle_id: prepared.artifact_handle_id,
+            failure: ArtifactCommitFailure {
                 failure_class: failure_class_for_error(&err),
-                error_code: err.error_code().as_str().to_owned(),
-                message: err.to_string(),
+                error_code: error_code.clone(),
+                message: message.clone(),
                 finished_at: now,
             },
-            recovery.recovery_reason.clone(),
-        )
-        .await
-        .map_err(CommitArtifactCommandError::from)?;
-    append_event(
-        &cp.events,
-        &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(prepared.artifact_handle_id.0),
-        now,
-        Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
-            commit_record_id: prepared.record.id.0,
-            artifact_handle_id: prepared.artifact_handle_id.0,
-            target_path: prepared.target_path.display().to_string(),
-            temp_path: prepared.temp_path.display().to_string(),
             recovery_reason: recovery.recovery_reason.clone(),
-            error_code: err.error_code().as_str().to_owned(),
-            message: err.to_string(),
-        }),
+            event: Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
+                commit_record_id: prepared.record.id.0,
+                artifact_handle_id: prepared.artifact_handle_id.0,
+                target_path: prepared.target_path.display().to_string(),
+                temp_path: prepared.temp_path.display().to_string(),
+                recovery_reason: recovery.recovery_reason.clone(),
+                error_code,
+                message,
+            }),
+            occurred_at: now,
+        },
     )
     .await
     .map_err(CommitArtifactCommandError::from)?;
