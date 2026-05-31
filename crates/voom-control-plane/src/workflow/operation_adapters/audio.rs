@@ -11,7 +11,7 @@ use crate::audio::{
     TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
     execute_transcode_audio_with_dispatchers,
 };
-use crate::workflow::dispatch_support::{
+use crate::workflow::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
 

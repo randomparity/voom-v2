@@ -1,11 +1,12 @@
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use voom_core::{FailureClass, LeaseId, VoomError};
 use voom_store::repo::leases::{Lease, NewLease};
 
 use crate::ControlPlane;
+use crate::workflow::executor::WorkflowExecutorOptions;
 
 pub(super) async fn acquire_lease_with_retry(
     control: &ControlPlane,
@@ -75,6 +76,46 @@ pub(super) async fn heartbeat_lease_with_retry(
             .map(|_| ())
     })
     .await
+}
+
+pub(super) async fn fail_if_watchdog_elapsed(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    last_heartbeat: Instant,
+    last_progress: Instant,
+    options: &WorkflowExecutorOptions,
+) -> Result<(), VoomError> {
+    let now = Instant::now();
+    if now.duration_since(last_heartbeat) >= options.heartbeat_timeout {
+        return fail_lease_and_return(
+            control,
+            lease_id,
+            FailureClass::WorkerTimeout,
+            VoomError::WorkerTimeout(format!("heartbeat timeout for lease {lease_id}")),
+        )
+        .await;
+    }
+    if now.duration_since(last_progress) >= options.progress_idle_timeout {
+        return fail_lease_and_return(
+            control,
+            lease_id,
+            FailureClass::ProgressTimeout,
+            VoomError::WorkerTimeout(format!("progress timeout for lease {lease_id}")),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+pub(super) async fn heartbeat_workflow_lease(
+    control: &ControlPlane,
+    lease_id: LeaseId,
+    last_heartbeat: &mut Instant,
+    options: &WorkflowExecutorOptions,
+) -> Result<(), VoomError> {
+    heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
+    *last_heartbeat = Instant::now();
+    Ok(())
 }
 
 pub(super) async fn retry_on_database_locked<T, Fut, Op>(mut operation: Op) -> Result<T, VoomError>

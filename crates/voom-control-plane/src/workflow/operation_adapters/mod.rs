@@ -118,10 +118,10 @@ where
         tokio::select! {
             result = &mut future => return result,
             _ = heartbeat.tick(), if !context.options.chaos.suppresses_heartbeats_for(operation) => {
-                crate::workflow::dispatch_support::heartbeat_lease_with_retry(
+                crate::workflow::leases::heartbeat_lease_with_retry(
                     context.control,
                     context.lease_id,
-                    crate::workflow::dispatch_support::time_duration(context.options.lease_ttl)?,
+                    crate::workflow::leases::time_duration(context.options.lease_ttl)?,
                 )
                 .await?;
             }

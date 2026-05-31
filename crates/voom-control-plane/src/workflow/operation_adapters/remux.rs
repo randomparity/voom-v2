@@ -8,7 +8,7 @@ use crate::remux::{
     ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
     success_event_recovery_report,
 };
-use crate::workflow::dispatch_support::{
+use crate::workflow::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
     retry_on_database_locked,
 };

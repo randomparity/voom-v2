@@ -5,7 +5,7 @@ use voom_worker_protocol::{OperationKind, TranscodeVideoRequest, TranscodeVideoR
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
-use crate::workflow::dispatch_support::{
+use crate::workflow::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
 
