@@ -1,5 +1,9 @@
 use super::*;
-use voom_worker_protocol::{OperationDispatch, OperationKind, ProgressFrame, http::OperationBody};
+use voom_worker_protocol::{
+    OperationDispatch, OperationKind, ProgressFrame, TranscodeVideoExpectedFacts,
+    TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus, http::OperationBody,
+};
 
 #[test]
 fn provider_definition_rejects_unsupported_operation() {
@@ -159,6 +163,48 @@ fn fake_transcoder_accepts_audio_transcode_codec() {
 }
 
 #[test]
+fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
+    let output_path = unique_output_path("fake-transcoder-video.mkv");
+    let request_payload = serde_json::to_value(TranscodeVideoRequest {
+        input: TranscodeVideoInput {
+            path: "/library/file-001.mkv".to_owned(),
+            expected: TranscodeVideoExpectedFacts {
+                size_bytes: 12_345,
+                content_hash: "blake3:input".to_owned(),
+                modified_at: None,
+                local_file_key: Some("input-key".to_owned()),
+            },
+        },
+        output: TranscodeVideoOutput {
+            staging_root: output_path.parent().unwrap().to_string_lossy().into_owned(),
+            path: output_path.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+            overwrite: true,
+        },
+        profile: TranscodeVideoProfile::default_hevc(),
+        copy_video: false,
+    })
+    .unwrap();
+    let req = request(OperationKind::TranscodeVideo, request_payload);
+
+    let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames).clone();
+    let result: TranscodeVideoResult = serde_json::from_value(payload).unwrap();
+
+    assert_eq!(result.status, TranscodeVideoStatus::Transcoded);
+    assert_eq!(result.provider, "fake-transcoder");
+    assert_eq!(result.input_pre.size_bytes, 12_345);
+    assert_eq!(result.input_post.content_hash, "blake3:input");
+    assert_eq!(result.output_container, "mkv");
+    assert_eq!(result.output_video_codec, "hevc");
+    assert!(output_path.is_file());
+    let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
 fn artifact_access_evidence_validates_selected_advertised_mode() {
     let payload = artifact_access_payload("shared_mount", &["shared_mount"]);
 
@@ -294,4 +340,11 @@ fn artifact_access_payload(
         },
         "advertised_artifact_access": advertised_artifact_access
     })
+}
+
+fn unique_output_path(file_name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "voom-fake-support-{}-{file_name}",
+        std::process::id()
+    ))
 }

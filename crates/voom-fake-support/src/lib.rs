@@ -28,7 +28,10 @@ use voom_worker_protocol::{
     ExtractAudioResult, ExtractAudioStatus, HttpServer, OperationDispatch, OperationFuture,
     OperationKind, OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
     RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, ServerHandle,
-    TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioStatus, WorkerCredentials,
+    TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoObservedFacts,
+    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, WorkerCredentials,
+    canonical_video_codec, is_supported_transcode_video_codec,
+    is_supported_transcode_video_container,
 };
 
 const MAX_FAKE_DURATION_MS: u64 = 30_000;
@@ -467,6 +470,14 @@ fn validate_payload(kind: ProviderKind, req: &OperationRequest) -> Result<(), Pr
             require_path(&req.payload)?;
         }
         ProviderKind::Transcoder => match req.operation {
+            OperationKind::TranscodeVideo => {
+                if let Some(request) = transcode_video_protocol_payload(&req.payload)? {
+                    validate_transcode_video_request(&request)?;
+                } else {
+                    require_path(&req.payload)?;
+                    require_field(&req.payload, "target_codec", "h265")?;
+                }
+            }
             OperationKind::TranscodeAudio => {
                 if let Some(request) = transcode_audio_protocol_payload(&req.payload)? {
                     validate_transcode_audio_request(&request)?;
@@ -590,6 +601,20 @@ fn remux_protocol_payload(
         .map_err(|err| invalid(format!("remux protocol payload invalid: {err}")))
 }
 
+fn transcode_video_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<TranscodeVideoRequest>, ProtocolError> {
+    if !(payload.get("input").is_some()
+        && payload.get("output").is_some()
+        && payload.get("profile").is_some())
+    {
+        return Ok(None);
+    }
+    serde_json::from_value(payload.clone())
+        .map(Some)
+        .map_err(|err| invalid(format!("transcode_video protocol payload invalid: {err}")))
+}
+
 fn transcode_audio_protocol_payload(
     payload: &serde_json::Value,
 ) -> Result<Option<TranscodeAudioRequest>, ProtocolError> {
@@ -617,6 +642,33 @@ fn extract_audio_protocol_payload(
     serde_json::from_value(payload.clone())
         .map(Some)
         .map_err(|err| invalid(format!("extract_audio protocol payload invalid: {err}")))
+}
+
+fn validate_transcode_video_request(request: &TranscodeVideoRequest) -> Result<(), ProtocolError> {
+    if request.input.path.trim().is_empty() {
+        return Err(invalid("transcode_video input.path must not be empty"));
+    }
+    if request.output.path.trim().is_empty() {
+        return Err(invalid("transcode_video output.path must not be empty"));
+    }
+    if !is_supported_transcode_video_container(&request.output.container) {
+        return Err(invalid(
+            "transcode_video output.container must be mkv or mp4",
+        ));
+    }
+    if !is_supported_transcode_video_codec(&request.output.video_codec) {
+        return Err(invalid(
+            "transcode_video output.video_codec must be hevc or av1",
+        ));
+    }
+    if canonical_video_codec(&request.output.video_codec)
+        != canonical_video_codec(&request.profile.target_codec)
+    {
+        return Err(invalid(
+            "transcode_video output.video_codec must match profile.target_codec",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_transcode_audio_request(request: &TranscodeAudioRequest) -> Result<(), ProtocolError> {
@@ -689,6 +741,43 @@ fn fake_remux_result(request: &RemuxRequest) -> Result<RemuxResult, ProtocolErro
             .iter()
             .map(|stream| stream.snapshot_stream_id.clone())
             .collect(),
+    })
+}
+
+fn fake_transcode_video_result(
+    provider: &str,
+    request: &TranscodeVideoRequest,
+) -> Result<TranscodeVideoResult, ProtocolError> {
+    let bytes = include_bytes!("../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    std::fs::write(&request.output.path, bytes)
+        .map_err(|err| invalid(format!("fake transcode_video output write failed: {err}")))?;
+    let input = video_observed_from_expected(
+        request.input.expected.size_bytes,
+        &request.input.expected.content_hash,
+        request.input.expected.local_file_key.clone(),
+    );
+    Ok(TranscodeVideoResult {
+        status: TranscodeVideoStatus::Transcoded,
+        provider: provider.to_owned(),
+        provider_version: "test".to_owned(),
+        input_pre: input.clone(),
+        input_post: input,
+        output: TranscodeVideoObservedFacts {
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(0),
+            content_hash: blake3_checksum(bytes),
+            modified_at: None,
+            local_file_key: Some(request.output.path.clone()),
+        },
+        output_container: request.output.container.clone(),
+        output_video_codec: request.output.video_codec.clone(),
+        output_width: 1_920,
+        output_height: 1_080,
+        output_pixel_format: request
+            .profile
+            .pixel_format
+            .clone()
+            .unwrap_or_else(|| "yuv420p".to_owned()),
+        copied_video: request.copy_video,
     })
 }
 
@@ -783,6 +872,19 @@ fn fake_audio_output_facts(path: &str) -> Result<AudioObservedFacts, ProtocolErr
     })
 }
 
+fn video_observed_from_expected(
+    size_bytes: u64,
+    content_hash: &str,
+    local_file_key: Option<String>,
+) -> TranscodeVideoObservedFacts {
+    TranscodeVideoObservedFacts {
+        size_bytes,
+        content_hash: content_hash.to_owned(),
+        modified_at: None,
+        local_file_key,
+    }
+}
+
 fn audio_observed_from_expected(size_bytes: u64, content_hash: &str) -> AudioObservedFacts {
     AudioObservedFacts {
         size_bytes,
@@ -851,6 +953,10 @@ fn result_payload(
             object.insert("hash".to_owned(), serde_json::json!("sha256:fake-prober"));
         }
         "fake-transcoder" => {
+            if let Some(video_result) = fake_transcoder_video_payload(provider, operation, payload)?
+            {
+                return Ok(video_result);
+            }
             if let Some(audio_result) = fake_transcoder_audio_payload(provider, operation, payload)?
             {
                 return Ok(audio_result);
@@ -917,6 +1023,21 @@ fn result_payload(
     Ok(result)
 }
 
+fn fake_transcoder_video_payload(
+    provider: &str,
+    operation: OperationKind,
+    payload: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, ProtocolError> {
+    if operation == OperationKind::TranscodeVideo
+        && let Some(request) = transcode_video_protocol_payload(payload)?
+    {
+        return serde_json::to_value(fake_transcode_video_result(provider, &request)?)
+            .map(Some)
+            .map_err(|err| invalid(format!("fake transcode_video result encode failed: {err}")));
+    }
+    Ok(None)
+}
+
 fn fake_transcoder_audio_payload(
     provider: &str,
     operation: OperationKind,
@@ -943,6 +1064,9 @@ fn fake_transcoder_legacy_payload(
     object: &mut serde_json::Map<String, serde_json::Value>,
     payload: &serde_json::Value,
 ) {
+    // Compatibility for legacy fake-provider tests and scripted callers that
+    // still send top-level `path` + `target_codec`. Active worker protocol
+    // callers use the typed transcode_video/transcode_audio branches above.
     object.insert(
         "output_path".to_owned(),
         serde_json::json!(transform_output_path(payload, "h265")),
