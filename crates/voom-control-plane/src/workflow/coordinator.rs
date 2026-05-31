@@ -1191,7 +1191,6 @@ impl ControlPlane {
     }
 }
 
-/// First stream in the reprobe payload tagged with the given `kind`.
 fn first_stream_of_kind<'a>(payload: &'a Value, kind: &str) -> Option<&'a Value> {
     payload
         .get("streams")
@@ -1200,12 +1199,11 @@ fn first_stream_of_kind<'a>(payload: &'a Value, kind: &str) -> Option<&'a Value>
         .find(|stream| stream.get("kind").and_then(Value::as_str) == Some(kind))
 }
 
-/// Read a string field off a payload object.
 fn payload_str(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// Read a `u32` field off a payload object (snapshot dimensions are `u64` JSON).
+/// Snapshot dimensions arrive as JSON `u64`, but planner dimensions are `u32`.
 fn payload_u32(value: &Value, key: &str) -> Option<u32> {
     value
         .get(key)
