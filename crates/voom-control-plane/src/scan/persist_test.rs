@@ -1,11 +1,12 @@
 use super::{
-    ObservedCandidateFacts, ScanPersistError, persist_scanned_media_snapshot, verify_probe_facts,
+    ObservedCandidateFacts, ScanPersistError, observe_sidecars, persist_scanned_media_snapshot,
+    verify_probe_facts,
 };
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::scan::ScanReportFileStatus;
+use crate::scan::{ScanReportFileStatus, discovery::SidecarCandidate};
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::clock_test_support::ManualClock;
@@ -116,6 +117,26 @@ async fn content_drift_skips_persistence_and_returns_failed_content_drift() {
     assert_eq!(table_count(&cp, "file_locations").await, 0);
     assert_eq!(table_count(&cp, "media_snapshots").await, 0);
     assert!(state_transition_event_kinds(&cp).await.is_empty());
+}
+
+#[tokio::test]
+async fn observe_sidecars_records_sha256_hex_checksum() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    tokio::fs::write(tmp.path(), b"sidecar bytes")
+        .await
+        .unwrap();
+
+    let observed = observe_sidecars(&[SidecarCandidate {
+        path: tmp.path().to_path_buf(),
+    }])
+    .await
+    .unwrap();
+
+    assert_eq!(
+        observed[0].content_hash,
+        "sha256:2a708564b7d4940d983e7aae40151cfdc1d6e2f05ca881687aadad4be1bba8e0"
+    );
+    assert_eq!(observed[0].size_bytes, 13);
 }
 
 #[tokio::test]

@@ -300,7 +300,7 @@ async fn observe_sidecars(
         let size_bytes = u64::try_from(bytes.len()).map_err(|_| {
             VoomError::Internal(format!("sidecar too large: {}", sidecar.path.display()))
         })?;
-        let content_hash = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        let content_hash = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
         observed.push(ObservedSidecar {
             path: sidecar.path.clone(),
             location_value: canonical_path_value(&sidecar.path)?,
