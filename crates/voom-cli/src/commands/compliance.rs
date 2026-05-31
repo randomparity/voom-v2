@@ -40,9 +40,11 @@ fn parse_report_mode(
             input_set_id,
         }),
         (None, None, Some(job_id)) => Ok(ReportMode::Run { job_id }),
-        _ => Err("compliance report requires either --policy-version-id with \
+        _ => Err(
+            "compliance report requires either --policy-version-id with \
                   --input-set-id (preview) or --job-id (post-run read)"
-            .to_owned()),
+                .to_owned(),
+        ),
     }
 }
 

@@ -236,16 +236,15 @@ fn report_with_no_selector_args_is_bad_args() {
     // The argument combination is rejected before any DB open, so an in-memory
     // url is enough.
     let output = Command::new(env!("CARGO_BIN_EXE_voom"))
-        .args([
-            "--database-url",
-            "sqlite::memory:",
-            "compliance",
-            "report",
-        ])
+        .args(["--database-url", "sqlite::memory:", "compliance", "report"])
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1), "no selector => BAD_ARGS exit 1");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "no selector => BAD_ARGS exit 1"
+    );
     let json = envelope(output.stdout);
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "BAD_ARGS");

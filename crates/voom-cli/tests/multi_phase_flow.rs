@@ -148,7 +148,10 @@ async fn assert_execute_committed_two_phases(url: &str, execute: &std::process::
 /// `compliance report --job-id` reads the durable two-phase chain back unchanged:
 /// same phases, `latest_phase_index` at phase 1, folded report ids preserved.
 fn assert_report_reads_back_chain(url: &str, job_id: u64, run_phases: &[Value]) {
-    let report = run_voom(url, &["compliance", "report", "--job-id", &job_id.to_string()]);
+    let report = run_voom(
+        url,
+        &["compliance", "report", "--job-id", &job_id.to_string()],
+    );
     assert_eq!(
         report.status.code(),
         Some(0),
@@ -160,7 +163,11 @@ fn assert_report_reads_back_chain(url: &str, job_id: u64, run_phases: &[Value]) 
     assert_eq!(report_json["status"], "ok");
     assert_eq!(report_json["data"]["summary"]["job_id"], job_id);
     let report_phases = report_json["data"]["phases"].as_array().unwrap();
-    assert_eq!(report_phases.len(), 2, "post-run read returns the full chain");
+    assert_eq!(
+        report_phases.len(),
+        2,
+        "post-run read returns the full chain"
+    );
     assert_eq!(report_phases[0]["phase_name"], "normalize");
     assert_eq!(report_phases[1]["phase_name"], "reverify");
     assert_eq!(
