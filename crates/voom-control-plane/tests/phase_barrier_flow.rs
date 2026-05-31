@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
+use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_control_plane::workflow::coordinator::CoordinatorOutcome;
 use voom_core::{FileVersionId, MediaSnapshotId};

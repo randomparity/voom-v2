@@ -18,8 +18,10 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::{ComplianceExecuteData, ComplianceExecutionOptions};
-use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::cases::policy::compliance::{
+    ComplianceExecuteData, ComplianceExecutionOptions,
+};
+use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;
@@ -164,7 +166,8 @@ async fn run_case(case: &Case) -> CaseOutcome {
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source = tmp.path().join("Movie.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Movie.mp4");
     generate_fixture(
         &source,
         case.source_codec,
@@ -205,8 +208,8 @@ async fn run_case(case: &Case) -> CaseOutcome {
     assert_eq!(plan.plan.nodes[0].operation_kind, "transcode_video");
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
 
-    let executed = execute_with_worker(&cp, policy.version.id, input.id, tmp.path()).await;
-    let committed = assert_committed_result(&url, tmp.path(), &executed, case).await;
+    let executed = execute_with_worker(&cp, policy.version.id, input.id, &root).await;
+    let committed = assert_committed_result(&url, &root, &executed, case).await;
 
     CaseOutcome {
         cp,

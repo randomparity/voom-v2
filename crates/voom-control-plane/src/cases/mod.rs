@@ -4,8 +4,8 @@
 //!
 //! `begin_tx`, `commit_tx`, and `append_event` are the shared
 //! transaction-and-event boilerplate used by every case file. They live
-//! here rather than duplicated per file so the five case modules stay
-//! consistent.
+//! here rather than duplicated per folder so media, policy, execution, and
+//! worker use cases stay consistent.
 
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
@@ -18,20 +18,15 @@ use voom_events::EventKind;
 #[cfg(test)]
 use voom_store::repo::events::{EventFilter, Page};
 
-pub mod artifacts;
-pub mod bundles;
-pub mod compliance;
-pub mod identity;
-pub mod jobs;
-pub mod leases;
-pub mod nodes;
-pub mod plans;
-pub mod policies;
-pub mod policy_inputs;
-pub mod remote_execution;
-pub mod tickets;
-pub mod use_leases;
+pub mod execution;
+pub mod media;
+pub mod policy;
 pub mod workers;
+
+pub use execution::{jobs, leases, remote_execution, tickets};
+pub use media::{artifacts, bundles, identity, use_leases};
+pub use policy::{compliance, plans, policies, policy_inputs};
+pub use workers::nodes;
 
 pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite>, VoomError> {
     pool.begin()

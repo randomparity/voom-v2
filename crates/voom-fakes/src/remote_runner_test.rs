@@ -2,7 +2,7 @@ use secrecy::ExposeSecret;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_api::router_with_control_plane;
-use voom_control_plane::cases::nodes::RegisterNodeInput;
+use voom_control_plane::cases::workers::nodes::RegisterNodeInput;
 use voom_control_plane::cases::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
 };

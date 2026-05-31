@@ -7,7 +7,7 @@ use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::OperationKind;
 
-use crate::cases::policy_inputs::PolicyInputFromScanInput;
+use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};
 use crate::workflow::{
     WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::WorkflowTicketPayload,
@@ -959,7 +959,7 @@ async fn read_compliance_run_report_zero_phase_job_is_ok_and_empty() {
         .run_phase_barrier(
             created.version.id,
             input.id,
-            crate::cases::compliance::ComplianceExecutionOptions::default(),
+            crate::cases::policy::compliance::ComplianceExecutionOptions::default(),
         )
         .await
         .unwrap();

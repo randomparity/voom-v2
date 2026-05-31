@@ -48,7 +48,8 @@ async fn multi_phase_execute_then_report_by_job_id() {
     cargo_build("voom-ffmpeg-worker");
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source = tmp.path().join("Movie.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Movie.mp4");
     generate_h264_fixture(&source);
 
     let db = NamedTempFile::new().unwrap();
@@ -77,8 +78,8 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let input_id = input.id.0;
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
-    let staging_root = tmp.path().join("stage");
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
     let execute = run_voom(
         &url,
         &[

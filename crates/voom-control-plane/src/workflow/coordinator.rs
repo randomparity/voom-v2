@@ -31,9 +31,9 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
-use crate::cases::compliance::ComplianceExecutionOptions;
-use crate::cases::plans::input_set_to_draft;
-use crate::cases::policy_inputs::stream_summary_from_snapshot_payload;
+use crate::cases::policy::compliance::ComplianceExecutionOptions;
+use crate::cases::policy::plans::input_set_to_draft;
+use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
 
 use super::WorkerRuntimeRegistry;
 use super::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};

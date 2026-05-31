@@ -10,8 +10,8 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
+use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
@@ -310,7 +310,7 @@ async fn ticket_result(url: &str, job_id: u64, operation: &str) -> serde_json::V
 async fn assert_audio_transcode_execution_result(
     url: &str,
     out_dir: &Path,
-    executed: &voom_control_plane::cases::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::cases::policy::compliance::ComplianceExecuteData,
 ) -> (FileVersionId, MediaSnapshotId) {
     let result = ticket_result(url, executed.summary.job_id, "transcode_audio").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();

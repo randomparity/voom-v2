@@ -12,7 +12,7 @@ use voom_store::repo::nodes::{NodeKind, NodeStatus};
 use voom_store::repo::workers::WorkerKind;
 
 use crate::cases::cp;
-use crate::cases::nodes::RegisterNodeInput;
+use crate::cases::workers::nodes::RegisterNodeInput;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 

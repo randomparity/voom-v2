@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tempfile::{NamedTempFile, TempDir};
 use time::OffsetDateTime;
-use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::workflow::ticket_payload::WorkflowTicketPayload;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
