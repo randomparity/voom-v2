@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -15,9 +14,7 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 use voom_worker_protocol::{
-    DispatchStream, ExtractAudioRequest, ExtractAudioResult, NdjsonOutcome, OperationKind,
-    OperationRequest, ProgressFrame, ProtocolError, RemuxRequest, RemuxResult,
-    TranscodeAudioRequest, TranscodeAudioResult, TranscodeVideoRequest, TranscodeVideoResult,
+    DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
 
 use super::binding::{
@@ -25,29 +22,20 @@ use super::binding::{
     render_policy_extract_audio_payload, render_policy_remux_payload,
     render_policy_transcode_audio_payload, render_policy_transcode_payload,
 };
+use super::dispatch_support::{
+    acquire_lease_with_retry, fail_lease_and_return, failure_class_for_error,
+    heartbeat_lease_with_retry, release_lease_with_retry, time_duration,
+};
 use super::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
 };
 use super::model::{WorkflowNode, WorkflowPlan};
+use super::operation_adapters::dispatch_control_plane_ticket;
 use super::runtime::WorkerRuntimeRegistry;
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use super::timing::{EffectiveTiming, seeded_timing};
 use crate::ControlPlane;
-use crate::audio::{
-    ExecuteExtractAudioInput, ExecuteTranscodeAudioInput, ExtractAudioDispatcher,
-    TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
-    execute_transcode_audio_with_dispatchers,
-};
-use crate::cases::{begin_tx, commit_tx};
-use crate::remux::commit::BundledRemuxResultProbeDispatcher;
-use crate::remux::{
-    ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
-    success_event_recovery_report,
-};
-use crate::transcode::{
-    ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
-};
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
@@ -146,7 +134,7 @@ impl WorkflowChaosOptions {
         self.payload_modes.insert(operation, mode.into());
     }
 
-    fn suppresses_heartbeats_for(&self, operation: OperationKind) -> bool {
+    pub(super) fn suppresses_heartbeats_for(&self, operation: OperationKind) -> bool {
         self.disable_heartbeat_ticks || self.suppress_heartbeat_operation == Some(operation)
     }
 
@@ -1278,7 +1266,7 @@ async fn dispatch_ticket_inner(
         control,
         runtime,
         ticket,
-        workflow_payload,
+        workflow_payload.operation,
         lease_id,
         &payload,
         &options,
@@ -1341,605 +1329,6 @@ async fn dispatch_ticket_inner(
         options,
     )
     .await
-}
-
-async fn dispatch_control_plane_ticket(
-    control: &ControlPlane,
-    runtime: &super::runtime::WorkerRuntime,
-    ticket: &Ticket,
-    workflow_payload: &WorkflowTicketPayload,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Option<Result<(), VoomError>> {
-    payload.get("source_file_version_id")?;
-    match workflow_payload.operation {
-        OperationKind::TranscodeVideo => Some(
-            dispatch_control_plane_transcode(
-                control,
-                runtime,
-                ticket,
-                workflow_payload,
-                lease_id,
-                payload,
-                options,
-            )
-            .await,
-        ),
-        OperationKind::Remux => Some(
-            dispatch_control_plane_remux(
-                control,
-                runtime,
-                ticket,
-                workflow_payload,
-                lease_id,
-                payload,
-                options,
-            )
-            .await,
-        ),
-        OperationKind::TranscodeAudio => Some(
-            dispatch_control_plane_transcode_audio(
-                control,
-                runtime,
-                ticket,
-                workflow_payload,
-                lease_id,
-                payload,
-                options,
-            )
-            .await,
-        ),
-        OperationKind::ExtractAudio => Some(
-            dispatch_control_plane_extract_audio(
-                control,
-                runtime,
-                ticket,
-                workflow_payload,
-                lease_id,
-                payload,
-                options,
-            )
-            .await,
-        ),
-        _ => None,
-    }
-}
-
-struct RuntimeTranscodeDispatcher<'a> {
-    runtime: &'a super::runtime::WorkerRuntime,
-    control: &'a ControlPlane,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    options: &'a WorkflowExecutorOptions,
-}
-
-#[async_trait::async_trait]
-impl TranscodeVideoDispatcher for RuntimeTranscodeDispatcher<'_> {
-    async fn dispatch_transcode_video(
-        &self,
-        request: TranscodeVideoRequest,
-    ) -> Result<TranscodeVideoResult, VoomError> {
-        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
-        await_with_lease_heartbeats(
-            self.control,
-            self.lease_id,
-            OperationKind::TranscodeVideo,
-            self.options,
-            crate::transcode::dispatch::dispatch_transcode_video_with_client(
-                self.runtime.client.as_ref(),
-                &self.runtime.credentials,
-                &idempotency_key,
-                request,
-            ),
-        )
-        .await
-    }
-}
-
-async fn dispatch_control_plane_transcode(
-    control: &ControlPlane,
-    runtime: &super::runtime::WorkerRuntime,
-    ticket: &Ticket,
-    workflow_payload: &WorkflowTicketPayload,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<(), VoomError> {
-    let _ = workflow_payload;
-    // Parse the resolved video profile from the ticket payload (embedded by
-    // binding.rs from the planner node payload per the pinned Phase 5↔6
-    // contract). This is the single resolution path — the profile was already
-    // resolved at planning time; we only deserialize it here.
-    let resolved_profile_value = payload
-        .get("resolved_profile")
-        .ok_or_else(|| {
-            VoomError::Config(format!(
-                "transcode ticket {} missing resolved_profile",
-                ticket.id
-            ))
-        })?
-        .clone();
-    let resolved_profile: voom_worker_protocol::TranscodeVideoProfile =
-        serde_json::from_value(resolved_profile_value).map_err(|err| {
-            VoomError::Config(format!(
-                "transcode ticket {} resolved_profile malformed: {err}",
-                ticket.id
-            ))
-        })?;
-    let output_container = payload
-        .get("container")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            VoomError::Config(format!("transcode ticket {} missing container", ticket.id))
-        })?
-        .to_owned();
-    let resolved = crate::transcode::resolve::ResolvedProfile {
-        profile: resolved_profile,
-        output_container,
-    };
-    let input = ExecuteTranscodeVideoInput {
-        job_id: ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!("transcode ticket {} missing job_id", ticket.id))
-        })?,
-        ticket_id: ticket.id,
-        lease_id,
-        source_file_version_id: voom_core::FileVersionId(required_u64(
-            payload,
-            "source_file_version_id",
-        )?),
-        source_location_id: optional_u64(payload, "source_location_id")
-            .map(voom_core::FileLocationId),
-        staging_root: options.transcode_staging_root.clone(),
-        target_dir: options.transcode_target_dir.clone(),
-        resolved,
-    };
-    let report = match execute_transcode_video_with_dispatchers(
-        control,
-        input,
-        &RuntimeTranscodeDispatcher {
-            runtime,
-            control,
-            ticket_id: ticket.id,
-            lease_id,
-            options,
-        },
-        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
-        &crate::transcode::commit::BundledTranscodeResultProbeDispatcher,
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let result = serde_json::to_value(report)
-        .map_err(|err| VoomError::Internal(format!("encode transcode report: {err}")))?;
-    release_lease_with_retry(control, lease_id, result).await
-}
-
-struct RuntimeTranscodeAudioDispatcher<'a> {
-    runtime: &'a super::runtime::WorkerRuntime,
-    control: &'a ControlPlane,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    options: &'a WorkflowExecutorOptions,
-}
-
-#[async_trait::async_trait]
-impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
-    async fn dispatch_transcode_audio(
-        &self,
-        request: TranscodeAudioRequest,
-    ) -> Result<TranscodeAudioResult, VoomError> {
-        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
-        await_with_lease_heartbeats(
-            self.control,
-            self.lease_id,
-            OperationKind::TranscodeAudio,
-            self.options,
-            crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
-                self.runtime.client.as_ref(),
-                &self.runtime.credentials,
-                self.lease_id,
-                &idempotency_key,
-                request,
-            ),
-        )
-        .await
-    }
-}
-
-struct RuntimeExtractAudioDispatcher<'a> {
-    runtime: &'a super::runtime::WorkerRuntime,
-    control: &'a ControlPlane,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    options: &'a WorkflowExecutorOptions,
-}
-
-#[async_trait::async_trait]
-impl ExtractAudioDispatcher for RuntimeExtractAudioDispatcher<'_> {
-    async fn dispatch_extract_audio(
-        &self,
-        request: ExtractAudioRequest,
-    ) -> Result<ExtractAudioResult, VoomError> {
-        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
-        await_with_lease_heartbeats(
-            self.control,
-            self.lease_id,
-            OperationKind::ExtractAudio,
-            self.options,
-            crate::audio::dispatch::dispatch_extract_audio_with_client_context(
-                self.runtime.client.as_ref(),
-                &self.runtime.credentials,
-                self.lease_id,
-                &idempotency_key,
-                request,
-            ),
-        )
-        .await
-    }
-}
-
-async fn dispatch_control_plane_transcode_audio(
-    control: &ControlPlane,
-    runtime: &super::runtime::WorkerRuntime,
-    ticket: &Ticket,
-    workflow_payload: &WorkflowTicketPayload,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<(), VoomError> {
-    let input = match transcode_audio_input_for_workflow_ticket(ticket, lease_id, payload, options)
-    {
-        Ok(input) => input,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let _ = workflow_payload;
-    let report = match execute_transcode_audio_with_dispatchers(
-        control,
-        input,
-        &RuntimeTranscodeAudioDispatcher {
-            runtime,
-            control,
-            ticket_id: ticket.id,
-            lease_id,
-            options,
-        },
-        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
-        &crate::audio::commit::BundledAudioResultProbeDispatcher,
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let result = serde_json::to_value(report)
-        .map_err(|err| VoomError::Internal(format!("encode transcode audio report: {err}")))?;
-    release_lease_with_retry(control, lease_id, result).await
-}
-
-async fn dispatch_control_plane_extract_audio(
-    control: &ControlPlane,
-    runtime: &super::runtime::WorkerRuntime,
-    ticket: &Ticket,
-    workflow_payload: &WorkflowTicketPayload,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<(), VoomError> {
-    let input =
-        match extract_audio_input_for_workflow_ticket(control, ticket, lease_id, payload, options)
-            .await
-        {
-            Ok(input) => input,
-            Err(source) => {
-                return fail_lease_and_return(
-                    control,
-                    lease_id,
-                    failure_class_for_error(&source),
-                    source,
-                )
-                .await;
-            }
-        };
-    let _ = workflow_payload;
-    let report = match execute_extract_audio_with_dispatchers(
-        control,
-        input,
-        &RuntimeExtractAudioDispatcher {
-            runtime,
-            control,
-            ticket_id: ticket.id,
-            lease_id,
-            options,
-        },
-        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
-    )
-    .await
-    {
-        Ok(report) => report,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let result = serde_json::to_value(report)
-        .map_err(|err| VoomError::Internal(format!("encode extract audio report: {err}")))?;
-    release_lease_with_retry(control, lease_id, result).await
-}
-
-struct RuntimeRemuxDispatcher<'a> {
-    runtime: &'a super::runtime::WorkerRuntime,
-    control: &'a ControlPlane,
-    ticket_id: TicketId,
-    lease_id: LeaseId,
-    options: &'a WorkflowExecutorOptions,
-}
-
-#[async_trait::async_trait]
-impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
-    async fn dispatch_remux(&self, request: RemuxRequest) -> Result<RemuxResult, VoomError> {
-        let mut progress = crate::remux::dispatch::NoopRemuxProgressSink;
-        self.dispatch_remux_with_progress(request, &mut progress)
-            .await
-    }
-
-    async fn dispatch_remux_with_progress(
-        &self,
-        request: RemuxRequest,
-        progress: &mut dyn crate::remux::dispatch::RemuxProgressSink,
-    ) -> Result<RemuxResult, VoomError> {
-        let idempotency_key = workflow_idempotency_key(self.ticket_id, self.lease_id);
-        await_with_lease_heartbeats(
-            self.control,
-            self.lease_id,
-            OperationKind::Remux,
-            self.options,
-            crate::remux::dispatch::dispatch_remux_with_client_context_and_progress(
-                self.runtime.client.as_ref(),
-                &self.runtime.credentials,
-                &idempotency_key,
-                self.lease_id,
-                request,
-                progress,
-            ),
-        )
-        .await
-    }
-}
-
-fn workflow_idempotency_key(ticket_id: TicketId, lease_id: LeaseId) -> String {
-    format!("ticket-{}-lease-{}", ticket_id.0, lease_id.0)
-}
-
-async fn dispatch_control_plane_remux(
-    control: &ControlPlane,
-    runtime: &super::runtime::WorkerRuntime,
-    ticket: &Ticket,
-    workflow_payload: &WorkflowTicketPayload,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<(), VoomError> {
-    let _ = workflow_payload;
-    let input = match remux_input_for_workflow_ticket(ticket, lease_id, payload, options) {
-        Ok(input) => input,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let success = match execute_remux_with_deferred_success_event(
-        control,
-        input,
-        &RuntimeRemuxDispatcher {
-            runtime,
-            control,
-            ticket_id: ticket.id,
-            lease_id,
-            options,
-        },
-        &crate::artifact::verify::BundledVerifyArtifactDispatcher,
-        &BundledRemuxResultProbeDispatcher,
-    )
-    .await
-    {
-        Ok(success) => success,
-        Err(source) => {
-            return fail_lease_and_return(
-                control,
-                lease_id,
-                failure_class_for_error(&source),
-                source,
-            )
-            .await;
-        }
-    };
-    let result = serde_json::to_value(&success.report)
-        .map_err(|err| VoomError::Internal(format!("encode remux report: {err}")))?;
-    match release_remux_lease_with_retry(control, lease_id, result, &success.success_event).await {
-        Ok(()) => Ok(()),
-        Err(source) => {
-            let recovery = success_event_recovery_report(&success, &source);
-            let result = serde_json::to_value(&recovery).map_err(|err| {
-                VoomError::Internal(format!("encode remux success-event recovery: {err}"))
-            })?;
-            release_lease_with_retry(control, lease_id, result).await
-        }
-    }
-}
-
-fn remux_input_for_workflow_ticket(
-    ticket: &Ticket,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<ExecuteRemuxInput, VoomError> {
-    let operation_payload = payload
-        .get("remux")
-        .cloned()
-        .ok_or_else(|| VoomError::Config("remux workflow payload missing `remux`".to_owned()))?;
-    Ok(ExecuteRemuxInput {
-        job_id: ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!("remux ticket {} missing job_id", ticket.id))
-        })?,
-        ticket_id: ticket.id,
-        lease_id,
-        source_file_version_id: voom_core::FileVersionId(required_u64(
-            payload,
-            "source_file_version_id",
-        )?),
-        source_location_id: optional_u64(payload, "source_location_id")
-            .map(voom_core::FileLocationId),
-        operation_payload,
-        staging_root: options.remux_staging_root.clone(),
-        target_dir: options.remux_target_dir.clone(),
-    })
-}
-
-fn transcode_audio_input_for_workflow_ticket(
-    ticket: &Ticket,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<ExecuteTranscodeAudioInput, VoomError> {
-    let operation_payload = payload.get("audio").cloned().ok_or_else(|| {
-        VoomError::Config("transcode audio workflow payload missing `audio`".to_owned())
-    })?;
-    Ok(ExecuteTranscodeAudioInput {
-        job_id: ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!(
-                "transcode audio ticket {} missing job_id",
-                ticket.id
-            ))
-        })?,
-        ticket_id: ticket.id,
-        lease_id,
-        source_file_version_id: voom_core::FileVersionId(required_u64(
-            payload,
-            "source_file_version_id",
-        )?),
-        source_location_id: optional_u64(payload, "source_location_id")
-            .map(voom_core::FileLocationId),
-        operation_payload,
-        staging_root: options.audio_staging_root.clone(),
-        target_dir: options.audio_target_dir.clone(),
-    })
-}
-
-async fn extract_audio_input_for_workflow_ticket(
-    control: &ControlPlane,
-    ticket: &Ticket,
-    lease_id: LeaseId,
-    payload: &Value,
-    options: &WorkflowExecutorOptions,
-) -> Result<ExecuteExtractAudioInput, VoomError> {
-    let operation_payload = payload.get("audio").cloned().ok_or_else(|| {
-        VoomError::Config("extract audio workflow payload missing `audio`".to_owned())
-    })?;
-    let source_file_version_id =
-        voom_core::FileVersionId(required_u64(payload, "source_file_version_id")?);
-    Ok(ExecuteExtractAudioInput {
-        job_id: ticket.job_id.ok_or_else(|| {
-            VoomError::Config(format!("extract audio ticket {} missing job_id", ticket.id))
-        })?,
-        ticket_id: ticket.id,
-        lease_id,
-        source_file_version_id,
-        source_location_id: optional_u64(payload, "source_location_id")
-            .map(voom_core::FileLocationId),
-        source_bundle_id: source_bundle_id_for_file_version(control, source_file_version_id)
-            .await?,
-        operation_payload,
-        staging_root: options.audio_staging_root.clone(),
-        target_dir: options.audio_target_dir.clone(),
-    })
-}
-
-async fn source_bundle_id_for_file_version(
-    control: &ControlPlane,
-    source_file_version_id: voom_core::FileVersionId,
-) -> Result<voom_core::BundleId, VoomError> {
-    let row = sqlx::query(
-        "SELECT abm.bundle_id \
-         FROM file_versions fv \
-         JOIN asset_bundle_members abm ON abm.file_asset_id = fv.file_asset_id \
-         WHERE fv.id = ?",
-    )
-    .bind(sqlite_i64(source_file_version_id.0))
-    .fetch_optional(&control.pool)
-    .await
-    .map_err(|e| VoomError::Database(format!("audio source bundle lookup: {e}")))?;
-    let row = row.ok_or_else(|| {
-        VoomError::Config(format!(
-            "file_version {source_file_version_id} is not a bundle member"
-        ))
-    })?;
-    let bundle_id: i64 = row
-        .try_get("bundle_id")
-        .map_err(|e| VoomError::Database(format!("audio source bundle id: {e}")))?;
-    Ok(voom_core::BundleId(sqlite_u64(bundle_id)))
-}
-
-async fn await_with_lease_heartbeats<F, T>(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    operation: OperationKind,
-    options: &WorkflowExecutorOptions,
-    future: F,
-) -> Result<T, VoomError>
-where
-    F: Future<Output = Result<T, VoomError>>,
-{
-    let mut heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + options.heartbeat_interval,
-        options.heartbeat_interval,
-    );
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tokio::pin!(future);
-    loop {
-        tokio::select! {
-            result = &mut future => return result,
-            _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
-                heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
-            }
-        }
-    }
 }
 
 async fn consume_dispatch_stream(
@@ -2034,17 +1423,6 @@ async fn consume_dispatch_stream(
     }
 }
 
-fn required_u64(payload: &Value, field: &str) -> Result<u64, VoomError> {
-    payload
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| VoomError::Config(format!("transcode payload missing `{field}`")))
-}
-
-fn optional_u64(payload: &Value, field: &str) -> Option<u64> {
-    payload.get(field).and_then(Value::as_u64)
-}
-
 async fn fail_if_watchdog_elapsed(
     control: &ControlPlane,
     lease_id: LeaseId,
@@ -2114,16 +1492,6 @@ async fn heartbeat_lease(
     heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
     *last_heartbeat = Instant::now();
     Ok(())
-}
-
-async fn fail_lease_and_return<T>(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    class: FailureClass,
-    source: VoomError,
-) -> Result<T, VoomError> {
-    fail_lease_with_retry(control, lease_id, source.to_string(), class).await?;
-    Err(source)
 }
 
 fn parse_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, VoomError> {
@@ -2223,10 +1591,6 @@ fn voom_error_for_failure_class(class: FailureClass, message: String) -> VoomErr
     }
 }
 
-fn failure_class_for_error(source: &VoomError) -> FailureClass {
-    FailureClass::from_error_code(source.error_code()).unwrap_or(FailureClass::WorkerCrash)
-}
-
 fn apply_chaos_payload_override(
     payload: &mut Value,
     operation: OperationKind,
@@ -2300,111 +1664,6 @@ fn local_reservation_blocks(
     })
 }
 
-async fn acquire_lease_with_retry(
-    control: &ControlPlane,
-    input: NewLease,
-) -> Result<voom_store::repo::leases::Lease, VoomError> {
-    retry_on_database_locked(|| {
-        let input = input.clone();
-        async move { control.acquire_lease(input).await }
-    })
-    .await
-}
-
-async fn retry_on_database_locked<T, Fut, Op>(mut operation: Op) -> Result<T, VoomError>
-where
-    Fut: Future<Output = Result<T, VoomError>>,
-    Op: FnMut() -> Fut,
-{
-    let mut last = None;
-    for _ in 0..8 {
-        match operation().await {
-            Ok(value) => return Ok(value),
-            Err(err) if is_database_locked(&err) => {
-                last = Some(err);
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
-}
-
-async fn release_lease_with_retry(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    payload: Value,
-) -> Result<(), VoomError> {
-    retry_on_database_locked(|| {
-        let payload = payload.clone();
-        async move {
-            control
-                .release_lease(lease_id, payload, control.clock().now())
-                .await
-                .map(|_| ())
-        }
-    })
-    .await
-}
-
-async fn release_remux_lease_with_retry(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    payload: Value,
-    success_event: &crate::remux::events::RemuxSucceededEvent,
-) -> Result<(), VoomError> {
-    retry_on_database_locked(|| {
-        let payload = payload.clone();
-        async move {
-            let mut tx = begin_tx(&control.pool).await?;
-            let now = control.clock().now();
-            crate::remux::events::append_succeeded_in_tx(control, &mut tx, success_event, now)
-                .await?;
-            control
-                .release_lease_in_tx(&mut tx, lease_id, payload, now)
-                .await?;
-            commit_tx(tx).await
-        }
-    })
-    .await
-}
-
-async fn fail_lease_with_retry(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    reason: String,
-    class: FailureClass,
-) -> Result<(), VoomError> {
-    retry_on_database_locked(|| {
-        let reason = reason.clone();
-        async move {
-            control
-                .fail_lease(lease_id, reason, class, control.clock().now())
-                .await
-                .map(|_| ())
-        }
-    })
-    .await
-}
-
-async fn heartbeat_lease_with_retry(
-    control: &ControlPlane,
-    lease_id: LeaseId,
-    ttl: time::Duration,
-) -> Result<(), VoomError> {
-    retry_on_database_locked(|| async move {
-        control
-            .heartbeat_lease(lease_id, ttl, control.clock().now())
-            .await
-            .map(|_| ())
-    })
-    .await
-}
-
-fn is_database_locked(err: &VoomError) -> bool {
-    matches!(err, VoomError::Database(message) if message.contains("database is locked"))
-}
-
 fn json_string_array_contains(raw: &str, needle: &str) -> Result<bool, VoomError> {
     let values: Vec<String> = serde_json::from_str(raw)
         .map_err(|e| VoomError::Database(format!("parse worker grant array: {e}")))?;
@@ -2420,11 +1679,6 @@ fn max_parallel_for_operation(raw: &str, operation: &str) -> Result<u32, VoomErr
         .and_then(Value::as_u64)
         .unwrap_or(1);
     Ok(u32::try_from(max).unwrap_or(u32::MAX).max(1))
-}
-
-fn time_duration(duration: Duration) -> Result<time::Duration, VoomError> {
-    time::Duration::try_from(duration)
-        .map_err(|e| VoomError::Config(format!("duration out of range: {e}")))
 }
 
 fn duration_millis_u32(duration: Duration) -> u32 {

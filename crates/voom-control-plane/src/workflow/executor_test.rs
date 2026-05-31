@@ -33,7 +33,7 @@ use voom_worker_protocol::{
     TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoRequest, WorkerCredentials,
 };
 
-use super::retry_on_database_locked;
+use super::super::dispatch_support::retry_on_database_locked;
 use crate::workflow::executor::{
     WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunSummary, is_synthetic_root_ticket,
 };
@@ -928,7 +928,7 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
     options.remux_staging_root = root.join("stage");
     options.remux_target_dir = root.join("out");
 
-    super::dispatch_control_plane_remux(
+    super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,
@@ -1018,7 +1018,7 @@ async fn policy_remux_post_commit_snapshot_failure_fails_lease_retriable() {
     options.remux_staging_root = root.join("stage");
     options.remux_target_dir = root.join("out");
 
-    let err = super::dispatch_control_plane_remux(
+    let err = super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,
@@ -1143,7 +1143,7 @@ async fn invalid_policy_remux_payload_fails_acquired_lease() {
         .unwrap();
     let runtime = fixture.registry.get(worker_id).unwrap();
 
-    let err = super::dispatch_control_plane_remux(
+    let err = super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
         &runtime,
         &ticket,

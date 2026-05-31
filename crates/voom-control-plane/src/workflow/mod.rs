@@ -1,8 +1,10 @@
 pub mod binding;
 pub mod coordinator;
+mod dispatch_support;
 pub mod executor;
 pub mod expansion;
 pub mod model;
+mod operation_adapters;
 pub mod policy_bridge;
 pub mod runtime;
 pub mod ticket_payload;
