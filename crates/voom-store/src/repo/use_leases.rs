@@ -4,10 +4,10 @@
 //! forms (`_in_tx` primitive + bare wrapper); event emission belongs
 //! at the `ControlPlane` layer (`crates/voom-control-plane/src/cases/use_leases.rs`).
 //!
-//! The pending-commit-lock query in `acquire_in_tx` is deferred to M3
-//! Phase 2 (the lock targets `commit_intent_scope_members`, which has
-//! no rows until the commit safety gate writes them). Marked inline
-//! with `// TODO(m3-phase-2)` below.
+//! `acquire_in_tx` rejects scopes covered by in-flight commit intents by
+//! consulting the commit-safety-gate pending-lock helper inside the same
+//! transaction as the lease insert. Reanchor-on-move deliberately does not
+//! consult that lock; it preserves existing lease scope as file locations move.
 
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
