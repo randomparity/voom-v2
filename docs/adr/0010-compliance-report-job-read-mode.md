@@ -55,8 +55,10 @@ nothing.**
   that opened with zero phase rows (a successful read, not an error) — an index
   rather than a duplicated row so the latest report cannot drift from `phases`.
 - The mode is **read-only**: no transaction, no ticket submission, no report
-  regeneration. The reports returned are byte-for-byte the ones the run folded
-  into the rows (ADR-0008), so post-run identity equals what `execute` returned.
+  regeneration. The per-phase `report_id` and report body returned are
+  byte-for-byte the ones the run folded into the rows (ADR-0008); this identity
+  is scoped to the per-phase reports and their chain, not the whole envelope
+  (the envelopes differ by the execute-only `issues` field).
 
 ## Consequences
 
@@ -65,9 +67,12 @@ nothing.**
   argument, matching the issue's framing of a single report surface.
 - The read view reuses the `WorkflowSummaryView` / `PhaseSummaryView` /
   `FilePhaseSummaryView` DTOs already defined for `compliance execute`
-  (`cases::compliance`), so `execute` output and `report --job-id` output share a
-  wire shape — an agent parses one schema for both the run and its later
-  inspection.
+  (`cases::compliance`). `execute` and `report --job-id` therefore share one
+  top-level schema — `summary`, `phases`, `file_phases`, and `latest_phase_index`
+  (both paths compute the index via the same `latest_phase_index` helper).
+  `execute` *additionally* carries `issues`, the applied-findings summary, which
+  the read omits because it regenerates and applies nothing. An agent parses one
+  schema for both, treating `issues` as execute-only.
 - Because the read never regenerates, it cannot drift from the recorded run even
   if the file's active version has since advanced or its inputs changed. The
   durable rows are the single source of truth for "what this job reported,"
