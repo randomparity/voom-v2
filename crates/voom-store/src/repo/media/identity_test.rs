@@ -4,9 +4,8 @@ use serde_json::json;
 use time::Duration;
 use voom_core::PolicyVersionId;
 
-use crate::repo::{
-    NewPolicyDocumentVersion, PolicyInputRepo, PolicyRepo, SqlitePolicyInputRepo, SqlitePolicyRepo,
-};
+use crate::repo::policy::policies::{NewPolicyDocumentVersion, PolicyRepo, SqlitePolicyRepo};
+use crate::repo::policy::policy_inputs::{PolicyInputRepo, SqlitePolicyInputRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 async fn fresh() -> (SqliteIdentityRepo, tempfile::NamedTempFile) {
@@ -1416,10 +1415,10 @@ async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
 // allowed to land against an in-flight commit so external moves never
 // deadlock the gate.
 
-use crate::repo::commit_safety_gate::{
+use crate::repo::audit::events::SqliteEventRepo;
+use crate::repo::media::commit_safety_gate::{
     CommitGateContext, CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
 };
-use crate::repo::events::SqliteEventRepo;
 use crate::test_support::FailingAliasResolver;
 
 /// Seed a single live `file_location` with a `file_id_generation` proof

@@ -92,7 +92,7 @@ fn target_epoch_drift_constructor_smokes() {
 }
 
 fn file_location_proposal_fixture() -> FileLocationProposal {
-    use crate::repo::identity::FileLocationKind;
+    use crate::repo::media::identity::FileLocationKind;
     FileLocationProposal {
         kind: FileLocationKind::LocalPath,
         value: "/tmp/stub".to_owned(),
@@ -607,13 +607,13 @@ async fn commit_intents_check_rejects_recovery_required_with_null_closure_author
 
 // -- prepare_destructive_commit sibling tests (commit 4) -------------------
 
-use crate::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
-use crate::repo::identity::{
+use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use crate::repo::media::identity::{
     AcceptedPin, FileLocationKind as IdentityFileLocationKind, IdentityRepo,
     NewFileLocation as IdentityNewFileLocation, NewFileVersion, NewIdentityEvidence, ProducedBy,
     SqliteIdentityRepo,
 };
-use crate::repo::use_leases::{
+use crate::repo::media::use_leases::{
     BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind, UseLeaseRepo,
 };
 use crate::test_support::T0;
@@ -887,7 +887,7 @@ async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event(
         .record_identity_evidence_in_tx(
             &mut pool.begin().await.unwrap(),
             NewIdentityEvidence {
-                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_type: crate::repo::media::identity::IdentityEvidenceTarget::FileVersion,
                 target_id: seeded.version_id.0,
                 assertion_type: voom_events::AssertionKind::HashMatch,
                 candidate_id: None,
@@ -906,7 +906,7 @@ async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event(
         .record_identity_evidence_in_tx(
             &mut tx,
             NewIdentityEvidence {
-                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_type: crate::repo::media::identity::IdentityEvidenceTarget::FileVersion,
                 target_id: seeded.version_id.0,
                 assertion_type: voom_events::AssertionKind::HashMatch,
                 candidate_id: None,
@@ -1328,7 +1328,7 @@ async fn authorize_phase_b_blocked_by_stale_evidence_lands_aborted_row_plus_even
         .record_identity_evidence_in_tx(
             &mut tx,
             NewIdentityEvidence {
-                target_type: crate::repo::identity::IdentityEvidenceTarget::FileVersion,
+                target_type: crate::repo::media::identity::IdentityEvidenceTarget::FileVersion,
                 target_id: seeded.version_id.0,
                 assertion_type: voom_events::AssertionKind::HashMatch,
                 candidate_id: None,

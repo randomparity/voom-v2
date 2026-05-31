@@ -313,7 +313,7 @@ pub(super) async fn revalidate_evidence_in_tx(
 
 async fn first_evidence_pin_drift(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    evidence: &crate::repo::identity::IdentityEvidence,
+    evidence: &crate::repo::media::identity::IdentityEvidence,
 ) -> Result<Option<EvidenceDrift>, VoomError> {
     // Pinned FileVersion IDs — any retired version → drift.
     if let Some(versions_json) = &evidence.pinned_file_version_ids {

@@ -30,8 +30,10 @@ use voom_core::{JobId, VoomError};
 
 use crate::init::init;
 use crate::pool::connect;
-use crate::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
-use crate::repo::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo};
+use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
+use crate::repo::execution::workers::{
+    NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo,
+};
 
 /// Shared default timestamp for builder fixtures and tests. Keyed on
 /// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
@@ -249,7 +251,7 @@ use std::collections::BTreeSet;
 
 use voom_core::ids::{FileLocationId, FileVersionId};
 
-use crate::repo::commit_safety_gate::{AliasResolutionError, AliasResolver};
+use crate::repo::media::commit_safety_gate::{AliasResolutionError, AliasResolver};
 
 #[derive(Debug, Clone)]
 pub struct FailingAliasResolver {

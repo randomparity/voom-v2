@@ -1,6 +1,6 @@
 use super::*;
 use crate::pool::connect;
-use crate::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
+use crate::repo::audit::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use crate::schema::{expected_migrations, probe_schema};
 use voom_events::{Event, EventKind};
 

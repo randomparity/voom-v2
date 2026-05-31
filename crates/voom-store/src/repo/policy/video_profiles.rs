@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use voom_core::{TranscodeVideoProfile, VoomError};
 
-use crate::repo::Repository;
+use super::Repository;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoProfile {

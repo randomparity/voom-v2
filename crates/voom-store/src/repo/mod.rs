@@ -1,26 +1,20 @@
 //! Repository pattern: trait per storage area, Sqlite impl per trait.
 
-pub mod artifact_access_plans;
-pub mod artifacts;
-pub mod bundles;
-pub mod commit_safety_gate;
+pub mod audit;
 pub(crate) mod common;
-pub mod events;
-pub mod identity;
-pub mod issues;
-pub mod jobs;
-pub mod leases;
-pub mod nodes;
-pub mod policies;
-pub mod policy_inputs;
-pub mod remote_idempotency;
-pub mod scheduler_decisions;
-pub mod schema_meta;
-pub mod tickets;
-pub mod use_leases;
-pub mod video_profiles;
-pub mod workers;
-pub mod workflow_summaries;
+pub mod execution;
+pub mod media;
+pub mod policy;
+
+pub use audit::{events, schema_meta};
+pub use execution::{
+    jobs, leases, nodes, remote_idempotency, scheduler_decisions, tickets, workers,
+    workflow_summaries,
+};
+pub use media::{
+    artifact_access_plans, artifacts, bundles, commit_safety_gate, identity, use_leases,
+};
+pub use policy::{issues, policies, policy_inputs, video_profiles};
 
 pub use artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,

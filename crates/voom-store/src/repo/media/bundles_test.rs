@@ -2,7 +2,7 @@ use super::*;
 
 use time::Duration;
 
-use crate::repo::identity::{
+use crate::repo::media::identity::{
     IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork, SqliteIdentityRepo,
 };
 use crate::test_support::{T0, fresh_initialized_pool_at};

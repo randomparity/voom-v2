@@ -4,7 +4,7 @@ use time::Duration;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, UseLeaseId};
 
 use super::*;
-use crate::repo::identity::{IdentityRepo, SqliteIdentityRepo};
+use crate::repo::media::identity::{IdentityRepo, SqliteIdentityRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Spin up a fresh pool with migration 0004 applied, plus a single
@@ -980,11 +980,11 @@ async fn reanchor_on_move_with_same_location_is_noop() {
 // here both pin the new rejection and verify the no-in-flight-commit
 // path is unchanged.
 
-use crate::repo::commit_safety_gate::{
+use crate::repo::audit::events::SqliteEventRepo;
+use crate::repo::media::commit_safety_gate::{
     CommitGateContext, CommitTarget, DestructiveCommit, PrepareOutcome, prepare_destructive_commit,
 };
-use crate::repo::events::SqliteEventRepo;
-use crate::repo::identity::{NewFileLocation, NewFileVersion, ProducedBy};
+use crate::repo::media::identity::{NewFileLocation, NewFileVersion, ProducedBy};
 use crate::test_support::FailingAliasResolver;
 
 /// Seed an `(asset, version, location)` chain so a `DeleteFileLocation`
@@ -996,7 +996,7 @@ async fn seed_pool_with_location() -> (
     FileVersionId,
     FileLocationId,
 ) {
-    use crate::repo::identity::{FileLocationKind, IdentityRepo};
+    use crate::repo::media::identity::{FileLocationKind, IdentityRepo};
     let tmp = NamedTempFile::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     let identity = SqliteIdentityRepo::new(pool.clone());

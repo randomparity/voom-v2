@@ -23,12 +23,12 @@ use voom_events::payload::{
 };
 use voom_events::{Event, EventEnvelope, SubjectType};
 
+use crate::repo::audit::events::EventRepo;
 use crate::repo::common::{i64_from_u64, iso8601, parse_iso8601, u64_from_i64};
-use crate::repo::events::EventRepo;
-use crate::repo::identity::{
+use crate::repo::media::identity::{
     FileLocationKind, IdentityEvidenceTarget, IdentityRepo, LocationProof,
 };
-use crate::repo::use_leases::LeaseScope;
+use crate::repo::media::use_leases::LeaseScope;
 
 /// Caller-facing proposal for a new `FileLocation` inside a destructive
 /// commit's `ReplaceFileLocation` / `MoveFileLocation` target. The

@@ -10,7 +10,7 @@ use super::{
     TargetEpochDriftWire, TargetMemberKind, Transaction, UseLeaseId, VoomError, begin_gate_tx,
     i64_from_u64, iso8601, u64_from_i64,
 };
-use crate::repo::identity::NewFileLocation;
+use crate::repo::media::identity::NewFileLocation;
 
 // ============================================================================
 // Phase C entry point — `finalize_destructive_commit`

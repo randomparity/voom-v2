@@ -6,8 +6,8 @@ use voom_core::clock_test_support::FrozenClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{FailureClass, LeaseId, TicketId, VoomError, WorkerId};
 
-use crate::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
-use crate::repo::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
+use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
+use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 /// Helper: build a (clock, rng) pair pinned to `T0` and the jitter
