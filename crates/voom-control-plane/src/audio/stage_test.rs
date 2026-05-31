@@ -103,6 +103,77 @@ async fn existing_staging_and_target_paths_fail_with_config_invalid() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_path_rejects_ticket_parent_symlink_before_creation() {
+    let root = stage_tempdir();
+    let root_path = root.path().canonicalize().unwrap();
+    let real_parent = root_path.join("real-ticket");
+    let ticket_link = root_path.join("ticket-10");
+    std::fs::create_dir(&real_parent).unwrap();
+    std::os::unix::fs::symlink(&real_parent, &ticket_link).unwrap();
+
+    let err = prepare_transcode_staging_path(
+        &root_path,
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+        "aac",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("must not traverse a symlink"));
+    assert!(!real_parent.join("lease-20").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn staging_path_rejects_lease_parent_symlink_before_creation() {
+    let root = stage_tempdir();
+    let root_path = root.path().canonicalize().unwrap();
+    let ticket_parent = root_path.join("ticket-10");
+    let real_parent = root_path.join("real-lease");
+    let lease_link = ticket_parent.join("lease-20");
+    std::fs::create_dir(&ticket_parent).unwrap();
+    std::fs::create_dir(&real_parent).unwrap();
+    std::os::unix::fs::symlink(&real_parent, &lease_link).unwrap();
+
+    let err = prepare_transcode_staging_path(
+        &root_path,
+        TicketId(10),
+        LeaseId(20),
+        Path::new("/library/Movie.mp4"),
+        "aac",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("must not traverse a symlink"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn private_mode_verification_rejects_group_accessible_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = stage_tempdir();
+    let path = root.path().join("public");
+    std::fs::create_dir(&path).unwrap();
+    let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o750);
+    std::fs::set_permissions(&path, permissions).unwrap();
+
+    let err = verify_private_dir_mode(&path, "audio staging root")
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("must be private"));
+}
+
 fn stage_tempdir() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
