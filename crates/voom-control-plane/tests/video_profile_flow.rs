@@ -12,7 +12,7 @@
 //! The test calls `preflight_from_process_env()` up front so a missing encoder
 //! fails loudly instead of being silently skipped (spec §10).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
@@ -28,7 +28,8 @@ use voom_ffmpeg_worker::preflight_from_process_env;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    FfprobeSiblingGuard, TestWorkerConfig, TestWorkerLaunch, cargo_build_package,
+    hide_stale_fake_ffprobe_sibling, target_debug_binary,
 };
 
 const HEVC_POLICY: &str = r#"policy "video transcode hevc default" {
@@ -160,10 +161,10 @@ async fn run_case(case: &Case) -> CaseOutcome {
     // a canned test-helper `ffprobe` stub next to the worker binary in the shared
     // profile dir; hide it for the duration of this real-ffmpeg flow so the probe
     // observes the actual transcoded streams.
-    let ffprobe_guard = hide_stale_fake_ffprobe_sibling();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
+    let ffprobe_guard = hide_stale_fake_ffprobe_sibling("video-profile-flow").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -221,49 +222,6 @@ async fn run_case(case: &Case) -> CaseOutcome {
         _tmp: tmp,
         _db: db,
         _ffprobe_guard: ffprobe_guard,
-    }
-}
-
-/// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
-/// the shared profile dir) so the bundled probe worker runs real ffprobe. The
-/// guard serializes the real-ffprobe cases in this binary (they share the single
-/// `ffprobe` sibling path, derived from the running test binary so it tracks the
-/// active cargo target dir) and restores the stub on drop.
-fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = target_debug_binary("ffprobe");
-    let hidden = path.with_file_name("ffprobe.video-profile-flow-hidden");
-    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
-        bytes
-            .windows(b"ffprobe version test-helper".len())
-            .any(|window| window == b"ffprobe version test-helper")
-    });
-    if is_stub {
-        std::fs::rename(&path, &hidden).unwrap();
-    }
-    FfprobeSiblingGuard {
-        path,
-        hidden,
-        restore: is_stub,
-        _lock: lock,
-    }
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-    restore: bool,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.restore && self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
     }
 }
 

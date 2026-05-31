@@ -4,7 +4,7 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -16,7 +16,8 @@ use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
+    target_debug_binary,
 };
 
 const AUDIO_TRANSCODE_POLICY: &str = r#"
@@ -37,7 +38,7 @@ async fn audio_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("audio-transcode-flow").unwrap();
 
     let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
@@ -112,7 +113,7 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("audio-transcode-flow").unwrap();
 
     let tmp = tempdir_in_repo();
     let source = tmp.path().join("Movie.mkv");
@@ -492,41 +493,6 @@ fn require_command(program: &str, args: &[&str]) {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn hide_stale_fake_ffprobe_sibling() -> Option<FfprobeSiblingGuard> {
-    let path = target_debug_binary("ffprobe");
-    let bytes = std::fs::read(&path).ok()?;
-    if !bytes
-        .windows(b"ffprobe version test-helper".len())
-        .any(|window| window == b"ffprobe version test-helper")
-    {
-        return None;
-    }
-    let hidden = path.with_file_name(format!(
-        "ffprobe.audio-transcode-flow-hidden-{}",
-        std::process::id()
-    ));
-    std::fs::rename(&path, &hidden).unwrap_or_else(|err| {
-        panic!(
-            "cannot hide stale test-helper ffprobe sibling {} before real scan: {err}",
-            path.display()
-        )
-    });
-    Some(FfprobeSiblingGuard { path, hidden })
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
-    }
 }
 
 fn generate_audio_fixture(path: &Path) {

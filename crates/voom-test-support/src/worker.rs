@@ -1,10 +1,15 @@
-use std::io::{self, BufRead};
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, BufRead, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use voom_control_plane::ControlPlane;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
+
+const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
+static NEXT_FFPROBE_GUARD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct TestWorkerConfig {
@@ -158,6 +163,150 @@ pub fn target_debug_dir() -> PathBuf {
 #[must_use]
 pub fn target_debug_binary(name: &str) -> PathBuf {
     target_debug_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+}
+
+#[derive(Debug)]
+struct TargetDebugLock {
+    path: PathBuf,
+}
+
+impl TargetDebugLock {
+    fn acquire(name: &str) -> io::Result<Self> {
+        let path = target_debug_dir().join(format!(".{name}.lock"));
+        let started = Instant::now();
+        loop {
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    if started.elapsed() > Duration::from_mins(2) {
+                        return Err(io::Error::new(
+                            ErrorKind::TimedOut,
+                            format!("timed out waiting for {}", path.display()),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+impl Drop for TargetDebugLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.path);
+    }
+}
+
+#[derive(Debug)]
+pub struct FfprobeSiblingGuard {
+    path: PathBuf,
+    hidden: Option<PathBuf>,
+    installed_copy: bool,
+    _lock: TargetDebugLock,
+}
+
+impl Drop for FfprobeSiblingGuard {
+    fn drop(&mut self) {
+        if self.installed_copy {
+            let _ = fs::remove_file(&self.path);
+        }
+        if let Some(hidden) = &self.hidden
+            && hidden.exists()
+            && !self.path.exists()
+        {
+            let _ = fs::rename(hidden, &self.path);
+        }
+    }
+}
+
+pub fn hide_stale_fake_ffprobe_sibling(label: &str) -> io::Result<FfprobeSiblingGuard> {
+    let lock = TargetDebugLock::acquire("voom-ffprobe-sibling")?;
+    let path = target_debug_binary("ffprobe");
+    let hidden = if ffprobe_sibling_is_test_helper(&path) {
+        let hidden = hidden_ffprobe_path(&path, label);
+        fs::rename(&path, &hidden)?;
+        Some(hidden)
+    } else {
+        None
+    };
+    Ok(FfprobeSiblingGuard {
+        path,
+        hidden,
+        installed_copy: false,
+        _lock: lock,
+    })
+}
+
+pub fn install_fake_ffprobe_sibling(source: &Path, label: &str) -> io::Result<FfprobeSiblingGuard> {
+    let lock = TargetDebugLock::acquire("voom-ffprobe-sibling")?;
+    let path = target_debug_binary("ffprobe");
+    let hidden = if path.exists() {
+        let hidden = hidden_ffprobe_path(&path, label);
+        fs::rename(&path, &hidden)?;
+        Some(hidden)
+    } else {
+        None
+    };
+    if let Err(err) = copy_executable(source, &path) {
+        restore_hidden_ffprobe(&path, hidden.as_ref());
+        return Err(err);
+    }
+    Ok(FfprobeSiblingGuard {
+        path,
+        hidden,
+        installed_copy: true,
+        _lock: lock,
+    })
+}
+
+fn copy_executable(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::copy(source, destination)?;
+    make_executable(destination)
+}
+
+fn ffprobe_sibling_is_test_helper(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| {
+        bytes
+            .windows(FFPROBE_TEST_HELPER_MARKER.len())
+            .any(|window| window == FFPROBE_TEST_HELPER_MARKER)
+    })
+}
+
+fn hidden_ffprobe_path(path: &Path, label: &str) -> PathBuf {
+    let id = NEXT_FFPROBE_GUARD_ID.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(
+        "ffprobe.{label}.hidden.{}.{}{}",
+        std::process::id(),
+        id,
+        std::env::consts::EXE_SUFFIX
+    ))
+}
+
+fn restore_hidden_ffprobe(path: &Path, hidden: Option<&PathBuf>) {
+    let _ = fs::remove_file(path);
+    if let Some(hidden) = hidden
+        && hidden.exists()
+        && !path.exists()
+    {
+        let _ = fs::rename(hidden, path);
+    }
+}
+
+fn make_executable(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Returns the cargo target root that owns the active profile directory.

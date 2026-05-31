@@ -4,7 +4,7 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
@@ -22,7 +22,8 @@ use voom_store::repo::workflow_summaries::{
     WorkflowSummaryRepo,
 };
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
+    target_debug_binary,
 };
 
 /// The phase-barrier coordinator drives one `plan_phase` per phase across every
@@ -37,7 +38,7 @@ use voom_test_support::worker::{
 async fn phase_barrier_commits_every_file_in_a_single_phase() {
     // The post-commit result probe runs REAL ffprobe against the committed
     // output; hide any canned `ffprobe` stub installed by sibling tests.
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -229,7 +230,7 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
 /// the canonical `mkv` — orthogonal to the chain-advance behavior under test.)
 #[tokio::test]
 async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -428,7 +429,7 @@ async fn assert_reprobe_and_lineage_chain(
 /// returns a `partial` outcome, and the job is `failed`.
 #[tokio::test]
 async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -513,7 +514,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
 /// re-enters `Doomed` (it commits) without re-mutating `Good`, under a new job.
 #[tokio::test]
 async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -750,47 +751,6 @@ fn two_file_input(files: &[(&str, ScannedFile)]) -> PolicyInputSetDraft {
         bundle_targets: Vec::new(),
         quality_profiles: Vec::new(),
         issues: Vec::new(),
-    }
-}
-
-/// Hide the canned test-helper `ffprobe` sibling so the bundled probe worker
-/// runs real ffprobe (see `video_transcode_flow.rs` for the rationale). The
-/// static mutex serializes any real-ffprobe cases in this binary.
-fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = target_debug_binary("ffprobe");
-    let hidden = path.with_file_name("ffprobe.phase-barrier-flow-hidden");
-    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
-        bytes
-            .windows(b"ffprobe version test-helper".len())
-            .any(|window| window == b"ffprobe version test-helper")
-    });
-    if is_stub {
-        std::fs::rename(&path, &hidden).unwrap();
-    }
-    FfprobeSiblingGuard {
-        path,
-        hidden,
-        restore: is_stub,
-        _lock: lock,
-    }
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-    restore: bool,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.restore && self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
     }
 }
 
