@@ -1,16 +1,18 @@
 //! HTTP/1.1 loopback transport over `hyper` 1.x. Phase 1 design §3.8.
 //!
-//! Scope this commit covers:
+//! Exposed routes:
 //! - `POST /v1/handshake` (exempt from version/auth/idempotency)
-//! - `POST /v1/operations` (gated on version + auth; idempotency
-//!   cache + body-scan deferred to a follow-up commit per the
-//!   plan's scope discipline)
+//! - `POST /v1/operations` (gated on version + auth). Requests must
+//!   carry `x-voom-idempotency-key`; any JSON body field named
+//!   `idempotency_key` is rejected because the header is canonical.
+//!   Duplicate keys are compared by request body hash: conflicting or
+//!   still-active duplicates fail, while completed responses can be replayed.
 //! - 404 on unknown routes
 //! - `OperationResponse` envelope as the first NDJSON line on the
 //!   response body, followed by the actual progress frames
 //!
-//! Per the design, lease-callback routes (heartbeat/progress/cancel)
-//! are Phase 2 supervisor-side work and are NOT in this commit.
+//! Lease-callback routes (heartbeat/progress/cancel) are supervisor-side APIs,
+//! not part of this worker loopback transport.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
