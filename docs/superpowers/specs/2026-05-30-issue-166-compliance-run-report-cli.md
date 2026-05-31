@@ -210,28 +210,47 @@ are real:
 Therefore, **before** writing the fixture or any snapshot, the plan's first step
 proves a concrete (phase-pair, worker, prober) combination commits **both** phases
 to exit 0 through the CLI, using a plain `assert!`-style test (not `insta`). Only
-once that test is green is the golden captured over the same setup. Candidate
-combinations, in preference order:
+once that test is green is the golden captured over the same setup.
 
-1. **`transcode video to hevc` → `remux` to `mkv`**, driven by the real
-   `voom-ffmpeg-worker` + real ffprobe — the exact stack
-   `phase_barrier_flow.rs` already proves commits two transcode phases. Reusing
-   the proven worker stack at the CLI layer is the lowest-risk path; the cost is
-   that the golden becomes a real-ffmpeg test (gated like `phase_barrier_flow.rs`,
-   `cargo test --workspace` only).
-2. **A fake-worker pairing** (`fake-transcoder`/`fake-remuxer` + the fake ffprobe
-   stub) — cheaper and hermetic, but only viable if the gate proves the fake
-   transcode CLI path commits deterministically (exit 0), which today's tolerant
-   test does not establish.
+**The golden must be a stable whole-envelope `insta` snapshot, so the gate
+prefers the deterministic prober.** A snapshot embeds the full report JSON,
+including each check's `observed_state`. Two prober choices differ sharply here:
 
-The gate's result — which combination commits — **decides the fixture's phases and
-the test's worker launch**. If neither single pairing commits twice, the fallback
-is a `remux → transcode` order or a two-`transcode`-phase policy (the proven shape
-from `phase_barrier_flow.rs`'s chain test), accepting that "two distinct
-operations" yields to "two committed phases." A `remux → remux` chain is rejected
-outright: the second remux would collide on the `<stem>.remux.mkv` target path
-(the existing `…existing_target_outputs_failure_envelope` test proves that
-collision fails the commit).
+- The **fake ffprobe stub** returns a fixed `basic-mp4.json` for every probe, so
+  every `observed_state` (container `mov,mp4,m4a,3gp,3g2,mj2`, codec `h264`, …) is
+  constant across runs/platforms — the existing remux CLI golden already snapshots
+  exactly these fixed values. This is insta-friendly.
+- **Real ffmpeg + real ffprobe** embed run-/version-/platform-varying values
+  (`bitrate`, `duration`, exact `format_name`) throughout the report. This is
+  precisely why the proven `phase_barrier_flow.rs` asserts individual fields
+  (`observed_state.video_codec == "hevc"`) **instead of snapshotting**. A
+  whole-envelope `insta` golden over real-ffmpeg output would churn.
+
+Candidate combinations, in preference order:
+
+1. **A fake-worker pairing + the fake ffprobe stub** — e.g. `transcode video to
+   hevc` (`fake-transcoder`) → `remux` to `mkv` (`fake-remuxer`), both re-probed
+   by the fake ffprobe. Deterministic `observed_state`, and it reuses the seeding
+   path the existing remux CLI golden uses (fake bytes, no real media). The single
+   open question the gate resolves is whether the fake-transcoder CLI commit
+   reaches exit 0 deterministically (the existing audio test tolerates exit 2 and
+   so does not establish this). This is the **only** candidate that yields a stable
+   whole-envelope `insta` golden.
+2. **Real `voom-ffmpeg-worker` + real ffprobe** — the stack `phase_barrier_flow.rs`
+   proves commits two transcode phases. Used **only as a fallback** if no fake
+   pairing commits twice. If this fallback is taken, the multi-phase coverage
+   becomes a **field-assertion test** (like `phase_barrier_flow.rs`), **not** a
+   whole-envelope snapshot, and it requires real media (`generate_h264_fixture`),
+   not the `seed_scanned_remux` fake-bytes path. The spec records this so the
+   fallback does not silently produce a flaky snapshot.
+
+The gate's result — which combination commits — **decides the fixture's phases,
+the prober, the test's worker launch, and whether the multi-phase coverage is an
+`insta` snapshot (candidate 1) or field assertions (candidate 2).** A `remux →
+remux` chain is rejected outright: the second remux would collide on the
+`<stem>.remux.mkv` target path (the existing
+`…existing_target_outputs_failure_envelope` test proves that collision fails the
+commit).
 
 ### Fixture
 
@@ -256,9 +275,11 @@ ticket per phase rather than blocking.
 
 ### Golden flow test (`compliance_envelope.rs`)
 
-A new test seeds one scanned source file (the existing `seed_scanned_remux`
-seeding path, generalized to accept a policy source + a probed snapshot matching
-the fixture's expectations), then:
+A new test seeds one scanned source file — for candidate 1, the existing
+`seed_scanned_remux` seeding path (fake bytes + a fake-ffprobe-matching snapshot),
+generalized to accept a policy source; for the candidate-2 fallback, real media
+via `generate_h264_fixture`. Then (the "snapshot" verb below applies to candidate
+1; under the candidate-2 fallback each step is a field assertion, per Determinism):
 
 1. **plan (preview):** `plan show --policy-version-id --input-set-id` → snapshot
    the plan envelope, so the goldens cover the `plan` stage against this policy.
@@ -277,28 +298,35 @@ the fixture's expectations), then:
    `latest_phase_index` points at the last (ordinal-1) phase, and each phase
    carries its folded `report_id`.
 
-Volatile ids (job id, produced version/location, reprobe snapshot, ticket ids, and
-report ids/hashes that depend on autoincrement target ids) are redacted with the
-existing `redact_local` / `redact_execute_ids` helpers, extended as needed so the
-goldens are stable across runs. Per the project test-layout rule (AGENTS.md), this
-multi-phase run launches a prober on staged output and is therefore only exercised
-by `cargo test --workspace`; the fixture media is written by the harness. If the
-gate selects the real-ffmpeg stack, the test is additionally gated/serialized the
-way `phase_barrier_flow.rs` is (hide the fake-ffprobe sibling, build the worker
-crates).
+For candidate 1 (the `insta` path), volatile ids (job id, produced
+version/location, reprobe snapshot, ticket ids, and report ids/hashes that depend
+on autoincrement target ids) are redacted with the existing `redact_local` /
+`redact_execute_ids` helpers, extended as needed so the goldens are stable across
+runs. The fake ffprobe's `observed_state` values are fixed and snapshotted as-is
+(the existing remux golden does this); no probe-derived redaction is needed there.
+Per the project test-layout rule (AGENTS.md), this multi-phase run launches a
+prober on staged output and is therefore only exercised by `cargo test
+--workspace`; the fixture media is written by the harness.
 
 ### Determinism
 
-Whichever stack the gate selects, the recorded goldens must be deterministic
-across runs. For the real-ffmpeg path this is already established by
-`phase_barrier_flow.rs` (fixed `testsrc` input, content-addressed report ids). The
-golden asserts the produced-version linkage and the ordered two-phase chain, which
-are deterministic; it does **not** assert a compliant *verdict* for a produced
-artifact (ADR-0008 consequence: a freshly produced artifact may still read
-non-compliant because the planner compares the raw probe `format_name` against the
-policy's canonical container). Report-id values that are stable functions of the
-inputs may be snapshotted directly; any id that varies with autoincrement target
-ids is redacted.
+Candidate 1's golden is deterministic by construction: the fake ffprobe returns a
+fixed `basic-mp4.json`, so every `observed_state` is constant, and the only
+volatile fields are autoincrement-derived ids (redacted above). The golden asserts
+the produced-version linkage and the ordered two-phase chain; it does **not**
+assert a compliant *verdict* for a produced artifact (ADR-0008 consequence: a
+freshly produced artifact may still read non-compliant because the planner
+compares the raw probe `format_name` against the policy's canonical container).
+
+If the candidate-2 fallback is taken, the multi-phase coverage is **field
+assertions, not an `insta` snapshot** — exactly the shape `phase_barrier_flow.rs`
+uses, and for the same reason: real ffmpeg embeds run-/version-varying
+`bitrate`/`duration`/`format_name` that no `insta` golden could pin without
+redacting most of the report. The fallback test asserts the same invariants
+(ordered two-phase chain, two committed rows, phase-2-rooted-at-phase-1) by field,
+and is gated/serialized the way `phase_barrier_flow.rs` is (hide the fake-ffprobe
+sibling, build the worker crates). The `report --job-id` post-run read is still
+covered, by field assertions over the read view rather than a snapshot.
 
 ## 6. Error handling
 
