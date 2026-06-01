@@ -3,7 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, SystemClock, TicketId};
+use voom_core::{JobId, SystemClock, TicketId, TicketOperation};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
 
@@ -559,7 +559,7 @@ async fn find_ticket(
 }
 
 fn parse_workflow_payload(ticket: &Ticket) -> WorkflowTicketPayload {
-    WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone()).unwrap()
+    WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone()).unwrap()
 }
 
 fn node_ids(tickets: &[Ticket]) -> Vec<String> {
@@ -593,11 +593,12 @@ fn branch_for_seed(branch_id: &str, operation: OperationKind) -> BranchContext {
     }
 }
 
-fn ticket_kind(operation: OperationKind) -> String {
-    format!(
+fn ticket_kind(operation: OperationKind) -> TicketOperation {
+    TicketOperation::new(format!(
         "synthetic.workflow.operation.{}",
         serde_json::to_value(operation).unwrap().as_str().unwrap()
-    )
+    ))
+    .unwrap()
 }
 
 fn timing() -> EffectiveTiming {

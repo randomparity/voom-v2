@@ -6,7 +6,7 @@ use voom_control_plane::workers::{
     NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{NodeId, TicketId, WorkerId};
+use voom_core::{NodeId, TicketId, TicketOperation, WorkerId};
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
@@ -15,6 +15,10 @@ use voom_store::test_support::sqlite_url_for;
 use super::{RemoteRunnerConfig, RemoteSyntheticRunner};
 
 const OP: &str = "transcode_video";
+
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
 
 #[tokio::test]
 async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
@@ -156,14 +160,14 @@ impl RemoteRunnerFixture {
                 name: "remote-worker".to_owned(),
                 kind: WorkerKind::Remote,
                 capabilities: vec![NewWorkerCapabilityDraft {
-                    operation: OP.to_owned(),
+                    operation: ticket_op(OP),
                     codecs: vec!["json".to_owned()],
                     hardware: Vec::new(),
                     artifact_access: vec!["shared_mount".to_owned()],
                     extra: json!({}),
                 }],
                 grants: vec![NewWorkerGrantDraft {
-                    can_execute: vec![OP.to_owned()],
+                    can_execute: vec![ticket_op(OP)],
                     can_access_read: Vec::new(),
                     can_access_write: Vec::new(),
                     denies: Vec::new(),
@@ -209,7 +213,7 @@ impl RemoteRunnerFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: OP.to_owned(),
+                kind: ticket_op(OP),
                 priority: 0,
                 payload,
                 max_attempts: 2,

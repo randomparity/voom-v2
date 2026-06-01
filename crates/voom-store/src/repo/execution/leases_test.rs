@@ -4,7 +4,7 @@ use serde_json::json;
 use time::Duration;
 use voom_core::clock_test_support::FrozenClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, LeaseId, TicketId, VoomError, WorkerId};
+use voom_core::{FailureClass, LeaseId, TicketId, TicketOperation, VoomError, WorkerId};
 
 use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
 use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
@@ -29,6 +29,10 @@ fn ceiling_rng() -> FrozenRng {
     FrozenRng::new(u32::MAX)
 }
 
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
 /// Returns the pool, the three repos, the seeded ticket id, the seeded
 /// worker id, and the tempfile (caller must bind it to keep the `SQLite`
 /// file alive for the duration of the test; `_tmp` underscore-binding
@@ -50,7 +54,7 @@ async fn setup() -> (
     let t = trepo
         .create(NewTicket {
             job_id: None,
-            kind: "noop".to_owned(),
+            kind: ticket_op("noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 3,
@@ -543,7 +547,7 @@ async fn force_release_with_requeue_rejects_when_attempts_exhausted() {
     let t = trepo
         .create(NewTicket {
             job_id: None,
-            kind: "noop".to_owned(),
+            kind: ticket_op("noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,
@@ -608,7 +612,7 @@ async fn force_release_with_requeue_marks_ready_when_attempts_remain() {
     let t = trepo
         .create(NewTicket {
             job_id: None,
-            kind: "noop".to_owned(),
+            kind: ticket_op("noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 2,
@@ -939,7 +943,7 @@ async fn expire_due_caps_at_lease_batch_limit_and_drains_remainder() {
         let t = trepo
             .create(NewTicket {
                 job_id: None,
-                kind: format!("k-{i}"),
+                kind: ticket_op(&format!("k-{i}")),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,

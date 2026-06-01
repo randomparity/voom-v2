@@ -2,7 +2,7 @@ use super::*;
 
 use sqlx::Executor;
 use time::OffsetDateTime;
-use voom_core::VoomError;
+use voom_core::{TicketOperation, VoomError};
 
 use crate::repo::execution::nodes::{NewNode, Node, NodeKind, NodeRepo, SqliteNodeRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
@@ -11,6 +11,10 @@ async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let p = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (p, tmp)
+}
+
+fn worker_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
 }
 
 fn sample_new_worker(name: &str) -> NewWorker {
@@ -75,7 +79,7 @@ async fn record_capability_stores_arrays_as_json() {
     let cap = repo
         .record_capability(NewCapability {
             worker_id: w.id,
-            operation: "transcode_video".to_owned(),
+            operation: worker_op("transcode_video"),
             codecs: vec!["h264".to_owned(), "hevc".to_owned()],
             hardware: vec!["cuda".to_owned()],
             artifact_access: vec!["local_path".to_owned()],
@@ -94,7 +98,7 @@ async fn record_grant_stores_max_parallel_as_json_object() {
     let g = repo
         .record_grant(NewGrant {
             worker_id: w.id,
-            can_execute: vec!["transcode_video".to_owned()],
+            can_execute: vec![worker_op("transcode_video")],
             can_access_read: vec!["local_path".to_owned()],
             can_access_write: vec!["staging".to_owned()],
             denies: vec![],
@@ -316,7 +320,7 @@ async fn worker_operation_eligibility_requires_capability_and_grant_without_deny
 
     let eligible = fixture
         .repo
-        .operation_eligibility(fixture.worker_id, "transcode_video")
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
         .await
         .unwrap();
     assert!(eligible.has_capability);
@@ -337,7 +341,7 @@ async fn worker_operation_eligibility_surfaces_denies() {
 
     let eligible = fixture
         .repo
-        .operation_eligibility(fixture.worker_id, "transcode_video")
+        .operation_eligibility(fixture.worker_id, &worker_op("transcode_video"))
         .await
         .unwrap();
     assert!(eligible.is_denied);
@@ -507,7 +511,7 @@ impl WorkerFixture {
         self.repo
             .record_capability(NewCapability {
                 worker_id: self.worker_id,
-                operation: operation.to_owned(),
+                operation: worker_op(operation),
                 codecs: vec![],
                 hardware: vec![],
                 artifact_access: artifact_access
@@ -526,13 +530,13 @@ impl WorkerFixture {
                 worker_id: self.worker_id,
                 can_execute: can_execute
                     .iter()
-                    .map(std::string::ToString::to_string)
+                    .map(|operation| worker_op(operation))
                     .collect(),
                 can_access_read: vec![],
                 can_access_write: vec![],
                 denies: denies
                     .iter()
-                    .map(std::string::ToString::to_string)
+                    .map(|operation| worker_op(operation))
                     .collect(),
                 max_parallel: serde_json::json!({}),
             })

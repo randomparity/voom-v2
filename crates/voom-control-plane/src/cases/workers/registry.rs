@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
 use time::Duration;
 use time::OffsetDateTime;
-use voom_core::{NodeId, VoomError, WorkerId};
+use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
 use voom_events::payload::{
     WorkerCapabilityRecordedPayload, WorkerGrantRecordedPayload, WorkerLinkedToNodePayload,
     WorkerRegisteredPayload, WorkerRetiredPayload,
@@ -36,7 +36,7 @@ pub struct RegisterWorkerForNodeInput {
 
 #[derive(Debug, Clone)]
 pub struct NewWorkerCapabilityDraft {
-    pub operation: String,
+    pub operation: TicketOperation,
     pub codecs: Vec<String>,
     pub hardware: Vec<String>,
     pub artifact_access: Vec<String>,
@@ -45,10 +45,10 @@ pub struct NewWorkerCapabilityDraft {
 
 #[derive(Debug, Clone)]
 pub struct NewWorkerGrantDraft {
-    pub can_execute: Vec<String>,
+    pub can_execute: Vec<TicketOperation>,
     pub can_access_read: Vec<String>,
     pub can_access_write: Vec<String>,
-    pub denies: Vec<String>,
+    pub denies: Vec<TicketOperation>,
     pub max_parallel: JsonValue,
 }
 
@@ -219,7 +219,7 @@ impl ControlPlane {
                 Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
                     worker_id: worker_id.0,
                     capability_id: cap.id,
-                    operation: cap.operation,
+                    operation: cap.operation.into_string(),
                 }),
             )
             .await?;
@@ -283,7 +283,7 @@ impl ControlPlane {
             Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
                 worker_id: worker_id.0,
                 capability_id: cap.id,
-                operation,
+                operation: operation.into_string(),
             }),
         )
         .await?;

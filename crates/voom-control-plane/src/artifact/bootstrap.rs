@@ -1,4 +1,4 @@
-use voom_core::VoomError;
+use voom_core::{OperationKind, TicketOperation, VoomError};
 use voom_store::repo::workers::{
     NewCapability, NewGrant, Worker, WorkerKind, WorkerRepo, WorkerStatus,
 };
@@ -6,8 +6,6 @@ use voom_store::repo::workers::{
 use crate::ControlPlane;
 
 const BUILTIN_VERIFY_ARTIFACT_WORKER_NAME: &str = "builtin.verify_artifact";
-const VERIFY_ARTIFACT_OPERATION: &str = "verify_artifact";
-
 pub async fn ensure_builtin_verify_artifact_worker_in_tx(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -25,15 +23,17 @@ pub async fn ensure_builtin_verify_artifact_worker_in_tx(
 
     validate_builtin_worker(&worker)?;
 
+    let operation = TicketOperation::from(OperationKind::VerifyArtifact);
     let eligibility = control_plane
         .workers
-        .operation_eligibility_in_tx(tx, worker.id, VERIFY_ARTIFACT_OPERATION)
+        .operation_eligibility_in_tx(tx, worker.id, &operation)
         .await?;
 
     if eligibility.is_denied {
         return Err(VoomError::Conflict(format!(
             "built-in worker {} is denied {}",
-            worker.name, VERIFY_ARTIFACT_OPERATION
+            worker.name,
+            operation.as_str()
         )));
     }
 
@@ -44,7 +44,7 @@ pub async fn ensure_builtin_verify_artifact_worker_in_tx(
                 tx,
                 NewCapability {
                     worker_id: worker.id,
-                    operation: VERIFY_ARTIFACT_OPERATION.to_owned(),
+                    operation: operation.clone(),
                     codecs: Vec::new(),
                     hardware: Vec::new(),
                     artifact_access: vec!["local_path".to_owned()],
@@ -61,7 +61,7 @@ pub async fn ensure_builtin_verify_artifact_worker_in_tx(
                 tx,
                 NewGrant {
                     worker_id: worker.id,
-                    can_execute: vec![VERIFY_ARTIFACT_OPERATION.to_owned()],
+                    can_execute: vec![operation],
                     can_access_read: vec!["local_path".to_owned()],
                     can_access_write: Vec::new(),
                     denies: Vec::new(),

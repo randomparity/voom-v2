@@ -15,7 +15,7 @@ use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
-    VoomError, WorkerId,
+    TicketOperation, VoomError, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
@@ -1169,7 +1169,7 @@ async fn invalid_policy_remux_payload_fails_acquired_lease() {
         .cp
         .create_ticket(NewTicket {
             job_id: Some(job.id),
-            kind: "synthetic.workflow.operation.remux".to_owned(),
+            kind: ticket_op("synthetic.workflow.operation.remux"),
             priority: 0,
             payload: workflow_payload.to_ticket_payload().unwrap(),
             max_attempts: 1,
@@ -1666,10 +1666,11 @@ impl ExecutorFixture {
             .await
             .unwrap();
         let operation_name = operation_name(operation);
+        let operation = ticket_op(operation_name.clone());
         self.cp
             .record_capability(NewCapability {
                 worker_id: worker.id,
-                operation: operation_name.clone(),
+                operation: operation.clone(),
                 codecs: Vec::new(),
                 hardware: Vec::new(),
                 artifact_access: Vec::new(),
@@ -1680,7 +1681,7 @@ impl ExecutorFixture {
         self.cp
             .record_grant(NewGrant {
                 worker_id: worker.id,
-                can_execute: vec![operation_name.clone()],
+                can_execute: vec![operation],
                 can_access_read: Vec::new(),
                 can_access_write: Vec::new(),
                 denies: Vec::new(),
@@ -1770,7 +1771,7 @@ impl ExecutorFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: Some(job_id),
-                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                kind: workflow_ticket_op(operation),
                 priority: 0,
                 payload,
                 max_attempts: 1,
@@ -1895,7 +1896,7 @@ impl ExecutorFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: Some(job.id),
-                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                kind: workflow_ticket_op(operation),
                 priority,
                 payload,
                 max_attempts: 1,
@@ -1933,7 +1934,7 @@ impl ExecutorFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: Some(job_id),
-                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                kind: workflow_ticket_op(operation),
                 priority: 0,
                 payload,
                 max_attempts: 1,
@@ -2189,7 +2190,7 @@ impl ExecutorFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: Some(job.id),
-                kind: "synthetic.workflow.operation.remux".to_owned(),
+                kind: ticket_op("synthetic.workflow.operation.remux"),
                 priority: 0,
                 payload: workflow_payload.to_ticket_payload().unwrap(),
                 max_attempts,
@@ -2915,6 +2916,17 @@ fn operation_name(operation: OperationKind) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+fn ticket_op(value: impl Into<String>) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
+fn workflow_ticket_op(operation: OperationKind) -> TicketOperation {
+    ticket_op(format!(
+        "synthetic.workflow.operation.{}",
+        operation_name(operation)
+    ))
 }
 
 fn policy_hash_node(id: &str, depends_on: &[&str]) -> WorkflowNode {

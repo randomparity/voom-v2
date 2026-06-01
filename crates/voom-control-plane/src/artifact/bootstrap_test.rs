@@ -35,7 +35,10 @@ async fn ensure_builtin_verify_artifact_worker_reuses_existing_live_row() {
 
     let eligibility = cp
         .workers()
-        .operation_eligibility(first.id, "verify_artifact")
+        .operation_eligibility(
+            first.id,
+            &TicketOperation::from(OperationKind::VerifyArtifact),
+        )
         .await
         .unwrap();
     assert!(eligibility.has_capability);
@@ -135,10 +138,10 @@ async fn denied_builtin_verify_artifact_execute_grant_fails_loudly() {
     cp.workers()
         .record_grant(NewGrant {
             worker_id: worker.id,
-            can_execute: vec!["verify_artifact".to_owned()],
+            can_execute: vec![TicketOperation::from(OperationKind::VerifyArtifact)],
             can_access_read: Vec::new(),
             can_access_write: Vec::new(),
-            denies: vec!["verify_artifact".to_owned()],
+            denies: vec![TicketOperation::from(OperationKind::VerifyArtifact)],
             max_parallel: serde_json::json!({}),
         })
         .await

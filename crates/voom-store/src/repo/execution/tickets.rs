@@ -5,7 +5,7 @@ use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
-use voom_core::{Clock, JobId, TicketId, VoomError};
+use voom_core::{Clock, JobId, TicketId, TicketOperation, VoomError};
 
 use super::Repository;
 use super::common::{
@@ -58,7 +58,7 @@ impl TicketState {
 #[derive(Debug, Clone)]
 pub struct NewTicket {
     pub job_id: Option<JobId>,
-    pub kind: String,
+    pub kind: TicketOperation,
     pub priority: i64,
     pub payload: JsonValue,
     pub max_attempts: u32,
@@ -69,7 +69,7 @@ pub struct NewTicket {
 pub struct Ticket {
     pub id: TicketId,
     pub job_id: Option<JobId>,
-    pub kind: String,
+    pub kind: TicketOperation,
     pub state: TicketState,
     pub priority: i64,
     pub payload: JsonValue,
@@ -131,18 +131,18 @@ pub trait TicketRepo: Repository {
     async fn next_ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError>;
     async fn ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError>;
     async fn next_ready_for_operations(
         &self,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError>;
     async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError>;
@@ -225,7 +225,7 @@ impl TicketRepo for SqliteTicketRepo {
              VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
         )
         .bind(input.job_id.map(|j| i64_from_u64(j.0)))
-        .bind(&input.kind)
+        .bind(input.kind.as_str())
         .bind(input.priority)
         .bind(payload_json)
         .bind(i64::from(input.max_attempts))
@@ -451,7 +451,7 @@ impl TicketRepo for SqliteTicketRepo {
     async fn next_ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError> {
         Ok(self
@@ -464,7 +464,7 @@ impl TicketRepo for SqliteTicketRepo {
     async fn ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
         if operations.is_empty() {
@@ -483,7 +483,7 @@ impl TicketRepo for SqliteTicketRepo {
         query.push(" AND attempt < max_attempts AND kind IN (");
         let mut separated = query.separated(", ");
         for operation in operations {
-            separated.push_bind(operation);
+            separated.push_bind(operation.as_str());
         }
         separated.push_unseparated(") ");
         query.push("ORDER BY priority DESC, next_eligible_at ASC, id ASC");
@@ -497,7 +497,7 @@ impl TicketRepo for SqliteTicketRepo {
 
     async fn next_ready_for_operations(
         &self,
-        operations: &[String],
+        operations: &[TicketOperation],
         now: OffsetDateTime,
     ) -> Result<Option<Ticket>, VoomError> {
         let mut tx = self
@@ -616,7 +616,7 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
     Ok(Ticket {
         id: TicketId(u64_from_i64(id)),
         job_id: job_id.map(|j| JobId(u64_from_i64(j))),
-        kind,
+        kind: TicketOperation::from_stored(kind, "tickets.kind")?,
         state: TicketState::parse(&state)?,
         priority,
         payload: payload_v,

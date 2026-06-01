@@ -26,7 +26,7 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{JobId, VoomError};
+use voom_core::{JobId, TicketOperation, VoomError};
 
 use crate::init::init;
 use crate::pool::connect;
@@ -172,7 +172,7 @@ impl TicketBuilder {
     pub async fn build(self, repo: &SqliteTicketRepo) -> Result<Ticket, VoomError> {
         repo.create(NewTicket {
             job_id: self.job_id,
-            kind: self.kind,
+            kind: TicketOperation::new(self.kind)?,
             priority: self.priority,
             payload: self.payload,
             max_attempts: self.max_attempts,

@@ -16,6 +16,10 @@ use crate::cases::workers::nodes::RegisterNodeInput;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
+fn worker_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
 fn page_filter(kind: EventKind) -> EventFilter {
     EventFilter {
         kind: Some(kind),
@@ -65,7 +69,7 @@ async fn record_capability_emits_worker_capability_recorded() {
     let cap = cp
         .record_capability(NewCapability {
             worker_id: w.id,
-            operation: "ingest".to_owned(),
+            operation: worker_op("ingest"),
             codecs: vec![],
             hardware: vec![],
             artifact_access: vec![],
@@ -108,7 +112,7 @@ async fn record_grant_emits_worker_grant_recorded() {
     let grant = cp
         .record_grant(NewGrant {
             worker_id: w.id,
-            can_execute: vec!["ingest".to_owned()],
+            can_execute: vec![worker_op("ingest")],
             can_access_read: vec![],
             can_access_write: vec![],
             denies: vec![],
@@ -398,14 +402,14 @@ fn worker_for_node_input(
         kind: WorkerKind::Synthetic,
         capabilities: vec![
             NewWorkerCapabilityDraft {
-                operation: "inspect".to_owned(),
+                operation: worker_op("inspect"),
                 codecs: vec!["json".to_owned()],
                 hardware: vec!["cpu".to_owned()],
                 artifact_access: vec!["read".to_owned()],
                 extra: serde_json::json!({"priority": 1}),
             },
             NewWorkerCapabilityDraft {
-                operation: "transcode".to_owned(),
+                operation: worker_op("transcode"),
                 codecs: vec!["h264".to_owned()],
                 hardware: vec!["gpu".to_owned()],
                 artifact_access: vec!["read".to_owned(), "write".to_owned()],
@@ -414,17 +418,17 @@ fn worker_for_node_input(
         ],
         grants: vec![
             NewWorkerGrantDraft {
-                can_execute: vec!["inspect".to_owned()],
+                can_execute: vec![worker_op("inspect")],
                 can_access_read: vec!["artifact:*".to_owned()],
                 can_access_write: vec![],
                 denies: vec![],
                 max_parallel: serde_json::json!({"inspect": 1}),
             },
             NewWorkerGrantDraft {
-                can_execute: vec!["transcode".to_owned()],
+                can_execute: vec![worker_op("transcode")],
                 can_access_read: vec!["artifact:*".to_owned()],
                 can_access_write: vec!["artifact:*".to_owned()],
-                denies: vec!["delete".to_owned()],
+                denies: vec![worker_op("delete")],
                 max_parallel: serde_json::json!({"transcode": 2}),
             },
         ],

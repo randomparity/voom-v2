@@ -91,10 +91,10 @@ async fn denied_builtin_ffprobe_execute_grant_fails_loudly() {
     cp.workers()
         .record_grant(NewGrant {
             worker_id: worker.id,
-            can_execute: vec!["probe_file".to_owned()],
+            can_execute: vec![TicketOperation::from(OperationKind::ProbeFile)],
             can_access_read: Vec::new(),
             can_access_write: Vec::new(),
-            denies: vec!["probe_file".to_owned()],
+            denies: vec![TicketOperation::from(OperationKind::ProbeFile)],
             max_parallel: serde_json::json!({}),
         })
         .await

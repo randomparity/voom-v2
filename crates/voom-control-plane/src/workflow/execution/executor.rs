@@ -7,7 +7,7 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use tokio::task::JoinSet;
 use voom_core::OperationKind;
-use voom_core::{FailureClass, JobId, TicketId, VoomError, WorkerId};
+use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::identity::IdentityRepo;
 use voom_store::repo::jobs::NewJob;
@@ -578,7 +578,7 @@ where
             .control_plane
             .create_ticket(NewTicket {
                 job_id: Some(job_id),
-                kind: ticket_kind(operation),
+                kind: ticket_kind(operation)?,
                 priority: 0,
                 payload,
                 max_attempts: self.options.max_attempts,
@@ -1019,12 +1019,14 @@ where
             .ok_or_else(|| {
                 VoomError::NotFound(format!("workflow ready ticket {ticket_id} for {job_id}"))
             })?;
-        WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone()).map_err(|e| {
-            VoomError::Internal(format!(
-                "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
-                ticket.id
-            ))
-        })?;
+        WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone()).map_err(
+            |e| {
+                VoomError::Internal(format!(
+                    "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
+                    ticket.id
+                ))
+            },
+        )?;
         Ok(Some(ticket))
     }
 
@@ -1240,12 +1242,15 @@ enum SpawnOutcome {
 }
 
 fn parse_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, VoomError> {
-    WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone())
+    WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
         .map_err(|e| VoomError::Config(format!("workflow ticket payload decode: {e}")))
 }
 
-fn ticket_kind(operation: OperationKind) -> String {
-    format!("synthetic.workflow.operation.{}", operation_name(operation))
+fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
+    TicketOperation::new(format!(
+        "synthetic.workflow.operation.{}",
+        operation_name(operation)
+    ))
 }
 
 /// Reports whether `node` lists `parent_id` among its direct dependencies.

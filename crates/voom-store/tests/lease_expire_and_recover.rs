@@ -16,7 +16,7 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::SystemClock;
+use voom_core::{SystemClock, TicketOperation};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::leases::{LEASE_BATCH_LIMIT, NewLease};
@@ -37,6 +37,10 @@ async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {
     (cp, tmp)
 }
 
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
 #[tokio::test]
 async fn expire_due_handles_bulk_overdue_leases() {
     let (cp, _tmp) = cp().await;
@@ -53,7 +57,7 @@ async fn expire_due_handles_bulk_overdue_leases() {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: format!("k-{i}"),
+                kind: ticket_op(&format!("k-{i}")),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,
@@ -146,7 +150,7 @@ async fn expire_due_handles_backlog_above_chunk_size() {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: format!("k-{i}"),
+                kind: ticket_op(&format!("k-{i}")),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,
@@ -201,7 +205,7 @@ async fn expire_due_drains_backlog_above_batch_limit() {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: format!("k-{i}"),
+                kind: ticket_op(&format!("k-{i}")),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 3,

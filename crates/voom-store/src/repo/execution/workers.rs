@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{NodeId, VoomError, WorkerId};
+use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
 
 use super::Repository;
 use super::common::{
@@ -120,7 +120,7 @@ pub struct WorkerOperationEligibility {
 #[derive(Debug, Clone)]
 pub struct NewCapability {
     pub worker_id: WorkerId,
-    pub operation: String,
+    pub operation: TicketOperation,
     pub codecs: Vec<String>,
     pub hardware: Vec<String>,
     pub artifact_access: Vec<String>,
@@ -131,16 +131,16 @@ pub struct NewCapability {
 pub struct Capability {
     pub id: u64,
     pub worker_id: WorkerId,
-    pub operation: String,
+    pub operation: TicketOperation,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewGrant {
     pub worker_id: WorkerId,
-    pub can_execute: Vec<String>,
+    pub can_execute: Vec<TicketOperation>,
     pub can_access_read: Vec<String>,
     pub can_access_write: Vec<String>,
-    pub denies: Vec<String>,
+    pub denies: Vec<TicketOperation>,
     pub max_parallel: JsonValue,
 }
 
@@ -210,12 +210,12 @@ pub trait WorkerRepo: Repository {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         worker_id: WorkerId,
-        operation: &str,
+        operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError>;
     async fn operation_eligibility(
         &self,
         worker_id: WorkerId,
-        operation: &str,
+        operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError>;
 
     async fn node_owned_worker_in_tx<'tx>(
@@ -301,7 +301,7 @@ impl WorkerRepo for SqliteWorkerRepo {
              VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(i64_from_u64(input.worker_id.0))
-        .bind(&input.operation)
+        .bind(input.operation.as_str())
         .bind(codecs)
         .bind(hw)
         .bind(access)
@@ -536,14 +536,14 @@ impl WorkerRepo for SqliteWorkerRepo {
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
         worker_id: WorkerId,
-        operation: &str,
+        operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
         let capability_rows = sqlx::query(
             "SELECT artifact_access FROM worker_capabilities \
              WHERE worker_id = ? AND operation = ? ORDER BY id ASC",
         )
         .bind(i64_from_u64(worker_id.0))
-        .bind(operation)
+        .bind(operation.as_str())
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| VoomError::Database(format!("worker_capabilities eligibility: {e}")))?;
@@ -573,10 +573,10 @@ impl WorkerRepo for SqliteWorkerRepo {
             let denies: String = row
                 .try_get("denies")
                 .map_err(|e| map_row_err("worker_grants eligibility", &e))?;
-            has_grant |= parse_string_array_json(&can_execute, "can_execute")?
+            has_grant |= parse_operation_array_json(&can_execute, "can_execute")?
                 .iter()
                 .any(|item| item == operation);
-            is_denied |= parse_string_array_json(&denies, "denies")?
+            is_denied |= parse_operation_array_json(&denies, "denies")?
                 .iter()
                 .any(|item| item == operation);
         }
@@ -592,7 +592,7 @@ impl WorkerRepo for SqliteWorkerRepo {
     async fn operation_eligibility(
         &self,
         worker_id: WorkerId,
-        operation: &str,
+        operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
         let mut tx = self
             .pool
@@ -740,6 +740,16 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
 fn parse_string_array_json(input: &str, field: &'static str) -> Result<Vec<String>, VoomError> {
     serde_json::from_str(input)
         .map_err(|e| VoomError::Database(format!("parse worker {field}: {e}")))
+}
+
+fn parse_operation_array_json(
+    input: &str,
+    field: &'static str,
+) -> Result<Vec<TicketOperation>, VoomError> {
+    let raw = parse_string_array_json(input, field)?;
+    raw.into_iter()
+        .map(|operation| TicketOperation::from_stored(operation, field))
+        .collect()
 }
 
 #[cfg(test)]

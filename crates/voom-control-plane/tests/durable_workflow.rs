@@ -32,7 +32,7 @@ use voom_control_plane::workflow::plan::expansion::{
 use voom_control_plane::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use voom_control_plane::workflow::{WorkerRuntimeRegistry, WorkflowExecutor, WorkflowPlan};
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, WorkerId};
+use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, TicketOperation, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
@@ -915,7 +915,7 @@ impl DurableWorkflowFixture {
             self.cp
                 .record_capability(NewCapability {
                     worker_id: worker.id,
-                    operation: operation.clone(),
+                    operation: TicketOperation::new(operation.clone())?,
                     codecs: Vec::new(),
                     hardware: Vec::new(),
                     artifact_access: Vec::new(),
@@ -930,7 +930,11 @@ impl DurableWorkflowFixture {
         self.cp
             .record_grant(NewGrant {
                 worker_id: worker.id,
-                can_execute: operation_names,
+                can_execute: operation_names
+                    .iter()
+                    .cloned()
+                    .map(TicketOperation::new)
+                    .collect::<Result<Vec<_>, _>>()?,
                 can_access_read: Vec::new(),
                 can_access_write: Vec::new(),
                 denies: Vec::new(),
@@ -1003,7 +1007,7 @@ impl DurableWorkflowFixture {
         Ok(Ticket {
             id: TicketId(u64::try_from(row.get::<i64, _>("id"))?),
             job_id: Some(self.job_id),
-            kind: row.get("kind"),
+            kind: TicketOperation::from_stored(row.get::<String, _>("kind"), "tickets.kind")?,
             state: TicketState::parse_for_test(row.get::<String, _>("state").as_str()),
             priority: row.get("priority"),
             payload: serde_json::from_str(&row.get::<String, _>("payload"))?,
@@ -1782,15 +1786,19 @@ fn node_ids(tickets: &[Ticket]) -> Vec<String> {
     tickets
         .iter()
         .map(|ticket| {
-            WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone())
+            WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
                 .unwrap()
                 .node_id
         })
         .collect()
 }
 
-fn ticket_kind(operation: OperationKind) -> String {
-    format!("synthetic.workflow.operation.{}", operation_name(operation))
+fn ticket_kind(operation: OperationKind) -> TicketOperation {
+    TicketOperation::new(format!(
+        "synthetic.workflow.operation.{}",
+        operation_name(operation)
+    ))
+    .unwrap()
 }
 
 fn operation_name(operation: OperationKind) -> String {

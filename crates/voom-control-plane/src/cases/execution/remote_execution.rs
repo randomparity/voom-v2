@@ -6,7 +6,9 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value as JsonValue, json};
 use sqlx::{Row, Sqlite, Transaction};
 use time::{Duration, OffsetDateTime};
-use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
+use voom_core::{
+    ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation, VoomError, WorkerId,
+};
 use voom_scheduler::{
     NodeCandidate, SCORING_VERSION, SchedulerCandidate, SchedulerScorer, ScoreDecision,
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
@@ -651,7 +653,7 @@ impl ControlPlane {
             scheduler_decision_id: scheduler_decision.id,
             ticket_id: ticket.id,
             worker_id: input.worker_id,
-            operation: ticket.kind,
+            operation: ticket.kind.into_string(),
             dispatch_payload: ticket.payload,
             lease_ttl_seconds: lease.ttl_seconds,
             heartbeat_after_seconds: heartbeat_after_seconds(lease.ttl_seconds),
@@ -1213,8 +1215,8 @@ fn route_lease_fail(lease_id: LeaseId) -> String {
 async fn worker_candidate_operations_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     worker_id: WorkerId,
-) -> Result<Vec<String>, VoomError> {
-    sqlx::query_scalar::<_, String>(
+) -> Result<Vec<TicketOperation>, VoomError> {
+    let operations = sqlx::query_scalar::<_, String>(
         "SELECT operation FROM worker_capabilities WHERE worker_id = ? \
          UNION \
          SELECT value AS operation FROM worker_grants, json_each(worker_grants.can_execute) \
@@ -1229,7 +1231,13 @@ async fn worker_candidate_operations_in_tx(
     })?)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("worker candidate operations: {e}")))
+    .map_err(|e| VoomError::Database(format!("worker candidate operations: {e}")))?;
+    operations
+        .into_iter()
+        .map(|operation| {
+            TicketOperation::from_stored(operation, "worker candidate operations.operation")
+        })
+        .collect()
 }
 
 fn candidate_from_ticket(
@@ -1287,7 +1295,7 @@ fn score_remote_candidates(candidates: &[SchedulerCandidate]) -> Result<ScoreDec
     // candidate breadth stays bounded. Keep the scorer API simple with cloned
     // homogeneous operation slices unless this path grows beyond that scope.
     let mut operation_order = Vec::new();
-    let mut by_operation: HashMap<String, Vec<SchedulerCandidate>> = HashMap::new();
+    let mut by_operation: HashMap<TicketOperation, Vec<SchedulerCandidate>> = HashMap::new();
     for candidate in candidates {
         if !by_operation.contains_key(&candidate.ticket.operation) {
             operation_order.push(candidate.ticket.operation.clone());
@@ -1477,7 +1485,7 @@ async fn active_lease_count_for_node_in_tx(
 async fn active_lease_count_for_worker_operation_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     worker_id: WorkerId,
-    operation: &str,
+    operation: &TicketOperation,
 ) -> Result<u32, VoomError> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) \
@@ -1486,7 +1494,7 @@ async fn active_lease_count_for_worker_operation_in_tx(
          WHERE leases.state = 'held' AND leases.worker_id = ? AND tickets.kind = ?",
     )
     .bind(sqlite_id(worker_id.0, "worker id")?)
-    .bind(operation)
+    .bind(operation.as_str())
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| VoomError::Database(format!("worker operation active lease count: {e}")))?;
@@ -1496,7 +1504,7 @@ async fn active_lease_count_for_worker_operation_in_tx(
 async fn max_parallel_for_worker_operation_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     worker_id: WorkerId,
-    operation: &str,
+    operation: &TicketOperation,
 ) -> Result<u32, VoomError> {
     let rows =
         sqlx::query("SELECT max_parallel FROM worker_grants WHERE worker_id = ? ORDER BY id")
@@ -1516,7 +1524,7 @@ async fn max_parallel_for_worker_operation_in_tx(
             .map_err(|e| VoomError::Database(format!("parse worker max_parallel: {e}")))?;
         operation_limit = max_optional_limit(
             operation_limit,
-            json_positive_u32(value.get(operation), "max_parallel operation")?,
+            json_positive_u32(value.get(operation.as_str()), "max_parallel operation")?,
         );
         wildcard_limit = max_optional_limit(
             wildcard_limit,
@@ -1715,7 +1723,7 @@ fn capacity_decision(
             "scoring_version": SCORING_VERSION,
             "outcome": "no_eligible_candidate",
             "reason": reason,
-            "operation": selected_candidate.ticket.operation,
+            "operation": selected_candidate.ticket.operation.as_str(),
             "selected_ticket_id": selected_candidate.ticket.ticket_id.0,
             "observed": {
                 "active_leases": observed_active,
@@ -1778,8 +1786,12 @@ fn suppression_key(
     ))
 }
 
-fn capacity_suppression_key(input: &RemoteAcquireInput, reason: &str, operation: &str) -> String {
-    remote_acquire_suppression_key(input, reason, operation)
+fn capacity_suppression_key(
+    input: &RemoteAcquireInput,
+    reason: &str,
+    operation: &TicketOperation,
+) -> String {
+    remote_acquire_suppression_key(input, reason, operation.as_str())
 }
 
 fn remote_acquire_suppression_key(
@@ -1794,9 +1806,17 @@ fn remote_acquire_suppression_key(
     )
 }
 
-fn set_operation_set(explanation: &mut JsonValue, operations: &[String]) {
+fn set_operation_set(explanation: &mut JsonValue, operations: &[TicketOperation]) {
     if let Some(object) = explanation.as_object_mut() {
-        object.insert("operation_set".to_owned(), json!(operations));
+        object.insert(
+            "operation_set".to_owned(),
+            json!(
+                operations
+                    .iter()
+                    .map(TicketOperation::as_str)
+                    .collect::<Vec<_>>()
+            ),
+        );
     }
 }
 

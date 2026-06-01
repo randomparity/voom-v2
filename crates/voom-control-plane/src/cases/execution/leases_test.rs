@@ -1,7 +1,7 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, TicketId, VoomError};
+use voom_core::{FailureClass, TicketId, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
@@ -14,7 +14,7 @@ const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 fn ticket(kind: &str, max_attempts: u32) -> NewTicket {
     NewTicket {
         job_id: None,
-        kind: kind.to_owned(),
+        kind: TicketOperation::new(kind).unwrap(),
         priority: 0,
         payload: serde_json::json!({}),
         max_attempts,

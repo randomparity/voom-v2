@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
-use voom_core::{ErrorCode, NodeId, WorkerId};
+use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
 
 use crate::cli::WorkerCommand;
@@ -115,12 +115,32 @@ async fn register(
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
+    let capabilities = match capabilities
+        .into_iter()
+        .map(capability_draft)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(capabilities) => capabilities,
+        Err(err) => {
+            emit_err(
+                "worker",
+                err.code(),
+                err.to_string(),
+                Some(
+                    "Pass operation tokens containing only ASCII letters, digits, '_', '-', or '.'"
+                        .to_owned(),
+                ),
+                Some(local),
+            )?;
+            return Ok(1);
+        }
+    };
     let input = RegisterWorkerForNodeInput {
         node_id: NodeId(node_id),
         token: SecretString::from(token),
         name,
         kind: kind.to_store(),
-        capabilities: capabilities.into_iter().map(capability_draft).collect(),
+        capabilities,
         grants: Vec::new(),
     };
     match cp.register_worker_for_node(input).await {
@@ -208,14 +228,14 @@ fn emit_worker(worker: WorkerInspection, local: Local) -> io::Result<i32> {
     .map(|()| 0)
 }
 
-fn capability_draft(operation: String) -> NewWorkerCapabilityDraft {
-    NewWorkerCapabilityDraft {
-        operation,
+fn capability_draft(operation: String) -> Result<NewWorkerCapabilityDraft, VoomError> {
+    Ok(NewWorkerCapabilityDraft {
+        operation: TicketOperation::new(operation)?,
         codecs: Vec::new(),
         hardware: Vec::new(),
         artifact_access: Vec::new(),
         extra: json!({}),
-    }
+    })
 }
 
 impl From<WorkerInspection> for WorkerData {

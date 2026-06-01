@@ -50,6 +50,28 @@ impl OperationKind {
         Self::CommitArtifact,
         Self::DeleteArtifact,
     ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScanLibrary => "scan_library",
+            Self::ProbeFile => "probe_file",
+            Self::HashFile => "hash_file",
+            Self::IdentifyMedia => "identify_media",
+            Self::ScoreQuality => "score_quality",
+            Self::SyncExternalSystem => "sync_external_system",
+            Self::BackUpFile => "back_up_file",
+            Self::Remux => "remux",
+            Self::TranscodeVideo => "transcode_video",
+            Self::TranscodeAudio => "transcode_audio",
+            Self::EditTracks => "edit_tracks",
+            Self::ExtractAudio => "extract_audio",
+            Self::TranscribeAudio => "transcribe_audio",
+            Self::VerifyArtifact => "verify_artifact",
+            Self::CommitArtifact => "commit_artifact",
+            Self::DeleteArtifact => "delete_artifact",
+        }
+    }
 }
 
 #[cfg(test)]

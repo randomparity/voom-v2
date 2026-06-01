@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
 use time::OffsetDateTime;
 use voom_core::OperationKind;
-use voom_core::{JobId, TicketId, VoomError};
+use voom_core::{JobId, TicketId, TicketOperation, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
@@ -185,7 +185,7 @@ pub async fn expand_backup_completion(
 struct TicketSpec {
     node_id: String,
     branch_id: String,
-    kind: String,
+    kind: TicketOperation,
     payload: Value,
     priority: i64,
     max_attempts: u32,
@@ -219,7 +219,7 @@ fn spec_for_branch(
     Ok(TicketSpec {
         node_id: node_id.to_owned(),
         branch_id: branch.branch_id.clone(),
-        kind: ticket_kind(operation),
+        kind: ticket_kind(operation)?,
         payload,
         priority: parent_ticket.priority,
         max_attempts: parent_ticket.max_attempts,
@@ -273,7 +273,7 @@ async fn create_missing_tickets(
             Event::TicketCreated(TicketCreatedPayload {
                 ticket_id: ticket.id.0,
                 job_id: input.job_id.map(|job_id| job_id.0),
-                kind: input.kind,
+                kind: input.kind.clone().into_string(),
                 priority: input.priority,
                 max_attempts: input.max_attempts,
             }),
@@ -324,7 +324,7 @@ fn dedupe_specs(specs: Vec<TicketSpec>) -> Vec<TicketSpec> {
 async fn find_existing_ticket_id_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     job_id: JobId,
-    kind: &str,
+    kind: &TicketOperation,
     branch_id: &str,
     node_id: &str,
 ) -> Result<Option<TicketId>, VoomError> {
@@ -338,7 +338,7 @@ async fn find_existing_ticket_id_in_tx(
          LIMIT 2",
     )
     .bind(sqlite_i64(job_id.0, "job id")?)
-    .bind(kind)
+    .bind(kind.as_str())
     .bind(branch_id)
     .bind(node_id)
     .fetch_all(&mut **tx)
@@ -452,7 +452,7 @@ fn operation_for_node(plan: &WorkflowPlan, node_id: &str) -> Result<OperationKin
 }
 
 fn parse_workflow_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, VoomError> {
-    WorkflowTicketPayload::parse_ticket(&ticket.kind, ticket.payload.clone())
+    WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
         .map_err(|e| VoomError::Config(format!("workflow ticket payload decode: {e}")))
 }
 
@@ -509,8 +509,11 @@ fn timing(ctx: &ExpansionContext<'_>, node_id: &str, branch_id: &str) -> Effecti
     )
 }
 
-fn ticket_kind(operation: OperationKind) -> String {
-    format!("synthetic.workflow.operation.{}", operation_name(operation))
+fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
+    TicketOperation::new(format!(
+        "synthetic.workflow.operation.{}",
+        operation_name(operation)
+    ))
 }
 
 fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {

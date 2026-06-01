@@ -20,6 +20,7 @@ pub mod operation_kind;
 pub mod remux;
 #[cfg(any(test, feature = "test-support"))]
 pub mod rng_test_support;
+pub mod ticket_operation;
 pub mod transcode_video_profile;
 pub mod version;
 
@@ -37,6 +38,7 @@ pub use ids::{
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
 pub use remux::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
+pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
     TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,

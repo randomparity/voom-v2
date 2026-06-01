@@ -1,7 +1,7 @@
 use super::*;
 
 use time::{Duration, OffsetDateTime};
-use voom_core::VoomError;
+use voom_core::{TicketOperation, VoomError};
 
 use crate::test_support::fresh_initialized_pool_at;
 
@@ -33,7 +33,7 @@ impl TicketFixture {
             .repo
             .create(NewTicket {
                 job_id: None,
-                kind: kind.to_owned(),
+                kind: ticket_op(kind),
                 priority,
                 payload: serde_json::json!({}),
                 max_attempts: 3,
@@ -53,12 +53,16 @@ impl TicketFixture {
 fn sample_new_ticket() -> NewTicket {
     NewTicket {
         job_id: None,
-        kind: "ingest.scan".to_owned(),
+        kind: ticket_op("ingest.scan"),
         priority: 0,
         payload: serde_json::json!({"path": "/tmp/x"}),
         max_attempts: 3,
         created_at: OffsetDateTime::UNIX_EPOCH,
     }
+}
+
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
 }
 
 #[tokio::test]
@@ -81,7 +85,7 @@ async fn next_ready_for_operations_orders_by_priority_next_eligible_and_ticket_i
 
     let selected = fixture
         .repo
-        .next_ready_for_operations(&["transcode_video".to_owned()], fixture.now)
+        .next_ready_for_operations(&[ticket_op("transcode_video")], fixture.now)
         .await
         .unwrap()
         .unwrap();
@@ -99,7 +103,7 @@ async fn next_ready_for_operations_uses_ticket_id_as_final_tiebreaker() {
 
     let selected = fixture
         .repo
-        .next_ready_for_operations(&["transcode_video".to_owned()], fixture.now)
+        .next_ready_for_operations(&[ticket_op("transcode_video")], fixture.now)
         .await
         .unwrap()
         .unwrap();

@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use voom_control_plane::ControlPlane;
+use voom_core::TicketOperation;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
@@ -70,9 +71,10 @@ impl TestWorkerLaunch {
             .spawn()?;
         let stdin = child.stdin.take();
         let bound = read_bound_addr(&mut child, &config.binary_path)?;
+        let operation = TicketOperation::new(config.operation.clone())?;
         cp.record_capability(NewCapability {
             worker_id: worker.id,
-            operation: config.operation.clone(),
+            operation: operation.clone(),
             codecs: Vec::new(),
             hardware: Vec::new(),
             artifact_access: Vec::new(),
@@ -84,7 +86,7 @@ impl TestWorkerLaunch {
         .await?;
         cp.record_grant(NewGrant {
             worker_id: worker.id,
-            can_execute: vec![config.operation.clone()],
+            can_execute: vec![operation],
             can_access_read: Vec::new(),
             can_access_write: Vec::new(),
             denies: Vec::new(),

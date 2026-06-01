@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use time::OffsetDateTime;
-use voom_core::OperationKind;
+use voom_core::{OperationKind, TicketOperation};
 use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
@@ -803,9 +803,10 @@ async fn register_policy_worker_with_extra(
         .await
         .unwrap();
     let operation_name = operation_name(operation);
+    let operation = TicketOperation::new(operation_name).unwrap();
     cp.record_capability(NewCapability {
         worker_id: worker.id,
-        operation: operation_name.to_owned(),
+        operation: operation.clone(),
         codecs: Vec::new(),
         hardware: Vec::new(),
         artifact_access: Vec::new(),
@@ -815,7 +816,7 @@ async fn register_policy_worker_with_extra(
     .unwrap();
     cp.record_grant(NewGrant {
         worker_id: worker.id,
-        can_execute: vec![operation_name.to_owned()],
+        can_execute: vec![operation],
         can_access_read: Vec::new(),
         can_access_write: Vec::new(),
         denies: Vec::new(),

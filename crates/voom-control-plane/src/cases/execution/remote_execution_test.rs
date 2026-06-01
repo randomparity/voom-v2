@@ -3,7 +3,8 @@ use super::*;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 use voom_core::{
-    ErrorCode, FailureClass, LeaseId, NodeId, TicketId, clock_test_support::FrozenClock,
+    ErrorCode, FailureClass, LeaseId, NodeId, TicketId, TicketOperation,
+    clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
 use voom_scheduler::ScoreReasonCode;
@@ -27,6 +28,10 @@ use crate::cases::workers::{
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 const OP: &str = "test.remote";
 
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
 struct RemoteFixture {
     cp: crate::ControlPlane,
     _tmp: tempfile::NamedTempFile,
@@ -45,7 +50,7 @@ impl RemoteFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: kind.to_owned(),
+                kind: ticket_op(kind),
                 priority,
                 payload: json!({
                     "dispatch": {"kind": kind},
@@ -325,7 +330,7 @@ fn score_remote_candidates_uses_global_no_candidate_reason_priority() {
     let missing_capability = SchedulerCandidate {
         ticket: TicketCandidate {
             ticket_id: TicketId(2),
-            operation: "test.missing_capability".to_owned(),
+            operation: ticket_op("test.missing_capability"),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
         },
@@ -424,12 +429,12 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
     let transcode_key = capacity_suppression_key(
         &fixture_input,
         SchedulerReasonCode::NodeCapacityFull.as_str(),
-        "transcode",
+        &ticket_op("transcode"),
     );
     let probe_key = capacity_suppression_key(
         &fixture_input,
         SchedulerReasonCode::NodeCapacityFull.as_str(),
-        "probe",
+        &ticket_op("probe"),
     );
 
     assert_ne!(transcode_key, probe_key);
@@ -484,7 +489,7 @@ fn scheduler_candidate(operation: &str, ticket_id: TicketId) -> SchedulerCandida
     SchedulerCandidate {
         ticket: TicketCandidate {
             ticket_id,
-            operation: operation.to_owned(),
+            operation: ticket_op(operation),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
         },
@@ -1252,7 +1257,7 @@ async fn fixture_with_options(
             capabilities: capabilities
                 .iter()
                 .map(|(operation, artifact_access)| NewWorkerCapabilityDraft {
-                    operation: (*operation).to_owned(),
+                    operation: ticket_op(operation),
                     codecs: vec!["json".to_owned()],
                     hardware: Vec::new(),
                     artifact_access: artifact_access
@@ -1263,10 +1268,10 @@ async fn fixture_with_options(
                 })
                 .collect(),
             grants: vec![NewWorkerGrantDraft {
-                can_execute: can_execute.iter().map(|op| (*op).to_owned()).collect(),
+                can_execute: can_execute.iter().map(|op| ticket_op(op)).collect(),
                 can_access_read: Vec::new(),
                 can_access_write: Vec::new(),
-                denies: denies.iter().map(|op| (*op).to_owned()).collect(),
+                denies: denies.iter().map(|op| ticket_op(op)).collect(),
                 max_parallel: json!({"limit": 1}),
             }],
         })
