@@ -132,6 +132,26 @@ async fn local_reservations_prevent_worker_capacity_overrun() {
 }
 
 #[tokio::test]
+async fn capacity_deferred_ready_ticket_does_not_block_later_ready_ticket() {
+    let fixture = ExecutorFixture::capacity_deferred_then_free_worker().await;
+    let mut options = timeout_options();
+    options.ready_batch_size = 8;
+
+    let err = fixture.run_with_options(options).await.unwrap_err();
+
+    assert_eq!(err.source.error_code(), ErrorCode::WorkerTimeout);
+    assert_eq!(err.summary.dispatch_count, 2);
+    assert_eq!(
+        err.summary
+            .per_operation
+            .get(&OperationKind::IdentifyMedia)
+            .unwrap()
+            .dispatch_count,
+        1
+    );
+}
+
+#[tokio::test]
 async fn no_eligible_worker_is_recorded_before_lease_dispatch() {
     let fixture = ExecutorFixture::without_workers(1).await;
     let err = fixture.run().await.unwrap_err();
@@ -1571,6 +1591,29 @@ impl ExecutorFixture {
         fixture
     }
 
+    async fn capacity_deferred_then_free_worker() -> Self {
+        let mut fixture = Self::without_workers(0).await;
+        fixture.plan = capacity_deferred_mixed_plan();
+        let hash_worker = fixture
+            .register_worker(
+                "hash-worker",
+                OperationKind::HashFile,
+                1,
+                FakeBehavior::Hang,
+            )
+            .await;
+        fixture
+            .register_worker(
+                "identify-worker",
+                OperationKind::IdentifyMedia,
+                1,
+                FakeBehavior::Success,
+            )
+            .await;
+        fixture.first_worker_id = Some(hash_worker);
+        fixture
+    }
+
     async fn single_worker_with_behavior(behavior: FakeBehavior) -> Self {
         let mut fixture = Self::without_workers(1).await;
         let worker_id = fixture
@@ -2702,6 +2745,38 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
+    }
+}
+
+fn capacity_deferred_mixed_plan() -> WorkflowPlan {
+    WorkflowPlan {
+        id: "capacity-deferred-mixed-test".to_owned(),
+        seed: 2,
+        nodes: vec![
+            simple_operation_node("hash-active", OperationKind::HashFile),
+            simple_operation_node("hash-deferred", OperationKind::HashFile),
+            simple_operation_node("identify-free", OperationKind::IdentifyMedia),
+        ],
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 3 },
+        concurrency: ConcurrencyPolicy {
+            max_in_flight_dispatches: 4,
+        },
+        timing: crate::workflow::plan::model::TimingPolicy {
+            base_duration_ms: 10,
+            jitter_ms: 0,
+        },
+    }
+}
+
+fn simple_operation_node(id: &str, operation: OperationKind) -> OperationNode {
+    OperationNode {
+        id: id.to_owned(),
+        operation,
+        policy_target: None,
+        operation_payload: Value::Null,
+        depends_on: Vec::new(),
+        depends_on_selected: Vec::new(),
+        provides_selected: None,
     }
 }
 

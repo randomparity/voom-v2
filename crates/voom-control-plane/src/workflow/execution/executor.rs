@@ -174,6 +174,10 @@ impl RunLoopState {
         self.terminal_error = Some(source);
     }
 
+    fn has_terminal_error(&self) -> bool {
+        self.terminal_error.is_some()
+    }
+
     fn take_terminal_error(&mut self) -> Option<VoomError> {
         self.terminal_error.take()
     }
@@ -470,27 +474,36 @@ where
             let mut dispatched_or_failed = false;
             let max_in_flight = plan.concurrency.max_in_flight_dispatches;
             while state.has_dispatch_capacity(max_in_flight) {
-                let ticket = match self.next_ready_workflow_ticket(job_id, &workflow_id).await {
-                    Ok(Some(ticket)) => ticket,
-                    Ok(None) => break,
+                let tickets = match self.ready_workflow_tickets(job_id, &workflow_id).await {
+                    Ok(tickets) if tickets.is_empty() => break,
+                    Ok(tickets) => tickets,
                     Err(source) => {
                         state.record_terminal_error(source);
                         dispatched_or_failed = true;
                         break;
                     }
                 };
-                match state.try_spawn_dispatch(self, ticket).await {
-                    Ok(SpawnOutcome::PreLeaseTerminal(source)) | Err(source) => {
-                        state.record_terminal_error(source);
-                        dispatched_or_failed = true;
+                let mut batch_made_progress = false;
+                for ticket in tickets {
+                    if !state.has_dispatch_capacity(max_in_flight) {
                         break;
                     }
-                    Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
-                        dispatched_or_failed = true;
+                    match state.try_spawn_dispatch(self, ticket).await {
+                        Ok(SpawnOutcome::PreLeaseTerminal(source)) | Err(source) => {
+                            state.record_terminal_error(source);
+                            dispatched_or_failed = true;
+                            batch_made_progress = true;
+                            break;
+                        }
+                        Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
+                            dispatched_or_failed = true;
+                            batch_made_progress = true;
+                        }
+                        Ok(SpawnOutcome::CapacityDeferred) => {}
                     }
-                    Ok(SpawnOutcome::CapacityDeferred) => {
-                        break;
-                    }
+                }
+                if state.has_terminal_error() || !batch_made_progress {
+                    break;
                 }
             }
             if dispatched_or_failed {
@@ -977,11 +990,11 @@ where
         Ok(count > 0)
     }
 
-    async fn next_ready_workflow_ticket(
+    async fn ready_workflow_tickets(
         &self,
         job_id: JobId,
         workflow_id: &str,
-    ) -> Result<Option<Ticket>, VoomError> {
+    ) -> Result<Vec<Ticket>, VoomError> {
         let now = format_time(self.control_plane.clock().now())?;
         let rows = sqlx::query(
             "SELECT id FROM tickets \
@@ -999,35 +1012,35 @@ where
         .fetch_all(&self.control_plane.pool)
         .await
         .map_err(|e| VoomError::Database(format!("workflow ready tickets for {job_id}: {e}")))?;
-        let Some(row) = rows.into_iter().next() else {
-            return Ok(None);
-        };
-        let id: i64 = row
-            .try_get("id")
-            .map_err(|e| VoomError::Database(format!("workflow ready ticket id: {e}")))?;
-        let ticket_id = TicketId(sqlite_u64(id));
-        let ticket = self
-            .control_plane
-            .tickets
-            .get(ticket_id)
-            .await
-            .map_err(|e| {
-                VoomError::Database(format!(
-                    "load workflow ready ticket {ticket_id} for {job_id}: {e}"
-                ))
-            })?
-            .ok_or_else(|| {
-                VoomError::NotFound(format!("workflow ready ticket {ticket_id} for {job_id}"))
-            })?;
-        WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone()).map_err(
-            |e| {
-                VoomError::Internal(format!(
-                    "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
-                    ticket.id
-                ))
-            },
-        )?;
-        Ok(Some(ticket))
+        let mut tickets = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| VoomError::Database(format!("workflow ready ticket id: {e}")))?;
+            let ticket_id = TicketId(sqlite_u64(id));
+            let ticket = self
+                .control_plane
+                .tickets
+                .get(ticket_id)
+                .await
+                .map_err(|e| {
+                    VoomError::Database(format!(
+                        "load workflow ready ticket {ticket_id} for {job_id}: {e}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    VoomError::NotFound(format!("workflow ready ticket {ticket_id} for {job_id}"))
+                })?;
+            WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
+                .map_err(|e| {
+                    VoomError::Internal(format!(
+                        "workflow ready tickets for {job_id}: ticket {} payload decode: {e}",
+                        ticket.id
+                    ))
+                })?;
+            tickets.push(ticket);
+        }
+        Ok(tickets)
     }
 
     async fn workflow_finished(&self, job_id: JobId) -> Result<bool, VoomError> {
