@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -2338,7 +2337,7 @@ impl ClientHandle for FakeClient {
         Ok(DispatchStream {
             response: OperationResponse {
                 lease_id,
-                accepted_at: Utc::now(),
+                accepted_at: OffsetDateTime::now_utc(),
             },
             frames: NdjsonReader::new(
                 Box::pin(reader) as Pin<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
@@ -2685,7 +2684,7 @@ fn result_frame(request: &OperationRequest, payload: Value) -> ProgressFrame {
     ProgressFrame::Result {
         lease_id: request.lease_id,
         seq: 0,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     }
 }
@@ -2694,7 +2693,7 @@ fn progress_frame(request: &OperationRequest, seq: u64) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id: request.lease_id,
         seq,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         percent: Some(PercentBps::try_from(100).unwrap()),
         message: None,
         payload: None,
@@ -2705,7 +2704,7 @@ fn mkvtoolnix_unavailable_frame(request: &OperationRequest) -> ProgressFrame {
     ProgressFrame::Error {
         lease_id: request.lease_id,
         seq: 0,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: FailureClass::WorkerCrash,
         code: ErrorCode::WorkerCrash,
         message: "mkvtoolnix worker unavailable".to_owned(),

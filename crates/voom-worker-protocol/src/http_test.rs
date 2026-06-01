@@ -5,9 +5,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
 use hyper::StatusCode;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 use voom_core::{LeaseId, WorkerId};
@@ -34,8 +34,8 @@ fn request(lease_id: LeaseId, payload: serde_json::Value) -> OperationRequest {
     }
 }
 
-fn fixed_time() -> chrono::DateTime<chrono::Utc> {
-    Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap()
+fn fixed_time() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_779_192_000).unwrap()
 }
 
 fn progress(lease_id: LeaseId, seq: u64) -> ProgressFrame {

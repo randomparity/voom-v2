@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use voom_worker_protocol::{OperationKind, PercentBps, ProgressFrame, ProtocolError};
 
 use crate::catalog::operation_name;
@@ -25,7 +25,7 @@ impl TimedDispatch {
             let frame = progress_frame(
                 self.lease_id,
                 seq,
-                Utc::now(),
+                OffsetDateTime::now_utc(),
                 percent,
                 &self.provider,
                 self.operation,
@@ -45,7 +45,7 @@ impl TimedDispatch {
         let result = ProgressFrame::Result {
             lease_id: self.lease_id,
             seq,
-            emitted_at: Utc::now(),
+            emitted_at: OffsetDateTime::now_utc(),
             payload: self.result_payload,
         };
         if self.writer.write_frame(&result).is_ok() {
@@ -57,7 +57,7 @@ impl TimedDispatch {
 pub(crate) fn progress_frame(
     lease_id: voom_core::LeaseId,
     seq: u64,
-    emitted_at: chrono::DateTime<Utc>,
+    emitted_at: OffsetDateTime,
     percent: PercentBps,
     provider: &str,
     operation: OperationKind,

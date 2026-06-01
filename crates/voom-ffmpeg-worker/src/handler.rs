@@ -2,8 +2,8 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde::{Serialize, de::DeserializeOwned};
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioRequest, ExtractAudioResult,
@@ -120,7 +120,7 @@ fn handle_operation_with_config(
 ) -> OperationFuture {
     Box::pin(async move {
         let lease_id = req.lease_id;
-        let accepted_at = Utc::now();
+        let accepted_at = OffsetDateTime::now_utc();
         let operation = req.operation;
         if !matches!(
             operation,
@@ -780,7 +780,7 @@ async fn observe_audio_file_facts(path: &Path) -> Result<AudioObservedFacts, Tra
 
 fn success_dispatch<T: Serialize>(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     result: T,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -790,7 +790,7 @@ fn success_dispatch<T: Serialize>(
     let result = ProgressFrame::Result {
         lease_id,
         seq: 1,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     };
     Ok(OperationDispatch::buffered(
@@ -804,7 +804,7 @@ fn success_dispatch<T: Serialize>(
 
 fn error_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     err: &TranscodeVideoError,
     seq: u64,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -819,7 +819,7 @@ fn error_dispatch(
 
 fn error_dispatch_with_progress(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     err: &TranscodeVideoError,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -832,11 +832,7 @@ fn error_dispatch_with_progress(
     ))
 }
 
-fn progress_frame(
-    lease_id: LeaseId,
-    emitted_at: chrono::DateTime<chrono::Utc>,
-    message: &str,
-) -> ProgressFrame {
+fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime, message: &str) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
         seq: 0,
@@ -850,7 +846,7 @@ fn progress_frame(
 fn decode_payload<T: DeserializeOwned>(
     payload: serde_json::Value,
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     operation: &str,
 ) -> Result<Result<T, OperationDispatch>, ProtocolError> {
     match serde_json::from_value::<T>(payload) {
@@ -869,7 +865,7 @@ fn error_frame(lease_id: LeaseId, err: &TranscodeVideoError, seq: u64) -> Progre
     ProgressFrame::Error {
         lease_id,
         seq,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: err.failure_class(),
         code: err.error_code(),
         message: err.to_string(),

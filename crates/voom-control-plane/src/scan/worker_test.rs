@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, ExpectedFileFacts, HttpClient, HttpServer, OperationDispatch, OperationFuture,
@@ -266,7 +266,7 @@ fn capture_lease_handler(seen: Arc<Mutex<Vec<LeaseId>>>) -> OperationHandler {
         let seen = seen.clone();
         Box::pin(async move {
             seen.lock().unwrap().push(req.lease_id);
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let result = ProgressFrame::Result {
                 lease_id: req.lease_id,
                 seq: 0,

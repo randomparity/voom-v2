@@ -70,7 +70,6 @@ tracing = "0.1.44"
 async-trait = "0.1.89"
 blake3 = "1.5"
 bytes = "1.7"
-chrono = { version = "0.4.39", features = ["serde"] }
 constant_time_eq = "0.4.2"
 http = "1.1"
 http-body = "1"

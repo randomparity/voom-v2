@@ -467,7 +467,7 @@ fn fallback_error_frame() -> ProgressFrame {
     ProgressFrame::Error {
         lease_id: LeaseId(42),
         seq: 0,
-        emitted_at: chrono::Utc::now(),
+        emitted_at: time::OffsetDateTime::now_utc(),
         class: FailureClass::WorkerCrash,
         code: ErrorCode::WorkerCrash,
         message: "test fallback".to_owned(),

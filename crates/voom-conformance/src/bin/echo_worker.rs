@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use voom_worker_protocol::http::OperationDispatch;
 use voom_worker_protocol::{
@@ -66,7 +66,7 @@ pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
                 detail: "payload missing path".to_owned(),
             })?
             .to_owned();
-        let now = Utc::now();
+        let now = OffsetDateTime::now_utc();
         let progress = ProgressFrame::Progress {
             lease_id: req.lease_id,
             seq: 0,

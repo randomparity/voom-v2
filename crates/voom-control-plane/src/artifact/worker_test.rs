@@ -4,8 +4,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, HttpServer, OperationDispatch, OperationFuture, OperationHandler, OperationKind,
@@ -282,7 +282,7 @@ async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProc
 fn malformed_request_handler() -> OperationHandler {
     Arc::new(|req: OperationRequest| {
         Box::pin(async move {
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let frame = ProgressFrame::Error {
                 lease_id: req.lease_id,
                 seq: 0,
@@ -321,7 +321,7 @@ fn unknown_operation_handler(seen: Arc<Mutex<Vec<OperationKind>>>) -> OperationH
 fn malformed_result_handler() -> OperationHandler {
     Arc::new(|req: OperationRequest| {
         Box::pin(async move {
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let frame = ProgressFrame::Result {
                 lease_id: req.lease_id,
                 seq: 0,

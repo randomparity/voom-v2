@@ -1,9 +1,9 @@
 use super::*;
-use chrono::{TimeZone, Utc};
+use time::OffsetDateTime;
 use voom_core::LeaseId;
 
-fn fixed_time() -> chrono::DateTime<chrono::Utc> {
-    Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap()
+fn fixed_time() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_779_192_000).unwrap()
 }
 
 #[test]
@@ -74,6 +74,10 @@ fn operation_response_round_trips() {
         accepted_at: fixed_time(),
     };
     let json = serde_json::to_string(&resp).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["accepted_at"],
+        "2026-05-19T12:00:00Z"
+    );
     let back: OperationResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(resp, back);
 }

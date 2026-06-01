@@ -12,11 +12,11 @@ voom-core.workspace = true
 voom-worker-protocol.workspace = true
 
 blake3.workspace = true
-chrono.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt-multi-thread", "macros", "net", "sync"] }
 
 [dev-dependencies]

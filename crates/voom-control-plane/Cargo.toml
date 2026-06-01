@@ -42,7 +42,6 @@ voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time", "test-util"] }
 # FrozenRng/SeededRng from voom-core::rng_test_support, used by lease

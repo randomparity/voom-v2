@@ -5,9 +5,9 @@
 //! See `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`
 //! §3.2 for the full contract.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use time::OffsetDateTime;
 use voom_core::{LeaseId, OperationKind, WorkerId};
 
 /// 0..=10000 basis points so `Eq` is derivable and on-wire JSON is
@@ -77,7 +77,8 @@ pub struct OperationRequest {
 #[serde(deny_unknown_fields)]
 pub struct OperationResponse {
     pub lease_id: LeaseId,
-    pub accepted_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub accepted_at: OffsetDateTime,
 }
 
 /// One frame on the NDJSON progress stream.
@@ -87,7 +88,8 @@ pub enum ProgressFrame {
     Progress {
         lease_id: LeaseId,
         seq: u64,
-        emitted_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        emitted_at: OffsetDateTime,
         percent: Option<PercentBps>,
         message: Option<String>,
         payload: Option<serde_json::Value>,
@@ -95,13 +97,15 @@ pub enum ProgressFrame {
     Result {
         lease_id: LeaseId,
         seq: u64,
-        emitted_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        emitted_at: OffsetDateTime,
         payload: serde_json::Value,
     },
     Error {
         lease_id: LeaseId,
         seq: u64,
-        emitted_at: DateTime<Utc>,
+        #[serde(with = "time::serde::rfc3339")]
+        emitted_at: OffsetDateTime,
         class: voom_core::FailureClass,
         code: voom_core::ErrorCode,
         message: String,

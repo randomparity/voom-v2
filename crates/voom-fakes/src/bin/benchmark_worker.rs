@@ -10,12 +10,13 @@
     reason = "benchmark-worker advertises readiness with BOUND addr=..."
 )]
 
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use voom_core::format_iso8601;
 use voom_worker_protocol::http::OperationDispatch;
 use voom_worker_protocol::{
     HttpServer, OperationFuture, OperationKind, OperationRequest, OperationResponse, ProgressFrame,
@@ -158,7 +159,7 @@ fn baseline_dispatch_with_body_limit(
     path: &str,
     max_body_bytes: usize,
 ) -> Result<OperationDispatch, ProtocolError> {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let progress = ProgressFrame::Progress {
         lease_id: req.lease_id,
         seq: 0,
@@ -196,8 +197,8 @@ fn benchmark_dispatch_with_body_limit(
     config: &BenchmarkConfig,
     max_body_bytes: usize,
 ) -> Result<OperationDispatch, ProtocolError> {
-    let accepted_at = Utc::now();
-    let started_at = Utc::now();
+    let accepted_at = OffsetDateTime::now_utc();
+    let started_at = OffsetDateTime::now_utc();
     let started_instant = Instant::now();
     let mut frames = Vec::new();
     let mut completed = 0_u64;
@@ -213,7 +214,7 @@ fn benchmark_dispatch_with_body_limit(
         frames.push(ProgressFrame::Progress {
             lease_id: req.lease_id,
             seq: sample_index,
-            emitted_at: Utc::now(),
+            emitted_at: OffsetDateTime::now_utc(),
             percent: None,
             message: Some(format!(
                 "benchmark {completed}/{} operations",
@@ -230,7 +231,7 @@ fn benchmark_dispatch_with_body_limit(
         sample_index += 1;
     }
     let _ = black_box(operation_accumulator);
-    let completed_at = Utc::now();
+    let completed_at = OffsetDateTime::now_utc();
     let elapsed_worker_ns = elapsed_worker_ns(started_instant);
     frames.push(ProgressFrame::Result {
         lease_id: req.lease_id,
@@ -259,8 +260,8 @@ fn benchmark_result_payload(
     config: &BenchmarkConfig,
     progress_frames: u64,
     elapsed_worker_ns: u64,
-    started_at: DateTime<Utc>,
-    completed_at: DateTime<Utc>,
+    started_at: OffsetDateTime,
+    completed_at: OffsetDateTime,
 ) -> serde_json::Value {
     let worker_ops_per_second_milli = u64::try_from(
         ((u128::from(config.operations) * 1_000_000_000_000_u128) / u128::from(elapsed_worker_ns))
@@ -273,8 +274,8 @@ fn benchmark_result_payload(
         "progress_frames": progress_frames,
         "elapsed_worker_ns": elapsed_worker_ns,
         "worker_ops_per_second_milli": worker_ops_per_second_milli,
-        "first_operation_started_at": started_at,
-        "completed_at": completed_at,
+        "first_operation_started_at": format_iso8601(started_at),
+        "completed_at": format_iso8601(completed_at),
     })
 }
 

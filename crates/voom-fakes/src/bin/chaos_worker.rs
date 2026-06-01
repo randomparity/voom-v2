@@ -17,9 +17,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
 use serde::Deserialize;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use voom_worker_protocol::{
@@ -526,7 +526,7 @@ fn json_response<T: serde::Serialize>(status: &'static str, value: &T) -> ChaosR
 }
 
 fn baseline_body(req: &OperationRequest, payload: &ChaosPayload) -> Result<Vec<u8>, ProtocolError> {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let progress = ProgressFrame::Progress {
         lease_id: req.lease_id,
         seq: 0,
@@ -557,7 +557,7 @@ fn progress_body(req: &OperationRequest, count: usize) -> Result<Vec<u8>, Protoc
         let frame = ProgressFrame::Progress {
             lease_id: req.lease_id,
             seq: seq as u64,
-            emitted_at: Utc::now(),
+            emitted_at: OffsetDateTime::now_utc(),
             percent: None,
             message: Some("chaos progress".to_owned()),
             payload: Some(serde_json::json!({"mode": "progress"})),
@@ -583,7 +583,7 @@ fn fixed_operation_response(
 fn operation_response_line(req: &OperationRequest) -> Result<Vec<u8>, ProtocolError> {
     let response = OperationResponse {
         lease_id: req.lease_id,
-        accepted_at: Utc::now(),
+        accepted_at: OffsetDateTime::now_utc(),
     };
     let mut out = serde_json::to_vec(&response).map_err(|e| ProtocolError::InvalidPayload {
         detail: format!("response encode: {e}"),

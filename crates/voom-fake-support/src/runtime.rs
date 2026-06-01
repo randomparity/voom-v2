@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use voom_worker_protocol::{
     HttpServer, OperationDispatch, OperationFuture, OperationRequest, OperationResponse,
@@ -31,7 +31,7 @@ pub fn dispatch_provider(
     let scenario = scenario(&req.payload);
     validate_payload(entry.kind, req)?;
     let timing = TimingControls::from_payload(&req.payload)?;
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let response = OperationResponse {
         lease_id: req.lease_id,
         accepted_at: now,

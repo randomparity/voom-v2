@@ -1,6 +1,8 @@
 use std::path::Path;
 
+use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
+use voom_core::format_iso8601;
 use voom_worker_protocol::ObservedFileFacts;
 
 use crate::WorkerError;
@@ -77,8 +79,7 @@ async fn open_regular_file_no_follow(path: &Path) -> Result<tokio::fs::File, Wor
 
 fn modified_at(metadata: &std::fs::Metadata) -> Option<String> {
     let modified = metadata.modified().ok()?;
-    let datetime = chrono::DateTime::<chrono::Utc>::from(modified);
-    Some(datetime.to_rfc3339())
+    Some(format_iso8601(OffsetDateTime::from(modified)))
 }
 
 #[cfg(test)]

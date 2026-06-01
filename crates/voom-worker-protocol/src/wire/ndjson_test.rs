@@ -1,11 +1,11 @@
 use super::*;
-use chrono::{TimeZone, Utc};
+use time::OffsetDateTime;
 use voom_core::LeaseId;
 
 use crate::{PercentBps, ProgressFrame, ProtocolError};
 
-fn fixed_time() -> chrono::DateTime<chrono::Utc> {
-    Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap()
+fn fixed_time() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_779_192_000).unwrap()
 }
 
 fn progress(lease: LeaseId, seq: u64) -> ProgressFrame {

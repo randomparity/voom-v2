@@ -1,7 +1,9 @@
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 
+use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
+use voom_core::format_iso8601;
 use voom_worker_protocol::VerifyArtifactObservedFacts;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,8 +109,7 @@ fn metadata_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bo
 
 fn modified_at(metadata: &std::fs::Metadata) -> Option<String> {
     let modified = metadata.modified().ok()?;
-    let datetime = chrono::DateTime::<chrono::Utc>::from(modified);
-    Some(datetime.to_rfc3339())
+    Some(format_iso8601(OffsetDateTime::from(modified)))
 }
 
 #[cfg(test)]
