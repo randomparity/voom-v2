@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1.89"
+async-trait = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 rand = { workspace = true }
 serde = { workspace = true }
