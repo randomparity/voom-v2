@@ -4,8 +4,8 @@ use std::path::Path;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::{
-    ScanFileErrorReport, ScanFileReport, ScanPathInput, ScanReport, ScanReportFileStatus,
-    ScanSidecarReport,
+    ScanFileErrorReport, ScanFileReport, ScanMode, ScanPathInput, ScanReport, ScanReportFileStatus,
+    ScanSidecarReport, is_supported_media_path,
 };
 use voom_core::{ErrorCode, FailureClass};
 
@@ -133,7 +133,7 @@ async fn validate_explicit_path(path: &Path) -> Result<(), String> {
         ));
     }
     if file_type.is_file() {
-        if voom_control_plane::scan::discovery::is_supported_media_path(path) {
+        if is_supported_media_path(path) {
             return Ok(());
         }
         return Err(format!("unsupported media extension: {}", path.display()));
@@ -238,10 +238,10 @@ fn non_utf8_path_wire(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn mode_wire(mode: voom_control_plane::scan::discovery::ScanMode) -> &'static str {
+fn mode_wire(mode: ScanMode) -> &'static str {
     match mode {
-        voom_control_plane::scan::discovery::ScanMode::File => "file",
-        voom_control_plane::scan::discovery::ScanMode::Directory => "directory",
+        ScanMode::File => "file",
+        ScanMode::Directory => "directory",
     }
 }
 

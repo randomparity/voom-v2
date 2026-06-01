@@ -2,9 +2,7 @@ use std::io;
 
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::policy_inputs::{
-    PolicyInputFromScanInput, PolicyInputFromScanResult,
-};
+use voom_control_plane::policy::{PolicyInputFromScanInput, PolicyInputFromScanResult};
 use voom_core::{FileVersionId, MediaSnapshotId};
 
 use crate::cli::{PolicyCommand, PolicyInputCommand};

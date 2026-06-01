@@ -11,11 +11,13 @@ use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult}
 
 use crate::ControlPlane;
 
-pub mod bootstrap;
-pub mod discovery;
-pub mod hash;
-pub mod persist;
-pub mod worker;
+pub(crate) mod bootstrap;
+pub(crate) mod discovery;
+pub(crate) mod hash;
+pub(crate) mod persist;
+pub(crate) mod worker;
+
+pub use discovery::{ScanMode, is_supported_media_path, is_supported_sidecar_path};
 
 #[derive(Debug, Clone)]
 pub struct ScanPathInput {
@@ -25,7 +27,7 @@ pub struct ScanPathInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanReport {
     pub path: PathBuf,
-    pub mode: discovery::ScanMode,
+    pub mode: ScanMode,
     pub summary: ScanSummary,
     pub files: Vec<ScanFileReport>,
     pub skipped: Vec<ScanFileReport>,
@@ -561,9 +563,8 @@ fn probe_request(
 
 fn file_status_from_discovery(status: discovery::FileScanStatus) -> ScanReportFileStatus {
     match status {
-        discovery::FileScanStatus::SkippedInaccessible => ScanReportFileStatus::SkippedInaccessible,
-        discovery::FileScanStatus::SkippedSymlink
-        | discovery::FileScanStatus::SkippedUnsupportedExtension => {
+        discovery::FileScanStatus::Inaccessible => ScanReportFileStatus::SkippedInaccessible,
+        discovery::FileScanStatus::Symlink | discovery::FileScanStatus::UnsupportedExtension => {
             ScanReportFileStatus::SkippedUnsupportedExtension
         }
     }

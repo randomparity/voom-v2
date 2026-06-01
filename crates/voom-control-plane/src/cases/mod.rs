@@ -18,15 +18,10 @@ use voom_events::EventKind;
 #[cfg(test)]
 use voom_store::repo::events::{EventFilter, Page};
 
-pub mod execution;
-pub mod media;
-pub mod policy;
-pub mod workers;
-
-pub use execution::{jobs, leases, remote_execution, tickets};
-pub use media::{artifacts, bundles, identity, use_leases};
-pub use policy::{compliance, plans, policies, policy_inputs};
-pub use workers::nodes;
+pub(crate) mod execution;
+pub(crate) mod media;
+pub(crate) mod policy;
+pub(crate) mod workers;
 
 pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite>, VoomError> {
     pool.begin()

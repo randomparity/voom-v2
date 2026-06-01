@@ -18,10 +18,10 @@ use voom_store::repo::scheduler_decisions::{
 use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 
-use crate::cases::{
-    count,
-    nodes::RegisterNodeInput,
-    workers::{NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput},
+use crate::cases::count;
+use crate::cases::workers::nodes::RegisterNodeInput;
+use crate::cases::workers::{
+    NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
 };
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;

@@ -11,9 +11,8 @@ use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 use tower::ServiceExt;
 use voom_api::{router, router_with_control_plane};
-use voom_control_plane::cases::{
-    nodes::RegisterNodeInput,
-    workers::{NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput},
+use voom_control_plane::workers::{
+    NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
 use voom_core::{FailureClass, LeaseId, NodeId, TicketId, WorkerId};

@@ -46,17 +46,53 @@ use voom_store::repo::{
 use voom_store::{SchemaState, connect, probe_schema};
 
 pub mod artifact;
-pub mod audio;
-pub mod cases;
+mod audio;
+mod cases;
 mod media_snapshot;
 pub mod node_auth;
-pub mod remux;
+mod remux;
 pub mod scan;
-pub mod transcode;
+mod transcode;
 pub(crate) mod worker_process;
 pub mod workflow;
 
-pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+pub mod execution {
+    pub use crate::cases::execution::remote_execution::{
+        RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan, RemoteCompleteInput,
+        RemoteCompleteOutcome, RemoteFailInput, RemoteFailOutcome, RemoteLeaseDispatch,
+        RemoteLeaseHeartbeatInput, RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput,
+        RemoteNodeHeartbeatOutcome, RemoteRecoverReport,
+    };
+}
+
+pub mod policy {
+    pub use crate::cases::policy::compliance::{
+        ComplianceApplyData, ComplianceExecuteData, ComplianceExecuteError,
+        ComplianceExecutionOptions, ComplianceReportData, ComplianceRunReportData,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+    };
+    pub use crate::cases::policy::policy_inputs::{
+        PolicyInputFromScanInput, PolicyInputFromScanResult,
+    };
+}
+
+pub mod workers {
+    pub use crate::cases::workers::nodes::{RegisterNodeInput, RegisteredNode};
+    pub use crate::cases::workers::{
+        NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
+    };
+}
+
+pub use audio::{
+    ExecuteExtractAudioInput, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
+    ExecuteTranscodeAudioReport, ExtractAudioDispatcher, TranscodeAudioDispatcher,
+    TranscodePostCommitRecoveryReport,
+};
+pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
+pub use transcode::{
+    ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,
+};
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
 /// `LeaseRepo::fail` (and any future caller that needs full-jitter

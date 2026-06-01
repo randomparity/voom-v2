@@ -232,7 +232,7 @@ async fn execute_transcode_audio_inner(
         &selection,
         &staging.canonical_root,
         &staging.path,
-    )?;
+    );
     let result = transcode.dispatch_transcode_audio(request).await?;
     context.result = Some(result.clone());
     dispatch::validate_transcode_result(&selected, &selection, &result)?;
@@ -529,7 +529,7 @@ async fn execute_extract_audio_inner(
         &selection,
         &staging.canonical_root,
         &staging.path,
-    )?;
+    );
     let result = extract.dispatch_extract_audio(request).await?;
     context.result = Some(result.clone());
     dispatch::validate_extract_result(&selected, &selection, &result)?;

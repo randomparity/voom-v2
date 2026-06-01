@@ -71,8 +71,8 @@ pub fn transcode_request_for(
     selection: &TranscodeAudioSelectionPlan,
     staging_root: &Path,
     staging_path: &Path,
-) -> Result<TranscodeAudioRequest, VoomError> {
-    Ok(TranscodeAudioRequest {
+) -> TranscodeAudioRequest {
+    TranscodeAudioRequest {
         input: TranscodeAudioInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: expected_facts(selected),
@@ -88,7 +88,7 @@ pub fn transcode_request_for(
             target_codec: selection.target_codec.clone(),
             profile: "default".to_owned(),
         },
-    })
+    }
 }
 
 pub fn extract_request_for(
@@ -96,8 +96,8 @@ pub fn extract_request_for(
     selection: &ExtractAudioSelectionPlan,
     staging_root: &Path,
     staging_path: &Path,
-) -> Result<ExtractAudioRequest, VoomError> {
-    Ok(ExtractAudioRequest {
+) -> ExtractAudioRequest {
+    ExtractAudioRequest {
         input: ExtractAudioInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: expected_facts(selected),
@@ -110,7 +110,7 @@ pub fn extract_request_for(
             overwrite: false,
         },
         selection: selection.stream.clone(),
-    })
+    }
 }
 
 pub async fn revalidate_source_file(

@@ -9,8 +9,7 @@ use std::process::Command;
 
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{BundleId, FileAssetId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
@@ -373,7 +372,7 @@ async fn assert_extract_execution_result(
     url: &str,
     out_dir: &Path,
     source_bundle_id: BundleId,
-    executed: &voom_control_plane::cases::policy::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::policy::ComplianceExecuteData,
 ) {
     let result = ticket_result(url, executed.summary.job_id, "extract_audio").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();

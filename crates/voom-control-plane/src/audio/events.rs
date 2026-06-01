@@ -3,16 +3,15 @@ use std::path::Path;
 use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
 use voom_events::payload::{
     ArtifactAudioDispositionPayload, ArtifactAudioExtractFailedPayload,
-    ArtifactAudioExtractProgressPayload, ArtifactAudioExtractStartedPayload,
-    ArtifactAudioExtractSucceededPayload, ArtifactAudioOutputStreamPayload,
-    ArtifactAudioStreamPayload, ArtifactAudioTranscodeFailedPayload,
-    ArtifactAudioTranscodeProgressPayload, ArtifactAudioTranscodeStartedPayload,
+    ArtifactAudioExtractStartedPayload, ArtifactAudioExtractSucceededPayload,
+    ArtifactAudioOutputStreamPayload, ArtifactAudioStreamPayload,
+    ArtifactAudioTranscodeFailedPayload, ArtifactAudioTranscodeStartedPayload,
     ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
 use voom_worker_protocol::{
-    AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioResult, PercentBps,
+    AudioDispositionFact, AudioOutputStreamFact, AudioStreamRef, ExtractAudioResult,
     TranscodeAudioResult,
 };
 
@@ -41,43 +40,6 @@ pub async fn record_transcode_started(
         SubjectType::FileVersion,
         Some(input.source_file_version_id.0),
         Event::ArtifactAudioTranscodeStarted(payload),
-    )
-    .await
-}
-
-#[derive(Debug)]
-pub struct TranscodeProgressEventInput<'a> {
-    pub input: &'a ExecuteTranscodeAudioInput,
-    pub source_location_id: FileLocationId,
-    pub source_media_snapshot_id: u64,
-    pub selection: &'a TranscodeAudioSelectionPlan,
-    pub staging_path: &'a Path,
-    pub percent: Option<PercentBps>,
-    pub message: Option<String>,
-}
-
-pub async fn record_transcode_progress(
-    cp: &ControlPlane,
-    event: TranscodeProgressEventInput<'_>,
-) -> Result<(), VoomError> {
-    append_audio_event(
-        cp,
-        SubjectType::FileVersion,
-        Some(event.input.source_file_version_id.0),
-        Event::ArtifactAudioTranscodeProgress(ArtifactAudioTranscodeProgressPayload {
-            job_id: event.input.job_id.0,
-            ticket_id: event.input.ticket_id.0,
-            lease_id: Some(event.input.lease_id.0),
-            source_file_version_id: event.input.source_file_version_id.0,
-            source_file_location_id: event.source_location_id.0,
-            source_media_snapshot_id: event.source_media_snapshot_id,
-            staging_path: event.staging_path.display().to_string(),
-            selected_streams: stream_payloads(&event.selection.selection.selected_streams),
-            percent_bps: event.percent.map(u16::from),
-            message: event.message,
-            provider: Some("ffmpeg".to_owned()),
-            provider_version: None,
-        }),
     )
     .await
 }
@@ -191,44 +153,6 @@ pub async fn record_extract_started(
         SubjectType::FileVersion,
         Some(input.source_file_version_id.0),
         Event::ArtifactAudioExtractStarted(payload),
-    )
-    .await
-}
-
-#[derive(Debug)]
-pub struct ExtractProgressEventInput<'a> {
-    pub input: &'a ExecuteExtractAudioInput,
-    pub source_location_id: FileLocationId,
-    pub source_media_snapshot_id: u64,
-    pub selection: &'a ExtractAudioSelectionPlan,
-    pub staging_path: &'a Path,
-    pub percent: Option<PercentBps>,
-    pub message: Option<String>,
-}
-
-pub async fn record_extract_progress(
-    cp: &ControlPlane,
-    event: ExtractProgressEventInput<'_>,
-) -> Result<(), VoomError> {
-    append_audio_event(
-        cp,
-        SubjectType::FileVersion,
-        Some(event.input.source_file_version_id.0),
-        Event::ArtifactAudioExtractProgress(ArtifactAudioExtractProgressPayload {
-            job_id: event.input.job_id.0,
-            ticket_id: event.input.ticket_id.0,
-            lease_id: Some(event.input.lease_id.0),
-            source_file_version_id: event.input.source_file_version_id.0,
-            source_file_location_id: event.source_location_id.0,
-            source_media_snapshot_id: event.source_media_snapshot_id,
-            source_bundle_id: event.input.source_bundle_id.0,
-            staging_path: event.staging_path.display().to_string(),
-            selected_stream: stream_payload(&event.selection.stream),
-            percent_bps: event.percent.map(u16::from),
-            message: event.message,
-            provider: Some("ffmpeg".to_owned()),
-            provider_version: None,
-        }),
     )
     .await
 }

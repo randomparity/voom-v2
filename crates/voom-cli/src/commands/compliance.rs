@@ -1,7 +1,7 @@
 use std::io;
 
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::compliance::{
+use voom_control_plane::policy::{
     ComplianceApplyData, ComplianceExecuteData, ComplianceExecutionOptions, ComplianceReportData,
     ComplianceRunReportData,
 };

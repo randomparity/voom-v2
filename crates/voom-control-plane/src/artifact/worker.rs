@@ -5,9 +5,11 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use voom_core::{ErrorCode, FailureClass, WorkerId};
+#[cfg(test)]
+use voom_worker_protocol::HttpClient;
 use voom_worker_protocol::{
-    ClientHandle, HttpClient, OperationKind, OperationRequest, ProtocolError,
-    VerifyArtifactRequest, VerifyArtifactResult, WorkerCredentials,
+    ClientHandle, OperationKind, OperationRequest, ProtocolError, VerifyArtifactRequest,
+    VerifyArtifactResult, WorkerCredentials,
 };
 
 pub use crate::worker_process::WorkerCommand;
@@ -136,16 +138,19 @@ impl BundledWorkerProcess {
         })
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn worker_id(&self) -> WorkerId {
         self.inner.worker_id
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn credentials(&self) -> &WorkerCredentials {
         &self.inner.credentials
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn client(&self) -> &HttpClient {
         &self.inner.client

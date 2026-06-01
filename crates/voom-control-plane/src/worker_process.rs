@@ -61,6 +61,7 @@ impl WorkerCommand {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn arg(mut self, arg: impl AsRef<OsStr>) -> Self {
         self.args.push(arg.as_ref().to_os_string());

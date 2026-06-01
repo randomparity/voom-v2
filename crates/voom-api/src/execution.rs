@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::execution::remote_execution::{
+use voom_control_plane::execution::{
     RemoteAcquireInput, RemoteCompleteInput, RemoteFailInput, RemoteLeaseHeartbeatInput,
     RemoteNodeHeartbeatInput,
 };

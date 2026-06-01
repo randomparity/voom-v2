@@ -10,8 +10,7 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
@@ -118,7 +117,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
 async fn assert_transcode_execution_result(
     url: &str,
     out_dir: &Path,
-    executed: &voom_control_plane::cases::policy::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::policy::ComplianceExecuteData,
 ) -> (FileVersionId, MediaSnapshotId) {
     let result = ticket_result(url, executed.summary.job_id, "transcode_video").await;
     let result_file_version_id = FileVersionId(result["result_file_version_id"].as_u64().unwrap());

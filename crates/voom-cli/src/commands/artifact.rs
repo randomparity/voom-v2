@@ -2,16 +2,13 @@ use std::io;
 use std::path::Path;
 
 use serde::Serialize;
-use voom_control_plane::artifact::commit::{
+use voom_control_plane::artifact::{
+    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
     CommitArtifactInput, CommitArtifactPreMutationReport, CommitArtifactReport,
-    CommitRecoveryReport,
+    CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
+    StageCopyInput, StageCopyReport, VerificationSummary, VerifyArtifactInput,
+    VerifyArtifactReport,
 };
-use voom_control_plane::artifact::inspect::{
-    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary, CommitSummary,
-    PathFacts, PathObservation, RecoverySummary, VerificationSummary,
-};
-use voom_control_plane::artifact::stage::{StageCopyInput, StageCopyReport};
-use voom_control_plane::artifact::verify::{VerifyArtifactInput, VerifyArtifactReport};
 use voom_core::{ArtifactHandleId, ErrorCode, FileLocationId, FileVersionId};
 use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatus};
 

@@ -1,7 +1,7 @@
 use serde_json::json;
 use voom_control_plane::scan::{
-    ScanFileErrorReport, ScanFileReport, ScanReport, ScanReportFileStatus, ScanSidecarReport,
-    ScanSummary,
+    ScanFileErrorReport, ScanFileReport, ScanMode, ScanReport, ScanReportFileStatus,
+    ScanSidecarReport, ScanSummary,
 };
 use voom_core::{BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId};
 
@@ -153,7 +153,7 @@ fn non_utf8_path_serializes_losslessly_as_os_bytes() {
 fn report_fixture() -> ScanReport {
     ScanReport {
         path: "/library".into(),
-        mode: voom_control_plane::scan::discovery::ScanMode::Directory,
+        mode: ScanMode::Directory,
         summary: ScanSummary {
             discovered: 3,
             ingested: 1,

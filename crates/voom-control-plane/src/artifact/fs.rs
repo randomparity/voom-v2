@@ -264,6 +264,7 @@ pub async fn copy_regular_file_checked(
     Ok(copied)
 }
 
+#[cfg(test)]
 pub async fn copy_to_unique_temp_then_install_no_replace(
     source: impl AsRef<Path>,
     final_path: impl AsRef<Path>,

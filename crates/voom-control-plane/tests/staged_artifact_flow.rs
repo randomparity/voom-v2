@@ -8,10 +8,10 @@ use std::sync::OnceLock;
 
 use tempfile::{NamedTempFile, TempDir};
 use voom_control_plane::ControlPlane;
-use voom_control_plane::artifact::commit::CommitArtifactInput;
-use voom_control_plane::artifact::inspect::{ArtifactInspectionState, ArtifactListInput};
-use voom_control_plane::artifact::stage::StageCopyInput;
-use voom_control_plane::artifact::verify::VerifyArtifactInput;
+use voom_control_plane::artifact::{
+    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, StageCopyInput,
+    VerifyArtifactInput,
+};
 use voom_control_plane::scan::ScanPathInput;
 use voom_core::ErrorCode;
 use voom_store::repo::artifacts::ArtifactCommitState;

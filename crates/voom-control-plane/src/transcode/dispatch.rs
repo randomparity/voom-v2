@@ -55,8 +55,8 @@ pub fn request_for(
     copy_video: bool,
     staging_root: &Path,
     staging_path: &Path,
-) -> Result<TranscodeVideoRequest, VoomError> {
-    Ok(TranscodeVideoRequest {
+) -> TranscodeVideoRequest {
+    TranscodeVideoRequest {
         input: TranscodeVideoInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: TranscodeVideoExpectedFacts {
@@ -75,7 +75,7 @@ pub fn request_for(
         },
         profile: resolved.profile.clone(),
         copy_video,
-    })
+    }
 }
 
 pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {

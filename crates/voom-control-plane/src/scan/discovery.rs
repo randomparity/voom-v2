@@ -17,9 +17,9 @@ pub enum ScanMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileScanStatus {
-    SkippedInaccessible,
-    SkippedSymlink,
-    SkippedUnsupportedExtension,
+    Inaccessible,
+    Symlink,
+    UnsupportedExtension,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +147,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
         let Ok(mut entries) = fs::read_dir(&dir).await else {
             skipped.push(SkippedFile {
                 path: dir,
-                status: FileScanStatus::SkippedInaccessible,
+                status: FileScanStatus::Inaccessible,
             });
             continue;
         };
@@ -156,7 +156,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
         } else {
             skipped.push(SkippedFile {
                 path: dir.clone(),
-                status: FileScanStatus::SkippedInaccessible,
+                status: FileScanStatus::Inaccessible,
             });
             None
         } {
@@ -164,7 +164,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
             let Ok(metadata) = fs::symlink_metadata(&entry_path).await else {
                 skipped.push(SkippedFile {
                     path: entry_path,
-                    status: FileScanStatus::SkippedInaccessible,
+                    status: FileScanStatus::Inaccessible,
                 });
                 continue;
             };
@@ -172,7 +172,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
             if file_type.is_symlink() {
                 skipped.push(SkippedFile {
                     path: entry_path,
-                    status: FileScanStatus::SkippedSymlink,
+                    status: FileScanStatus::Symlink,
                 });
             } else if file_type.is_dir() {
                 pending.push(entry_path);
@@ -187,7 +187,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
                 let skipped_path = canonicalize(&entry_path).await.unwrap_or(entry_path);
                 skipped.push(SkippedFile {
                     path: skipped_path,
-                    status: FileScanStatus::SkippedUnsupportedExtension,
+                    status: FileScanStatus::UnsupportedExtension,
                 });
             }
         }
@@ -202,7 +202,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
         } else {
             skipped.push(SkippedFile {
                 path: sidecar,
-                status: FileScanStatus::SkippedUnsupportedExtension,
+                status: FileScanStatus::UnsupportedExtension,
             });
         }
     }

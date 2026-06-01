@@ -37,6 +37,23 @@ fn execution_plan_serializes_public_shape() {
 }
 
 #[test]
+fn operation_kind_counts_serialize_in_wire_name_order() {
+    let operation_counts_by_kind = BTreeMap::from([
+        (PlanOperationKind::Remux, 1),
+        (PlanOperationKind::ClearTags, 1),
+        (PlanOperationKind::SetTag, 1),
+        (PlanOperationKind::DeleteTag, 1),
+    ]);
+
+    let json = serde_json::to_string(&operation_counts_by_kind).unwrap();
+
+    assert_eq!(
+        json,
+        r#"{"clear_tags":1,"delete_tag":1,"remux":1,"set_tag":1}"#
+    );
+}
+
+#[test]
 fn default_scheduling_hints_are_descriptive_placeholders() {
     let hints = SchedulingHints::default();
     assert_eq!(hints.priority_class, "normal");

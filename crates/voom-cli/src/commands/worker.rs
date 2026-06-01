@@ -4,7 +4,7 @@ use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
+use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
 use voom_core::{ErrorCode, NodeId, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
 

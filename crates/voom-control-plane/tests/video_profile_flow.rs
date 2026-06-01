@@ -18,10 +18,9 @@ use std::process::Command;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::compliance::{
-    ComplianceExecuteData, ComplianceExecutionOptions,
+use voom_control_plane::policy::{
+    ComplianceExecuteData, ComplianceExecutionOptions, PolicyInputFromScanInput,
 };
-use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyVersionId};
 use voom_ffmpeg_worker::preflight_from_process_env;

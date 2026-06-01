@@ -9,8 +9,7 @@ use std::process::Command;
 
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::policy::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
@@ -177,7 +176,7 @@ async fn assert_scanned_stream_facts(
 async fn assert_remux_execution_result(
     url: &str,
     out_dir: &Path,
-    executed: &voom_control_plane::cases::policy::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::policy::ComplianceExecuteData,
 ) {
     let result = ticket_result(url, executed.summary.job_id, "remux").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();

@@ -6,8 +6,10 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, WorkerId};
+#[cfg(test)]
+use voom_worker_protocol::HttpClient;
 use voom_worker_protocol::{
-    ClientHandle, HttpClient, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest,
+    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest,
     ProbeFileResult, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
@@ -139,11 +141,13 @@ impl BundledWorkerProcess {
         self.inner.worker_id
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn credentials(&self) -> &WorkerCredentials {
         &self.inner.credentials
     }
 
+    #[cfg(test)]
     #[must_use]
     pub const fn client(&self) -> &HttpClient {
         &self.inner.client

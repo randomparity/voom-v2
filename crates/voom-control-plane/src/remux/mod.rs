@@ -255,18 +255,12 @@ async fn execute_remux_core(
         failure.record_failure(&err).await?;
         return Err(err);
     }
-    let request = match dispatch::request_for(
+    let request = dispatch::request_for(
         &selected,
         &selection,
         &staging.canonical_root,
         &staging_path,
-    ) {
-        Ok(request) => request,
-        Err(err) => {
-            failure.record_failure(&err).await?;
-            return Err(err);
-        }
-    };
+    );
     let mut progress = EventRemuxProgressSink {
         cp,
         input: &input,

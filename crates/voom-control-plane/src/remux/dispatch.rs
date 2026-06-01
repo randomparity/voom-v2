@@ -87,8 +87,8 @@ pub fn request_for(
     selection: &RemuxSelection,
     staging_root: &Path,
     staging_path: &Path,
-) -> Result<RemuxRequest, VoomError> {
-    Ok(RemuxRequest {
+) -> RemuxRequest {
+    RemuxRequest {
         input: RemuxInput {
             path: selected.canonical_path.to_string_lossy().into_owned(),
             expected: RemuxExpectedFacts {
@@ -105,7 +105,7 @@ pub fn request_for(
             overwrite: false,
         },
         selection: selection.clone(),
-    })
+    }
 }
 
 pub async fn revalidate_source_file(selected: &SelectedSource) -> Result<(), VoomError> {

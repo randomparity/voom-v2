@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
@@ -102,9 +103,7 @@ pub struct PlanNode {
     pub safety_hints: SafetyHints,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanOperationKind {
     Remux,
@@ -144,6 +143,18 @@ impl PlanOperationKind {
             Self::Conditional => "conditional",
             Self::Rules => "rules",
         }
+    }
+}
+
+impl PartialOrd for PlanOperationKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PlanOperationKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
     }
 }
 

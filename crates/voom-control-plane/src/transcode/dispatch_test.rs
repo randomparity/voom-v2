@@ -109,8 +109,7 @@ fn request_for_carries_resolved_profile_codec_and_container() {
         true,
         Path::new("/tmp/stage"),
         Path::new("/tmp/stage/Movie.av1-1080p.av1.mp4"),
-    )
-    .unwrap();
+    );
 
     // The dispatched request must carry the RESOLVED profile verbatim, not a
     // hardcoded default.
