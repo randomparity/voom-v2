@@ -22,7 +22,6 @@ test-support = ["voom-store/test-support"]
 base64 = { workspace = true }
 blake3 = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
 constant_time_eq = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
@@ -43,6 +42,7 @@ voom-store = { workspace = true }
 voom-worker-protocol = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 # FrozenRng/SeededRng from voom-core::rng_test_support, used by lease

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
-    VoomError, WorkerId,
+    VoomError, WorkerId, format_iso8601,
 };
 use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult};
 
@@ -386,7 +386,7 @@ fn probe_request(
             content_hash: facts.content_hash.clone(),
             modified_at: facts
                 .modified_at
-                .map(|modified| chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339()),
+                .map(|modified| format_iso8601(time::OffsetDateTime::from(modified))),
             local_file_key: None,
         },
     })
