@@ -15,3 +15,28 @@ async fn observe_file_facts_reports_blake3_size_and_modified_time() {
     );
     assert!(facts.modified_at.is_some());
 }
+
+#[tokio::test]
+async fn observe_file_facts_reports_missing_path_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.bin");
+
+    let err = observe_file_facts(&path).await.unwrap_err();
+    let message = err.to_string();
+
+    assert!(message.contains(&path.display().to_string()), "{message}");
+}
+
+#[tokio::test]
+async fn observe_file_facts_reports_directory_path_context() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let err = observe_file_facts(dir.path()).await.unwrap_err();
+    let message = err.to_string();
+
+    assert!(
+        message.contains(&dir.path().display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("not a regular file"), "{message}");
+}

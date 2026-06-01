@@ -43,6 +43,7 @@ async fn observe_file_facts_rejects_symlink_to_regular_file() {
     // ffprobe must match so a symlinked path cannot redirect the probe to a
     // different file than the scanner hashed.
     let result = Box::pin(observe_file_facts(&link)).await;
+    let message = error_message(&result);
 
     assert!(
         matches!(
@@ -51,6 +52,7 @@ async fn observe_file_facts_rejects_symlink_to_regular_file() {
         ),
         "symlink to a regular file must be rejected, got {result:?}"
     );
+    assert!(message.contains(&link.display().to_string()), "{message}");
 }
 
 #[tokio::test]
@@ -62,9 +64,41 @@ async fn observe_file_facts_rejects_directory() {
     };
 
     let result = Box::pin(observe_file_facts(dir.path())).await;
+    let message = error_message(&result);
 
     assert!(matches!(
         result.as_ref().map_err(WorkerError::failure_class),
         Err(voom_core::FailureClass::ArtifactUnavailable)
     ));
+    assert!(
+        message.contains(&dir.path().display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("not a regular file"), "{message}");
+}
+
+#[tokio::test]
+async fn observe_file_facts_rejects_missing_path_with_context() {
+    let dir_result = tempfile::tempdir();
+    assert!(dir_result.is_ok());
+    let Ok(dir) = dir_result else {
+        return;
+    };
+    let path = dir.path().join("missing.mp4");
+
+    let result = Box::pin(observe_file_facts(&path)).await;
+    let message = error_message(&result);
+
+    assert!(matches!(
+        result.as_ref().map_err(WorkerError::failure_class),
+        Err(voom_core::FailureClass::ArtifactUnavailable)
+    ));
+    assert!(message.contains(&path.display().to_string()), "{message}");
+}
+
+fn error_message<T>(result: &Result<T, WorkerError>) -> String {
+    match result {
+        Ok(_) => String::new(),
+        Err(err) => err.to_string(),
+    }
 }

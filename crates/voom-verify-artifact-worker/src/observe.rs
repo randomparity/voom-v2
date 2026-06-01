@@ -30,22 +30,18 @@ impl std::error::Error for ObserveError {}
 pub async fn observe_file_facts(path: &Path) -> Result<VerifyArtifactObservedFacts, ObserveError> {
     let path_metadata = tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?;
+        .map_err(|err| artifact_unavailable(path, err))?;
     if !path_metadata.is_file() {
-        return Err(ObserveError::ArtifactUnavailable(
-            "artifact path is not a regular file".to_owned(),
-        ));
+        return Err(artifact_not_regular(path));
     }
 
     let mut file = open_regular_file_no_follow(path).await?;
     let metadata = file
         .metadata()
         .await
-        .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?;
+        .map_err(|err| artifact_unavailable(path, err))?;
     if !metadata.is_file() {
-        return Err(ObserveError::ArtifactUnavailable(
-            "artifact path is not a regular file".to_owned(),
-        ));
+        return Err(artifact_not_regular(path));
     }
 
     let mut hasher = blake3::Hasher::new();
@@ -54,7 +50,7 @@ pub async fn observe_file_facts(path: &Path) -> Result<VerifyArtifactObservedFac
         let read = file
             .read(&mut buffer)
             .await
-            .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?;
+            .map_err(|err| artifact_unavailable(path, err))?;
         if read == 0 {
             break;
         }
@@ -63,7 +59,7 @@ pub async fn observe_file_facts(path: &Path) -> Result<VerifyArtifactObservedFac
     let final_metadata = file
         .metadata()
         .await
-        .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?;
+        .map_err(|err| artifact_unavailable(path, err))?;
     if metadata_changed(&metadata, &final_metadata) {
         return Err(ObserveError::ArtifactChecksumMismatch(
             "artifact changed while verification was reading it".to_owned(),
@@ -83,15 +79,16 @@ async fn open_regular_file_no_follow(path: &Path) -> Result<tokio::fs::File, Obs
     use std::os::unix::fs::OpenOptionsExt;
 
     let path = path.to_owned();
+    let open_path = path.clone();
     let std_file = tokio::task::spawn_blocking(move || {
         std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
+            .open(open_path)
     })
     .await
-    .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?
-    .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))?;
+    .map_err(|err| artifact_unavailable(&path, err))?
+    .map_err(|err| artifact_unavailable(&path, err))?;
 
     Ok(tokio::fs::File::from_std(std_file))
 }
@@ -100,7 +97,18 @@ async fn open_regular_file_no_follow(path: &Path) -> Result<tokio::fs::File, Obs
 async fn open_regular_file_no_follow(path: &Path) -> Result<tokio::fs::File, ObserveError> {
     tokio::fs::File::open(path)
         .await
-        .map_err(|err| ObserveError::ArtifactUnavailable(err.to_string()))
+        .map_err(|err| artifact_unavailable(path, err))
+}
+
+fn artifact_unavailable(path: &Path, err: impl Display) -> ObserveError {
+    ObserveError::ArtifactUnavailable(format!("artifact path {}: {err}", path.display()))
+}
+
+fn artifact_not_regular(path: &Path) -> ObserveError {
+    ObserveError::ArtifactUnavailable(format!(
+        "artifact path {} is not a regular file",
+        path.display()
+    ))
 }
 
 fn metadata_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {

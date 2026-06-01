@@ -22,12 +22,13 @@ async fn observe_file_facts_reports_size_hash_and_mtime_for_regular_file() {
 #[tokio::test]
 async fn observe_file_facts_rejects_missing_paths() {
     let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing.bin");
 
-    let err = observe_file_facts(&dir.path().join("missing.bin"))
-        .await
-        .unwrap_err();
+    let err = observe_file_facts(&path).await.unwrap_err();
+    let message = err.to_string();
 
-    assert!(err.to_string().contains("artifact unavailable"));
+    assert!(message.contains("artifact unavailable"), "{message}");
+    assert!(message.contains(&path.display().to_string()), "{message}");
 }
 
 #[tokio::test]
@@ -39,8 +40,10 @@ async fn observe_file_facts_rejects_non_regular_files_without_following_symlinks
     make_symlink(&target, &link);
 
     let err = observe_file_facts(&link).await.unwrap_err();
+    let message = err.to_string();
 
-    assert!(err.to_string().contains("not a regular file"));
+    assert!(message.contains("not a regular file"), "{message}");
+    assert!(message.contains(&link.display().to_string()), "{message}");
 }
 
 #[cfg(unix)]
@@ -53,8 +56,10 @@ async fn no_follow_open_rejects_leaf_symlink_after_path_check() {
     make_symlink(&target, &link);
 
     let err = open_regular_file_no_follow(&link).await.unwrap_err();
+    let message = err.to_string();
 
-    assert!(err.to_string().contains("artifact unavailable"));
+    assert!(message.contains("artifact unavailable"), "{message}");
+    assert!(message.contains(&link.display().to_string()), "{message}");
 }
 
 #[cfg(unix)]
