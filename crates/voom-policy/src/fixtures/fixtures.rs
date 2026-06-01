@@ -36,10 +36,10 @@ impl std::str::FromStr for FixtureName {
 pub fn load_fixture(name: FixtureName) -> Result<PolicyInputSetDraft, serde_json::Error> {
     serde_json::from_str(match name {
         FixtureName::SyntheticCompliantBaseline => {
-            include_str!("../fixtures/synthetic_compliant_baseline.json")
+            include_str!("../../fixtures/synthetic_compliant_baseline.json")
         }
         FixtureName::SyntheticNoncompliantTranscodeNeeded => {
-            include_str!("../fixtures/synthetic_noncompliant_transcode_needed.json")
+            include_str!("../../fixtures/synthetic_noncompliant_transcode_needed.json")
         }
     })
 }
