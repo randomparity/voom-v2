@@ -29,10 +29,6 @@ const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
 pub enum NdjsonOutcome {
     /// Non-terminal frame (`Progress`).
     Frame(ProgressFrame),
-    /// Stream closed cleanly after a terminal frame was delivered.
-    /// The terminal frame is delivered on the call that read it; this
-    /// outcome only fires on the call *after* the terminal.
-    Closed,
     /// Stream closed without a terminal frame (EOF). `partial_bytes`
     /// records how many bytes accumulated in the in-progress line buffer
     /// before EOF (zero for a clean close on a frame boundary).
@@ -85,8 +81,9 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
     ///   - `Frame(progress)` — non-terminal frame; caller should call again.
     ///   - `Terminated(frame)` — terminal `Result` / `Error` delivered.
     ///   - `StreamEnd { partial_bytes }` — EOF before terminal.
-    ///   - `Closed` — already past the terminal; calling again yields the
-    ///     same outcome until reconstructed.
+    ///
+    /// Calls after `Terminated` return
+    /// `ProtocolError::UnexpectedFrameAfterTerminal`.
     ///
     /// On any contract violation, returns `Err(ProtocolError)` and the
     /// stream is considered aborted.
