@@ -194,7 +194,7 @@ async fn consume_dispatch_stream(
                         )
                         .await;
                     }
-                    Ok(NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed) => {
+                    Ok(NdjsonOutcome::StreamEnd { .. }) => {
                         return fail_lease_and_return(
                             control,
                             lease_id,

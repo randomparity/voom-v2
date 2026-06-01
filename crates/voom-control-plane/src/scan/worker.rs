@@ -264,7 +264,7 @@ async fn consume_probe_file_stream(
                     "progress frame cannot terminate worker stream",
                 ));
             }
-            NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
+            NdjsonOutcome::StreamEnd { .. } => {
                 return Err(ScanWorkerError::worker_crash(
                     "worker stream ended before terminal frame",
                 ));

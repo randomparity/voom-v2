@@ -446,7 +446,7 @@ where
                     message: labels.progress_terminal.to_owned(),
                 });
             }
-            NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed => {
+            NdjsonOutcome::StreamEnd { .. } => {
                 return Err(WorkerStreamError::StreamEnded {
                     message: labels.stream_ended.to_owned(),
                 });
