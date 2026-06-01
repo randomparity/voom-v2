@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_store::repo::workers::{NewGrant, NewWorker, WorkerKind, WorkerRepo, WorkerStatus};
+use voom_store::repo::workers::{NewGrant, NewWorker, WorkerKind, WorkerStatus};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 

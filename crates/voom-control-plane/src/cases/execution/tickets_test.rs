@@ -5,7 +5,7 @@ use voom_core::{FailureClass, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventPage, EventRepo, Page};
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{TicketRepo, TicketState};
+use voom_store::repo::tickets::TicketState;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 
 use crate::cases::cp;

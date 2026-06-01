@@ -1,5 +1,5 @@
 //! Worker-lifecycle use cases. Each method opens a transaction, calls the
-//! `WorkerRepo` `_in_tx` form, emits the matching event via
+//! `SqliteWorkerRepo` `_in_tx` form, emits the matching event via
 //! `EventRepo::append_in_tx`, then commits.
 
 use secrecy::{ExposeSecret, SecretString};
@@ -13,10 +13,10 @@ use voom_events::payload::{
     WorkerRegisteredPayload, WorkerRetiredPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::nodes::{NodeRepo, NodeStatus};
+use voom_store::repo::nodes::NodeStatus;
 use voom_store::repo::workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, Worker, WorkerInspection, WorkerKind,
-    WorkerRepo, WorkerStatus,
+    WorkerStatus,
 };
 
 use crate::ControlPlane;
@@ -56,7 +56,7 @@ impl ControlPlane {
     /// Register a worker and emit `worker.registered`.
     ///
     /// # Errors
-    /// Propagates `WorkerRepo::register_in_tx` and event-append errors.
+    /// Propagates `SqliteWorkerRepo::register_in_tx` and event-append errors.
     pub async fn register_worker(&self, input: NewWorker) -> Result<Worker, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let worker = self.workers.register_in_tx(&mut tx, input.clone()).await?;
@@ -268,7 +268,7 @@ impl ControlPlane {
     /// Record a worker capability and emit `worker.capability_recorded`.
     ///
     /// # Errors
-    /// Propagates `WorkerRepo::record_capability_in_tx` and event-append errors.
+    /// Propagates `SqliteWorkerRepo::record_capability_in_tx` and event-append errors.
     pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let worker_id = input.worker_id;
@@ -294,7 +294,7 @@ impl ControlPlane {
     /// Record a worker grant and emit `worker.grant_recorded`.
     ///
     /// # Errors
-    /// Propagates `WorkerRepo::record_grant_in_tx` and event-append errors.
+    /// Propagates `SqliteWorkerRepo::record_grant_in_tx` and event-append errors.
     pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let worker_id = input.worker_id;
@@ -318,7 +318,7 @@ impl ControlPlane {
     /// Retire a worker and emit `worker.retired`.
     ///
     /// # Errors
-    /// Propagates `WorkerRepo::retire_in_tx` and event-append errors.
+    /// Propagates `SqliteWorkerRepo::retire_in_tx` and event-append errors.
     pub async fn retire_worker(
         &self,
         id: WorkerId,

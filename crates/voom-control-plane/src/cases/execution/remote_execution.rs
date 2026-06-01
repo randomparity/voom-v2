@@ -14,21 +14,19 @@ use voom_scheduler::{
     ScoreOutcome, ScoreReasonCode, TicketCandidate, WorkerCandidate,
 };
 use voom_store::repo::artifact_access_plans::{
-    ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
-    NewArtifactAccessPlan,
+    ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
 };
-use voom_store::repo::leases::{LeaseRepo, NewLease};
-use voom_store::repo::nodes::{NodeAuthRecord, NodeKind, NodeRepo, NodeStatus};
+use voom_store::repo::leases::NewLease;
+use voom_store::repo::nodes::{NodeAuthRecord, NodeKind, NodeStatus};
 use voom_store::repo::remote_idempotency::{
-    IdempotencyOutcome, RemoteIdempotencyInput, RemoteIdempotencyRepo, RemoteMutationReplay,
+    IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
 };
 use voom_store::repo::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
-    SchedulerDecisionRepo, SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
+    SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
-use voom_store::repo::scheduler_node_limits::SchedulerNodeLimitRepo;
-use voom_store::repo::tickets::{Ticket, TicketRepo};
-use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility, WorkerRepo};
+use voom_store::repo::tickets::Ticket;
+use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility};
 
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;

@@ -1,9 +1,8 @@
-//! `BundleRepo` — `asset_bundles` + `asset_bundle_members`. Owns the
+//! `SqliteBundleRepo` — `asset_bundles` + `asset_bundle_members`. Owns the
 //! membership UNIQUE-on-file_asset_id invariant (an asset is a member
 //! of at most one bundle at a time per spec §8.3). CASCADE on
 //! `asset_bundles` deletion drops member rows transparently.
 
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{BundleId, FileAssetId, MediaVariantId, VoomError};
@@ -93,47 +92,6 @@ pub struct BundleMember {
     pub role: BundleMemberRole,
 }
 
-#[async_trait]
-pub trait BundleRepo: Repository {
-    async fn create_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewAssetBundle,
-    ) -> Result<AssetBundle, VoomError>;
-    async fn create(&self, input: NewAssetBundle) -> Result<AssetBundle, VoomError>;
-    async fn get(&self, id: BundleId) -> Result<Option<AssetBundle>, VoomError>;
-    async fn list_by_variant(
-        &self,
-        media_variant_id: MediaVariantId,
-    ) -> Result<Vec<AssetBundle>, VoomError>;
-    async fn update_display_name_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: BundleId,
-        display_name: String,
-        expected_epoch: u64,
-    ) -> Result<AssetBundle, VoomError>;
-
-    async fn add_member_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewBundleMember,
-    ) -> Result<BundleMember, VoomError>;
-    async fn get_member_by_file_asset_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        file_asset_id: FileAssetId,
-    ) -> Result<Option<BundleMember>, VoomError>;
-    async fn add_member(&self, input: NewBundleMember) -> Result<BundleMember, VoomError>;
-    async fn remove_member_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        bundle_id: BundleId,
-        file_asset_id: FileAssetId,
-    ) -> Result<BundleMember, VoomError>;
-    async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteBundleRepo {
     pool: SqlitePool,
@@ -148,11 +106,10 @@ impl SqliteBundleRepo {
 
 impl Repository for SqliteBundleRepo {}
 
-#[async_trait]
-impl BundleRepo for SqliteBundleRepo {
-    async fn create_in_tx<'tx>(
+impl SqliteBundleRepo {
+    pub async fn create_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewAssetBundle,
     ) -> Result<AssetBundle, VoomError> {
         let ts = iso8601(input.created_at)?;
@@ -172,7 +129,7 @@ impl BundleRepo for SqliteBundleRepo {
             .ok_or_else(|| VoomError::Internal(format!("asset_bundles post-insert get: {id}")))
     }
 
-    async fn create(&self, input: NewAssetBundle) -> Result<AssetBundle, VoomError> {
+    pub async fn create(&self, input: NewAssetBundle) -> Result<AssetBundle, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -185,7 +142,7 @@ impl BundleRepo for SqliteBundleRepo {
         Ok(out)
     }
 
-    async fn get(&self, id: BundleId) -> Result<Option<AssetBundle>, VoomError> {
+    pub async fn get(&self, id: BundleId) -> Result<Option<AssetBundle>, VoomError> {
         let row = sqlx::query(SELECT_BUNDLE_COLS)
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
@@ -194,7 +151,7 @@ impl BundleRepo for SqliteBundleRepo {
         row.as_ref().map(row_to_bundle).transpose()
     }
 
-    async fn list_by_variant(
+    pub async fn list_by_variant(
         &self,
         media_variant_id: MediaVariantId,
     ) -> Result<Vec<AssetBundle>, VoomError> {
@@ -209,9 +166,9 @@ impl BundleRepo for SqliteBundleRepo {
         rows.iter().map(row_to_bundle).collect()
     }
 
-    async fn update_display_name_in_tx<'tx>(
+    pub async fn update_display_name_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: BundleId,
         display_name: String,
         expected_epoch: u64,
@@ -236,9 +193,9 @@ impl BundleRepo for SqliteBundleRepo {
             .ok_or_else(|| VoomError::Internal(format!("asset_bundles post-update get: {id}")))
     }
 
-    async fn add_member_in_tx<'tx>(
+    pub async fn add_member_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewBundleMember,
     ) -> Result<BundleMember, VoomError> {
         let res = sqlx::query(
@@ -273,7 +230,7 @@ impl BundleRepo for SqliteBundleRepo {
         })
     }
 
-    async fn add_member(&self, input: NewBundleMember) -> Result<BundleMember, VoomError> {
+    pub async fn add_member(&self, input: NewBundleMember) -> Result<BundleMember, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -286,9 +243,9 @@ impl BundleRepo for SqliteBundleRepo {
         Ok(out)
     }
 
-    async fn get_member_by_file_asset_in_tx<'tx>(
+    pub async fn get_member_by_file_asset_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         file_asset_id: FileAssetId,
     ) -> Result<Option<BundleMember>, VoomError> {
         let row = sqlx::query(
@@ -302,9 +259,9 @@ impl BundleRepo for SqliteBundleRepo {
         row.as_ref().map(row_to_bundle_member).transpose()
     }
 
-    async fn remove_member_in_tx<'tx>(
+    pub async fn remove_member_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         bundle_id: BundleId,
         file_asset_id: FileAssetId,
     ) -> Result<BundleMember, VoomError> {
@@ -326,7 +283,7 @@ impl BundleRepo for SqliteBundleRepo {
         row_to_bundle_member(&row)
     }
 
-    async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError> {
+    pub async fn list_members(&self, bundle_id: BundleId) -> Result<Vec<BundleMember>, VoomError> {
         let rows = sqlx::query(
             "SELECT id, bundle_id, file_asset_id, role FROM asset_bundle_members \
              WHERE bundle_id = ? ORDER BY id ASC",

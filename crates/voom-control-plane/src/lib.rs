@@ -34,13 +34,12 @@ use voom_store::repo::{
     policy_inputs::SqlitePolicyInputRepo,
     remote_idempotency::SqliteRemoteIdempotencyRepo,
     scheduler_decisions::{
-        SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionRepo,
-        SqliteSchedulerDecisionRepo,
+        SchedulerDecision, SchedulerDecisionFilter, SqliteSchedulerDecisionRepo,
     },
     scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
-    video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo},
+    video_profiles::{SqliteVideoProfileRepo, VideoProfile},
     workers::SqliteWorkerRepo,
     workflow_summaries::SqliteWorkflowSummaryRepo,
 };
@@ -106,7 +105,7 @@ pub use workflow::coordinator::{CoordinatorError, CoordinatorOutcome};
 pub use workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
-/// `LeaseRepo::fail` (and any future caller that needs full-jitter
+/// `SqliteLeaseRepo::fail` (and any future caller that needs full-jitter
 /// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
 /// a `Mutex` to keep the `ControlPlane` itself `Clone`-able and
 /// thread-safe.
@@ -300,7 +299,7 @@ impl ControlPlane {
     /// fixed-value RNG. The case handlers use this to thread a
     /// `&mut (dyn RngCore + Send)` into repo calls without holding the
     /// std Mutex across the awaits inside the repo (the workspace lint
-    /// `await_holding_lock` forbids that). Each `LeaseRepo::fail` call
+    /// `await_holding_lock` forbids that). Each `SqliteLeaseRepo::fail` call
     /// consumes exactly one jitter value via `default_backoff`, so a
     /// single-shot snapshot is sufficient.
     pub(crate) fn snapshot_rng(&self) -> SnapshotRng {
@@ -586,7 +585,7 @@ fn production_rng() -> SharedRng {
 /// Single-shot RNG that returns one fixed `u32` from every call. The
 /// shape lets `ControlPlane::snapshot_rng` lift one jitter value out
 /// of the shared RNG while keeping the std Mutex off the await
-/// boundary — the consumer (`LeaseRepo::fail` → `default_backoff`)
+/// boundary — the consumer (`SqliteLeaseRepo::fail` → `default_backoff`)
 /// only needs one value per call.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotRng {

@@ -5,7 +5,7 @@
 )]
 
 //! Pending-commit lock retrofit — end-to-end coverage for the two call
-//! sites wired in M3 Phase 2 commit 5 (`UseLeaseRepo::acquire_in_tx` and
+//! sites wired in M3 Phase 2 commit 5 (`SqliteUseLeaseRepo::acquire_in_tx` and
 //! `IdentityRepo::record_discovered_file_in_tx::AliasAttached`) plus the
 //! architectural exemption for `IdentityRepo::reconcile_rename_in_tx`.
 //! Disk-mode parity via the M1 harness mirrors the Phase A suite.
@@ -26,7 +26,6 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
-    UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
 

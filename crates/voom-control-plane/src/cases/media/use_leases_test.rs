@@ -5,7 +5,6 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{FileLocationKind, NewFileLocation, NewFileVersion, ProducedBy};
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
-    UseLeaseRepo,
 };
 
 use crate::cases::{count, cp};

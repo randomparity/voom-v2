@@ -28,7 +28,7 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, NewPhaseSummary, NewWorkflowSummary,
-    PhaseOutcome, PhaseReport, PhaseSummary, WorkflowSummary, WorkflowSummaryRepo,
+    PhaseOutcome, PhaseReport, PhaseSummary, WorkflowSummary,
 };
 
 use crate::ControlPlane;
@@ -413,7 +413,6 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        use voom_store::repo::jobs::JobRepo;
         if self.jobs.get(prior_job_id).await?.is_none() {
             return Err(VoomError::NotFound(format!(
                 "resume: prior job {prior_job_id} does not exist"

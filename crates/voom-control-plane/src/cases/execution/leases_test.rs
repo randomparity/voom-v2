@@ -4,7 +4,7 @@ use time::{Duration as TDuration, OffsetDateTime};
 use voom_core::{FailureClass, TicketId, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 
 use crate::cases::{count, cp};

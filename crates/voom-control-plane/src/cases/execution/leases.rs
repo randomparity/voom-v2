@@ -1,4 +1,4 @@
-//! Lease-lifecycle use cases. Each method composes the `LeaseRepo` `_in_tx`
+//! Lease-lifecycle use cases. Each method composes the `SqliteLeaseRepo` `_in_tx`
 //! call with one or more event-append calls inside the same transaction.
 
 use serde_json::Value as JsonValue;
@@ -13,8 +13,8 @@ use voom_events::payload::{
     TicketSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, LeaseRepo, NewLease};
-use voom_store::repo::tickets::{TicketRepo, TicketState};
+use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, NewLease};
+use voom_store::repo::tickets::TicketState;
 
 use crate::ControlPlane;
 
@@ -90,7 +90,7 @@ impl ControlPlane {
     /// observable via `last_heartbeat_at` and produce too much volume.
     ///
     /// # Errors
-    /// Propagates `LeaseRepo::heartbeat` errors.
+    /// Propagates `SqliteLeaseRepo::heartbeat` errors.
     pub async fn heartbeat_lease(
         &self,
         lease_id: LeaseId,
@@ -108,7 +108,7 @@ impl ControlPlane {
     /// Heartbeat a lease inside the caller's transaction. Emits no event.
     ///
     /// # Errors
-    /// Propagates `LeaseRepo::heartbeat_in_tx` errors.
+    /// Propagates `SqliteLeaseRepo::heartbeat_in_tx` errors.
     pub(crate) async fn heartbeat_lease_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,

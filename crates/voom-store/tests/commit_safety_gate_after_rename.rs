@@ -42,7 +42,6 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
-    UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
 

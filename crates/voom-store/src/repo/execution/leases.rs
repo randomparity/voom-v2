@@ -1,6 +1,5 @@
-//! `LeaseRepo` — worker-execution lease lifecycle.
+//! `SqliteLeaseRepo` — worker-execution lease lifecycle.
 
-use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
@@ -11,7 +10,7 @@ use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
-use super::tickets::{SqliteTicketRepo, TicketRepo};
+use super::tickets::SqliteTicketRepo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -153,97 +152,6 @@ pub struct ExpireReport {
     pub pairs: Vec<(LeaseId, TicketId)>,
 }
 
-#[async_trait]
-pub trait LeaseRepo: Repository {
-    async fn acquire_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewLease,
-    ) -> Result<Lease, VoomError>;
-    async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError>;
-
-    async fn heartbeat_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: LeaseId,
-        ttl: Duration,
-        now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
-    async fn heartbeat(
-        &self,
-        lease_id: LeaseId,
-        ttl: Duration,
-        now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
-
-    async fn release_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: LeaseId,
-        result: JsonValue,
-        now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
-    async fn release(
-        &self,
-        lease_id: LeaseId,
-        result: JsonValue,
-        now: OffsetDateTime,
-    ) -> Result<Lease, VoomError>;
-
-    async fn fail_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: LeaseId,
-        class: FailureClass,
-        now: OffsetDateTime,
-        clock: &dyn Clock,
-        rng: &mut (dyn RngCore + Send),
-    ) -> Result<Lease, VoomError>;
-    async fn fail(
-        &self,
-        lease_id: LeaseId,
-        class: FailureClass,
-        now: OffsetDateTime,
-        clock: &dyn Clock,
-        rng: &mut (dyn RngCore + Send),
-    ) -> Result<Lease, VoomError>;
-
-    async fn expire_due_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        now: OffsetDateTime,
-    ) -> Result<ExpireReport, VoomError>;
-    async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError>;
-
-    async fn force_release_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: LeaseId,
-        also_requeue: bool,
-        now: OffsetDateTime,
-    ) -> Result<ForceReleaseOutcome, VoomError>;
-    async fn force_release(
-        &self,
-        lease_id: LeaseId,
-        also_requeue: bool,
-        now: OffsetDateTime,
-    ) -> Result<ForceReleaseOutcome, VoomError>;
-
-    async fn get_held_for_worker_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: LeaseId,
-        worker_id: WorkerId,
-    ) -> Result<Lease, VoomError>;
-    async fn get_held_for_worker(
-        &self,
-        lease_id: LeaseId,
-        worker_id: WorkerId,
-    ) -> Result<Lease, VoomError>;
-
-    async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteLeaseRepo {
     pool: SqlitePool,
@@ -258,15 +166,14 @@ impl SqliteLeaseRepo {
 
 impl Repository for SqliteLeaseRepo {}
 
-#[async_trait]
-impl LeaseRepo for SqliteLeaseRepo {
+impl SqliteLeaseRepo {
     // Capability / grant / deny / max_parallel gating is deferred to
     // Sprint 3 (policy) and Sprint 4 (remote workers). The supporting
     // tables exist now so Sprint 1 use cases can populate them. See
     // docs/superpowers/specs/2026-05-16-voom-sprint-1-design.md §7.5.
-    async fn acquire_in_tx<'tx>(
+    pub async fn acquire_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewLease,
     ) -> Result<Lease, VoomError> {
         let ttl_secs = input.ttl.whole_seconds();
@@ -337,7 +244,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             .ok_or_else(|| VoomError::Internal("acquire: post-insert get vanished".to_owned()))
     }
 
-    async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
+    pub async fn acquire(&self, input: NewLease) -> Result<Lease, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -350,9 +257,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
-    async fn heartbeat_in_tx<'tx>(
+    pub async fn heartbeat_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         ttl: Duration,
         now: OffsetDateTime,
@@ -379,7 +286,7 @@ impl LeaseRepo for SqliteLeaseRepo {
             .ok_or_else(|| VoomError::Internal("heartbeat: post-update get vanished".to_owned()))
     }
 
-    async fn heartbeat(
+    pub async fn heartbeat(
         &self,
         lease_id: LeaseId,
         ttl: Duration,
@@ -404,9 +311,9 @@ impl LeaseRepo for SqliteLeaseRepo {
     /// the lease was already absent or in a non-`held` state — both
     /// outcomes surface as `VoomError::Conflict`. Callers that need to
     /// distinguish "missing" from "wrong state" should `get` first.
-    async fn release_in_tx<'tx>(
+    pub async fn release_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         result: JsonValue,
         now: OffsetDateTime,
@@ -459,7 +366,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(lease)
     }
 
-    async fn release(
+    pub async fn release(
         &self,
         lease_id: LeaseId,
         result: JsonValue,
@@ -484,9 +391,9 @@ impl LeaseRepo for SqliteLeaseRepo {
     /// `state = 'held'` (replaces the previous wide `get_lease_in_tx`).
     /// On a missing lease, on a non-`held` lease, or on a lost race the
     /// caller sees `VoomError::Conflict`.
-    async fn fail_in_tx<'tx>(
+    pub async fn fail_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         class: FailureClass,
         now: OffsetDateTime,
@@ -596,7 +503,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(lease)
     }
 
-    async fn fail(
+    pub async fn fail(
         &self,
         lease_id: LeaseId,
         class: FailureClass,
@@ -618,9 +525,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
-    async fn expire_due_in_tx<'tx>(
+    pub async fn expire_due_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
         let now_str = iso8601(now)?;
@@ -657,7 +564,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(report)
     }
 
-    async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
+    pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -670,9 +577,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
-    async fn force_release_in_tx<'tx>(
+    pub async fn force_release_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         also_requeue: bool,
         now: OffsetDateTime,
@@ -779,7 +686,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         })
     }
 
-    async fn force_release(
+    pub async fn force_release(
         &self,
         lease_id: LeaseId,
         also_requeue: bool,
@@ -799,9 +706,9 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
-    async fn get_held_for_worker_in_tx<'tx>(
+    pub async fn get_held_for_worker_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
         worker_id: WorkerId,
     ) -> Result<Lease, VoomError> {
@@ -823,7 +730,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(lease)
     }
 
-    async fn get_held_for_worker(
+    pub async fn get_held_for_worker(
         &self,
         lease_id: LeaseId,
         worker_id: WorkerId,
@@ -842,7 +749,7 @@ impl LeaseRepo for SqliteLeaseRepo {
         Ok(out)
     }
 
-    async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError> {
+    pub async fn get(&self, id: LeaseId) -> Result<Option<Lease>, VoomError> {
         let row = sqlx::query(SELECT_LEASE_COLS)
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)

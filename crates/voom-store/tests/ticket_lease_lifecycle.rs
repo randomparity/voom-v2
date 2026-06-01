@@ -21,8 +21,8 @@ use voom_core::rng_test_support::FrozenRng;
 use voom_core::{FailureClass, SystemClock, TicketOperation};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::leases::{LeaseRepo, NewLease};
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::leases::NewLease;
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 

@@ -1,6 +1,5 @@
-//! `JobRepo` — durable journal of operator-initiated work.
+//! `SqliteJobRepo` — durable journal of operator-initiated work.
 
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{JobId, VoomError};
@@ -58,45 +57,6 @@ pub struct Job {
     pub epoch: u64,
 }
 
-#[async_trait]
-pub trait JobRepo: Repository {
-    async fn create_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewJob,
-    ) -> Result<Job, VoomError>;
-
-    async fn create(&self, input: NewJob) -> Result<Job, VoomError>;
-
-    async fn get(&self, id: JobId) -> Result<Option<Job>, VoomError>;
-
-    async fn list_by_state(&self, state: JobState, limit: u32) -> Result<Vec<Job>, VoomError>;
-
-    async fn succeed_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: JobId,
-        now: OffsetDateTime,
-    ) -> Result<Job, VoomError>;
-    async fn succeed(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError>;
-
-    async fn fail_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: JobId,
-        now: OffsetDateTime,
-    ) -> Result<Job, VoomError>;
-    async fn fail(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError>;
-
-    async fn cancel_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: JobId,
-        now: OffsetDateTime,
-    ) -> Result<Job, VoomError>;
-    async fn cancel(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteJobRepo {
     pool: SqlitePool,
@@ -111,11 +71,10 @@ impl SqliteJobRepo {
 
 impl Repository for SqliteJobRepo {}
 
-#[async_trait]
-impl JobRepo for SqliteJobRepo {
-    async fn create_in_tx<'tx>(
+impl SqliteJobRepo {
+    pub async fn create_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewJob,
     ) -> Result<Job, VoomError> {
         let created = iso8601(input.created_at)?;
@@ -141,7 +100,7 @@ impl JobRepo for SqliteJobRepo {
         })
     }
 
-    async fn create(&self, input: NewJob) -> Result<Job, VoomError> {
+    pub async fn create(&self, input: NewJob) -> Result<Job, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -154,7 +113,7 @@ impl JobRepo for SqliteJobRepo {
         Ok(out)
     }
 
-    async fn get(&self, id: JobId) -> Result<Option<Job>, VoomError> {
+    pub async fn get(&self, id: JobId) -> Result<Option<Job>, VoomError> {
         let row = sqlx::query(
             "SELECT id, kind, state, priority, created_at, updated_at, epoch \
              FROM jobs WHERE id = ?",
@@ -166,7 +125,7 @@ impl JobRepo for SqliteJobRepo {
         row.as_ref().map(row_to_job).transpose()
     }
 
-    async fn list_by_state(&self, state: JobState, limit: u32) -> Result<Vec<Job>, VoomError> {
+    pub async fn list_by_state(&self, state: JobState, limit: u32) -> Result<Vec<Job>, VoomError> {
         let rows = sqlx::query(
             "SELECT id, kind, state, priority, created_at, updated_at, epoch \
              FROM jobs WHERE state = ? \
@@ -180,16 +139,16 @@ impl JobRepo for SqliteJobRepo {
         rows.iter().map(row_to_job).collect()
     }
 
-    async fn succeed_in_tx<'tx>(
+    pub async fn succeed_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: JobId,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
         transition_open_to(tx, id, JobState::Succeeded, now).await
     }
 
-    async fn succeed(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
+    pub async fn succeed(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -202,16 +161,16 @@ impl JobRepo for SqliteJobRepo {
         Ok(out)
     }
 
-    async fn fail_in_tx<'tx>(
+    pub async fn fail_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: JobId,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
         transition_open_to(tx, id, JobState::Failed, now).await
     }
 
-    async fn fail(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
+    pub async fn fail(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -224,16 +183,16 @@ impl JobRepo for SqliteJobRepo {
         Ok(out)
     }
 
-    async fn cancel_in_tx<'tx>(
+    pub async fn cancel_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: JobId,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
         transition_open_to(tx, id, JobState::Cancelled, now).await
     }
 
-    async fn cancel(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
+    pub async fn cancel(&self, id: JobId, now: OffsetDateTime) -> Result<Job, VoomError> {
         let mut tx = self
             .pool
             .begin()

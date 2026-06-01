@@ -1,7 +1,7 @@
 use voom_core::{PolicyDocumentId, PolicyVersionId, VoomError};
 use voom_store::repo::policies::{
     CreatedPolicyVersion, NewPolicyDocumentVersion, PolicyDocument, PolicyDocumentSummary,
-    PolicyRepo, PolicyVersion,
+    PolicyVersion,
 };
 
 use crate::ControlPlane;

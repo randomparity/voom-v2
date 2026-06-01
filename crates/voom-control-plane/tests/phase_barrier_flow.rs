@@ -19,7 +19,6 @@ use voom_policy::{
 };
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
-    WorkflowSummaryRepo,
 };
 use voom_test_support::worker::{
     TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,

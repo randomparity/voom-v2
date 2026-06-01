@@ -6,7 +6,6 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileLocationId, FileVersionId, VoomError, rng_test_support::FrozenRng};
 use voom_events::EventKind;
-use voom_store::repo::artifacts::ArtifactRepo;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, NewFileLocation, ProducedBy,

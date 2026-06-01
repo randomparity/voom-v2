@@ -18,7 +18,6 @@ use voom_events::{EventKind, SubjectType};
 use voom_store::init;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome};
-use voom_store::repo::use_leases::UseLeaseRepo;
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, USE_LEASE_BATCH_LIMIT, UseLeaseKind,
     UseLeaseReleaseReason,

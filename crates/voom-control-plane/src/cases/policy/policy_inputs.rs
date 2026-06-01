@@ -2,7 +2,7 @@ use voom_core::{FileVersionId, MediaSnapshotId, PolicyInputSetId, VoomError};
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::{
     identity::IdentityRepo,
-    policy_inputs::{PolicyInputRepo, PolicyInputSet, PolicyInputSetSummary},
+    policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
 };
 
 use crate::ControlPlane;

@@ -8,15 +8,13 @@ use voom_core::{
 };
 use voom_events::EventKind;
 use voom_scheduler::ScoreReasonCode;
-use voom_store::repo::artifact_access_plans::{
-    ArtifactAccessMode, ArtifactAccessPlanRepo, ArtifactAccessPlanStatus,
-};
+use voom_store::repo::artifact_access_plans::{ArtifactAccessMode, ArtifactAccessPlanStatus};
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::remote_idempotency::RemoteMutationReplay;
 use voom_store::repo::scheduler_decisions::{
     SchedulerDecisionFilter, SchedulerDecisionOutcome, SchedulerReasonCode,
 };
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::WorkerKind;
 
 use crate::cases::count;

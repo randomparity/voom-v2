@@ -5,7 +5,7 @@
 //! `reconcile_rename_in_tx`. Both are documented in spec §8.7.
 //!
 //! `asset_bundles` / `asset_bundle_members` live in their own repo
-//! (`BundleRepo`) because the membership UNIQUE constraint and the
+//! (`SqliteBundleRepo`) because the membership UNIQUE constraint and the
 //! variant scoping make the surface noticeably different.
 
 use async_trait::async_trait;

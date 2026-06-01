@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use voom_core::{TranscodeVideoProfile, VoomError};
 
@@ -44,12 +43,6 @@ impl VideoProfile {
     }
 }
 
-#[async_trait]
-pub trait VideoProfileRepo: Repository {
-    async fn list(&self) -> Result<Vec<VideoProfile>, VoomError>;
-    async fn get_by_name(&self, name: &str) -> Result<Option<VideoProfile>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteVideoProfileRepo {
     pool: SqlitePool,
@@ -68,9 +61,8 @@ const SELECT_COLUMNS: &str = "id, name, target_codec, encoder, crf, preset, tune
     codec_profile, codec_level, pixel_format, max_width, max_height, output_container, \
     copy_compatible";
 
-#[async_trait]
-impl VideoProfileRepo for SqliteVideoProfileRepo {
-    async fn list(&self) -> Result<Vec<VideoProfile>, VoomError> {
+impl SqliteVideoProfileRepo {
+    pub async fn list(&self) -> Result<Vec<VideoProfile>, VoomError> {
         let sql = format!("SELECT {SELECT_COLUMNS} FROM video_profiles ORDER BY name ASC");
         let rows = sqlx::query(&sql)
             .fetch_all(&self.pool)
@@ -79,7 +71,7 @@ impl VideoProfileRepo for SqliteVideoProfileRepo {
         rows.iter().map(row_to_video_profile).collect()
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<VideoProfile>, VoomError> {
+    pub async fn get_by_name(&self, name: &str) -> Result<Option<VideoProfile>, VoomError> {
         let sql = format!("SELECT {SELECT_COLUMNS} FROM video_profiles WHERE name = ?");
         let row = sqlx::query(&sql)
             .bind(name)

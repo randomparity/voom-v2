@@ -9,8 +9,7 @@ use sqlx::Row;
 use voom_core::{OperationKind, PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_store::repo::{
-    IssueRepo, PolicyInputRepo, PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind,
-    PolicyIssueStatus, PolicyRepo,
+    PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueStatus,
 };
 use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
@@ -642,9 +641,6 @@ impl ControlPlane {
         &self,
         job_id: voom_core::JobId,
     ) -> Result<ComplianceRunReportData, VoomError> {
-        use voom_store::repo::jobs::JobRepo;
-        use voom_store::repo::workflow_summaries::WorkflowSummaryRepo;
-
         let repo = &self.workflow_summaries;
         let Some(summary) = repo.get_summary(job_id).await? else {
             let message = if self.jobs.get(job_id).await?.is_some() {

@@ -3,7 +3,7 @@ use voom_core::ids::ArtifactCommitRecordId;
 use voom_core::{ArtifactHandleId, VoomError};
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactRepo, NewArtifactCommitRecord,
+    ArtifactCommitFailure, ArtifactCommitRecord, NewArtifactCommitRecord,
 };
 
 use crate::ControlPlane;

@@ -30,10 +30,8 @@ use voom_core::{JobId, TicketOperation, VoomError};
 
 use crate::init::init;
 use crate::pool::connect;
-use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
-use crate::repo::execution::workers::{
-    NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo,
-};
+use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
+use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind};
 
 /// Shared default timestamp for builder fixtures and tests. Keyed on
 /// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
@@ -168,7 +166,7 @@ impl TicketBuilder {
     ///
     /// # Errors
     ///
-    /// Propagates `TicketRepo::create` errors.
+    /// Propagates `SqliteTicketRepo::create` errors.
     pub async fn build(self, repo: &SqliteTicketRepo) -> Result<Ticket, VoomError> {
         repo.create(NewTicket {
             job_id: self.job_id,
@@ -227,7 +225,7 @@ impl WorkerBuilder {
     ///
     /// # Errors
     ///
-    /// Propagates `WorkerRepo::register` errors.
+    /// Propagates `SqliteWorkerRepo::register` errors.
     pub async fn build(self, repo: &SqliteWorkerRepo) -> Result<Worker, VoomError> {
         repo.register(NewWorker {
             name: self.name,

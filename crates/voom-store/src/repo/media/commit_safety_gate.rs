@@ -647,7 +647,7 @@ impl std::fmt::Debug for CommitGateContext<'_> {
 /// sufficient.
 ///
 /// Callers translate a hit into the lock's caller-facing error variant
-/// (`VoomError::Conflict(...)` for `UseLeaseRepo::acquire_in_tx` and
+/// (`VoomError::Conflict(...)` for `SqliteUseLeaseRepo::acquire_in_tx` and
 /// the `IdentityRepo::record_discovered_file_in_tx::AliasAttached`
 /// branch, per sprint spec §9.2 / §8.7). `IdentityRepo::reconcile_rename_in_tx`
 /// deliberately does NOT consult this helper (arch spec lines 697–708;

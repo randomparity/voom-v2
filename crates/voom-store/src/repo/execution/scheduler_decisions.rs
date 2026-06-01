@@ -1,6 +1,5 @@
 //! Durable scheduler decision logs.
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -237,53 +236,11 @@ impl SqliteSchedulerDecisionRepo {
 
 impl Repository for SqliteSchedulerDecisionRepo {}
 
-#[async_trait]
-pub trait SchedulerDecisionRepo: Repository {
-    async fn create(&self, input: NewSchedulerDecision) -> Result<SchedulerDecision, VoomError>;
-
-    async fn create_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        input: NewSchedulerDecision,
-    ) -> Result<SchedulerDecision, VoomError>;
-
-    async fn create_or_suppress(
+impl SqliteSchedulerDecisionRepo {
+    pub async fn create(
         &self,
         input: NewSchedulerDecision,
-    ) -> Result<SchedulerDecision, VoomError>;
-
-    async fn create_or_suppress_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        input: NewSchedulerDecision,
-    ) -> Result<SchedulerDecision, VoomError>;
-
-    async fn link_selected_lease(
-        &self,
-        id: u64,
-        lease_id: LeaseId,
-        now: OffsetDateTime,
-    ) -> Result<SchedulerDecision, VoomError>;
-
-    async fn link_selected_lease_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: u64,
-        lease_id: LeaseId,
-        now: OffsetDateTime,
-    ) -> Result<SchedulerDecision, VoomError>;
-
-    async fn get(&self, id: u64) -> Result<Option<SchedulerDecision>, VoomError>;
-
-    async fn list(
-        &self,
-        filter: SchedulerDecisionFilter,
-    ) -> Result<Vec<SchedulerDecision>, VoomError>;
-}
-
-#[async_trait]
-impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
-    async fn create(&self, input: NewSchedulerDecision) -> Result<SchedulerDecision, VoomError> {
+    ) -> Result<SchedulerDecision, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -296,7 +253,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         Ok(decision)
     }
 
-    async fn create_in_tx(
+    pub async fn create_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSchedulerDecision,
@@ -315,7 +272,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         row_to_decision(&row)
     }
 
-    async fn create_or_suppress(
+    pub async fn create_or_suppress(
         &self,
         input: NewSchedulerDecision,
     ) -> Result<SchedulerDecision, VoomError> {
@@ -331,7 +288,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         Ok(decision)
     }
 
-    async fn create_or_suppress_in_tx(
+    pub async fn create_or_suppress_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewSchedulerDecision,
@@ -359,7 +316,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
             })
     }
 
-    async fn link_selected_lease(
+    pub async fn link_selected_lease(
         &self,
         id: u64,
         lease_id: LeaseId,
@@ -379,7 +336,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         Ok(decision)
     }
 
-    async fn link_selected_lease_in_tx(
+    pub async fn link_selected_lease_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: u64,
@@ -408,7 +365,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         }
     }
 
-    async fn get(&self, id: u64) -> Result<Option<SchedulerDecision>, VoomError> {
+    pub async fn get(&self, id: u64) -> Result<Option<SchedulerDecision>, VoomError> {
         let row = sqlx::query(&format!(
             "SELECT {DECISION_COLS} FROM scheduler_decisions WHERE id = ?"
         ))
@@ -419,7 +376,7 @@ impl SchedulerDecisionRepo for SqliteSchedulerDecisionRepo {
         row.as_ref().map(row_to_decision).transpose()
     }
 
-    async fn list(
+    pub async fn list(
         &self,
         filter: SchedulerDecisionFilter,
     ) -> Result<Vec<SchedulerDecision>, VoomError> {

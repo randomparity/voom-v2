@@ -8,7 +8,7 @@ use voom_core::OperationKind;
 use voom_core::{JobId, TicketId, TicketOperation, VoomError};
 use voom_events::payload::TicketCreatedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
 
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{OperationNode, WorkflowPlan};
@@ -357,7 +357,7 @@ async fn find_existing_ticket_id_in_tx(
 
 async fn ensure_dependency_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
-    tickets: &impl TicketRepo,
+    tickets: &SqliteTicketRepo,
     ticket_id: TicketId,
     depends_on: TicketId,
 ) -> Result<(), VoomError> {

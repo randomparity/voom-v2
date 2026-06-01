@@ -2,7 +2,7 @@
 //! the `clock_test_support` pattern.
 //!
 //! `FrozenRng` returns a fixed `u32` from every call — wire it into
-//! `TicketRepo::default_backoff` to land the jitter at the floor (`0`)
+//! `SqliteTicketRepo::default_backoff` to land the jitter at the floor (`0`)
 //! or ceiling (`u32::MAX`) of the computed window deterministically.
 //! `SeededRng` wraps `StdRng::seed_from_u64` for property-style
 //! repeatability across runs.

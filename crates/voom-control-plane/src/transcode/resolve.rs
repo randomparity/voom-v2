@@ -10,7 +10,7 @@ use voom_core::{
 };
 use voom_plan::inline_profile_id;
 use voom_policy::{MediaSnapshotInput, VideoProfileRef, VideoProfileSettings};
-use voom_store::repo::video_profiles::{SqliteVideoProfileRepo, VideoProfileRepo};
+use voom_store::repo::video_profiles::SqliteVideoProfileRepo;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProfile {

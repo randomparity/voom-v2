@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use voom_core::OperationKind;
 use voom_core::{JobId, SystemClock, TicketId, TicketOperation};
 use voom_store::repo::jobs::NewJob;
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo};
+use voom_store::repo::tickets::{NewTicket, Ticket};
 
 use crate::ControlPlane;
 use crate::workflow::execution::timing::EffectiveTiming;

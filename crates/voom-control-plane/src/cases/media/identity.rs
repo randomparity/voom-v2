@@ -20,7 +20,6 @@ use voom_store::repo::identity::{
     NewFileLocation, NewFileVersion, NewIdentityEvidence, NewMediaSnapshot, NewMediaVariant,
     NewMediaWork, ObservedBytes, RenameProof, RenameReconciledOutcome,
 };
-use voom_store::repo::use_leases::UseLeaseRepo;
 
 use crate::ControlPlane;
 

@@ -1,6 +1,6 @@
 use voom_core::{OperationKind, TicketOperation, VoomError};
 use voom_store::repo::workers::{
-    NewCapability, NewGrant, NewWorker, Worker, WorkerKind, WorkerRepo, WorkerStatus,
+    NewCapability, NewGrant, NewWorker, Worker, WorkerKind, WorkerStatus,
 };
 
 use crate::ControlPlane;

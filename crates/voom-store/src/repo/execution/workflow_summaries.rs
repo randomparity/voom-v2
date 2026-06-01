@@ -1,4 +1,4 @@
-//! `WorkflowSummaryRepo` — durable three-grain workflow summaries.
+//! `SqliteWorkflowSummaryRepo` — durable three-grain workflow summaries.
 //!
 //! A job-level parent (`workflow_summaries`), a per-phase child
 //! (`workflow_phase_summaries`) carrying that phase's folded compliance report,
@@ -10,7 +10,6 @@
 
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::OffsetDateTime;
@@ -183,60 +182,6 @@ pub struct FilePhaseSummary {
     pub created_at: OffsetDateTime,
 }
 
-#[async_trait]
-pub trait WorkflowSummaryRepo: Repository {
-    async fn insert_summary_in_tx<'tx>(
-        &self,
-        tx: &mut Transaction<'tx, Sqlite>,
-        input: NewWorkflowSummary,
-        now: OffsetDateTime,
-    ) -> Result<WorkflowSummary, VoomError>;
-    async fn insert_summary(
-        &self,
-        input: NewWorkflowSummary,
-        now: OffsetDateTime,
-    ) -> Result<WorkflowSummary, VoomError>;
-
-    async fn upsert_phase_summary_in_tx<'tx>(
-        &self,
-        tx: &mut Transaction<'tx, Sqlite>,
-        input: NewPhaseSummary,
-        now: OffsetDateTime,
-    ) -> Result<PhaseSummary, VoomError>;
-    async fn upsert_phase_summary(
-        &self,
-        input: NewPhaseSummary,
-        now: OffsetDateTime,
-    ) -> Result<PhaseSummary, VoomError>;
-
-    async fn upsert_file_phase_summary_in_tx<'tx>(
-        &self,
-        tx: &mut Transaction<'tx, Sqlite>,
-        input: NewFilePhaseSummary,
-        now: OffsetDateTime,
-    ) -> Result<FilePhaseSummary, VoomError>;
-    async fn upsert_file_phase_summary(
-        &self,
-        input: NewFilePhaseSummary,
-        now: OffsetDateTime,
-    ) -> Result<FilePhaseSummary, VoomError>;
-
-    async fn get_summary(&self, job_id: JobId) -> Result<Option<WorkflowSummary>, VoomError>;
-    async fn get_phase_summary(
-        &self,
-        job_id: JobId,
-        phase_ordinal: u32,
-    ) -> Result<Option<PhaseSummary>, VoomError>;
-    async fn get_file_phase_summary(
-        &self,
-        job_id: JobId,
-        phase_ordinal: u32,
-        branch_id: &str,
-    ) -> Result<Option<FilePhaseSummary>, VoomError>;
-    async fn phases_for_job(&self, job_id: JobId) -> Result<Vec<PhaseSummary>, VoomError>;
-    async fn file_phases_for_job(&self, job_id: JobId) -> Result<Vec<FilePhaseSummary>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteWorkflowSummaryRepo {
     pool: SqlitePool,
@@ -261,11 +206,10 @@ const FILE_PHASE_COLS: &str = "id, job_id, phase_ordinal, branch_id, ticket_ids,
      produced_file_version_id, produced_file_location_id, artifact_handle_id, \
      reprobe_snapshot_id, outcome, created_at";
 
-#[async_trait]
-impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
-    async fn insert_summary_in_tx<'tx>(
+impl SqliteWorkflowSummaryRepo {
+    pub async fn insert_summary_in_tx(
         &self,
-        tx: &mut Transaction<'tx, Sqlite>,
+        tx: &mut Transaction<'_, Sqlite>,
         input: NewWorkflowSummary,
         now: OffsetDateTime,
     ) -> Result<WorkflowSummary, VoomError> {
@@ -303,7 +247,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         })
     }
 
-    async fn insert_summary(
+    pub async fn insert_summary(
         &self,
         input: NewWorkflowSummary,
         now: OffsetDateTime,
@@ -314,9 +258,9 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         Ok(out)
     }
 
-    async fn upsert_phase_summary_in_tx<'tx>(
+    pub async fn upsert_phase_summary_in_tx(
         &self,
-        tx: &mut Transaction<'tx, Sqlite>,
+        tx: &mut Transaction<'_, Sqlite>,
         input: NewPhaseSummary,
         now: OffsetDateTime,
     ) -> Result<PhaseSummary, VoomError> {
@@ -367,7 +311,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         })
     }
 
-    async fn upsert_phase_summary(
+    pub async fn upsert_phase_summary(
         &self,
         input: NewPhaseSummary,
         now: OffsetDateTime,
@@ -378,9 +322,9 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         Ok(out)
     }
 
-    async fn upsert_file_phase_summary_in_tx<'tx>(
+    pub async fn upsert_file_phase_summary_in_tx(
         &self,
-        tx: &mut Transaction<'tx, Sqlite>,
+        tx: &mut Transaction<'_, Sqlite>,
         input: NewFilePhaseSummary,
         now: OffsetDateTime,
     ) -> Result<FilePhaseSummary, VoomError> {
@@ -443,7 +387,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         })
     }
 
-    async fn upsert_file_phase_summary(
+    pub async fn upsert_file_phase_summary(
         &self,
         input: NewFilePhaseSummary,
         now: OffsetDateTime,
@@ -456,7 +400,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         Ok(out)
     }
 
-    async fn get_summary(&self, job_id: JobId) -> Result<Option<WorkflowSummary>, VoomError> {
+    pub async fn get_summary(&self, job_id: JobId) -> Result<Option<WorkflowSummary>, VoomError> {
         let row = sqlx::query(&format!(
             "SELECT {SUMMARY_COLS} FROM workflow_summaries WHERE job_id = ?"
         ))
@@ -467,7 +411,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         row.as_ref().map(row_to_summary).transpose()
     }
 
-    async fn get_phase_summary(
+    pub async fn get_phase_summary(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
@@ -475,7 +419,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         fetch_phase_by_key(&self.pool, job_id, phase_ordinal).await
     }
 
-    async fn get_file_phase_summary(
+    pub async fn get_file_phase_summary(
         &self,
         job_id: JobId,
         phase_ordinal: u32,
@@ -484,7 +428,7 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         fetch_file_phase_by_key(&self.pool, job_id, phase_ordinal, branch_id).await
     }
 
-    async fn phases_for_job(&self, job_id: JobId) -> Result<Vec<PhaseSummary>, VoomError> {
+    pub async fn phases_for_job(&self, job_id: JobId) -> Result<Vec<PhaseSummary>, VoomError> {
         let rows = sqlx::query(&format!(
             "SELECT {PHASE_COLS} FROM workflow_phase_summaries \
              WHERE job_id = ? ORDER BY phase_ordinal ASC"
@@ -496,7 +440,10 @@ impl WorkflowSummaryRepo for SqliteWorkflowSummaryRepo {
         rows.iter().map(row_to_phase).collect()
     }
 
-    async fn file_phases_for_job(&self, job_id: JobId) -> Result<Vec<FilePhaseSummary>, VoomError> {
+    pub async fn file_phases_for_job(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<FilePhaseSummary>, VoomError> {
         let rows = sqlx::query(&format!(
             "SELECT {FILE_PHASE_COLS} FROM workflow_file_phase_summaries \
              WHERE job_id = ? ORDER BY phase_ordinal ASC, branch_id ASC"

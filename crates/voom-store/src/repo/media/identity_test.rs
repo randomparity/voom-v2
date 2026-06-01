@@ -4,8 +4,8 @@ use serde_json::json;
 use time::Duration;
 use voom_core::PolicyVersionId;
 
-use crate::repo::policy::policies::{NewPolicyDocumentVersion, PolicyRepo, SqlitePolicyRepo};
-use crate::repo::policy::policy_inputs::{PolicyInputRepo, SqlitePolicyInputRepo};
+use crate::repo::policy::policies::{NewPolicyDocumentVersion, SqlitePolicyRepo};
+use crate::repo::policy::policy_inputs::SqlitePolicyInputRepo;
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 async fn fresh() -> (SqliteIdentityRepo, tempfile::NamedTempFile) {

@@ -3,7 +3,7 @@ use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
 use voom_policy::{FixtureName, TargetRef, load_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::policy_inputs::{PolicyInputRepo, PolicyInputTargetRef};
+use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 
 use crate::cases::cp;
 

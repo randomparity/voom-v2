@@ -16,10 +16,10 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactRepo,
-    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
+    NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
 };
-use voom_store::repo::bundles::{BundleMemberRole, BundleRepo, NewBundleMember};
+use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,

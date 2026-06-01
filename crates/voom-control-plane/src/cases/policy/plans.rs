@@ -3,10 +3,7 @@ use voom_policy::{
     BundleTargetInput, IdentityEvidenceInput, IssueInput, MediaSnapshotInput, PolicyInputSetDraft,
     PolicySyntheticTarget, QualityProfileSelection, TargetRef,
 };
-use voom_store::repo::{
-    policies::PolicyRepo,
-    policy_inputs::{PolicyInputRepo, PolicyInputSet, PolicyInputTargetRef},
-};
+use voom_store::repo::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
 
 use crate::ControlPlane;
 

@@ -1,6 +1,5 @@
 //! Scheduler-owned node capacity limits.
 
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{NodeId, VoomError};
@@ -30,25 +29,8 @@ impl SqliteSchedulerNodeLimitRepo {
 
 impl Repository for SqliteSchedulerNodeLimitRepo {}
 
-#[async_trait]
-pub trait SchedulerNodeLimitRepo: Repository {
-    async fn node_limit_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        node_id: NodeId,
-    ) -> Result<u32, VoomError>;
-
-    async fn set_node_limit(
-        &self,
-        node_id: NodeId,
-        max_parallel_leases: u32,
-        now: OffsetDateTime,
-    ) -> Result<SchedulerNodeLimit, VoomError>;
-}
-
-#[async_trait]
-impl SchedulerNodeLimitRepo for SqliteSchedulerNodeLimitRepo {
-    async fn node_limit_in_tx(
+impl SqliteSchedulerNodeLimitRepo {
+    pub async fn node_limit_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         node_id: NodeId,
@@ -69,7 +51,7 @@ impl SchedulerNodeLimitRepo for SqliteSchedulerNodeLimitRepo {
         u32_from_i64(max_parallel_leases)
     }
 
-    async fn set_node_limit(
+    pub async fn set_node_limit(
         &self,
         node_id: NodeId,
         max_parallel_leases: u32,

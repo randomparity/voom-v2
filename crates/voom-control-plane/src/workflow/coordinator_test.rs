@@ -12,7 +12,7 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary, WorkflowSummaryRepo,
+    FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary,
 };
 
 use crate::cases::cp;

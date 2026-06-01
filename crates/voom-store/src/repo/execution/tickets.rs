@@ -1,6 +1,5 @@
-//! `TicketRepo` — owns tickets + `ticket_dependencies`.
+//! `SqliteTicketRepo` — owns tickets + `ticket_dependencies`.
 
-use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
 use sqlx::{QueryBuilder, Row, SqlitePool};
@@ -15,8 +14,7 @@ use super::common::{
 /// Sprint 1 default backoff window — capped exponential with full
 /// jitter, matching the architectural spec's Error Handling And
 /// Recovery → Retry policy. Sprint 4+'s scheduling policy will replace
-/// these constants with policy-driven values; the seam stays in
-/// `TicketRepo::default_backoff` so the call sites don't change.
+/// these constants with policy-driven values.
 const DEFAULT_BACKOFF_BASE_SECS: u64 = 5;
 const DEFAULT_BACKOFF_CAP_SECS: u64 = 300;
 
@@ -82,79 +80,16 @@ pub struct Ticket {
     pub epoch: u64,
 }
 
-#[async_trait]
-pub trait TicketRepo: Repository {
-    async fn create_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewTicket,
-    ) -> Result<Ticket, VoomError>;
-    async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError>;
+#[derive(Debug, Clone)]
+pub struct SqliteTicketRepo {
+    pool: SqlitePool,
+}
 
-    async fn add_dependency_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        ticket_id: TicketId,
-        depends_on: TicketId,
-    ) -> Result<(), VoomError>;
-    async fn add_dependency(
-        &self,
-        ticket_id: TicketId,
-        depends_on: TicketId,
-    ) -> Result<(), VoomError>;
-
-    /// Returns the vector of newly-promoted tickets — empty if the target
-    /// was not eligible for promotion. For the M1 surface this returns at
-    /// most one element (the target); cascade to dependents is the
-    /// `ControlPlane`'s responsibility (Task 14 walks dependents on success).
-    /// Repo writes only the ticket row — callers emit the `ticket.ready` event.
-    async fn mark_ready_if_unblocked_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        ticket_id: TicketId,
-        now: OffsetDateTime,
-    ) -> Result<Vec<Ticket>, VoomError>;
-    async fn mark_ready_if_unblocked(
-        &self,
-        ticket_id: TicketId,
-        now: OffsetDateTime,
-    ) -> Result<Vec<Ticket>, VoomError>;
-
-    async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError>;
-    async fn get_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: TicketId,
-    ) -> Result<Option<Ticket>, VoomError>;
-    async fn list_by_state(&self, state: TicketState, limit: u32)
-    -> Result<Vec<Ticket>, VoomError>;
-    async fn next_ready_for_operations_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[TicketOperation],
-        now: OffsetDateTime,
-    ) -> Result<Option<Ticket>, VoomError>;
-    async fn ready_for_operations_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        operations: &[TicketOperation],
-        now: OffsetDateTime,
-    ) -> Result<Vec<Ticket>, VoomError>;
-    async fn next_ready_for_operations(
-        &self,
-        operations: &[TicketOperation],
-        now: OffsetDateTime,
-    ) -> Result<Option<Ticket>, VoomError>;
-    async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError>;
-    /// Same as `list_dependents` but reads through the supplied transaction.
-    /// Required for the release-lease cascade so newly-succeeded parent state
-    /// is visible to the lookup (sqlx-on-SQLite isolates pool reads from an
-    /// open transaction).
-    async fn list_dependents_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        depends_on: TicketId,
-    ) -> Result<Vec<Ticket>, VoomError>;
+impl SqliteTicketRepo {
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
 
     /// Default backoff window after a retriable failure: capped
     /// exponential with full jitter, per the architectural spec's
@@ -172,7 +107,7 @@ pub trait TicketRepo: Repository {
         unused_variables,
         reason = "clock reserved for Sprint 4 time-of-day-aware backoff windows"
     )]
-    fn default_backoff(
+    pub fn default_backoff(
         attempt: u32,
         clock: &dyn Clock,
         rng: &mut (dyn RngCore + Send),
@@ -195,25 +130,12 @@ pub trait TicketRepo: Repository {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SqliteTicketRepo {
-    pool: SqlitePool,
-}
-
-impl SqliteTicketRepo {
-    #[must_use]
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
-    }
-}
-
 impl Repository for SqliteTicketRepo {}
 
-#[async_trait]
-impl TicketRepo for SqliteTicketRepo {
-    async fn create_in_tx<'tx>(
+impl SqliteTicketRepo {
+    pub async fn create_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewTicket,
     ) -> Result<Ticket, VoomError> {
         let ts = iso8601(input.created_at)?;
@@ -242,7 +164,7 @@ impl TicketRepo for SqliteTicketRepo {
             .ok_or_else(|| VoomError::Internal(format!("tickets create: row vanished id={id}")))
     }
 
-    async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError> {
+    pub async fn create(&self, input: NewTicket) -> Result<Ticket, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -255,9 +177,9 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(out)
     }
 
-    async fn add_dependency_in_tx<'tx>(
+    pub async fn add_dependency_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ticket_id: TicketId,
         depends_on: TicketId,
     ) -> Result<(), VoomError> {
@@ -319,7 +241,7 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(())
     }
 
-    async fn add_dependency(
+    pub async fn add_dependency(
         &self,
         ticket_id: TicketId,
         depends_on: TicketId,
@@ -337,9 +259,9 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(())
     }
 
-    async fn mark_ready_if_unblocked_in_tx<'tx>(
+    pub async fn mark_ready_if_unblocked_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         ticket_id: TicketId,
         now: OffsetDateTime,
     ) -> Result<Vec<Ticket>, VoomError> {
@@ -393,7 +315,7 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(vec![promoted])
     }
 
-    async fn mark_ready_if_unblocked(
+    pub async fn mark_ready_if_unblocked(
         &self,
         ticket_id: TicketId,
         now: OffsetDateTime,
@@ -412,7 +334,7 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(out)
     }
 
-    async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError> {
+    pub async fn get(&self, id: TicketId) -> Result<Option<Ticket>, VoomError> {
         let row = sqlx::query(SELECT_TICKET_BY_ID)
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
@@ -421,15 +343,15 @@ impl TicketRepo for SqliteTicketRepo {
         row.as_ref().map(row_to_ticket).transpose()
     }
 
-    async fn get_in_tx<'tx>(
+    pub async fn get_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: TicketId,
     ) -> Result<Option<Ticket>, VoomError> {
         get_in_tx_inner(tx, id).await
     }
 
-    async fn list_by_state(
+    pub async fn list_by_state(
         &self,
         state: TicketState,
         limit: u32,
@@ -448,7 +370,7 @@ impl TicketRepo for SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
-    async fn next_ready_for_operations_in_tx(
+    pub async fn next_ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         operations: &[TicketOperation],
@@ -461,7 +383,7 @@ impl TicketRepo for SqliteTicketRepo {
             .next())
     }
 
-    async fn ready_for_operations_in_tx(
+    pub async fn ready_for_operations_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         operations: &[TicketOperation],
@@ -495,7 +417,7 @@ impl TicketRepo for SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
-    async fn next_ready_for_operations(
+    pub async fn next_ready_for_operations(
         &self,
         operations: &[TicketOperation],
         now: OffsetDateTime,
@@ -514,7 +436,7 @@ impl TicketRepo for SqliteTicketRepo {
         Ok(out)
     }
 
-    async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
+    pub async fn list_dependents(&self, depends_on: TicketId) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)
             .bind(i64_from_u64(depends_on.0))
             .fetch_all(&self.pool)
@@ -523,9 +445,9 @@ impl TicketRepo for SqliteTicketRepo {
         rows.iter().map(row_to_ticket).collect()
     }
 
-    async fn list_dependents_in_tx<'tx>(
+    pub async fn list_dependents_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         depends_on: TicketId,
     ) -> Result<Vec<Ticket>, VoomError> {
         let rows = sqlx::query(SELECT_DEPENDENTS_OF)

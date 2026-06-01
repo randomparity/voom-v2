@@ -10,8 +10,7 @@ use voom_core::{
     rng_test_support::FrozenRng,
 };
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitState, ArtifactRepo, ArtifactVerificationStatus,
-    NewArtifactCommitRecord,
+    ArtifactCommitFailure, ArtifactCommitState, ArtifactVerificationStatus, NewArtifactCommitRecord,
 };
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_worker_protocol::{

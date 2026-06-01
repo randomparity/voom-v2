@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{IssueId, VoomError};
@@ -66,31 +65,6 @@ pub struct PolicyIssueMutation {
     pub row: PolicyIssueRow,
 }
 
-#[async_trait]
-pub trait IssueRepo: Repository {
-    async fn upsert_policy_noncompliant_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        draft: PolicyIssueDraft,
-        now: OffsetDateTime,
-    ) -> Result<PolicyIssueMutation, VoomError>;
-
-    async fn resolve_policy_noncompliant_by_dedupe_key_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        dedupe_key: &str,
-        title: &str,
-        body: &str,
-        now: OffsetDateTime,
-    ) -> Result<Option<PolicyIssueMutation>, VoomError>;
-
-    async fn list_live_policy_noncompliant_by_dedupe_prefix_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        dedupe_prefix: &str,
-    ) -> Result<Vec<PolicyIssueRow>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteIssueRepo;
 
@@ -103,11 +77,10 @@ impl SqliteIssueRepo {
 
 impl Repository for SqliteIssueRepo {}
 
-#[async_trait]
-impl IssueRepo for SqliteIssueRepo {
-    async fn upsert_policy_noncompliant_in_tx<'tx>(
+impl SqliteIssueRepo {
+    pub async fn upsert_policy_noncompliant_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         draft: PolicyIssueDraft,
         now: OffsetDateTime,
     ) -> Result<PolicyIssueMutation, VoomError> {
@@ -187,9 +160,9 @@ impl IssueRepo for SqliteIssueRepo {
         })
     }
 
-    async fn resolve_policy_noncompliant_by_dedupe_key_in_tx<'tx>(
+    pub async fn resolve_policy_noncompliant_by_dedupe_key_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         dedupe_key: &str,
         title: &str,
         body: &str,
@@ -224,9 +197,9 @@ impl IssueRepo for SqliteIssueRepo {
         }))
     }
 
-    async fn list_live_policy_noncompliant_by_dedupe_prefix_in_tx<'tx>(
+    pub async fn list_live_policy_noncompliant_by_dedupe_prefix_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         dedupe_prefix: &str,
     ) -> Result<Vec<PolicyIssueRow>, VoomError> {
         let rows = sqlx::query(

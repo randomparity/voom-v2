@@ -10,10 +10,9 @@ use voom_core::{
     rng_test_support::FrozenRng,
 };
 use voom_events::EventKind;
-use voom_store::repo::artifacts::{ArtifactRepo, ArtifactVerificationStatus, NewArtifactLocation};
+use voom_store::repo::artifacts::{ArtifactVerificationStatus, NewArtifactLocation};
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
-use voom_store::repo::workers::WorkerRepo;
 use voom_worker_protocol::{
     VerifyArtifactObservedFacts, VerifyArtifactRequest, VerifyArtifactResult, VerifyArtifactStatus,
 };

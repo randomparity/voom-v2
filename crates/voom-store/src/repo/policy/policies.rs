@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -55,30 +54,6 @@ pub struct PolicyDocumentSummary {
     pub epoch: u64,
 }
 
-#[async_trait]
-pub trait PolicyRepo: Repository {
-    async fn create_document_with_version(
-        &self,
-        draft: NewPolicyDocumentVersion,
-    ) -> Result<CreatedPolicyVersion, VoomError>;
-
-    async fn add_version(
-        &self,
-        document_id: PolicyDocumentId,
-        source_text: String,
-        created_at: OffsetDateTime,
-    ) -> Result<PolicyVersion, VoomError>;
-
-    async fn get_document(&self, id: PolicyDocumentId)
-    -> Result<Option<PolicyDocument>, VoomError>;
-    async fn list_documents(&self) -> Result<Vec<PolicyDocumentSummary>, VoomError>;
-    async fn get_version(&self, id: PolicyVersionId) -> Result<Option<PolicyVersion>, VoomError>;
-    async fn list_versions(
-        &self,
-        document_id: PolicyDocumentId,
-    ) -> Result<Vec<PolicyVersion>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqlitePolicyRepo {
     pool: SqlitePool,
@@ -93,9 +68,8 @@ impl SqlitePolicyRepo {
 
 impl Repository for SqlitePolicyRepo {}
 
-#[async_trait]
-impl PolicyRepo for SqlitePolicyRepo {
-    async fn create_document_with_version(
+impl SqlitePolicyRepo {
+    pub async fn create_document_with_version(
         &self,
         draft: NewPolicyDocumentVersion,
     ) -> Result<CreatedPolicyVersion, VoomError> {
@@ -149,7 +123,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         Ok(CreatedPolicyVersion { document, version })
     }
 
-    async fn add_version(
+    pub async fn add_version(
         &self,
         document_id: PolicyDocumentId,
         source_text: String,
@@ -220,7 +194,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         })
     }
 
-    async fn get_document(
+    pub async fn get_document(
         &self,
         id: PolicyDocumentId,
     ) -> Result<Option<PolicyDocument>, VoomError> {
@@ -232,7 +206,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         row.as_ref().map(row_to_document).transpose()
     }
 
-    async fn list_documents(&self) -> Result<Vec<PolicyDocumentSummary>, VoomError> {
+    pub async fn list_documents(&self) -> Result<Vec<PolicyDocumentSummary>, VoomError> {
         let rows = sqlx::query(
             "SELECT id, slug, display_name, created_at, current_accepted_version_id, epoch \
              FROM policy_documents ORDER BY slug ASC, id ASC",
@@ -246,7 +220,10 @@ impl PolicyRepo for SqlitePolicyRepo {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    async fn get_version(&self, id: PolicyVersionId) -> Result<Option<PolicyVersion>, VoomError> {
+    pub async fn get_version(
+        &self,
+        id: PolicyVersionId,
+    ) -> Result<Option<PolicyVersion>, VoomError> {
         let row = sqlx::query(VERSION_SELECT_BY_ID)
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
@@ -255,7 +232,7 @@ impl PolicyRepo for SqlitePolicyRepo {
         row.as_ref().map(row_to_version).transpose()
     }
 
-    async fn list_versions(
+    pub async fn list_versions(
         &self,
         document_id: PolicyDocumentId,
     ) -> Result<Vec<PolicyVersion>, VoomError> {
@@ -277,7 +254,7 @@ impl PolicyRepo for SqlitePolicyRepo {
 }
 
 impl SqlitePolicyRepo {
-    async fn get_version_by_document_and_hash(
+    pub async fn get_version_by_document_and_hash(
         &self,
         document_id: PolicyDocumentId,
         source_hash: &str,

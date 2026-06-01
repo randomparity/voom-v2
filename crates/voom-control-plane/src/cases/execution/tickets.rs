@@ -9,7 +9,7 @@ use voom_events::payload::{
     TicketReadyPayload,
 };
 use voom_events::{Event, SubjectType};
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
 
 use crate::ControlPlane;
 
@@ -25,7 +25,7 @@ impl ControlPlane {
     /// Create a new ticket and emit `ticket.created`.
     ///
     /// # Errors
-    /// Propagates `TicketRepo::create_in_tx` and event-append errors.
+    /// Propagates `SqliteTicketRepo::create_in_tx` and event-append errors.
     pub async fn create_ticket(&self, input: NewTicket) -> Result<Ticket, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let ticket = self.tickets.create_in_tx(&mut tx, input.clone()).await?;
@@ -147,12 +147,11 @@ impl ControlPlane {
                 .await?
         } else {
             let mut shot = self.snapshot_rng();
-            let backoff =
-                <voom_store::repo::tickets::SqliteTicketRepo as TicketRepo>::default_backoff(
-                    next_attempt,
-                    &*self.clock,
-                    &mut shot,
-                );
+            let backoff = voom_store::repo::tickets::SqliteTicketRepo::default_backoff(
+                next_attempt,
+                &*self.clock,
+                &mut shot,
+            );
             requeue_ready_ticket(
                 tx,
                 ticket_id_i,

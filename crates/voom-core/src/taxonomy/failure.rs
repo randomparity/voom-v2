@@ -1,5 +1,5 @@
 //! `FailureClass` — single source of truth for retriability decisions
-//! across `LeaseRepo::fail`, `LeaseRepo::expire_due`, and the
+//! across `SqliteLeaseRepo::fail`, `SqliteLeaseRepo::expire_due`, and the
 //! `ticket.failed_*` event payloads. Mirrors the architectural spec's
 //! Failure taxonomy (Error Handling And Recovery → Failure taxonomy)
 //! exactly so the `retry_class`/`is_retriable` partition cannot drift

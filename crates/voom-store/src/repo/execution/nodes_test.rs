@@ -1,7 +1,7 @@
 use time::{Duration, OffsetDateTime};
 use voom_core::{ErrorCode, NodeId};
 
-use super::{NewNode, Node, NodeKind, NodeRepo, NodeStatus, SqliteNodeRepo};
+use super::{NewNode, Node, NodeKind, NodeStatus, SqliteNodeRepo};
 use crate::test_support::T0;
 
 #[tokio::test]

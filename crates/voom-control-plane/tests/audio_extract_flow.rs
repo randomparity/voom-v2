@@ -14,7 +14,7 @@ use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{BundleId, FileAssetId, FileVersionId, MediaSnapshotId};
 use voom_plan::PlanOperationKind;
 use voom_store::repo::bundles::{
-    BundleMemberRole, BundleRepo, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
+    BundleMemberRole, NewAssetBundle, NewBundleMember, SqliteBundleRepo,
 };
 use voom_store::repo::identity::{
     IdentityRepo, MediaWorkKind, NewMediaVariant, NewMediaWork, SqliteIdentityRepo,

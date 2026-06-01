@@ -100,7 +100,7 @@ pub struct TicketFailedTerminalPayload {
     pub class: FailureClass,
     /// `terminal_failure` issue auto-opened by the §10.2 / S3 path.
     /// `None` in M1 (the `issues` table doesn't exist yet) — `Some(id)`
-    /// in M3 once `IssueRepo` lands. Always serialized (`null` in M1)
+    /// in M3 once `SqliteIssueRepo` lands. Always serialized (`null` in M1)
     /// so the wire shape stays stable across the M3 migration.
     pub issue_id: Option<IssueId>,
 }

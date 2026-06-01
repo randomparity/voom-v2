@@ -1,5 +1,5 @@
 //! Artifact-lifecycle use cases. Each method composes the matching
-//! `ArtifactRepo` `_in_tx` call with the appropriate
+//! `SqliteArtifactRepo` `_in_tx` call with the appropriate
 //! `EventRepo::append_in_tx` inside one transaction.
 
 use time::OffsetDateTime;
@@ -10,8 +10,8 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{
-    ArtifactHandle, ArtifactLineage, ArtifactLocation, ArtifactRepo, NewArtifactHandle,
-    NewArtifactLineage, NewArtifactLocation,
+    ArtifactHandle, ArtifactLineage, ArtifactLocation, NewArtifactHandle, NewArtifactLineage,
+    NewArtifactLocation,
 };
 
 use crate::ControlPlane;

@@ -17,8 +17,8 @@ use voom_events::payload::{
     ArtifactCommitRecoveryRequiredPayload, ArtifactCommitStartedPayload,
 };
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactRepo,
-    ArtifactVerification, NewArtifactCommitRecord,
+    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactVerification,
+    NewArtifactCommitRecord,
 };
 use voom_store::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy,

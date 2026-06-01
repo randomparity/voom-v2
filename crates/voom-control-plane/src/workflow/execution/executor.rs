@@ -13,7 +13,7 @@ use voom_store::repo::identity::IdentityRepo;
 #[cfg(test)]
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
 
 use super::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
 use super::leases::{acquire_lease_with_retry, failure_class_for_error, time_duration};

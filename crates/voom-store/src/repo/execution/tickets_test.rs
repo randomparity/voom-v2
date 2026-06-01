@@ -238,8 +238,8 @@ async fn add_dependency_rejects_ready_dependent() {
 async fn add_dependency_rejects_leased_dependent() {
     // A leased ticket is mid-execution — adding a new blocker now would
     // pretend it had been gated on the new edge all along. Reject it.
-    use crate::repo::execution::leases::{LeaseRepo, NewLease, SqliteLeaseRepo};
-    use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
+    use crate::repo::execution::leases::{NewLease, SqliteLeaseRepo};
+    use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
     use time::Duration;
 
     let (pool, _tmp) = pool().await;

@@ -2,8 +2,8 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_store::repo::scheduler_decisions::{
-    NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerDecisionRepo,
-    SchedulerReasonCode, SchedulerRequestSource,
+    NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
+    SchedulerRequestSource,
 };
 
 use super::*;

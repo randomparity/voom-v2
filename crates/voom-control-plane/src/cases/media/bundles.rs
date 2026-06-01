@@ -1,5 +1,5 @@
 //! Bundle-layer use cases. `create_bundle`, `add_bundle_member`,
-//! `remove_bundle_member` each compose a `BundleRepo` `_in_tx` write
+//! `remove_bundle_member` each compose a `SqliteBundleRepo` `_in_tx` write
 //! with the matching `asset_bundle.*` event.
 
 use time::OffsetDateTime;
@@ -9,7 +9,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::bundles::{
-    AssetBundle, BundleMember, BundleMemberRole, BundleRepo, NewAssetBundle, NewBundleMember,
+    AssetBundle, BundleMember, BundleMemberRole, NewAssetBundle, NewBundleMember,
 };
 
 use crate::ControlPlane;
@@ -129,7 +129,7 @@ impl ControlPlane {
     /// Get a bundle by id.
     ///
     /// # Errors
-    /// Propagates `BundleRepo::get` errors.
+    /// Propagates `SqliteBundleRepo::get` errors.
     pub async fn get_bundle(&self, id: BundleId) -> Result<Option<AssetBundle>, VoomError> {
         self.bundles.get(id).await
     }
@@ -137,7 +137,7 @@ impl ControlPlane {
     /// List all bundles for a media variant.
     ///
     /// # Errors
-    /// Propagates `BundleRepo::list_by_variant` errors.
+    /// Propagates `SqliteBundleRepo::list_by_variant` errors.
     pub async fn list_bundles_by_variant(
         &self,
         media_variant_id: MediaVariantId,
@@ -148,7 +148,7 @@ impl ControlPlane {
     /// List members of a bundle.
     ///
     /// # Errors
-    /// Propagates `BundleRepo::list_members` errors.
+    /// Propagates `SqliteBundleRepo::list_members` errors.
     pub async fn list_bundle_members(
         &self,
         bundle_id: BundleId,

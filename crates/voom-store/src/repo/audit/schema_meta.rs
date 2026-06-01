@@ -1,14 +1,7 @@
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use voom_core::VoomError;
 
 use super::Repository;
-
-#[async_trait]
-pub trait SchemaMetaRepo: Repository {
-    async fn get(&self, key: &str) -> Result<Option<String>, VoomError>;
-    async fn set(&self, key: &str, value: &str) -> Result<(), VoomError>;
-}
 
 #[derive(Debug)]
 pub struct SqliteSchemaMetaRepo {
@@ -24,9 +17,8 @@ impl SqliteSchemaMetaRepo {
 
 impl Repository for SqliteSchemaMetaRepo {}
 
-#[async_trait]
-impl SchemaMetaRepo for SqliteSchemaMetaRepo {
-    async fn get(&self, key: &str) -> Result<Option<String>, VoomError> {
+impl SqliteSchemaMetaRepo {
+    pub async fn get(&self, key: &str) -> Result<Option<String>, VoomError> {
         sqlx::query_scalar::<_, String>("SELECT value FROM schema_meta WHERE key = ?")
             .bind(key)
             .fetch_optional(&self.pool)
@@ -34,7 +26,7 @@ impl SchemaMetaRepo for SqliteSchemaMetaRepo {
             .map_err(|e| VoomError::Database(format!("schema_meta get({key:?}) failed: {e}")))
     }
 
-    async fn set(&self, key: &str, value: &str) -> Result<(), VoomError> {
+    pub async fn set(&self, key: &str, value: &str) -> Result<(), VoomError> {
         sqlx::query(
             "INSERT INTO schema_meta (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",

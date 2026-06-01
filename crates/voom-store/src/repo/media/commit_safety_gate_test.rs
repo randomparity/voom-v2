@@ -614,7 +614,7 @@ use crate::repo::media::identity::{
     SqliteIdentityRepo,
 };
 use crate::repo::media::use_leases::{
-    BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind, UseLeaseRepo,
+    BlockingMode, IssuerKind, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
 };
 use crate::test_support::T0;
 use sqlx::SqlitePool;

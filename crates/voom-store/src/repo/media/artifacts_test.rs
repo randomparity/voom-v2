@@ -4,7 +4,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
 
-use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind, WorkerRepo};
+use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, WorkerKind};
 use crate::repo::media::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };

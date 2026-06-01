@@ -1,6 +1,5 @@
 //! Synthetic artifact access plans selected during remote lease acquisition.
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -104,68 +103,6 @@ pub struct ArtifactAccessPlan {
     pub updated_at: OffsetDateTime,
 }
 
-#[async_trait]
-pub trait ArtifactAccessPlanRepo: Repository {
-    async fn create_selected_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        input: NewArtifactAccessPlan,
-    ) -> Result<ArtifactAccessPlan, VoomError>;
-
-    async fn create_selected(
-        &self,
-        input: NewArtifactAccessPlan,
-    ) -> Result<ArtifactAccessPlan, VoomError>;
-
-    async fn mark_status_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        id: u64,
-        status: ArtifactAccessPlanStatus,
-        reason: Option<String>,
-        evidence: JsonValue,
-        now: OffsetDateTime,
-    ) -> Result<ArtifactAccessPlan, VoomError>;
-
-    async fn mark_status(
-        &self,
-        id: u64,
-        status: ArtifactAccessPlanStatus,
-        reason: Option<String>,
-        evidence: JsonValue,
-        now: OffsetDateTime,
-    ) -> Result<ArtifactAccessPlan, VoomError>;
-
-    async fn get_by_lease(
-        &self,
-        lease_id: LeaseId,
-    ) -> Result<Option<ArtifactAccessPlan>, VoomError>;
-
-    async fn get_by_lease_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        lease_id: LeaseId,
-    ) -> Result<Option<ArtifactAccessPlan>, VoomError>;
-
-    async fn list_by_ticket(
-        &self,
-        ticket_id: TicketId,
-    ) -> Result<Vec<ArtifactAccessPlan>, VoomError>;
-
-    async fn list_by_worker(
-        &self,
-        worker_id: WorkerId,
-    ) -> Result<Vec<ArtifactAccessPlan>, VoomError>;
-
-    async fn list_by_node(&self, node_id: NodeId) -> Result<Vec<ArtifactAccessPlan>, VoomError>;
-
-    async fn list_by_mode_and_status(
-        &self,
-        mode: ArtifactAccessMode,
-        status: ArtifactAccessPlanStatus,
-    ) -> Result<Vec<ArtifactAccessPlan>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteArtifactAccessPlanRepo {
     pool: SqlitePool,
@@ -180,9 +117,8 @@ impl SqliteArtifactAccessPlanRepo {
 
 impl Repository for SqliteArtifactAccessPlanRepo {}
 
-#[async_trait]
-impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
-    async fn create_selected_in_tx(
+impl SqliteArtifactAccessPlanRepo {
+    pub async fn create_selected_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewArtifactAccessPlan,
@@ -217,7 +153,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         get_by_id_in_tx(tx, u64_from_i64(res.last_insert_rowid())).await
     }
 
-    async fn create_selected(
+    pub async fn create_selected(
         &self,
         input: NewArtifactAccessPlan,
     ) -> Result<ArtifactAccessPlan, VoomError> {
@@ -233,7 +169,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         Ok(plan)
     }
 
-    async fn mark_status_in_tx(
+    pub async fn mark_status_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: u64,
@@ -279,7 +215,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         get_by_id_in_tx(tx, id).await
     }
 
-    async fn mark_status(
+    pub async fn mark_status(
         &self,
         id: u64,
         status: ArtifactAccessPlanStatus,
@@ -301,7 +237,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         Ok(plan)
     }
 
-    async fn get_by_lease(
+    pub async fn get_by_lease(
         &self,
         lease_id: LeaseId,
     ) -> Result<Option<ArtifactAccessPlan>, VoomError> {
@@ -313,7 +249,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         row.as_ref().map(row_to_plan).transpose()
     }
 
-    async fn get_by_lease_in_tx(
+    pub async fn get_by_lease_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: LeaseId,
@@ -328,7 +264,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         row.as_ref().map(row_to_plan).transpose()
     }
 
-    async fn list_by_ticket(
+    pub async fn list_by_ticket(
         &self,
         ticket_id: TicketId,
     ) -> Result<Vec<ArtifactAccessPlan>, VoomError> {
@@ -341,7 +277,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         .await
     }
 
-    async fn list_by_worker(
+    pub async fn list_by_worker(
         &self,
         worker_id: WorkerId,
     ) -> Result<Vec<ArtifactAccessPlan>, VoomError> {
@@ -354,7 +290,10 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         .await
     }
 
-    async fn list_by_node(&self, node_id: NodeId) -> Result<Vec<ArtifactAccessPlan>, VoomError> {
+    pub async fn list_by_node(
+        &self,
+        node_id: NodeId,
+    ) -> Result<Vec<ArtifactAccessPlan>, VoomError> {
         list_by_i64(
             &self.pool,
             SELECT_PLANS_BY_NODE,
@@ -364,7 +303,7 @@ impl ArtifactAccessPlanRepo for SqliteArtifactAccessPlanRepo {
         .await
     }
 
-    async fn list_by_mode_and_status(
+    pub async fn list_by_mode_and_status(
         &self,
         mode: ArtifactAccessMode,
         status: ArtifactAccessPlanStatus,

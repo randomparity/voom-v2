@@ -1,6 +1,5 @@
-//! `WorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
+//! `SqliteWorkerRepo` — owns workers + `worker_capabilities` + `worker_grants`.
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -90,82 +89,6 @@ pub struct Grant {
     pub worker_id: WorkerId,
 }
 
-#[async_trait]
-pub trait WorkerRepo: Repository {
-    async fn register_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewWorker,
-    ) -> Result<Worker, VoomError>;
-    async fn register(&self, input: NewWorker) -> Result<Worker, VoomError>;
-
-    async fn record_capability_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewCapability,
-    ) -> Result<Capability, VoomError>;
-    async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError>;
-
-    async fn record_grant_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewGrant,
-    ) -> Result<Grant, VoomError>;
-    async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError>;
-
-    async fn retire_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        id: WorkerId,
-        expected_epoch: u64,
-        now: OffsetDateTime,
-    ) -> Result<Worker, VoomError>;
-    async fn retire(
-        &self,
-        id: WorkerId,
-        expected_epoch: u64,
-        now: OffsetDateTime,
-    ) -> Result<Worker, VoomError>;
-
-    async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError>;
-    async fn get_by_name_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        name: &str,
-    ) -> Result<Option<Worker>, VoomError>;
-    async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError>;
-    async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError>;
-    async fn list_by_status(
-        &self,
-        status: WorkerStatus,
-        limit: u32,
-    ) -> Result<Vec<Worker>, VoomError>;
-    async fn list_inspections(
-        &self,
-        status: Option<WorkerStatus>,
-        limit: u32,
-    ) -> Result<Vec<WorkerInspection>, VoomError>;
-
-    async fn operation_eligibility_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        operation: &TicketOperation,
-    ) -> Result<WorkerOperationEligibility, VoomError>;
-    async fn operation_eligibility(
-        &self,
-        worker_id: WorkerId,
-        operation: &TicketOperation,
-    ) -> Result<WorkerOperationEligibility, VoomError>;
-
-    async fn node_owned_worker_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        worker_id: WorkerId,
-        node_id: NodeId,
-    ) -> Result<Worker, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteWorkerRepo {
     pool: SqlitePool,
@@ -180,11 +103,10 @@ impl SqliteWorkerRepo {
 
 impl Repository for SqliteWorkerRepo {}
 
-#[async_trait]
-impl WorkerRepo for SqliteWorkerRepo {
-    async fn register_in_tx<'tx>(
+impl SqliteWorkerRepo {
+    pub async fn register_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewWorker,
     ) -> Result<Worker, VoomError> {
         let ts = iso8601(input.registered_at)?;
@@ -213,7 +135,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         })
     }
 
-    async fn register(&self, input: NewWorker) -> Result<Worker, VoomError> {
+    pub async fn register(&self, input: NewWorker) -> Result<Worker, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -226,9 +148,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn record_capability_in_tx<'tx>(
+    pub async fn record_capability_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewCapability,
     ) -> Result<Capability, VoomError> {
         let codecs = serialize_json(&input.codecs, "codecs")?;
@@ -256,7 +178,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         })
     }
 
-    async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
+    pub async fn record_capability(&self, input: NewCapability) -> Result<Capability, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -269,9 +191,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn record_grant_in_tx<'tx>(
+    pub async fn record_grant_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewGrant,
     ) -> Result<Grant, VoomError> {
         let ce = serialize_json(&input.can_execute, "can_execute")?;
@@ -299,7 +221,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         })
     }
 
-    async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
+    pub async fn record_grant(&self, input: NewGrant) -> Result<Grant, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -312,9 +234,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn retire_in_tx<'tx>(
+    pub async fn retire_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: WorkerId,
         expected_epoch: u64,
         now: OffsetDateTime,
@@ -361,7 +283,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         })
     }
 
-    async fn retire(
+    pub async fn retire(
         &self,
         id: WorkerId,
         expected_epoch: u64,
@@ -379,7 +301,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
+    pub async fn get(&self, id: WorkerId) -> Result<Option<Worker>, VoomError> {
         let row = sqlx::query(
             "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
              FROM workers WHERE id = ?",
@@ -391,15 +313,15 @@ impl WorkerRepo for SqliteWorkerRepo {
         row.as_ref().map(row_to_worker).transpose()
     }
 
-    async fn get_by_name_in_tx<'tx>(
+    pub async fn get_by_name_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         name: &str,
     ) -> Result<Option<Worker>, VoomError> {
         get_by_name_in_tx(tx, name).await
     }
 
-    async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
+    pub async fn get_by_name(&self, name: &str) -> Result<Option<Worker>, VoomError> {
         let mut tx = self
             .pool
             .begin()
@@ -412,7 +334,10 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn get_inspection(&self, id: WorkerId) -> Result<Option<WorkerInspection>, VoomError> {
+    pub async fn get_inspection(
+        &self,
+        id: WorkerId,
+    ) -> Result<Option<WorkerInspection>, VoomError> {
         let row = sqlx::query(
             "SELECT w.id, w.node_id, w.name, w.kind, w.status, w.registered_at, \
              w.last_seen_at, w.retired_at, w.epoch, \
@@ -429,7 +354,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         row.as_ref().map(row_to_inspection).transpose()
     }
 
-    async fn list_by_status(
+    pub async fn list_by_status(
         &self,
         status: WorkerStatus,
         limit: u32,
@@ -447,7 +372,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
-    async fn list_inspections(
+    pub async fn list_inspections(
         &self,
         status: Option<WorkerStatus>,
         limit: u32,
@@ -472,9 +397,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         rows.iter().map(row_to_inspection).collect()
     }
 
-    async fn operation_eligibility_in_tx<'tx>(
+    pub async fn operation_eligibility_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         worker_id: WorkerId,
         operation: &TicketOperation,
     ) -> Result<WorkerOperationEligibility, VoomError> {
@@ -529,7 +454,7 @@ impl WorkerRepo for SqliteWorkerRepo {
         })
     }
 
-    async fn operation_eligibility(
+    pub async fn operation_eligibility(
         &self,
         worker_id: WorkerId,
         operation: &TicketOperation,
@@ -548,9 +473,9 @@ impl WorkerRepo for SqliteWorkerRepo {
         Ok(out)
     }
 
-    async fn node_owned_worker_in_tx<'tx>(
+    pub async fn node_owned_worker_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         worker_id: WorkerId,
         node_id: NodeId,
     ) -> Result<Worker, VoomError> {

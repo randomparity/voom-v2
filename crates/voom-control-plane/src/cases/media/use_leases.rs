@@ -1,5 +1,5 @@
 //! Asset use-lease use cases (M3 Phase 1). Each method composes a
-//! `UseLeaseRepo` `_in_tx` write with `EventRepo::append_in_tx` inside
+//! `SqliteUseLeaseRepo` `_in_tx` write with `EventRepo::append_in_tx` inside
 //! the same transaction so the row write and its event row are atomic.
 //!
 //! `heartbeat_use_lease` is the single exception: per sprint-1 design
@@ -14,7 +14,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::use_leases::{
-    ExpireReport, NewUseLease, ReanchorReport, UseLease, UseLeaseReleaseReason, UseLeaseRepo,
+    ExpireReport, NewUseLease, ReanchorReport, UseLease, UseLeaseReleaseReason,
 };
 
 use crate::ControlPlane;
@@ -59,7 +59,7 @@ impl ControlPlane {
     /// heartbeat volume is too high; `last_heartbeat_at` is the observable).
     ///
     /// # Errors
-    /// Propagates `UseLeaseRepo::heartbeat` errors.
+    /// Propagates `SqliteUseLeaseRepo::heartbeat` errors.
     pub async fn heartbeat_use_lease(
         &self,
         lease_id: UseLeaseId,
@@ -219,7 +219,7 @@ impl ControlPlane {
     /// `use_lease.reanchored_by_move` per re-anchored lease, all inside the
     /// same transaction as the bulk update.
     ///
-    /// `UseLeaseRepo::reanchor_on_move_in_tx` caps each call at
+    /// `SqliteUseLeaseRepo::reanchor_on_move_in_tx` caps each call at
     /// `USE_LEASE_BATCH_LIMIT` rows so the in-memory `RETURNING` set
     /// and the `SQLite` write-lock window stay bounded. This handler
     /// owns the drain loop: it re-invokes the repo until the report

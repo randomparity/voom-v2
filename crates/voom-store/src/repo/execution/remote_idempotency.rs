@@ -1,6 +1,5 @@
 //! Remote execution route idempotency records.
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -32,25 +31,6 @@ pub enum RemoteMutationReplay {
     Error { code: String, message: String },
 }
 
-#[async_trait]
-pub trait RemoteIdempotencyRepo: Repository {
-    async fn reserve_or_replay_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        input: RemoteIdempotencyInput,
-    ) -> Result<IdempotencyOutcome, VoomError>;
-
-    async fn complete_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        node_id: NodeId,
-        route_key: &str,
-        worker_id: Option<WorkerId>,
-        idempotency_key: &str,
-        response: RemoteMutationReplay,
-    ) -> Result<(), VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteRemoteIdempotencyRepo {
     #[expect(
@@ -69,9 +49,8 @@ impl SqliteRemoteIdempotencyRepo {
 
 impl Repository for SqliteRemoteIdempotencyRepo {}
 
-#[async_trait]
-impl RemoteIdempotencyRepo for SqliteRemoteIdempotencyRepo {
-    async fn reserve_or_replay_in_tx(
+impl SqliteRemoteIdempotencyRepo {
+    pub async fn reserve_or_replay_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: RemoteIdempotencyInput,
@@ -150,7 +129,7 @@ impl RemoteIdempotencyRepo for SqliteRemoteIdempotencyRepo {
         }
     }
 
-    async fn complete_in_tx(
+    pub async fn complete_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         node_id: NodeId,

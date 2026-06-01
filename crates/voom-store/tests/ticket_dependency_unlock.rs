@@ -4,7 +4,7 @@
 )]
 
 //! Linear ten-ticket chain plus a cycle-attempt sub-test. Exercises
-//! `TicketRepo::add_dependency` cycle detection and the
+//! `SqliteTicketRepo::add_dependency` cycle detection and the
 //! `mark_ready_if_unblocked` downstream-unlock cascade that the
 //! `ControlPlane` release use case will call after each ticket succeeds.
 
@@ -16,7 +16,7 @@ use time::Duration;
 use voom_control_plane::ControlPlane;
 use voom_core::{SystemClock, TicketOperation, VoomError};
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 

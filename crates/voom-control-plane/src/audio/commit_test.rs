@@ -5,9 +5,7 @@ use sqlx::Row;
 use time::OffsetDateTime;
 use voom_core::ErrorCode;
 use voom_core::rng_test_support::FrozenRng;
-use voom_store::repo::artifacts::{
-    ArtifactRepo, ArtifactVerificationStatus, NewArtifactVerification,
-};
+use voom_store::repo::artifacts::{ArtifactVerificationStatus, NewArtifactVerification};
 use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};

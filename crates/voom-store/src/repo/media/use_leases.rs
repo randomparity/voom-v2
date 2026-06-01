@@ -1,4 +1,4 @@
-//! `UseLeaseRepo` — owns `asset_use_leases` (M3 Phase 1).
+//! `SqliteUseLeaseRepo` — owns `asset_use_leases` (M3 Phase 1).
 //!
 //! Lifecycle per sprint-1 design §9.2. Each write method comes in two
 //! forms (`_in_tx` primitive + bare wrapper); event emission belongs
@@ -9,7 +9,6 @@
 //! transaction as the lease insert. Reanchor-on-move deliberately does not
 //! consult that lock; it preserves existing lease scope as file locations move.
 
-use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
 use time::{Duration, OffsetDateTime};
 use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId, UseLeaseId, VoomError};
@@ -246,104 +245,8 @@ pub struct ReanchorReport {
 }
 
 // ============================================================================
-// `UseLeaseRepo` trait
+// `SqliteUseLeaseRepo` trait
 // ============================================================================
-
-#[async_trait]
-pub trait UseLeaseRepo: Repository {
-    // --- write methods (one pair per lifecycle entry) ----------------------
-
-    async fn acquire_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: NewUseLease,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError>;
-
-    async fn heartbeat_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn heartbeat(
-        &self,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn release_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: UseLeaseId,
-        reason: UseLeaseReleaseReason,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn release(
-        &self,
-        lease_id: UseLeaseId,
-        reason: UseLeaseReleaseReason,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn force_release_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn force_release(
-        &self,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn expire_due_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        now: OffsetDateTime,
-    ) -> Result<ExpireReport, VoomError>;
-
-    async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError>;
-
-    async fn recover_stale_issuer_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn recover_stale_issuer(
-        &self,
-        lease_id: UseLeaseId,
-        now: OffsetDateTime,
-    ) -> Result<UseLease, VoomError>;
-
-    async fn reanchor_on_move_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        retired: FileLocationId,
-        new: FileLocationId,
-        now: OffsetDateTime,
-    ) -> Result<ReanchorReport, VoomError>;
-
-    async fn reanchor_on_move(
-        &self,
-        retired: FileLocationId,
-        new: FileLocationId,
-        now: OffsetDateTime,
-    ) -> Result<ReanchorReport, VoomError>;
-
-    // --- read methods -----------------------------------------------------
-
-    async fn get(&self, id: UseLeaseId) -> Result<Option<UseLease>, VoomError>;
-
-    async fn list_for_scope(&self, scope: LeaseScope) -> Result<Vec<UseLease>, VoomError>;
-}
 
 // ============================================================================
 // `SqliteUseLeaseRepo`
@@ -513,7 +416,7 @@ const fn scope_bind_columns(
 }
 
 // ============================================================================
-// `UseLeaseRepo` impl
+// `SqliteUseLeaseRepo` impl
 // ============================================================================
 
 /// One-probe scope liveness lookup used by `acquire_in_tx`. Reads
@@ -554,9 +457,8 @@ async fn probe_scope_liveness(
         .map_err(err)
 }
 
-#[async_trait]
-impl UseLeaseRepo for SqliteUseLeaseRepo {
-    async fn get(&self, id: UseLeaseId) -> Result<Option<UseLease>, VoomError> {
+impl SqliteUseLeaseRepo {
+    pub async fn get(&self, id: UseLeaseId) -> Result<Option<UseLease>, VoomError> {
         let row = sqlx::query(
             "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
                     scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
@@ -571,7 +473,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         row.as_ref().map(row_to_use_lease).transpose()
     }
 
-    async fn list_for_scope(&self, scope: LeaseScope) -> Result<Vec<UseLease>, VoomError> {
+    pub async fn list_for_scope(&self, scope: LeaseScope) -> Result<Vec<UseLease>, VoomError> {
         let (a, b, v, l) = scope_bind_columns(scope);
         // Each scope value is bound twice (IS NOT NULL probe + equality match) — keep
         // the WHERE arms and the .bind() sequence in sync if you edit this.
@@ -601,9 +503,9 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         rows.iter().map(row_to_use_lease).collect()
     }
 
-    async fn acquire_in_tx<'tx>(
+    pub async fn acquire_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: NewUseLease,
     ) -> Result<UseLease, VoomError> {
         // 1) Validate TTL vs manual-lock invariant. (§9.2 acquire step 1.)
@@ -717,16 +619,16 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         })
     }
 
-    async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
+    pub async fn acquire(&self, input: NewUseLease) -> Result<UseLease, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let out = self.acquire_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(out)
     }
 
-    async fn heartbeat_in_tx<'tx>(
+    pub async fn heartbeat_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
@@ -800,7 +702,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         })
     }
 
-    async fn heartbeat(
+    pub async fn heartbeat(
         &self,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
@@ -811,9 +713,9 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(out)
     }
 
-    async fn release_in_tx<'tx>(
+    pub async fn release_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: UseLeaseId,
         reason: UseLeaseReleaseReason,
         now: OffsetDateTime,
@@ -825,7 +727,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
             UseLeaseReleaseReason::Released | UseLeaseReleaseReason::Superseded
         ) {
             return Err(VoomError::Config(format!(
-                "UseLeaseRepo::release accepts Released or Superseded only; got {reason:?}"
+                "SqliteUseLeaseRepo::release accepts Released or Superseded only; got {reason:?}"
             )));
         }
 
@@ -848,7 +750,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         }
     }
 
-    async fn release(
+    pub async fn release(
         &self,
         lease_id: UseLeaseId,
         reason: UseLeaseReleaseReason,
@@ -860,9 +762,9 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(out)
     }
 
-    async fn force_release_in_tx<'tx>(
+    pub async fn force_release_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
@@ -884,7 +786,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         }
     }
 
-    async fn force_release(
+    pub async fn force_release(
         &self,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
@@ -895,9 +797,9 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(out)
     }
 
-    async fn expire_due_in_tx<'tx>(
+    pub async fn expire_due_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         now: OffsetDateTime,
     ) -> Result<ExpireReport, VoomError> {
         let now_iso = iso8601(now)?;
@@ -936,16 +838,16 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(ExpireReport { expired })
     }
 
-    async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
+    pub async fn expire_due(&self, now: OffsetDateTime) -> Result<ExpireReport, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let out = self.expire_due_in_tx(&mut tx, now).await?;
         commit_tx(tx).await?;
         Ok(out)
     }
 
-    async fn recover_stale_issuer_in_tx<'tx>(
+    pub async fn recover_stale_issuer_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
     ) -> Result<UseLease, VoomError> {
@@ -1003,7 +905,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         }
     }
 
-    async fn recover_stale_issuer(
+    pub async fn recover_stale_issuer(
         &self,
         lease_id: UseLeaseId,
         now: OffsetDateTime,
@@ -1016,9 +918,9 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(out)
     }
 
-    async fn reanchor_on_move_in_tx<'tx>(
+    pub async fn reanchor_on_move_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         retired: FileLocationId,
         new: FileLocationId,
         _now: OffsetDateTime,
@@ -1066,7 +968,7 @@ impl UseLeaseRepo for SqliteUseLeaseRepo {
         Ok(ReanchorReport { reanchored })
     }
 
-    async fn reanchor_on_move(
+    pub async fn reanchor_on_move(
         &self,
         retired: FileLocationId,
         new: FileLocationId,

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -152,27 +151,6 @@ pub struct PolicyIssueInput {
     pub existing_issue_id: Option<IssueId>,
 }
 
-#[async_trait]
-pub trait PolicyInputRepo: Repository {
-    async fn create_input_set(
-        &self,
-        input: PolicyInputSetDraft,
-    ) -> Result<PolicyInputSet, VoomError>;
-
-    async fn create_input_set_in_tx<'tx>(
-        &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
-        input: PolicyInputSetDraft,
-    ) -> Result<PolicyInputSet, VoomError>;
-
-    async fn get_input_set(
-        &self,
-        id: PolicyInputSetId,
-    ) -> Result<Option<PolicyInputSet>, VoomError>;
-    async fn get_input_set_by_slug(&self, slug: &str) -> Result<Option<PolicyInputSet>, VoomError>;
-    async fn list_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqlitePolicyInputRepo {
     pool: SqlitePool,
@@ -187,13 +165,12 @@ impl SqlitePolicyInputRepo {
 
 impl Repository for SqlitePolicyInputRepo {}
 
-#[async_trait]
 #[expect(
     clippy::too_many_lines,
     reason = "transactional create mirrors the policy input schema tables in one atomic write"
 )]
-impl PolicyInputRepo for SqlitePolicyInputRepo {
-    async fn create_input_set(
+impl SqlitePolicyInputRepo {
+    pub async fn create_input_set(
         &self,
         input: PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
@@ -209,9 +186,9 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
         Ok(out)
     }
 
-    async fn create_input_set_in_tx<'tx>(
+    pub async fn create_input_set_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         input: PolicyInputSetDraft,
     ) -> Result<PolicyInputSet, VoomError> {
         voom_policy::validate_input_set(&input)
@@ -434,7 +411,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
         })
     }
 
-    async fn get_input_set(
+    pub async fn get_input_set(
         &self,
         id: PolicyInputSetId,
     ) -> Result<Option<PolicyInputSet>, VoomError> {
@@ -446,7 +423,10 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
         get_input_set_by_id_conn(&mut conn, id).await
     }
 
-    async fn get_input_set_by_slug(&self, slug: &str) -> Result<Option<PolicyInputSet>, VoomError> {
+    pub async fn get_input_set_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<PolicyInputSet>, VoomError> {
         let mut conn = self
             .pool
             .acquire()
@@ -463,7 +443,7 @@ impl PolicyInputRepo for SqlitePolicyInputRepo {
         }
     }
 
-    async fn list_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError> {
+    pub async fn list_input_sets(&self) -> Result<Vec<PolicyInputSetSummary>, VoomError> {
         let mut conn = self
             .pool
             .acquire()

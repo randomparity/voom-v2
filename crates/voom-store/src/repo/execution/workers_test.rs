@@ -4,7 +4,7 @@ use sqlx::Executor;
 use time::OffsetDateTime;
 use voom_core::{TicketOperation, VoomError};
 
-use crate::repo::execution::nodes::{NewNode, Node, NodeKind, NodeRepo, SqliteNodeRepo};
+use crate::repo::execution::nodes::{NewNode, Node, NodeKind, SqliteNodeRepo};
 use crate::test_support::{T0, fresh_initialized_pool_at};
 
 async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {

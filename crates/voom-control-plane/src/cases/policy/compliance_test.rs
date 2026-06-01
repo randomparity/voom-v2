@@ -971,7 +971,7 @@ async fn read_compliance_run_report_zero_phase_job_is_ok_and_empty() {
 #[tokio::test]
 async fn read_compliance_run_report_orders_phases_and_points_at_latest() {
     use voom_store::repo::workflow_summaries::{
-        NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport, WorkflowSummaryRepo,
+        NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport,
     };
 
     let (cp, _tmp) = cp().await;

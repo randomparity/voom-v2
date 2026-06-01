@@ -1,8 +1,7 @@
-//! `NodeRepo` — owns durable node identity rows.
+//! `SqliteNodeRepo` — owns durable node identity rows.
 
 use std::fmt;
 
-use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::{Duration, OffsetDateTime};
@@ -77,40 +76,6 @@ impl fmt::Debug for NodeAuthRecord {
     }
 }
 
-#[async_trait]
-pub trait NodeRepo: Repository {
-    async fn register_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        input: NewNode,
-    ) -> Result<Node, VoomError>;
-    async fn get(&self, id: NodeId) -> Result<Option<Node>, VoomError>;
-    async fn list(&self, status: Option<NodeStatus>, limit: u32) -> Result<Vec<Node>, VoomError>;
-    async fn auth_record_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        id: NodeId,
-    ) -> Result<Option<NodeAuthRecord>, VoomError>;
-    async fn heartbeat_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        id: NodeId,
-        now: OffsetDateTime,
-    ) -> Result<Node, VoomError>;
-    async fn mark_stale_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        now: OffsetDateTime,
-    ) -> Result<Vec<Node>, VoomError>;
-    async fn retire_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        id: NodeId,
-        expected_epoch: u64,
-        now: OffsetDateTime,
-    ) -> Result<Node, VoomError>;
-}
-
 #[derive(Debug, Clone)]
 pub struct SqliteNodeRepo {
     pool: SqlitePool,
@@ -125,9 +90,8 @@ impl SqliteNodeRepo {
 
 impl Repository for SqliteNodeRepo {}
 
-#[async_trait]
-impl NodeRepo for SqliteNodeRepo {
-    async fn register_in_tx(
+impl SqliteNodeRepo {
+    pub async fn register_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         input: NewNode,
@@ -166,7 +130,7 @@ impl NodeRepo for SqliteNodeRepo {
         })
     }
 
-    async fn get(&self, id: NodeId) -> Result<Option<Node>, VoomError> {
+    pub async fn get(&self, id: NodeId) -> Result<Option<Node>, VoomError> {
         let row = sqlx::query(
             "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
              heartbeat_ttl_seconds, auth_token_hint, metadata, epoch \
@@ -179,7 +143,11 @@ impl NodeRepo for SqliteNodeRepo {
         row.as_ref().map(row_to_node).transpose()
     }
 
-    async fn list(&self, status: Option<NodeStatus>, limit: u32) -> Result<Vec<Node>, VoomError> {
+    pub async fn list(
+        &self,
+        status: Option<NodeStatus>,
+        limit: u32,
+    ) -> Result<Vec<Node>, VoomError> {
         let status = status.map(NodeStatus::as_str);
         let rows = sqlx::query(
             "SELECT id, name, kind, status, registered_at, last_seen_at, retired_at, \
@@ -196,7 +164,7 @@ impl NodeRepo for SqliteNodeRepo {
         rows.iter().map(row_to_node).collect()
     }
 
-    async fn auth_record_in_tx(
+    pub async fn auth_record_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         id: NodeId,
@@ -212,7 +180,7 @@ impl NodeRepo for SqliteNodeRepo {
         row.as_ref().map(row_to_auth_record).transpose()
     }
 
-    async fn heartbeat_in_tx(
+    pub async fn heartbeat_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         id: NodeId,
@@ -247,7 +215,7 @@ impl NodeRepo for SqliteNodeRepo {
         })
     }
 
-    async fn mark_stale_in_tx(
+    pub async fn mark_stale_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         now: OffsetDateTime,
@@ -271,7 +239,7 @@ impl NodeRepo for SqliteNodeRepo {
         Ok(changed)
     }
 
-    async fn retire_in_tx(
+    pub async fn retire_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         id: NodeId,
