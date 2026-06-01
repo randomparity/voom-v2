@@ -38,7 +38,7 @@ use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
 use super::plan::expansion::branch_id_from_path;
-use super::plan::policy_bridge::workflow_plan_from_compliance;
+use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
 use super::plan::ticket_payload::operation_name;
 
 /// Bridge node ids carry this prefix; the per-file ticket lookup reconstructs the
@@ -889,13 +889,18 @@ impl ControlPlane {
         if planned == 0 {
             return Ok(None);
         }
-        let bridge =
-            workflow_plan_from_compliance(plan, report, planned, planned).map_err(|source| {
-                PhaseDispatchFailure {
-                    source,
-                    run_summary: None,
-                }
-            })?;
+        let shape = WorkflowExecutionShape::new(planned, planned).map_err(|source| {
+            PhaseDispatchFailure {
+                source,
+                run_summary: None,
+            }
+        })?;
+        let bridge = workflow_plan_from_compliance(plan, report, shape).map_err(|source| {
+            PhaseDispatchFailure {
+                source,
+                run_summary: None,
+            }
+        })?;
         let Some(workflow) = bridge.workflow else {
             return Ok(None);
         };

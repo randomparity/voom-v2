@@ -41,11 +41,30 @@ fn bridge_builds_workflow_with_requested_limits() {
     let plan = plan(vec![node(PlanOperationKind::Remux, NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let execution = workflow_plan_from_compliance(&plan, &report, 4, 2).unwrap();
+    let shape = WorkflowExecutionShape::new(4, 2).unwrap();
+    let execution = workflow_plan_from_compliance(&plan, &report, shape).unwrap();
     let workflow = execution.workflow.unwrap();
 
     assert_eq!(workflow.fan_out.max_files, 4);
     assert_eq!(workflow.concurrency.max_in_flight_dispatches, 2);
+}
+
+#[test]
+fn bridge_rejects_zero_execution_shape_limits() {
+    let max_files_err = WorkflowExecutionShape::new(0, 2).unwrap_err();
+    assert_eq!(
+        max_files_err.to_string(),
+        "policy execution error: workflow execution shape max_files must be greater than 0"
+    );
+
+    let max_in_flight_err = WorkflowExecutionShape::new(2, 0).unwrap_err();
+    assert_eq!(
+        max_in_flight_err.to_string(),
+        concat!(
+            "policy execution error: ",
+            "workflow execution shape max_in_flight_dispatches must be greater than 0"
+        )
+    );
 }
 
 #[test]

@@ -27,11 +27,48 @@ pub struct PolicyExecutionSummary {
     pub per_operation: BTreeMap<PlanOperationKind, u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowExecutionShape {
+    max_files: usize,
+    max_in_flight_dispatches: usize,
+}
+
+impl WorkflowExecutionShape {
+    /// Create the workflow execution shape that the policy bridge must embed.
+    ///
+    /// # Errors
+    /// Returns `POLICY_EXECUTION_ERROR` if either execution limit is zero.
+    pub fn new(max_files: usize, max_in_flight_dispatches: usize) -> Result<Self, VoomError> {
+        if max_files == 0 {
+            return Err(VoomError::PolicyExecution(
+                "workflow execution shape max_files must be greater than 0".to_owned(),
+            ));
+        }
+        if max_in_flight_dispatches == 0 {
+            return Err(VoomError::PolicyExecution(
+                "workflow execution shape max_in_flight_dispatches must be greater than 0"
+                    .to_owned(),
+            ));
+        }
+        Ok(Self {
+            max_files,
+            max_in_flight_dispatches,
+        })
+    }
+
+    #[cfg(test)]
+    const fn single_file() -> Self {
+        Self {
+            max_files: 1,
+            max_in_flight_dispatches: 1,
+        }
+    }
+}
+
 pub fn workflow_plan_from_compliance(
     plan: &ExecutionPlan,
     report: &voom_plan::ComplianceReport,
-    max_files: usize,
-    max_in_flight_dispatches: usize,
+    shape: WorkflowExecutionShape,
 ) -> Result<PolicyExecutionPlan, VoomError> {
     let mut nodes = Vec::new();
     let mut workflow_node_ids_by_plan_node_id = BTreeMap::new();
@@ -83,9 +120,11 @@ pub fn workflow_plan_from_compliance(
             id: format!("policy-{}", report.report_id),
             seed: 6,
             nodes,
-            fan_out: FanOutPolicy { max_files },
+            fan_out: FanOutPolicy {
+                max_files: shape.max_files,
+            },
             concurrency: ConcurrencyPolicy {
-                max_in_flight_dispatches,
+                max_in_flight_dispatches: shape.max_in_flight_dispatches,
             },
             timing: TimingPolicy {
                 base_duration_ms: 5,
@@ -102,7 +141,7 @@ fn single_file_workflow_plan_from_compliance(
     plan: &ExecutionPlan,
     report: &voom_plan::ComplianceReport,
 ) -> Result<PolicyExecutionPlan, VoomError> {
-    workflow_plan_from_compliance(plan, report, 1, 1)
+    workflow_plan_from_compliance(plan, report, WorkflowExecutionShape::single_file())
 }
 
 fn execution_operation(operation_kind: PlanOperationKind) -> Result<OperationKind, VoomError> {
