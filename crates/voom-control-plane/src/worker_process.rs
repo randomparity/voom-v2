@@ -17,7 +17,7 @@ use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, LeaseId, VoomError, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HttpClient, NdjsonOutcome, OperationKind, OperationRequest,
-    PercentBps, ProgressFrame, WorkerCredentials,
+    PercentBps, ProgressFrame, ProtocolError, WorkerCredentials,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,6 +96,17 @@ pub(crate) struct WorkerOperationDispatch<'a, Request> {
     pub(crate) heartbeat_deadline_ms: u32,
     pub(crate) progress_idle_deadline_ms: u32,
     pub(crate) labels: WorkerStreamLabels,
+}
+
+#[derive(Debug)]
+pub(crate) enum WorkerDispatchError {
+    PayloadEncode {
+        message: String,
+    },
+    DispatchFailed {
+        source: ProtocolError,
+        message: String,
+    },
 }
 
 #[derive(Debug)]
@@ -276,8 +287,28 @@ where
     Response: DeserializeOwned,
 {
     let labels = operation_dispatch.labels;
-    let payload = serde_json::to_value(operation_dispatch.payload)
-        .map_err(|err| VoomError::Internal(format!("{}: {err}", labels.payload_encode)))?;
+    let progress_idle_deadline_ms = operation_dispatch.progress_idle_deadline_ms;
+    let dispatch = dispatch_worker_operation_with_client(client, credentials, operation_dispatch)
+        .await
+        .map_err(worker_dispatch_error_to_voom_error)?;
+    consume_operation_stream(dispatch, progress_idle_deadline_ms, labels, progress).await
+}
+
+pub(crate) async fn dispatch_worker_operation_with_client<C, Request>(
+    client: &C,
+    credentials: &WorkerCredentials,
+    operation_dispatch: WorkerOperationDispatch<'_, Request>,
+) -> Result<DispatchStream, WorkerDispatchError>
+where
+    C: ClientHandle + ?Sized,
+    Request: Serialize + Send,
+{
+    let labels = operation_dispatch.labels;
+    let payload = serde_json::to_value(operation_dispatch.payload).map_err(|err| {
+        WorkerDispatchError::PayloadEncode {
+            message: format!("{}: {err}", labels.payload_encode),
+        }
+    })?;
     let request = OperationRequest {
         operation: operation_dispatch.operation,
         lease_id: operation_dispatch.lease_id,
@@ -285,17 +316,13 @@ where
         heartbeat_deadline_ms: operation_dispatch.heartbeat_deadline_ms,
         progress_idle_deadline_ms: operation_dispatch.progress_idle_deadline_ms,
     };
-    let dispatch = client
+    client
         .dispatch(credentials, operation_dispatch.idempotency_key, request)
         .await
-        .map_err(|err| VoomError::WorkerCrash(format!("{}: {err}", labels.dispatch_failed)))?;
-    consume_operation_stream(
-        dispatch,
-        operation_dispatch.progress_idle_deadline_ms,
-        labels,
-        progress,
-    )
-    .await
+        .map_err(|source| WorkerDispatchError::DispatchFailed {
+            message: format!("{}: {source}", labels.dispatch_failed),
+            source,
+        })
 }
 
 pub(crate) fn bundled_worker_command_from<F>(
@@ -469,6 +496,13 @@ fn worker_stream_error_to_voom_error(err: WorkerStreamError) -> VoomError {
             message,
         } => worker_terminal_error(class, code, message),
         WorkerStreamError::ProgressHandler { source } => source,
+    }
+}
+
+fn worker_dispatch_error_to_voom_error(err: WorkerDispatchError) -> VoomError {
+    match err {
+        WorkerDispatchError::PayloadEncode { message } => VoomError::Internal(message),
+        WorkerDispatchError::DispatchFailed { message, .. } => VoomError::WorkerCrash(message),
     }
 }
 

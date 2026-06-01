@@ -159,9 +159,32 @@ fn dispatch_setup_protocol_failures_are_worker_crashes() {
         "response read: unexpected end of file",
         "response decode: expected value at line 1 column 1",
     ] {
-        let err = map_dispatch_protocol_error(&ProtocolError::MalformedFrame {
+        let protocol_error = ProtocolError::MalformedFrame {
             detail: detail.to_owned(),
-        });
+        };
+        let err = map_dispatch_protocol_error_message(
+            &protocol_error,
+            format!("worker dispatch failed: {protocol_error}"),
+        );
+
+        assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+        assert_eq!(err.error_code(), ErrorCode::WorkerCrash);
+    }
+}
+
+#[test]
+fn dispatch_backpressure_protocol_failures_are_worker_crashes() {
+    for protocol_error in [
+        ProtocolError::DuplicateIdempotencyKey {
+            key: "probe-idempotency".to_owned(),
+            original_status: "active".to_owned(),
+        },
+        ProtocolError::ServiceAtCapacity,
+    ] {
+        let err = map_dispatch_protocol_error_message(
+            &protocol_error,
+            format!("worker dispatch failed: {protocol_error}"),
+        );
 
         assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
         assert_eq!(err.error_code(), ErrorCode::WorkerCrash);

@@ -4,19 +4,19 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use tokio::time::timeout;
 use voom_core::{ErrorCode, FailureClass, WorkerId};
 #[cfg(test)]
 use voom_worker_protocol::HttpClient;
 use voom_worker_protocol::{
-    ClientHandle, NdjsonOutcome, OperationKind, OperationRequest, ProbeFileRequest,
-    ProbeFileResult, ProgressFrame, ProtocolError, WorkerCredentials,
+    ClientHandle, OperationKind, ProbeFileRequest, ProbeFileResult, ProtocolError,
+    WorkerCredentials,
 };
 
 pub use crate::worker_process::WorkerCommand;
 use crate::worker_process::{
-    self, BundledWorkerProcess as WorkerProcess, bundled_worker_command_from, fresh_lease_id,
-    random_hex_128,
+    self, BundledWorkerProcess as WorkerProcess, NoopWorkerProgressHandler, WorkerDispatchError,
+    WorkerOperationDispatch, WorkerStreamError, WorkerStreamLabels, bundled_worker_command_from,
+    consume_worker_stream, dispatch_worker_operation_with_client, fresh_lease_id, random_hex_128,
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -198,79 +198,32 @@ where
     C: ClientHandle + ?Sized,
 {
     let lease_id = fresh_lease_id();
-    let payload = serde_json::to_value(probe).map_err(|err| {
-        ScanWorkerError::malformed_worker_result(format!("probe_file payload encode: {err}"))
-    })?;
-    let request = OperationRequest {
-        operation: OperationKind::ProbeFile,
-        lease_id,
-        payload,
-        heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
-        progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
-    };
     let idempotency_key = random_hex_128();
-    let dispatch = client
-        .dispatch(credentials, &idempotency_key, request)
-        .await
-        .map_err(|err| map_dispatch_protocol_error(&err))?;
-    consume_probe_file_stream(
-        dispatch,
-        Duration::from_millis(u64::from(DISPATCH_IDLE_DEADLINE_MS)),
+    let labels = probe_file_stream_labels();
+    let dispatch = dispatch_worker_operation_with_client(
+        client,
+        credentials,
+        WorkerOperationDispatch {
+            idempotency_key: &idempotency_key,
+            operation: OperationKind::ProbeFile,
+            lease_id,
+            payload: probe,
+            heartbeat_deadline_ms: HEARTBEAT_DEADLINE_MS,
+            progress_idle_deadline_ms: DISPATCH_IDLE_DEADLINE_MS,
+            labels,
+        },
     )
     .await
-}
-
-async fn consume_probe_file_stream(
-    mut dispatch: voom_worker_protocol::DispatchStream,
-    idle_timeout: Duration,
-) -> Result<ProbeFileResult, ScanWorkerError> {
-    loop {
-        let outcome = timeout(idle_timeout, dispatch.frames.next_frame())
-            .await
-            .map_err(|_| {
-                ScanWorkerError::progress_timeout(format!(
-                    "worker progress idle timeout after {idle_timeout:?}"
-                ))
-            })?
-            .map_err(|err| {
-                ScanWorkerError::malformed_worker_result(format!(
-                    "worker progress stream protocol error: {err}"
-                ))
-            })?;
-        match outcome {
-            NdjsonOutcome::Frame(ProgressFrame::Progress { .. }) => {}
-            NdjsonOutcome::Frame(_) => {
-                return Err(ScanWorkerError::malformed_worker_result(
-                    "worker sent terminal frame as non-terminal progress frame",
-                ));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Result { payload, .. }) => {
-                return serde_json::from_value::<ProbeFileResult>(payload).map_err(|err| {
-                    ScanWorkerError::malformed_worker_result(format!(
-                        "probe_file result decode: {err}"
-                    ))
-                });
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Error {
-                class,
-                code,
-                message,
-                ..
-            }) => {
-                return Err(ScanWorkerError::terminal_error(class, code, message));
-            }
-            NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
-                return Err(ScanWorkerError::malformed_worker_result(
-                    "progress frame cannot terminate worker stream",
-                ));
-            }
-            NdjsonOutcome::StreamEnd { .. } => {
-                return Err(ScanWorkerError::worker_crash(
-                    "worker stream ended before terminal frame",
-                ));
-            }
-        }
-    }
+    .map_err(map_probe_dispatch_error)?;
+    let mut progress = NoopWorkerProgressHandler;
+    consume_worker_stream(
+        dispatch,
+        Duration::from_millis(u64::from(DISPATCH_IDLE_DEADLINE_MS)),
+        labels,
+        &mut progress,
+    )
+    .await
+    .map_err(map_probe_stream_error)
 }
 
 fn bundled_ffprobe_command() -> WorkerCommand {
@@ -299,21 +252,71 @@ fn bundled_ffprobe_command_from(
     )
 }
 
-fn map_dispatch_protocol_error(err: &ProtocolError) -> ScanWorkerError {
+fn map_dispatch_protocol_error_message(err: &ProtocolError, message: String) -> ScanWorkerError {
     match err {
         ProtocolError::MalformedFrame { detail }
             if detail.contains("missing response/body separator")
                 || detail.contains("response read")
                 || detail.starts_with("response decode:") =>
         {
-            ScanWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
+            ScanWorkerError::worker_crash(message)
         }
         ProtocolError::InvalidPayload { detail }
             if detail.starts_with("request:") || detail.starts_with("body:") =>
         {
-            ScanWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
+            ScanWorkerError::worker_crash(message)
         }
-        _ => ScanWorkerError::malformed_worker_result(format!("worker dispatch failed: {err}")),
+        ProtocolError::DuplicateIdempotencyKey { .. } | ProtocolError::ServiceAtCapacity => {
+            ScanWorkerError::worker_crash(message)
+        }
+        _ => ScanWorkerError::malformed_worker_result(message),
+    }
+}
+
+fn map_probe_dispatch_error(err: WorkerDispatchError) -> ScanWorkerError {
+    match err {
+        WorkerDispatchError::PayloadEncode { message } => {
+            ScanWorkerError::malformed_worker_result(message)
+        }
+        WorkerDispatchError::DispatchFailed { source, message } => {
+            map_dispatch_protocol_error_message(&source, message)
+        }
+    }
+}
+
+fn map_probe_stream_error(err: WorkerStreamError) -> ScanWorkerError {
+    match err {
+        WorkerStreamError::ProgressIdleTimeout { message } => {
+            ScanWorkerError::progress_timeout(message)
+        }
+        WorkerStreamError::StreamProtocol { message }
+        | WorkerStreamError::TerminalFrameAsProgress { message }
+        | WorkerStreamError::ProgressFrameAsTerminal { message }
+        | WorkerStreamError::ResultDecode { message } => {
+            ScanWorkerError::malformed_worker_result(message)
+        }
+        WorkerStreamError::StreamEnded { message } => ScanWorkerError::worker_crash(message),
+        WorkerStreamError::Terminal {
+            class,
+            code,
+            message,
+        } => ScanWorkerError::terminal_error(class, code, message),
+        WorkerStreamError::ProgressHandler { source } => ScanWorkerError::malformed_worker_result(
+            format!("probe_file progress handler failed: {source}"),
+        ),
+    }
+}
+
+const fn probe_file_stream_labels() -> WorkerStreamLabels {
+    WorkerStreamLabels {
+        payload_encode: "probe_file payload encode",
+        dispatch_failed: "probe_file dispatch failed",
+        progress_idle_timeout: "probe_file worker progress idle timeout",
+        stream_protocol: "worker progress stream protocol error",
+        terminal_frame_as_progress: "worker sent terminal frame as non-terminal progress frame",
+        progress_terminal: "progress frame cannot terminate worker stream",
+        stream_ended: "worker stream ended before terminal frame",
+        result_decode: "probe_file result decode",
     }
 }
 
