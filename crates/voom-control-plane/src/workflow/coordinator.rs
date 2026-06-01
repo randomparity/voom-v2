@@ -321,8 +321,260 @@ struct PhaseBarrierRunInputs {
     branch_ids: Vec<(FileVersionId, String)>,
 }
 
+/// Everything the phase-loop runner owns once an in-job run starts.
+struct PhaseLoopInputs {
+    job_id: JobId,
+    policy: voom_policy::CompiledPolicy,
+    context: PlanningContext,
+    base_draft: PolicyInputSetDraft,
+    files: Vec<PhaseFile>,
+    seed_file_phases: Vec<FilePhaseSummary>,
+    options: ComplianceExecutionOptions,
+    runtimes: WorkerRuntimeRegistry,
+}
+
+/// Files split by whether this phase should advance them or preserve them until
+/// their resume phase.
+struct PhaseEntry {
+    entering: Vec<PhaseFile>,
+    passthrough: Vec<PhaseFile>,
+}
+
+/// Planner output plus the per-file dispositions the dispatcher and persistence
+/// code both need for a phase.
+struct PlannedPhase {
+    plan: ExecutionPlan,
+    report: voom_plan::ComplianceReport,
+    dispositions: Vec<Disposition>,
+}
+
 type CoordinatorFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CoordinatorOutcome, CoordinatorError>> + Send + 'a>>;
+
+/// State for the phase-barrier loop. The loop has to coordinate planning,
+/// dispatch, durable summaries, and resume handoff; keeping those transitions
+/// named here prevents the top-level coordinator from becoming a mixed
+/// responsibility control flow block.
+struct PhaseLoop<'a> {
+    control_plane: &'a ControlPlane,
+    job_id: JobId,
+    policy: voom_policy::CompiledPolicy,
+    context: PlanningContext,
+    base_draft: PolicyInputSetDraft,
+    executor: WorkflowExecutor,
+    files: Vec<PhaseFile>,
+    phases: Vec<PhaseSummary>,
+    file_phases: Vec<FilePhaseSummary>,
+    last_run: Option<crate::workflow::WorkflowRunSummary>,
+}
+
+impl<'a> PhaseLoop<'a> {
+    fn new(control_plane: &'a ControlPlane, inputs: PhaseLoopInputs) -> Self {
+        let executor = WorkflowExecutor::with_options(
+            control_plane.clone(),
+            inputs.runtimes,
+            WorkflowExecutorOptions::from(inputs.options),
+        );
+        Self {
+            control_plane,
+            job_id: inputs.job_id,
+            policy: inputs.policy,
+            context: inputs.context,
+            base_draft: inputs.base_draft,
+            executor,
+            files: inputs.files,
+            phases: Vec::new(),
+            file_phases: inputs.seed_file_phases,
+            last_run: None,
+        }
+    }
+
+    async fn run(mut self) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let phase_order = self.policy.phase_order.clone();
+        for (index, phase_name) in phase_order.iter().enumerate() {
+            if self.files.is_empty() {
+                break;
+            }
+            let phase_ordinal = phase_ordinal(index)?;
+            let Some(mut entry) = self.enter_phase(phase_ordinal) else {
+                continue;
+            };
+            let planned = self.plan_phase_for_files(phase_name, &entry.entering)?;
+            if let Err(failure) = self.dispatch_phase_work(&planned).await {
+                return self
+                    .persist_failed_phase(
+                        phase_ordinal,
+                        &entry.entering,
+                        &planned.dispositions,
+                        failure,
+                    )
+                    .await;
+            }
+            self.persist_phase_outcome(
+                phase_ordinal,
+                phase_name,
+                &planned.dispositions,
+                &mut entry,
+            )
+            .await?;
+            self.recombine_survivors(entry);
+        }
+
+        self.finish().await
+    }
+
+    fn enter_phase(&mut self, phase_ordinal: u32) -> Option<PhaseEntry> {
+        // Files below their resume ordinal pass through untouched and rejoin
+        // once the loop reaches their own phase.
+        let (entering, passthrough): (Vec<PhaseFile>, Vec<PhaseFile>) =
+            std::mem::take(&mut self.files)
+                .into_iter()
+                .partition(|file| file.resume_ordinal <= phase_ordinal);
+        if entering.is_empty() {
+            self.files = passthrough;
+            None
+        } else {
+            Some(PhaseEntry {
+                entering,
+                passthrough,
+            })
+        }
+    }
+
+    fn plan_phase_for_files(
+        &self,
+        phase_name: &str,
+        entering: &[PhaseFile],
+    ) -> Result<PlannedPhase, VoomError> {
+        let draft = phase_draft(&self.base_draft, entering);
+        let plan = voom_plan::plan_phase(
+            PlanningRequest {
+                policy: self.policy.clone(),
+                input: draft,
+                context: self.context.clone(),
+            },
+            phase_name,
+        )
+        .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
+        let report = voom_plan::generate_compliance_report(&plan)
+            .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
+        let dispositions = classify_phase(entering, &plan);
+        Ok(PlannedPhase {
+            plan,
+            report,
+            dispositions,
+        })
+    }
+
+    async fn dispatch_phase_work(
+        &mut self,
+        planned: &PlannedPhase,
+    ) -> Result<(), PhaseDispatchFailure> {
+        let run = self
+            .control_plane
+            .dispatch_phase(
+                &self.executor,
+                self.job_id,
+                &planned.plan,
+                &planned.report,
+                &planned.dispositions,
+            )
+            .await?;
+        if let Some(run) = run {
+            self.last_run = Some(run);
+        }
+        Ok(())
+    }
+
+    async fn persist_phase_outcome(
+        &mut self,
+        phase_ordinal: u32,
+        phase_name: &str,
+        dispositions: &[Disposition],
+        entry: &mut PhaseEntry,
+    ) -> Result<(), VoomError> {
+        let (rows, refreshed) = self
+            .control_plane
+            .finalize_phase(
+                self.job_id,
+                phase_ordinal,
+                &mut entry.entering,
+                dispositions,
+            )
+            .await?;
+        let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
+        self.file_phases.extend(rows);
+        let report = regenerate_phase_report(
+            &self.policy,
+            &self.context,
+            &self.base_draft,
+            phase_name,
+            &refreshed,
+        )?;
+        let phase_row = self
+            .control_plane
+            .workflow_summaries
+            .upsert_phase_summary(
+                NewPhaseSummary {
+                    job_id: self.job_id,
+                    phase_ordinal,
+                    phase_name: phase_name.to_owned(),
+                    report: Some(report),
+                    outcome,
+                },
+                self.control_plane.clock().now(),
+            )
+            .await?;
+        self.phases.push(phase_row);
+        Ok(())
+    }
+
+    async fn persist_failed_phase(
+        &mut self,
+        phase_ordinal: u32,
+        entering: &[PhaseFile],
+        dispositions: &[Disposition],
+        failure: PhaseDispatchFailure,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let phases = std::mem::take(&mut self.phases);
+        let file_phases = std::mem::take(&mut self.file_phases);
+        self.control_plane
+            .finalize_failed_phase(
+                self.job_id,
+                phase_ordinal,
+                entering,
+                dispositions,
+                failure,
+                phases,
+                file_phases,
+            )
+            .await
+    }
+
+    fn recombine_survivors(&mut self, entry: PhaseEntry) {
+        self.files = entry.entering;
+        self.files.extend(entry.passthrough);
+    }
+
+    async fn finish(self) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let Self {
+            control_plane,
+            job_id,
+            phases,
+            file_phases,
+            last_run,
+            ..
+        } = self;
+        control_plane
+            .finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
+            .await
+            .map_err(CoordinatorError::from)
+    }
+}
+
+fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
+    u32::try_from(index).map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))
+}
 
 impl ControlPlane {
     /// Drive the existing workflow executor one phase at a time across every
@@ -456,9 +708,16 @@ impl ControlPlane {
         let (files, backfilled) = self
             .reconcile_resume(prior_job_id, job_id, files, phase_count)
             .await?;
-        self.drive_phase_loop(
-            job_id, &policy, &context, base_draft, files, backfilled, options, runtimes,
-        )
+        self.drive_phase_loop(PhaseLoopInputs {
+            job_id,
+            policy,
+            context,
+            base_draft,
+            files,
+            seed_file_phases: backfilled,
+            options,
+            runtimes,
+        })
         .await
     }
 
@@ -600,16 +859,16 @@ impl ControlPlane {
             return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
         }
         let files = self.initial_phase_files(&branch_ids).await?;
-        self.drive_phase_loop(
+        self.drive_phase_loop(PhaseLoopInputs {
             job_id,
-            &policy,
-            &context,
+            policy,
+            context,
             base_draft,
             files,
-            Vec::new(),
+            seed_file_phases: Vec::new(),
             options,
             runtimes,
-        )
+        })
         .await
     }
 
@@ -618,118 +877,16 @@ impl ControlPlane {
     /// pre-loads rows a resume backfilled before the loop. Files below their
     /// `resume_ordinal` pass through a phase untouched and rejoin at their own
     /// resume phase (#165).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one owned job's run state plus the pre-seeded resume rows"
-    )]
     async fn drive_phase_loop(
         &self,
-        job_id: JobId,
-        policy: &voom_policy::CompiledPolicy,
-        context: &PlanningContext,
-        base_draft: PolicyInputSetDraft,
-        mut files: Vec<PhaseFile>,
-        seed_file_phases: Vec<FilePhaseSummary>,
-        options: ComplianceExecutionOptions,
-        runtimes: WorkerRuntimeRegistry,
+        inputs: PhaseLoopInputs,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        if files.is_empty() || policy.phase_order.is_empty() {
+        if inputs.files.is_empty() || inputs.policy.phase_order.is_empty() {
             return Ok(self
-                .finalize_zero_phase_run(job_id, seed_file_phases)
+                .finalize_zero_phase_run(inputs.job_id, inputs.seed_file_phases)
                 .await?);
         }
-        let executor = WorkflowExecutor::with_options(
-            self.clone(),
-            runtimes,
-            WorkflowExecutorOptions::from(options),
-        );
-
-        let mut phases = Vec::new();
-        let mut file_phases = seed_file_phases;
-        let mut last_run = None;
-        for (index, phase_name) in policy.phase_order.iter().enumerate() {
-            if files.is_empty() {
-                break;
-            }
-            let phase_ordinal = u32::try_from(index)
-                .map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))?;
-            // Only files that have reached their resume phase enter this phase;
-            // the rest pass through untouched and rejoin at their own ordinal.
-            let (mut entering, passthrough): (Vec<PhaseFile>, Vec<PhaseFile>) =
-                std::mem::take(&mut files)
-                    .into_iter()
-                    .partition(|file| file.resume_ordinal <= phase_ordinal);
-            if entering.is_empty() {
-                files = passthrough;
-                continue;
-            }
-            let draft = phase_draft(&base_draft, &entering);
-            let plan = voom_plan::plan_phase(
-                PlanningRequest {
-                    policy: policy.clone(),
-                    input: draft,
-                    context: context.clone(),
-                },
-                phase_name,
-            )
-            .map_err(voom_plan::PlanGenerationError::into_voom_error)?;
-            let report = voom_plan::generate_compliance_report(&plan)
-                .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
-            let dispositions = classify_phase(&entering, &plan);
-
-            let run = match self
-                .dispatch_phase(&executor, job_id, &plan, &report, &dispositions)
-                .await
-            {
-                Ok(run) => run,
-                Err(failure) => {
-                    return self
-                        .finalize_failed_phase(
-                            job_id,
-                            phase_ordinal,
-                            &entering,
-                            &dispositions,
-                            failure,
-                            phases,
-                            file_phases,
-                        )
-                        .await;
-                }
-            };
-            if run.is_some() {
-                last_run = run;
-            }
-            let (rows, refreshed) = self
-                .finalize_phase(job_id, phase_ordinal, &mut entering, &dispositions)
-                .await?;
-            let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
-            file_phases.extend(rows);
-            let report =
-                regenerate_phase_report(policy, context, &base_draft, phase_name, &refreshed)?;
-            let phase_row = self
-                .workflow_summaries
-                .upsert_phase_summary(
-                    NewPhaseSummary {
-                        job_id,
-                        phase_ordinal,
-                        phase_name: phase_name.clone(),
-                        report: Some(report),
-                        outcome,
-                    },
-                    self.clock().now(),
-                )
-                .await?;
-            phases.push(phase_row);
-
-            // Recombine the phase's survivors with the files still waiting for
-            // their resume phase.
-            files = entering;
-            files.extend(passthrough);
-        }
-
-        self.finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
-            .await
-            .map_err(CoordinatorError::from)
+        PhaseLoop::new(self, inputs).run().await
     }
 
     /// Succeed the owned job and write its job-grain summary, returning the
