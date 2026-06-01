@@ -40,14 +40,13 @@ pub enum AuthorizeOutcome {
     },
 }
 
-/// Phase B of the destructive-commit gate — sub-slice 6 of the M3
-/// Phase 2 plan. Reads the `commit_intents` row in `state = 'pending'`,
-/// recomputes the affected-scope closure against current DB state,
-/// runs the three Phase B trip-wires (closure drift, fresh blocking
-/// lease, accepted-evidence drift), snapshots per-member epochs into
-/// the `target_row_epochs` JSON column, and transitions the row to
-/// `state = 'authorized'`. All work runs inside one IMMEDIATE tx —
-/// Phase B aborts in-tx (no two-tx pattern; sequencing doc §5.2).
+/// Phase B of the destructive-commit gate. Reads the `commit_intents`
+/// row in `state = 'pending'`, recomputes the affected-scope closure
+/// against current DB state, runs the three Phase B trip-wires (closure
+/// drift, fresh blocking lease, accepted-evidence drift), snapshots
+/// per-member epochs into the `target_row_epochs` JSON column, and
+/// transitions the row to `state = 'authorized'`. All work runs inside
+/// one IMMEDIATE tx; Phase B aborts in-tx.
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
@@ -65,8 +64,8 @@ pub enum AuthorizeOutcome {
 /// The returned `CommitPermit` carries the same `commit_id`, the
 /// authorized closure, the lease IDs evaluated against it, the
 /// evidence revalidation results, and the row's post-update `epoch`.
-/// The per-member epoch snapshot is NOT carried on the permit — Phase C
-/// re-reads it from `commit_intents.target_row_epochs` (commit 7).
+/// The per-member epoch snapshot is NOT carried on the permit; Phase C
+/// re-reads it from `commit_intents.target_row_epochs`.
 ///
 /// # Errors
 ///
@@ -436,10 +435,9 @@ impl PhaseBAbort {
 /// `abort_reason`, emit the matching event, and return the
 /// `CommitGateResult` the caller surfaces to its consumer. Does NOT
 /// commit — the caller commits the tx once. Phase B's in-tx abort
-/// pattern is deliberately distinct from Phase A's two-tx helper
-/// (sequencing doc §5.2: the two-tx pattern is reserved for Phase A
-/// gate-check aborts that fire BEFORE a `pending` row would have
-/// landed).
+/// pattern is deliberately distinct from Phase A's two-tx helper: the
+/// two-tx pattern is reserved for Phase A gate-check aborts that fire
+/// BEFORE a `pending` row would have landed.
 async fn abort_pending_intent_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_repo: &dyn EventRepo,
@@ -556,7 +554,7 @@ async fn emit_phase_b_abort_event(
 /// gate's IMMEDIATE tx. Returns the `[kind, row_id, epoch]` triples
 /// Phase B writes atomically to `commit_intents.target_row_epochs`.
 /// One SELECT per granularity; the granularity-tagged result is the
-/// authoritative source Phase C re-reads (commit 7).
+/// authoritative source Phase C re-reads.
 async fn snapshot_target_row_epochs_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     closure: &AffectedScopeClosure,

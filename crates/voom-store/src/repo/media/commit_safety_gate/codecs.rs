@@ -154,8 +154,8 @@ pub(super) fn encode_evidence_ids(ids: &[EvidenceId]) -> Result<String, VoomErro
 /// `commit_intents.override_token` column. Uses the struct's derived
 /// serde — `actor` / `reason` are plain strings; `bypass: BTreeSet<BypassKind>`
 /// serializes as an ordered JSON array of `snake_case` tags
-/// (`["closure_incomplete"]` in Sprint 1). The decoder
-/// (`decode_force_path_token`) is the inverse.
+/// such as `["closure_incomplete"]`. The decoder (`decode_force_path_token`)
+/// is the inverse.
 pub(super) fn encode_force_path_token(token: &ForcePathToken) -> Result<String, VoomError> {
     serde_json::to_string(token)
         .map_err(|e| VoomError::Internal(format!("encode override_token: {e}")))
@@ -163,15 +163,14 @@ pub(super) fn encode_force_path_token(token: &ForcePathToken) -> Result<String, 
 
 /// Inverse of `encode_force_path_token`. The
 /// `commit_intents.override_token` column is written exclusively by
-/// `prepare_destructive_commit` (commit 10) and never mutated; a parse
-/// failure is `VoomError::Database` because that's the on-disk
-/// corruption case.
+/// `prepare_destructive_commit` and never mutated; a parse failure is
+/// `VoomError::Database` because that's the on-disk corruption case.
 pub(super) fn decode_force_path_token(json: &str) -> Result<ForcePathToken, VoomError> {
     serde_json::from_str(json)
         .map_err(|e| VoomError::Database(format!("decode override_token: {e}")))
 }
 
-// ----- inverse wire-format decoders (commit 6) ------------------------------
+// ----- inverse wire-format decoders -----------------------------------------
 //
 // Phase B reads back the JSON columns that Phase A wrote (`target`,
 // `closure_initial`) so it can re-emit closure-grew payloads and surface
@@ -287,14 +286,13 @@ fn closure_from_wire(w: AffectedScopeClosureWire) -> AffectedScopeClosure {
     }
 }
 
-// ----- per-member epoch snapshot wire format (commit 6) ---------------------
+// ----- per-member epoch snapshot wire format --------------------------------
 //
 // `commit_intents.target_row_epochs` is a JSON array of [kind, row_id,
-// epoch] triples (sprint plan §3 "Per-member epoch guard"). Phase B
-// writes it atomically with `state='authorized'`; Phase C re-reads it
-// (commit 7) and uses each `epoch` as the `expected_epoch` argument to
-// the matching `IdentityRepo` destructive mutation. `kind` round-trips
-// through `TargetMemberKind`'s `Serialize/Deserialize` impl
+// epoch] triples. Phase B writes it atomically with `state='authorized'`;
+// Phase C re-reads it and uses each `epoch` as the `expected_epoch`
+// argument to the matching `IdentityRepo` destructive mutation. `kind`
+// round-trips through `TargetMemberKind`'s `Serialize/Deserialize` impl
 // (`#[serde(rename_all = "snake_case")]`).
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

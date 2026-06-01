@@ -124,8 +124,8 @@ struct CommitIntentRowBody<'a> {
     started_at: OffsetDateTime,
 }
 
-/// Phase A gate-check abort using the two-tx pattern (sequencing doc
-/// §5.2). The two-tx pattern is **only** used for Phase A gate-check
+/// Phase A gate-check abort using the two-transaction pattern. The
+/// two-transaction pattern is **only** used for Phase A gate-check
 /// aborts (raised before the `commit_intents` row would land in
 /// `'pending'`). Phase B aborts, Phase C trip-wire aborts, and the
 /// dedicated `abort_destructive_commit` entry point all commit the
@@ -268,20 +268,19 @@ pub(super) fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
 
 // ----- Phase A main entry point --------------------------------------------
 
-/// Phase A of the destructive-commit gate — sub-slice 4 of the M3 Phase 2
-/// plan. Computes the affected-scope closure, evaluates the three Phase A
-/// gate checks (blocking use-lease, accepted-evidence drift,
-/// closure-walk reachability), and persists either a `state = 'pending'`
-/// `commit_intents` row (success) or a `state = 'aborted'` row (gate
-/// check tripped) along with the matching event.
+/// Phase A of the destructive-commit gate. Computes the affected-scope
+/// closure, evaluates the three Phase A gate checks (blocking use-lease,
+/// accepted-evidence drift, closure-walk reachability), and persists
+/// either a `state = 'pending'` `commit_intents` row (success) or a
+/// `state = 'aborted'` row (gate check tripped) along with the matching
+/// event.
 ///
 /// The success path runs inside one IMMEDIATE transaction:
 /// closure-walk → lease check → evidence revalidation → INSERT pending
 /// row → expand `commit_intent_scope_members` → emit
 /// `commit.intent_recorded` → COMMIT. The abort paths rollback the
 /// gate's IMMEDIATE tx and use `phase_a_gate_abort_with_event` to land
-/// the aborted row and event in two sequential transactions (sequencing
-/// doc §5.2).
+/// the aborted row and event in two sequential transactions.
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
@@ -289,8 +288,8 @@ pub(super) fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
 /// gate's tx handle, preserving the gate snapshot and avoiding nested
 /// connection waits.
 ///
-/// `input.override_token` is the sanctioned force-path bypass (commit
-/// 10). `None` (the default) routes any `AliasResolutionError::Unreachable`
+/// `input.override_token` is the sanctioned force-path bypass. `None`
+/// (the default) routes any `AliasResolutionError::Unreachable`
 /// from the closure walker straight to `BlockedByClosureIncomplete`.
 /// `Some(token)` after `validate_bypass` accepts the token funnels the
 /// matching `Unreachable` into the bypass branch (the closure walk
@@ -452,7 +451,7 @@ struct GateWalkAbort {
 /// failure the caller cannot reason about. `bypass` carries the
 /// caller's sanctioned `BypassKind` set — `ClosureIncomplete` here
 /// silences the `Unreachable` abort path and lets the walk proceed
-/// with the DB-internal closure (commit 10).
+/// with the DB-internal closure.
 async fn run_phase_a_gate_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
@@ -602,7 +601,7 @@ async fn insert_pending_intent(
 /// `commit_intents.override_token` column write. Authorize does not
 /// re-emit — the audit signal is single-shot per commit. The payload
 /// carries every `BypassKind` bit the operator supplied as
-/// `snake_case` strings; Sprint 1 ships exactly `"closure_incomplete"`.
+/// `snake_case` strings.
 async fn emit_forced_override(
     event_repo: &dyn EventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

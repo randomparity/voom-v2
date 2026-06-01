@@ -17,10 +17,9 @@ pub enum AbortOutcome {
     Aborted { commit_id: CommitId, epoch: u64 },
 }
 
-/// Caller-initiated abort of a `pending` `commit_intents` row — sub-slice
-/// 8 of the M3 Phase 2 plan. The only sanctioned entry point for the
-/// "operator changed their mind between `prepare` and `authorize`"
-/// transition. One IMMEDIATE tx:
+/// Caller-initiated abort of a `pending` `commit_intents` row. This is
+/// the only sanctioned entry point for the "operator changed their mind
+/// between `prepare` and `authorize`" transition. One IMMEDIATE tx:
 /// 1. Read the `commit_intents` row by `commit_id`. Require
 ///    `state = 'pending'`. Missing, `authorized`, or any terminal state
 ///    surfaces as `VoomError::Conflict` — `authorized` rows are not
@@ -33,7 +32,7 @@ pub enum AbortOutcome {
 /// 3. Emit `commit.aborted_pre_mutation` with `prior_state = 'pending'`
 ///    and the reason tag. (The event kind is shared with the
 ///    `NotPerformed` branch of `finalize_destructive_commit`, which
-///    emits with `prior_state = 'authorized'` — commit 7.)
+///    emits with `prior_state = 'authorized'`.)
 ///
 /// `reason` must be one of the pre-mutation `AbortReason` variants:
 /// `OperatorCancel`, `MutationFailed`, or `Other(_)`. Gate-driven
@@ -120,8 +119,7 @@ fn caller_abort_reason_str(reason: &AbortReason) -> Result<&'static str, VoomErr
     }
 }
 
-/// Read-only listing over in-flight `commit_intents` rows — sub-slice 9
-/// of the M3 Phase 2 plan. Returns every row in
+/// Read-only listing over in-flight `commit_intents` rows. Returns every row in
 /// `state IN ('pending', 'authorized')`, ordered by `started_at ASC`
 /// with `id ASC` as a tie-breaker for non-unique `started_at`. Terminal
 /// states (`completed`, `aborted`, `recovery_required`) are excluded.

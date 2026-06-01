@@ -12,7 +12,7 @@ use super::{
 /// guard regardless, but Phase A surfaces it eagerly as a closure-walk
 /// failure so the operator does not wait for the round trip.
 ///
-/// `bypass` is the active force-path bypass set (commit 10). When it
+/// `bypass` is the active force-path bypass set. When it
 /// contains `BypassKind::ClosureIncomplete`, an
 /// `AliasResolutionError::Unreachable` from the external resolver is
 /// swallowed: the walk proceeds with whatever DB-internal aliases were
@@ -76,9 +76,8 @@ pub(super) async fn build_closure(
         .into_iter()
         .collect();
 
-    // External alias enumeration through the trait — Sprint 1 ships
-    // only `FailingAliasResolver`, which returns `Unreachable` to drive
-    // the closure-incomplete abort branch in tests.
+    // External alias enumeration through the trait. Test resolvers can
+    // return `Unreachable` to drive the closure-incomplete abort branch.
     let mut alias_warnings: Vec<ClosureWarning> = Vec::new();
     let mut external_locations: BTreeSet<FileLocationId> = BTreeSet::new();
     match alias_resolver.aliases_for_version(version.id).await {
@@ -145,7 +144,7 @@ pub(super) async fn build_closure(
     file_assets.insert(version.file_asset_id);
 
     // Warnings stay empty unless the force-path bypass swallowed an
-    // `Unreachable` (commit 10) — in which case the dropped resolver
+    // `Unreachable`, in which case the dropped resolver
     // message rides along on the closure as a non-fatal annotation.
     // Invariant: warnings do NOT contribute to closure drift
     // (`id_member_delta` ignores them), so the bypass-introduced
@@ -216,9 +215,9 @@ async fn blocking_lease_rows_in_tx(
 
     // SQLite `json_each` produces one row per element of the bound JSON
     // array; the UNION ALL across the four scope columns is the
-    // four-granularity overlap check from §9.3. `release_reason IS NULL`
+    // four-granularity overlap check. `release_reason IS NULL`
     // restricts to live leases; `blocking_mode = 'blocking'` honors the
-    // arch-spec distinction between blocking and advisory.
+    // durable distinction between blocking and advisory.
     let rows = sqlx::query(
         "SELECT id, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id \
          FROM asset_use_leases \
@@ -305,7 +304,7 @@ pub(super) async fn revalidate_evidence_in_tx(
         // `IdentityEvidenceTarget` exists in `identity.rs` and is
         // imported here so the round-trip parsing of the row's
         // `target_type` is the single source of truth; the variant
-        // itself is unused in Sprint 1 evidence revalidation.
+        // itself is not otherwise needed in evidence revalidation.
         let _ = std::marker::PhantomData::<IdentityEvidenceTarget>;
     }
     Ok(out)
@@ -332,9 +331,8 @@ async fn first_evidence_pin_drift(
         }
     }
     // Pinned hashes — compare against current `file_versions.content_hash`.
-    // The pin shape ships as `[ [version_id, hash], ... ]` per sprint
-    // §8.7; rows where the stored hash no longer matches drive the
-    // `PinnedHashDiffers` exit.
+    // The pin shape is `[ [version_id, hash], ... ]`; rows where the
+    // stored hash no longer matches drive the `PinnedHashDiffers` exit.
     if let Some(hashes_json) = &evidence.pinned_hashes {
         for (vid, expected) in pinned_hash_pairs(hashes_json, "pinned_hashes")? {
             if let Some(current) = version_content_hash(tx, FileVersionId(vid)).await? {

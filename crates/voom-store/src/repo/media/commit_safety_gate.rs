@@ -1,4 +1,4 @@
-//! Commit safety gate public surface — Sprint 1 §9.3.
+//! Commit safety gate public surface.
 //!
 //! Shared types and transaction helpers for the three-phase destructive
 //! commit gate. Phase-specific control flow lives in sibling modules.
@@ -46,19 +46,15 @@ pub struct FileLocationProposal {
 }
 
 /// The destructive operation a commit-safety-gate caller is asking
-/// the gate to authorize. Sprint 1 ships three variants —
-/// `DeleteFileLocation`, `ReplaceFileLocation`, `MoveFileLocation` —
-/// all operating on `file_locations` rows. Targets that mutate
-/// `file_versions` or `asset_bundles` are deferred to Sprint 5+
-/// because the schema and the cascade semantics needed to retire
-/// those rows safely are not yet defined:
-/// - `DeleteFileVersion`: retiring a version leaves live
-///   `FileLocation` rows pointing at it. The safe cascade —
-///   atomically retire every location under the version using the
-///   snapshotted epochs — needs its own design pass.
-/// - `ArchiveFileVersion`: `file_versions` schema (migration 0003)
-///   has no `archived_at` column.
-/// - `ArchiveBundle` / `DeleteBundle`: same schema-column gap.
+/// the gate to authorize. The current gate supports destructive
+/// `file_locations` operations only: delete, replace, and move.
+///
+/// `file_versions` and `asset_bundles` mutations are intentionally not
+/// represented here. Retiring a version would require atomically
+/// retiring every live location under it using snapshotted epochs, and
+/// archive-style targets need durable schema columns that do not exist
+/// yet. Keeping those targets out of the enum makes unsupported
+/// cascades unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitTarget {
     DeleteFileLocation(FileLocationId),
@@ -253,8 +249,9 @@ pub enum MutationOutcome {
     },
     /// The caller obtained a permit but decided not to mutate.
     /// `finalize` transitions the intent to `aborted` with
-    /// `abort_reason = OperatorCancel`. Only sanctioned
-    /// post-authorize termination path; see parent spec §9.3.2.
+    /// `abort_reason = OperatorCancel`. This is the only sanctioned
+    /// post-authorize termination path that does not perform the
+    /// filesystem mutation.
     NotPerformed,
 }
 
@@ -311,13 +308,11 @@ pub struct CommitIntent {
 /// finalize.
 ///
 /// Fields are module-private — only code inside `commit_safety_gate`
-/// (Phase B's `authorize_destructive_commit` in commit 6, plus the
-/// sibling tests under the `tests` child module) can fabricate or
-/// inspect them. External consumers reach state through the accessor
-/// methods. Phase B builds permits in-module via the struct literal;
-/// no crate-visible constructor is exposed, because exposing one
-/// would re-open the bypass path the module-private fields are there
-/// to close.
+/// can fabricate or inspect them. External consumers reach state
+/// through the accessor methods. Phase B builds permits in-module via
+/// the struct literal; no crate-visible constructor is exposed, because
+/// exposing one would re-open the bypass path the module-private fields
+/// are there to close.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitPermit {
     commit_id: CommitId,
@@ -376,7 +371,7 @@ pub struct CommitGateOutcome {
     pub result: CommitGateResult,
 }
 
-/// Disposition of a commit-safety-gate phase. Eight Sprint-1 variants.
+/// Disposition of a commit-safety-gate phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitGateResult {
     /// All three phases passed; durable identity mutation has landed.
@@ -434,7 +429,7 @@ pub enum CommitGateResult {
 }
 
 /// Input to `prepare_destructive_commit`. `override_token` carries the
-/// optional force-path bypass token (commit 10); `None` is the default
+/// optional force-path bypass token; `None` is the default
 /// gate-respecting path that aborts on any closure-walk
 /// `AliasResolutionError::Unreachable`. `Some(token)` after
 /// `validate_bypass` passes drives the closure-incomplete bypass branch
@@ -475,13 +470,12 @@ pub struct PendingCommitIntent {
     pub authorized_at: Option<OffsetDateTime>,
 }
 
-/// One bit in `ForcePathToken.bypass`. Sprint 1 ships exactly one
-/// kind: `ClosureIncomplete` — the rationale being that an offline
-/// filesystem mount can prevent the alias resolver from enumerating
-/// the full closure for a `FileVersion`, and an operator with
-/// out-of-band knowledge of the affected aliases may need to commit
-/// anyway. The bypass-validation pass (which rejects any other bit
-/// with `VoomError::Config(...)`) lives with the force-path entry point.
+/// One bit in `ForcePathToken.bypass`. `ClosureIncomplete` covers an
+/// offline external alias source that prevents the resolver from
+/// enumerating the full closure for a `FileVersion`. An operator with
+/// out-of-band knowledge of the affected aliases may use this bit to
+/// force the commit anyway. The bypass-validation pass lives with the
+/// force-path entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BypassKind {
@@ -502,17 +496,13 @@ pub struct ForcePathToken {
 }
 
 /// Validate a force-path token's bypass set before any state change.
-/// Sprint 1 ships exactly one sanctioned `BypassKind` variant
-/// (`ClosureIncomplete`); any other bit is rejected with
+/// `ClosureIncomplete` is the only sanctioned bypass kind; any other
+/// bit would be rejected with
 /// `VoomError::Config("force-path bypass not supported: <name>")`.
 ///
-/// The single-variant `BypassKind` enum makes "any other bit" currently
-/// unrepresentable at the type level, so this function is presently a
-/// no-op for every constructible token. It exists as the forward-compat
-/// gate: when Sprint 5+ adds new bypass kinds, the new variants flow
-/// through here and the validator decides which ones the gate accepts.
-/// Wiring it into `prepare_destructive_commit` ahead of the new variants
-/// (rather than alongside them) avoids a parallel review burden.
+/// The single-variant `BypassKind` enum makes any unsupported bit
+/// unrepresentable today. Keeping this check in the state-changing
+/// path makes the force-bypass invariant explicit at the gate boundary.
 ///
 /// # Errors
 ///
@@ -540,8 +530,8 @@ fn bypass_kind_str(k: BypassKind) -> &'static str {
 /// Error returned by an `AliasResolver` when it cannot enumerate the
 /// live `FileLocation`s under a supplied `FileVersion`. The two
 /// variants are deliberately distinct: `Unreachable` is a
-/// physical-world condition the gate's force-path bypass (commit 10)
-/// is designed to override; `Database` is our own storage layer
+/// physical-world condition the gate's force-path bypass is designed
+/// to override; `Database` is our own storage layer
 /// failing and surfaces at the gate boundary as
 /// `VoomError::Database`, never as a closure-incomplete abort.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,7 +539,7 @@ pub enum AliasResolutionError {
     /// External alias source (filesystem mount, object store, remote
     /// node) cannot enumerate live locations for the supplied
     /// `FileVersion`. Caller surfaces as `BlockedByClosureIncomplete`
-    /// in Phase A and Phase B (commit 4 / commit 6).
+    /// during prepare and authorize.
     Unreachable { message: String },
     /// Underlying storage failure during alias resolution — not the
     /// "external mount offline" case; this is "our own DB layer
@@ -560,13 +550,12 @@ pub enum AliasResolutionError {
 /// Resolver for **external** (non-database) alias sources — e.g.
 /// filesystem mounts that expose hardlinks/bind mounts, object
 /// stores that mirror live `FileLocation` rows under a different
-/// URL scheme. Sprint 1 ships no production resolver; Sprint 4 and
-/// Sprint 5 introduce filesystem-aware and object-store-aware
-/// resolvers behind this trait.
+/// URL scheme. No production external alias resolver is registered by
+/// default; callers that need filesystem- or object-store-aware alias
+/// enumeration provide an implementation behind this trait.
 ///
 /// **DB-internal alias enumeration does NOT use this trait.** The
-/// gate's closure walker (commit 4 / Phase A) reads live
-/// `file_locations` rows directly via
+/// gate's closure walker reads live `file_locations` rows directly via
 /// `IdentityRepo::list_live_file_locations_by_version_in_tx`,
 /// inside the same IMMEDIATE transaction the gate's safety checks
 /// run under. Mixing DB-internal enumeration with this trait
@@ -628,11 +617,11 @@ impl std::fmt::Debug for CommitGateContext<'_> {
 }
 
 // ============================================================================
-// Pending-commit lock helper (sub-slice 5)
+// Pending-commit lock helper
 // ============================================================================
 
 /// Single source of truth for the "any in-flight commit covers this
-/// scope?" question (M3 sequencing doc §5.1). Reads `commit_intents`
+/// scope?" question. Reads `commit_intents`
 /// rows in `state IN ('pending', 'authorized')` that have at least one
 /// `commit_intent_scope_members` row matching the supplied scope, and
 /// returns the first hit as `(commit_id, offending_scope)` — or `None`
@@ -649,11 +638,10 @@ impl std::fmt::Debug for CommitGateContext<'_> {
 /// Callers translate a hit into the lock's caller-facing error variant
 /// (`VoomError::Conflict(...)` for `SqliteUseLeaseRepo::acquire_in_tx` and
 /// the `IdentityRepo::record_discovered_file_in_tx::AliasAttached`
-/// branch, per sprint spec §9.2 / §8.7). `IdentityRepo::reconcile_rename_in_tx`
-/// deliberately does NOT consult this helper (arch spec lines 697–708;
-/// sprint spec §8.7 architectural exemption — renames must be allowed
-/// to land against an in-flight commit so external moves never deadlock
-/// the gate).
+/// branch). `IdentityRepo::reconcile_rename_in_tx` deliberately does
+/// NOT consult this helper: rename reconciliation must be allowed to
+/// land against an in-flight commit so external moves never deadlock
+/// the gate.
 ///
 /// # Errors
 ///
@@ -715,8 +703,8 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
 /// `abort_destructive_commit` — plus the two-tx helper
 /// `phase_a_gate_abort_with_event` routes through this function.
 ///
-/// The Phase 2 spec ("one IMMEDIATE transaction") is now enforced at
-/// the API boundary: with `pool.begin()` (deferred mode), two
+/// The one-IMMEDIATE-transaction invariant is enforced at the API
+/// boundary: with `pool.begin()` (deferred mode), two
 /// concurrent prepares on overlapping scope could both read "no
 /// overlap" before either inserted `scope_members` rows, racing through
 /// the in-tx overlapping-prepare consult. RESERVED-on-BEGIN forces

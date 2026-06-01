@@ -37,15 +37,14 @@ pub enum FinalizeOutcome {
     Blocked(CommitGateOutcome),
 }
 
-/// Phase C of the destructive-commit gate — sub-slice 7 of the M3
-/// Phase 2 plan. Re-reads the `commit_intents` row in
-/// `state = 'authorized'`, validates the permit, optionally runs the
-/// defensive trip-wires against the recomputed closure / leases /
-/// per-member epochs, dispatches the durable identity mutation, and
-/// transitions the row to `completed` (silent path) /
-/// `recovery_required` (trip-wire) / `aborted` (`NotPerformed`). All
-/// work runs inside one IMMEDIATE tx; the two-tx pattern is reserved
-/// for Phase A gate-check aborts (sequencing doc §5.2).
+/// Phase C of the destructive-commit gate. Re-reads the
+/// `commit_intents` row in `state = 'authorized'`, validates the
+/// permit, optionally runs the defensive trip-wires against the
+/// recomputed closure / leases / per-member epochs, dispatches the
+/// durable identity mutation, and transitions the row to `completed`
+/// (silent path) / `recovery_required` (trip-wire) / `aborted`
+/// (`NotPerformed`). All work runs inside one IMMEDIATE tx; the
+/// two-transaction pattern is reserved for Phase A gate-check aborts.
 ///
 /// `alias_resolver` covers **external** (non-DB) alias sources only;
 /// DB-internal alias enumeration goes through
@@ -53,8 +52,7 @@ pub enum FinalizeOutcome {
 /// gate's tx handle, preserving the gate snapshot and avoiding nested
 /// connection waits.
 ///
-/// The four trip-wire sub-branches per sprint spec §9.3.2 Phase C
-/// step 3, plus the per-member epoch guard added under §3:
+/// The four defensive trip-wire branches, plus the per-member epoch guard:
 /// - Closure grew/shifted (no fresh lease, no epoch drift) →
 ///   `recovery_reason = 'closure_grew'`, return `BlockedByClosureGrew`.
 /// - Fresh blocking lease (empty closure delta, no epoch drift) →
@@ -63,7 +61,7 @@ pub enum FinalizeOutcome {
 ///   `recovery_reason = 'closure_grew_and_fresh_lease'`, return
 ///   `BlockedByClosureGrew` (closure shift is the dominant signal;
 ///   the fresh-lease check would have been re-evaluated against the
-///   wrong baseline anyway — spec §9.3.2).
+///   wrong baseline).
 /// - Stale target epoch (any member's current `epoch` differs from
 ///   the durable snapshot, regardless of the other two trip-wires)
 ///   → `recovery_reason = 'stale_target_epoch'`, return
@@ -217,7 +215,7 @@ async fn finalize_applied_with_recovery_boundary(
             // closure_final is intentionally empty: any sub-step may
             // have failed, so we cannot trust a partially-built
             // closure. The mutation-failure path is orthogonal to the
-            // four §9.3.2 trip-wires; the post-mutation event's
+            // four defensive trip-wires; the post-mutation event's
             // delta / lease / drift arrays are empty by contract.
             let outcome = finalize_mutation_failed_in_tx(
                 &mut tx,
@@ -406,7 +404,7 @@ fn decode_target_row_epochs(json: &str) -> Result<Vec<TargetRowEpochTriple>, Voo
 /// and emits `commit.aborted_pre_mutation` (`prior_state='authorized'`).
 /// `closure_final` carries the authorized closure unchanged because no
 /// FS mutation was applied and the Phase C defensive trip-wire is
-/// skipped on this branch (§9.3.2 Phase C step 2).
+/// skipped on this branch.
 async fn finalize_not_performed_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_repo: &dyn EventRepo,
@@ -448,9 +446,9 @@ async fn finalize_not_performed_in_tx(
         commit_id: row.commit_id,
         closure_initial: row.closure_initial.clone(),
         closure_authorized: row.closure_authorized.clone(),
-        // §9.3.2 Phase C step 2: NotPerformed carries the authorized
-        // closure as `closure_final` because no FS mutation was applied
-        // and the trip-wire is skipped.
+        // NotPerformed carries the authorized closure as
+        // `closure_final` because no FS mutation was applied and the
+        // trip-wire is skipped.
         closure_final: row.closure_authorized.clone(),
         evaluated_lease_ids: permit.evaluated_lease_ids().to_vec(),
         revalidated_evidence: permit.revalidated_evidence().to_vec(),
@@ -476,8 +474,7 @@ struct PhaseCTripWire {
     fresh_lease_ids: Vec<UseLeaseId>,
     /// `None` when the closure-grew / fresh-lease wires fired with no
     /// epoch drift; `Some(_)` when the stale-target-epoch wire fired
-    /// (regardless of the other two — spec §9.3.2 Phase C step 3 last
-    /// bullet).
+    /// (regardless of the other two).
     target_epoch_drift: Vec<TargetEpochDrift>,
     /// First fresh blocking lease for the `BlockedByUseLease` return
     /// path (only populated when `reason == FreshLease`).
@@ -529,7 +526,7 @@ impl PhaseCTripWireReason {
 /// 4. The combined-trip-wire branch fires only when (2) AND (3) both
 ///    fire AND (1) did not. `ClosureGrew` is the dominant signal
 ///    inside the combined case; the gate returns
-///    `BlockedByClosureGrew` (spec §9.3.2 step 3 third bullet).
+///    `BlockedByClosureGrew`.
 async fn run_phase_c_trip_wires_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
@@ -541,8 +538,8 @@ async fn run_phase_c_trip_wires_in_tx(
 ) -> Result<PhaseCRecheck, VoomError> {
     // Step 1: recompute closure. A retired target now appears as
     // closure drift (Phase B walker semantics). The force-path bypass
-    // (commit 10) is NOT piped through Phase C — the persisted token
-    // was consumed at prepare + authorize, and a Phase C
+    // is NOT piped through Phase C: the persisted token was consumed
+    // at prepare + authorize, and a Phase C
     // closure-incomplete abort surfaces as the internal-error escape
     // below rather than honoring the bypass a second time. The
     // closure walker therefore receives an empty bypass set.
@@ -561,10 +558,9 @@ async fn run_phase_c_trip_wires_in_tx(
             // ClosureIncomplete from the alias resolver at Phase C is a
             // resolver-changed-its-mind escape — surface as a stale
             // target-epoch invariant violation rather than abort with a
-            // partial closure (Sprint 1 ships no Phase C closure-
-            // incomplete branch; the force-path slice does not extend
-            // here either, per §4 commit 7). Return an internal error
-            // so the caller surfaces it as `VoomError::Internal`.
+            // partial closure. The force-path bypass does not extend
+            // beyond prepare/authorize. Return an internal error so the
+            // caller surfaces it as `VoomError::Internal`.
             return Err(VoomError::Internal(format!(
                 "finalize: closure walker reported abort during Phase C recompute on commit {} \
                  — alias resolver should have observed the same closure as Phase B",
@@ -596,7 +592,7 @@ async fn run_phase_c_trip_wires_in_tx(
     let fresh_lease_ids = evaluated_at_finalize;
 
     // Stale target epoch is the dominant signal — fires regardless of
-    // whether other wires also fired (spec §9.3.2 step 3 last bullet).
+    // whether other wires also fired.
     if !target_epoch_drift.is_empty() {
         return Ok(PhaseCRecheck::Trip(Box::new(PhaseCTripWire {
             reason: PhaseCTripWireReason::StaleTargetEpoch,
@@ -729,8 +725,8 @@ async fn push_drift_if_mismatch(
         .map_err(|e| VoomError::Database(format!("finalize: epoch probe {table}: {e}")))?;
     // Row gone between authorize and finalize → treat as drift with
     // observed = u64::MAX sentinel. The recovery worker will surface
-    // it as a deleted member; in Sprint 1 the gate's audit row carries
-    // the snapshot value as `expected` and the sentinel as `observed`.
+    // it as a deleted member; the gate's audit row carries the snapshot
+    // value as `expected` and the sentinel as `observed`.
     let observed = match observed {
         Some(raw) => u64_from_i64(raw),
         None => u64::MAX,
@@ -754,7 +750,7 @@ async fn push_drift_if_mismatch(
 /// rollback and `mutation_failed` recovery transition.
 #[expect(
     clippy::too_many_arguments,
-    reason = "Phase C silent path needs the full execution context; splitting would scatter the §9.3.2 step 4-5 invariants under one helper"
+    reason = "Phase C silent path keeps mutation and completion invariants together"
 )]
 async fn finalize_silent_path_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -815,7 +811,7 @@ async fn finalize_silent_path_in_tx(
 /// `BlockedByMutationFailed { error }`. The caller commits the outer
 /// tx. The closure delta / fresh-lease arrays on the post-mutation
 /// event are empty because no trip-wire fired; the mutation-failure
-/// path is distinct from the four §9.3.2 trip-wires.
+/// path is distinct from the four defensive trip-wires.
 async fn finalize_mutation_failed_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_repo: &dyn EventRepo,
@@ -865,10 +861,9 @@ async fn finalize_mutation_failed_in_tx(
 /// sourcing `expected_epoch` from the snapshot decoded from
 /// `commit_intents.target_row_epochs`. `FileLocationProposal` →
 /// `NewFileLocation` conversion happens here, in Phase C, by reading
-/// the retired row's `file_version_id` inside the tx. The
-/// `DeleteFileVersion` / `ArchiveFileVersion` dispatch paths are
-/// deferred because safe cascade semantics are not part of Sprint 1's
-/// `CommitTarget`.
+/// the retired row's `file_version_id` inside the tx. Version- and
+/// bundle-level dispatch paths are absent because their safe cascade
+/// semantics are not part of the current `CommitTarget` contract.
 async fn dispatch_durable_mutation_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
@@ -1170,7 +1165,7 @@ async fn emit_recovery_required_event(
 
 /// Emit `commit.aborted_post_mutation` with `reason='mutation_failed'`.
 /// The delta / lease / drift arrays are empty because the mutation-
-/// failure path is orthogonal to the four §9.3.2 trip-wires. Audit
+/// failure path is orthogonal to the four defensive trip-wires. Audit
 /// consumers route on the `reason` tag.
 async fn emit_mutation_failed_post_mutation_event(
     event_repo: &dyn EventRepo,
