@@ -1,3 +1,8 @@
+//! FFmpeg-backed worker operations for video transcode requests.
+//!
+//! The crate owns local ffmpeg/ffprobe preflight, media fact observation, and
+//! worker-protocol handlers for transcode-video dispatch.
+
 #![cfg_attr(
     test,
     expect(

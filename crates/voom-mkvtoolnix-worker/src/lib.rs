@@ -1,3 +1,8 @@
+//! MKVToolNix-backed worker operations for remux requests.
+//!
+//! The crate owns local mkvmerge preflight, media fact observation, and
+//! worker-protocol handlers for remux dispatch.
+
 #![cfg_attr(
     test,
     expect(
