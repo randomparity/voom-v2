@@ -31,11 +31,11 @@ use crate::workflow::plan::expansion::{
     expand_scanner_completion, expand_transform_completion,
 };
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
+use crate::workflow::plan::policy_bridge::is_policy_workflow_node_id;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::WorkflowRunSummary;
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
-const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -973,7 +973,7 @@ impl WorkflowExecutor {
             "backup" => {
                 expand_backup_completion(&ctx, &payload.branch_id, &ticket).await?;
             }
-            node_id if node_id.starts_with(POLICY_NODE_ID_PREFIX) => {
+            node_id if is_policy_workflow_node_id(node_id) => {
                 self.expand_policy_node_completion(plan, workflow_id, job_id, node_id)
                     .await?;
             }
@@ -984,7 +984,7 @@ impl WorkflowExecutor {
 
     /// Dynamically expands the dependents of a just-succeeded policy-bridge node.
     ///
-    /// Policy plans (node ids prefixed `policy-node_`) can be arbitrary DAGs whose
+    /// Policy plan nodes can be arbitrary DAGs whose
     /// edges are declared via [`OperationNode::depends_on`]. Workflow tickets do not
     /// use the store's declarative dependency table, so each downstream node's
     /// ticket must be created here once all of its parents have succeeded.

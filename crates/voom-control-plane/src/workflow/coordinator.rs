@@ -39,11 +39,9 @@ use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
 use super::plan::expansion::branch_id_from_path;
-use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
-
-/// Bridge node ids carry this prefix; the per-file ticket lookup reconstructs the
-/// workflow node id from a plan node id (`policy_bridge.rs`).
-const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
+use super::plan::policy_bridge::{
+    WorkflowExecutionShape, policy_workflow_node_id, workflow_plan_from_compliance,
+};
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.
@@ -1109,7 +1107,7 @@ impl ControlPlane {
             if tip.id == file.version_id {
                 continue;
             }
-            let workflow_node_id = format!("{POLICY_NODE_ID_PREFIX}{node_id}");
+            let workflow_node_id = policy_workflow_node_id(node_id);
             let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
             let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
             let row = self
@@ -1211,7 +1209,7 @@ impl ControlPlane {
                 Ok((row, file.snapshot.clone(), Some(file)))
             }
             Disposition::Planned { node_id } => {
-                let workflow_node_id = format!("{POLICY_NODE_ID_PREFIX}{node_id}");
+                let workflow_node_id = policy_workflow_node_id(node_id);
                 let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
                 let (tip, snapshot) = active_version_with_snapshot(&self.identity, file.asset_id)
                     .await?

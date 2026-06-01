@@ -6,6 +6,8 @@ use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind};
 
 use super::{ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowPlan};
 
+const POLICY_WORKFLOW_NODE_ID_PREFIX: &str = "policy-node_";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PolicyExecutionPlan {
     pub workflow: Option<WorkflowPlan>,
@@ -86,7 +88,7 @@ pub fn workflow_plan_from_compliance(
         match node.status {
             NodeStatus::Planned => {
                 let operation = execution_operation(node.operation_kind)?;
-                let workflow_node_id = format!("policy-node_{}", node.node_id);
+                let workflow_node_id = policy_workflow_node_id(&node.node_id);
                 workflow_node_ids_by_plan_node_id
                     .insert(node.node_id.clone(), workflow_node_id.clone());
                 nodes.push(OperationNode {
@@ -132,6 +134,14 @@ pub fn workflow_plan_from_compliance(
     };
 
     Ok(PolicyExecutionPlan { workflow, summary })
+}
+
+pub(crate) fn policy_workflow_node_id(plan_node_id: &str) -> String {
+    format!("{POLICY_WORKFLOW_NODE_ID_PREFIX}{plan_node_id}")
+}
+
+pub(crate) fn is_policy_workflow_node_id(node_id: &str) -> bool {
+    node_id.starts_with(POLICY_WORKFLOW_NODE_ID_PREFIX)
 }
 
 #[cfg(test)]

@@ -10,6 +10,15 @@ use voom_policy::TargetRef;
 use super::*;
 
 #[test]
+fn policy_workflow_node_id_helpers_share_prefix_contract() {
+    let node_id = policy_workflow_node_id("node_remux");
+
+    assert_eq!(node_id, "policy-node_node_remux");
+    assert!(is_policy_workflow_node_id(&node_id));
+    assert!(!is_policy_workflow_node_id("node_remux"));
+}
+
+#[test]
 fn bridge_maps_planned_remux_with_policy_target_and_payload() {
     let plan = plan(vec![node(PlanOperationKind::Remux, NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
