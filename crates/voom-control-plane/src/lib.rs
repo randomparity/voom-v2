@@ -37,6 +37,7 @@ use voom_store::repo::{
         SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionRepo,
         SqliteSchedulerDecisionRepo,
     },
+    scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
     video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo},
@@ -131,6 +132,7 @@ pub struct ControlPlane {
     pub(crate) policies: SqlitePolicyRepo,
     pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
+    pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
 }
 
@@ -161,6 +163,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("policies", &self.policies)
             .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
+            .field("scheduler_node_limits", &self.scheduler_node_limits)
             .field("workflow_summaries", &self.workflow_summaries)
             .finish()
     }
@@ -259,6 +262,7 @@ impl ControlPlane {
             policies: SqlitePolicyRepo::new(pool.clone()),
             video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
+            scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             pool,
             clock,

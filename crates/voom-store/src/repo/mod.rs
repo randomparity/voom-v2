@@ -8,8 +8,8 @@ pub mod policy;
 
 pub use audit::{events, schema_meta};
 pub use execution::{
-    jobs, leases, nodes, remote_idempotency, scheduler_decisions, tickets, workers,
-    workflow_summaries,
+    jobs, leases, nodes, remote_idempotency, scheduler_decisions, scheduler_node_limits, tickets,
+    workers, workflow_summaries,
 };
 pub use media::{
     artifact_access_plans, artifacts, bundles, commit_safety_gate, identity, use_leases,
@@ -58,8 +58,11 @@ pub use remote_idempotency::{
 };
 pub use scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionKind,
-    SchedulerDecisionOutcome, SchedulerDecisionRepo, SchedulerNodeLimit, SchedulerReasonCode,
-    SchedulerRequestSource, SqliteSchedulerDecisionRepo,
+    SchedulerDecisionOutcome, SchedulerDecisionRepo, SchedulerReasonCode, SchedulerRequestSource,
+    SqliteSchedulerDecisionRepo,
+};
+pub use scheduler_node_limits::{
+    SchedulerNodeLimit, SchedulerNodeLimitRepo, SqliteSchedulerNodeLimitRepo,
 };
 pub use schema_meta::{SchemaMetaRepo, SqliteSchemaMetaRepo};
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo, TicketState};

@@ -26,6 +26,7 @@ use voom_store::repo::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome,
     SchedulerDecisionRepo, SchedulerReasonCode as StoreSchedulerReasonCode, SchedulerRequestSource,
 };
+use voom_store::repo::scheduler_node_limits::SchedulerNodeLimitRepo;
 use voom_store::repo::tickets::{Ticket, TicketRepo};
 use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility, WorkerRepo};
 
@@ -530,7 +531,7 @@ impl ControlPlane {
         let mut worker_active_by_operation = HashMap::new();
         let mut worker_limit_by_operation = HashMap::new();
         let node_limit = self
-            .scheduler_decisions
+            .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
             .await?;
         let node_active_leases = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
@@ -623,7 +624,7 @@ impl ControlPlane {
 
         let node_active = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
         let node_limit = self
-            .scheduler_decisions
+            .scheduler_node_limits
             .node_limit_in_tx(tx, input.node_id)
             .await?;
         if node_active >= node_limit {
