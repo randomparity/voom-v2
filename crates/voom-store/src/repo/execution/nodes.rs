@@ -7,72 +7,12 @@ use serde_json::Value as JsonValue;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use time::{Duration, OffsetDateTime};
 use voom_core::{NodeId, VoomError};
+pub use voom_core::{NodeKind, NodeStatus};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u32_from_i64, u64_from_i64,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeKind {
-    Local,
-    Remote,
-    Synthetic,
-}
-
-impl NodeKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Remote => "remote",
-            Self::Synthetic => "synthetic",
-        }
-    }
-
-    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "local" => Ok(Self::Local),
-            "remote" => Ok(Self::Remote),
-            "synthetic" => Ok(Self::Synthetic),
-            other => Err(VoomError::Database(format!(
-                "nodes.kind {other:?} not in vocab"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NodeStatus {
-    Registered,
-    Active,
-    Stale,
-    Retired,
-}
-
-impl NodeStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Registered => "registered",
-            Self::Active => "active",
-            Self::Stale => "stale",
-            Self::Retired => "retired",
-        }
-    }
-
-    pub(crate) fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "registered" => Ok(Self::Registered),
-            "active" => Ok(Self::Active),
-            "stale" => Ok(Self::Stale),
-            "retired" => Ok(Self::Retired),
-            other => Err(VoomError::Database(format!(
-                "nodes.status {other:?} not in vocab"
-            ))),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct NewNode {
@@ -461,8 +401,8 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
     Ok(Node {
         id: NodeId(u64_from_i64(id)),
         name,
-        kind: NodeKind::parse(&kind)?,
-        status: NodeStatus::parse(&status)?,
+        kind: NodeKind::parse_database("nodes.kind", &kind)?,
+        status: NodeStatus::parse_database("nodes.status", &status)?,
         registered_at: parse_iso8601(&registered)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
@@ -491,8 +431,8 @@ fn row_to_auth_record(row: &sqlx::sqlite::SqliteRow) -> Result<NodeAuthRecord, V
         .map_err(|e| map_row_err("nodes", &e))?;
     Ok(NodeAuthRecord {
         id: NodeId(u64_from_i64(id)),
-        kind: NodeKind::parse(&kind)?,
-        status: NodeStatus::parse(&status)?,
+        kind: NodeKind::parse_database("nodes.kind", &kind)?,
+        status: NodeStatus::parse_database("nodes.status", &status)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         heartbeat_ttl_seconds: u32_from_i64(heartbeat_ttl_seconds)?,
         auth_token_hash,

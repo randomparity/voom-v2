@@ -73,8 +73,8 @@ impl ControlPlane {
             Event::NodeRegistered(NodeRegisteredPayload {
                 node_id: node.id.0,
                 name: node.name.clone(),
-                kind: node.kind.as_str().to_owned(),
-                status: node.status.as_str().to_owned(),
+                kind: node.kind,
+                status: node.status,
                 heartbeat_ttl_seconds: node.heartbeat_ttl_seconds,
             }),
         )
@@ -137,7 +137,7 @@ impl ControlPlane {
             now,
             Event::NodeHeartbeatRecorded(NodeHeartbeatRecordedPayload {
                 node_id: node.id.0,
-                status: node.status.as_str().to_owned(),
+                status: node.status,
                 last_seen_at: node.last_seen_at,
                 epoch: node.epoch,
             }),

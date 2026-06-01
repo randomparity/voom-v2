@@ -1,7 +1,7 @@
 use super::*;
 
 use time::OffsetDateTime;
-use voom_core::FailureClass;
+use voom_core::{FailureClass, NodeKind, NodeStatus, TicketOperation, WorkerKind};
 
 #[test]
 fn schema_initialized_payload_round_trip() {
@@ -122,8 +122,8 @@ fn node_registered_payload_round_trip() {
     let p = NodeRegisteredPayload {
         node_id: 42,
         name: "node-a".to_owned(),
-        kind: "local".to_owned(),
-        status: "active".to_owned(),
+        kind: NodeKind::Local,
+        status: NodeStatus::Active,
         heartbeat_ttl_seconds: 30,
     };
     let json = serde_json::to_value(Event::NodeRegistered(p.clone())).unwrap();
@@ -137,7 +137,7 @@ fn node_registered_payload_round_trip() {
 fn node_heartbeat_recorded_payload_round_trip() {
     let p = NodeHeartbeatRecordedPayload {
         node_id: 42,
-        status: "active".to_owned(),
+        status: NodeStatus::Active,
         last_seen_at: OffsetDateTime::UNIX_EPOCH,
         epoch: 7,
     };
@@ -1169,7 +1169,7 @@ fn event_kind_matches_serde_tag() {
         Event::TicketCreated(TicketCreatedPayload {
             ticket_id: 1,
             job_id: None,
-            kind: "k".to_owned(),
+            kind: TicketOperation::new("k").unwrap(),
             priority: 0,
             max_attempts: 1,
         }),
@@ -1236,13 +1236,13 @@ fn event_kind_matches_serde_tag() {
         Event::NodeRegistered(NodeRegisteredPayload {
             node_id: 1,
             name: "n".to_owned(),
-            kind: "local".to_owned(),
-            status: "active".to_owned(),
+            kind: NodeKind::Local,
+            status: NodeStatus::Active,
             heartbeat_ttl_seconds: 60,
         }),
         Event::NodeHeartbeatRecorded(NodeHeartbeatRecordedPayload {
             node_id: 1,
-            status: "active".to_owned(),
+            status: NodeStatus::Active,
             last_seen_at: OffsetDateTime::UNIX_EPOCH,
             epoch: 1,
         }),
@@ -1259,7 +1259,7 @@ fn event_kind_matches_serde_tag() {
         Event::WorkerRegistered(WorkerRegisteredPayload {
             worker_id: 1,
             name: "w".to_owned(),
-            kind: "synthetic".to_owned(),
+            kind: WorkerKind::Synthetic,
         }),
         Event::WorkerLinkedToNode(WorkerLinkedToNodePayload {
             worker_id: 1,
@@ -1268,7 +1268,7 @@ fn event_kind_matches_serde_tag() {
         Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
             worker_id: 1,
             capability_id: 1,
-            operation: "op".to_owned(),
+            operation: TicketOperation::new("op").unwrap(),
         }),
         Event::WorkerGrantRecorded(WorkerGrantRecordedPayload {
             worker_id: 1,

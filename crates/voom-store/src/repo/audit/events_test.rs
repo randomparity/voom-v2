@@ -142,6 +142,7 @@ async fn list_cursor_signals_exhaustion_with_none() {
 
 #[tokio::test]
 async fn append_then_get_round_trips_every_m1_kind() {
+    use voom_core::{TicketOperation, WorkerKind};
     use voom_events::payload::{
         ArtifactHandleCreatedPayload, ArtifactLineageRecordedPayload,
         ArtifactLocationRecordedPayload, ArtifactLocationRetiredPayload, JobCancelledPayload,
@@ -198,7 +199,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
             Event::TicketCreated(TicketCreatedPayload {
                 ticket_id: 1,
                 job_id: None,
-                kind: "k".to_owned(),
+                kind: TicketOperation::new("k").unwrap(),
                 priority: 0,
                 max_attempts: 1,
             }),
@@ -292,7 +293,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
             Event::WorkerRegistered(WorkerRegisteredPayload {
                 worker_id: 1,
                 name: "w".to_owned(),
-                kind: "synthetic".to_owned(),
+                kind: WorkerKind::Synthetic,
             }),
         ),
         (
@@ -300,7 +301,7 @@ async fn append_then_get_round_trips_every_m1_kind() {
             Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
                 worker_id: 1,
                 capability_id: 1,
-                operation: "op".to_owned(),
+                operation: TicketOperation::new("op").unwrap(),
             }),
         ),
         (

@@ -5,73 +5,13 @@ use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketOperation, VoomError, WorkerId};
+pub use voom_core::{WorkerKind, WorkerStatus};
 
 use super::Repository;
 use super::common::{
     i64_from_u64, iso8601, map_row_err, parse_iso8601, serialize_json, u64_from_i64,
 };
 use super::nodes::{NodeKind, NodeStatus};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerKind {
-    Synthetic,
-    Local,
-    Remote,
-}
-
-impl WorkerKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Synthetic => "synthetic",
-            Self::Local => "local",
-            Self::Remote => "remote",
-        }
-    }
-
-    fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "synthetic" => Ok(Self::Synthetic),
-            "local" => Ok(Self::Local),
-            "remote" => Ok(Self::Remote),
-            other => Err(VoomError::Database(format!(
-                "workers.kind {other:?} not in vocab"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkerStatus {
-    Registered,
-    Active,
-    Stale,
-    Retired,
-}
-
-impl WorkerStatus {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Registered => "registered",
-            Self::Active => "active",
-            Self::Stale => "stale",
-            Self::Retired => "retired",
-        }
-    }
-
-    fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "registered" => Ok(Self::Registered),
-            "active" => Ok(Self::Active),
-            "stale" => Ok(Self::Stale),
-            "retired" => Ok(Self::Retired),
-            other => Err(VoomError::Database(format!(
-                "workers.status {other:?} not in vocab"
-            ))),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct NewWorker {
@@ -691,8 +631,8 @@ fn row_to_worker(row: &sqlx::sqlite::SqliteRow) -> Result<Worker, VoomError> {
         id: WorkerId(u64_from_i64(id)),
         node_id: node_id.map(|id| NodeId(u64_from_i64(id))),
         name,
-        kind: WorkerKind::parse(&kind)?,
-        status: WorkerStatus::parse(&status)?,
+        kind: WorkerKind::parse_database("workers.kind", &kind)?,
+        status: WorkerStatus::parse_database("workers.status", &status)?,
         registered_at: parse_iso8601(&registered)?,
         last_seen_at: parse_iso8601(&last_seen)?,
         retired_at: retired.map(|s| parse_iso8601(&s)).transpose()?,
@@ -728,8 +668,8 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
             Ok(WorkerNodeContext {
                 id: NodeId(u64_from_i64(id)),
                 name,
-                kind: NodeKind::parse(&kind)?,
-                status: NodeStatus::parse(&status)?,
+                kind: NodeKind::parse_database("nodes.kind", &kind)?,
+                status: NodeStatus::parse_database("nodes.status", &status)?,
                 last_seen_at: parse_iso8601(&last_seen)?,
             })
         })

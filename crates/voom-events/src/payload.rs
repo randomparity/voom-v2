@@ -3,7 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
-use voom_core::{CommitId, EvidenceId, FailureClass, IssueId, PolicyVersionId, UseLeaseId};
+use voom_core::{
+    CommitId, EvidenceId, FailureClass, IssueId, NodeKind, NodeStatus, PolicyVersionId,
+    TicketOperation, UseLeaseId, WorkerKind,
+};
 
 use crate::kind::EventKind;
 
@@ -48,7 +51,7 @@ pub struct JobCancelledPayload {
 pub struct TicketCreatedPayload {
     pub ticket_id: u64,
     pub job_id: Option<u64>,
-    pub kind: String,
+    pub kind: TicketOperation,
     pub priority: i64,
     pub max_attempts: u32,
 }
@@ -160,15 +163,15 @@ pub struct LeaseForceReleasedPayload {
 pub struct NodeRegisteredPayload {
     pub node_id: u64,
     pub name: String,
-    pub kind: String,
-    pub status: String,
+    pub kind: NodeKind,
+    pub status: NodeStatus,
     pub heartbeat_ttl_seconds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeHeartbeatRecordedPayload {
     pub node_id: u64,
-    pub status: String,
+    pub status: NodeStatus,
     #[serde(with = "time::serde::iso8601")]
     pub last_seen_at: OffsetDateTime,
     pub epoch: u64,
@@ -196,7 +199,7 @@ pub struct NodeRetiredPayload {
 pub struct WorkerRegisteredPayload {
     pub worker_id: u64,
     pub name: String,
-    pub kind: String,
+    pub kind: WorkerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +212,7 @@ pub struct WorkerLinkedToNodePayload {
 pub struct WorkerCapabilityRecordedPayload {
     pub worker_id: u64,
     pub capability_id: u64,
-    pub operation: String,
+    pub operation: TicketOperation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

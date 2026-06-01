@@ -95,6 +95,7 @@ pub use ids::{
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
 pub use remux::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
+pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStatus};
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,

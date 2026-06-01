@@ -69,7 +69,7 @@ impl ControlPlane {
             Event::WorkerRegistered(WorkerRegisteredPayload {
                 worker_id: worker.id.0,
                 name: worker.name.clone(),
-                kind: worker.kind.as_str().to_owned(),
+                kind: worker.kind,
             }),
         )
         .await?;
@@ -140,7 +140,7 @@ impl ControlPlane {
             Event::WorkerRegistered(WorkerRegisteredPayload {
                 worker_id: worker.id.0,
                 name: worker.name.clone(),
-                kind: worker.kind.as_str().to_owned(),
+                kind: worker.kind,
             }),
         )
         .await?;
@@ -219,7 +219,7 @@ impl ControlPlane {
                 Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
                     worker_id: worker_id.0,
                     capability_id: cap.id,
-                    operation: cap.operation.into_string(),
+                    operation: cap.operation,
                 }),
             )
             .await?;
@@ -283,7 +283,7 @@ impl ControlPlane {
             Event::WorkerCapabilityRecorded(WorkerCapabilityRecordedPayload {
                 worker_id: worker_id.0,
                 capability_id: cap.id,
-                operation: operation.into_string(),
+                operation,
             }),
         )
         .await?;

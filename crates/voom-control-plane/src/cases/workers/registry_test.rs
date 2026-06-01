@@ -94,7 +94,7 @@ async fn record_capability_emits_worker_capability_recorded() {
         panic!("expected WorkerCapabilityRecorded payload");
     };
     assert_eq!(payload.capability_id, cap.id);
-    assert_eq!(payload.operation, "ingest");
+    assert_eq!(payload.operation.as_str(), "ingest");
 }
 
 #[tokio::test]
