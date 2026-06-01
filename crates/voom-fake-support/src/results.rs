@@ -78,7 +78,11 @@ pub(crate) fn result_payload(
             {
                 return Ok(audio_result);
             }
-            fake_transcoder_legacy_payload(object, payload);
+            return Err(invalid(format!(
+                "fake-transcoder {} requires typed transcode_video, transcode_audio, \
+                 or extract_audio payload",
+                operation_name(operation)
+            )));
         }
         "fake-remuxer" => {
             if let Some(request) = remux_protocol_payload(payload)? {
@@ -130,13 +134,7 @@ pub(crate) fn result_payload(
         }
         _ => return Err(invalid(format!("unknown provider {provider}"))),
     }
-    let artifact_access_evidence = synthetic_artifact_access_evidence(payload)?;
-    let artifact_access_object = artifact_access_evidence
-        .as_object()
-        .ok_or_else(|| invalid("artifact access evidence must be object"))?;
-    for (key, value) in artifact_access_object {
-        object.insert(key.clone(), value.clone());
-    }
+    merge_artifact_access_evidence(&mut result, payload)?;
     Ok(result)
 }
 
@@ -187,6 +185,13 @@ fn fake_transcode_video_result(
     request: &TranscodeVideoRequest,
 ) -> Result<TranscodeVideoResult, ProtocolError> {
     let bytes = include_bytes!("../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    if let Some(parent) = Path::new(&request.output.path).parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            invalid(format!(
+                "fake transcode_video output parent create failed: {err}"
+            ))
+        })?;
+    }
     std::fs::write(&request.output.path, bytes)
         .map_err(|err| invalid(format!("fake transcode_video output write failed: {err}")))?;
     let input = video_observed_from_expected(
@@ -340,9 +345,10 @@ fn fake_transcoder_video_payload(
     if operation == OperationKind::TranscodeVideo
         && let Some(request) = transcode_video_protocol_payload(payload)?
     {
-        return serde_json::to_value(fake_transcode_video_result(provider, &request)?)
-            .map(Some)
-            .map_err(|err| invalid(format!("fake transcode_video result encode failed: {err}")));
+        let mut result = serde_json::to_value(fake_transcode_video_result(provider, &request)?)
+            .map_err(|err| invalid(format!("fake transcode_video result encode failed: {err}")))?;
+        merge_artifact_access_evidence(&mut result, payload)?;
+        return Ok(Some(result));
     }
     Ok(None)
 }
@@ -355,38 +361,37 @@ fn fake_transcoder_audio_payload(
     if operation == OperationKind::TranscodeAudio
         && let Some(request) = transcode_audio_protocol_payload(payload)?
     {
-        return serde_json::to_value(fake_transcode_audio_result(provider, &request)?)
-            .map(Some)
-            .map_err(|err| invalid(format!("fake transcode_audio result encode failed: {err}")));
+        let mut result = serde_json::to_value(fake_transcode_audio_result(provider, &request)?)
+            .map_err(|err| invalid(format!("fake transcode_audio result encode failed: {err}")))?;
+        merge_artifact_access_evidence(&mut result, payload)?;
+        return Ok(Some(result));
     }
     if operation == OperationKind::ExtractAudio
         && let Some(request) = extract_audio_protocol_payload(payload)?
     {
-        return serde_json::to_value(fake_extract_audio_result(provider, &request)?)
-            .map(Some)
-            .map_err(|err| invalid(format!("fake extract_audio result encode failed: {err}")));
+        let mut result = serde_json::to_value(fake_extract_audio_result(provider, &request)?)
+            .map_err(|err| invalid(format!("fake extract_audio result encode failed: {err}")))?;
+        merge_artifact_access_evidence(&mut result, payload)?;
+        return Ok(Some(result));
     }
     Ok(None)
 }
 
-fn fake_transcoder_legacy_payload(
-    object: &mut serde_json::Map<String, serde_json::Value>,
+fn merge_artifact_access_evidence(
+    result: &mut serde_json::Value,
     payload: &serde_json::Value,
-) {
-    // Compatibility for legacy fake-provider tests and scripted callers that
-    // still send top-level `path` + `target_codec`. Active worker protocol
-    // callers use the typed transcode_video/transcode_audio branches above.
-    object.insert(
-        "output_path".to_owned(),
-        serde_json::json!(transform_output_path(payload, "h265")),
-    );
-    object.insert(
-        "target_codec".to_owned(),
-        payload
-            .get("target_codec")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!("h265")),
-    );
+) -> Result<(), ProtocolError> {
+    let result_object = result
+        .as_object_mut()
+        .ok_or_else(|| invalid("result payload must be object"))?;
+    let artifact_access_evidence = synthetic_artifact_access_evidence(payload)?;
+    let artifact_access_object = artifact_access_evidence
+        .as_object()
+        .ok_or_else(|| invalid("artifact access evidence must be object"))?;
+    for (key, value) in artifact_access_object {
+        result_object.insert(key.clone(), value.clone());
+    }
+    Ok(())
 }
 
 fn advertised_access_modes<'a>(

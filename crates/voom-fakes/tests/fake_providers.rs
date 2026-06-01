@@ -96,8 +96,11 @@ async fn fake_providers_follow_worker_protocol() {
             .await;
             assert_two_frame_success(&case, secondary, &frames);
 
-            let invalid =
-                operation_request(250 + index as u64, secondary, case.invalid_payload.clone());
+            let invalid = operation_request(
+                250 + index as u64,
+                secondary,
+                invalid_payload_for_operation(&case, secondary),
+            );
             let err = client
                 .dispatch(
                     &launch.credentials,
@@ -245,21 +248,13 @@ fn provider_cases() -> Vec<ProviderCase> {
             bin_env: "CARGO_BIN_EXE_fake-transcoder",
             name: "fake-transcoder",
             primary: OperationKind::TranscodeVideo,
-            secondary: &[
-                OperationKind::TranscodeAudio,
-                OperationKind::ExtractAudio,
-                OperationKind::TranscribeAudio,
-            ],
-            valid_payload: serde_json::json!({
-                "path": "/library/movie.mkv",
-                "target_codec": "h265",
-                "scenario": "default"
-            }),
-            invalid_payload: serde_json::json!({
-                "path": "/library/movie.mkv",
-                "target_codec": "bad_codec"
-            }),
-            expected_field: "output_path",
+            secondary: &[OperationKind::TranscodeAudio, OperationKind::ExtractAudio],
+            valid_payload: transcode_video_payload("fake-provider-primary-video.mkv", "hevc"),
+            invalid_payload: transcode_video_payload(
+                "fake-provider-invalid-video.mkv",
+                "bad_codec",
+            ),
+            expected_field: "output_video_codec",
         },
         ProviderCase {
             bin_env: "CARGO_BIN_EXE_fake-remuxer",
@@ -376,14 +371,29 @@ fn provider_cases() -> Vec<ProviderCase> {
 }
 
 fn valid_payload_for_operation(case: &ProviderCase, operation: OperationKind) -> serde_json::Value {
-    if case.name == "fake-transcoder" && operation == OperationKind::TranscodeAudio {
-        serde_json::json!({
-            "path": "/library/movie.mkv",
-            "target_codec": "opus",
-            "scenario": "default"
-        })
-    } else {
-        case.valid_payload.clone()
+    match (case.name, operation) {
+        ("fake-transcoder", OperationKind::TranscodeAudio) => {
+            transcode_audio_payload("fake-provider-secondary-audio.mkv", "opus")
+        }
+        ("fake-transcoder", OperationKind::ExtractAudio) => {
+            extract_audio_payload("fake-provider-secondary-extract.ogg", "opus")
+        }
+        _ => case.valid_payload.clone(),
+    }
+}
+
+fn invalid_payload_for_operation(
+    case: &ProviderCase,
+    operation: OperationKind,
+) -> serde_json::Value {
+    match (case.name, operation) {
+        ("fake-transcoder", OperationKind::TranscodeAudio) => {
+            transcode_audio_payload("fake-provider-invalid-audio.mkv", "bad_codec")
+        }
+        ("fake-transcoder", OperationKind::ExtractAudio) => {
+            extract_audio_payload("fake-provider-invalid-extract.ogg", "bad_codec")
+        }
+        _ => case.invalid_payload.clone(),
     }
 }
 
@@ -399,14 +409,115 @@ fn assert_two_frame_success(
     };
     assert_eq!(*seq, 1);
     assert_eq!(payload["provider"], case.name);
-    assert_eq!(payload["operation"], operation_name(operation));
-    assert_eq!(payload["scenario"], "default");
+    if case.name == "fake-transcoder" {
+        assert!(
+            payload.get("status").is_some(),
+            "typed result missing status"
+        );
+    } else {
+        assert_eq!(payload["operation"], operation_name(operation));
+        assert_eq!(payload["scenario"], "default");
+    }
+    let expected_field = expected_field_for_operation(case, operation);
     assert!(
-        payload.get(case.expected_field).is_some(),
+        payload.get(expected_field).is_some(),
         "{} missing {}",
         case.name,
-        case.expected_field
+        expected_field
     );
+}
+
+fn expected_field_for_operation(case: &ProviderCase, operation: OperationKind) -> &'static str {
+    match (case.name, operation) {
+        ("fake-transcoder", OperationKind::TranscodeAudio) => "output_audio_codecs",
+        ("fake-transcoder", OperationKind::ExtractAudio) => "output_audio_codec",
+        _ => case.expected_field,
+    }
+}
+
+fn transcode_video_payload(file_name: &str, output_video_codec: &str) -> serde_json::Value {
+    let output_path = unique_output_path(file_name);
+    serde_json::json!({
+        "input": {
+            "path": "/library/movie.mkv",
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": output_path.parent().unwrap().to_string_lossy().into_owned(),
+            "path": output_path.to_string_lossy().into_owned(),
+            "container": "mkv",
+            "video_codec": output_video_codec,
+            "overwrite": true
+        },
+        "profile": {
+            "name": "default-hevc",
+            "target_codec": "hevc",
+            "encoder": "libx265",
+            "crf": 23_u8,
+            "preset": "medium"
+        },
+        "copy_video": false
+    })
+}
+
+fn transcode_audio_payload(file_name: &str, target_codec: &str) -> serde_json::Value {
+    let output_path = unique_output_path(file_name);
+    serde_json::json!({
+        "input": {
+            "path": "/library/movie.mkv",
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": output_path.parent().unwrap().to_string_lossy().into_owned(),
+            "path": output_path.to_string_lossy().into_owned(),
+            "container": "mkv",
+            "overwrite": true
+        },
+        "selection": {
+            "selected_streams": [{
+                "snapshot_stream_id": "stream-1",
+                "provider_stream_index": 1_u32
+            }]
+        },
+        "audio": {
+            "target_codec": target_codec,
+            "profile": "default-opus"
+        }
+    })
+}
+
+fn extract_audio_payload(file_name: &str, audio_codec: &str) -> serde_json::Value {
+    let output_path = unique_output_path(file_name);
+    serde_json::json!({
+        "input": {
+            "path": "/library/movie.mkv",
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": output_path.parent().unwrap().to_string_lossy().into_owned(),
+            "path": output_path.to_string_lossy().into_owned(),
+            "container": "ogg",
+            "audio_codec": audio_codec,
+            "overwrite": true
+        },
+        "selection": {
+            "snapshot_stream_id": "stream-1",
+            "provider_stream_index": 1_u32
+        }
+    })
+}
+
+fn unique_output_path(file_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("voom-fakes-{}-{file_name}", std::process::id()))
 }
 
 async fn collect_body(mut stream: voom_worker_protocol::DispatchStream) -> Vec<ProgressFrame> {

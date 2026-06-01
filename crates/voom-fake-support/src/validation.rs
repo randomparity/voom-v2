@@ -4,7 +4,7 @@ use voom_worker_protocol::{
     is_supported_transcode_video_codec, is_supported_transcode_video_container,
 };
 
-use crate::catalog::ProviderKind;
+use crate::catalog::{ProviderKind, operation_name};
 
 pub(crate) const MAX_FAKE_DURATION_MS: u64 = 30_000;
 pub(crate) const MAX_FAKE_FAN_OUT_COUNT: u32 = 1_000;
@@ -72,36 +72,7 @@ pub(crate) fn validate_payload(
         | ProviderKind::IdentityProvider => {
             require_path(&req.payload)?;
         }
-        ProviderKind::Transcoder => match req.operation {
-            OperationKind::TranscodeVideo => {
-                if let Some(request) = transcode_video_protocol_payload(&req.payload)? {
-                    validate_transcode_video_request(&request)?;
-                } else {
-                    require_path(&req.payload)?;
-                    require_field(&req.payload, "target_codec", "h265")?;
-                }
-            }
-            OperationKind::TranscodeAudio => {
-                if let Some(request) = transcode_audio_protocol_payload(&req.payload)? {
-                    validate_transcode_audio_request(&request)?;
-                } else {
-                    require_path(&req.payload)?;
-                    require_one_of(&req.payload, "target_codec", &["aac", "opus"])?;
-                }
-            }
-            OperationKind::ExtractAudio => {
-                if let Some(request) = extract_audio_protocol_payload(&req.payload)? {
-                    validate_extract_audio_request(&request)?;
-                } else {
-                    require_path(&req.payload)?;
-                    require_field(&req.payload, "target_codec", "h265")?;
-                }
-            }
-            _ => {
-                require_path(&req.payload)?;
-                require_field(&req.payload, "target_codec", "h265")?;
-            }
-        },
+        ProviderKind::Transcoder => validate_transcoder_payload(req)?,
         ProviderKind::Remuxer => {
             if let Some(request) = remux_protocol_payload(&req.payload)? {
                 if request.input.path.trim().is_empty() {
@@ -176,7 +147,7 @@ pub(crate) fn transcode_video_protocol_payload(
     {
         return Ok(None);
     }
-    serde_json::from_value(payload.clone())
+    serde_json::from_value(protocol_payload_without_runtime_metadata(payload))
         .map(Some)
         .map_err(|err| invalid(format!("transcode_video protocol payload invalid: {err}")))
 }
@@ -191,7 +162,7 @@ pub(crate) fn transcode_audio_protocol_payload(
     {
         return Ok(None);
     }
-    serde_json::from_value(payload.clone())
+    serde_json::from_value(protocol_payload_without_runtime_metadata(payload))
         .map(Some)
         .map_err(|err| invalid(format!("transcode_audio protocol payload invalid: {err}")))
 }
@@ -205,7 +176,7 @@ pub(crate) fn extract_audio_protocol_payload(
     {
         return Ok(None);
     }
-    serde_json::from_value(payload.clone())
+    serde_json::from_value(protocol_payload_without_runtime_metadata(payload))
         .map(Some)
         .map_err(|err| invalid(format!("extract_audio protocol payload invalid: {err}")))
 }
@@ -269,22 +240,6 @@ fn require_field(
     }
 }
 
-fn require_one_of(
-    payload: &serde_json::Value,
-    field: &'static str,
-    expected: &[&'static str],
-) -> Result<(), ProtocolError> {
-    let actual = string_field(payload, field)?;
-    if expected.contains(&actual) {
-        Ok(())
-    } else {
-        Err(invalid(format!(
-            "{field} must be one of {}",
-            expected.join(", ")
-        )))
-    }
-}
-
 fn optional_u64(
     payload: &serde_json::Value,
     field: &'static str,
@@ -296,6 +251,71 @@ fn optional_u64(
             .ok_or_else(|| invalid(format!("{field} must be an unsigned integer"))),
         None => Ok(None),
     }
+}
+
+fn validate_transcoder_payload(req: &OperationRequest) -> Result<(), ProtocolError> {
+    match req.operation {
+        OperationKind::TranscodeVideo => {
+            let request = require_transcode_video_protocol_payload(&req.payload)?;
+            validate_transcode_video_request(&request)
+        }
+        OperationKind::TranscodeAudio => {
+            let request = require_transcode_audio_protocol_payload(&req.payload)?;
+            validate_transcode_audio_request(&request)
+        }
+        OperationKind::ExtractAudio => {
+            let request = require_extract_audio_protocol_payload(&req.payload)?;
+            validate_extract_audio_request(&request)
+        }
+        _ => Err(invalid(format!(
+            "fake-transcoder does not accept {} payloads",
+            operation_name(req.operation)
+        ))),
+    }
+}
+
+fn require_transcode_video_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<TranscodeVideoRequest, ProtocolError> {
+    transcode_video_protocol_payload(payload)?.ok_or_else(|| {
+        invalid("fake-transcoder transcode_video requires typed input, output, and profile payload")
+    })
+}
+
+fn require_transcode_audio_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<TranscodeAudioRequest, ProtocolError> {
+    transcode_audio_protocol_payload(payload)?.ok_or_else(|| {
+        invalid(
+            "fake-transcoder transcode_audio requires typed input, output, selection, and audio \
+             payload",
+        )
+    })
+}
+
+fn require_extract_audio_protocol_payload(
+    payload: &serde_json::Value,
+) -> Result<ExtractAudioRequest, ProtocolError> {
+    extract_audio_protocol_payload(payload)?.ok_or_else(|| {
+        invalid("fake-transcoder extract_audio requires typed input, output, and selection payload")
+    })
+}
+
+fn protocol_payload_without_runtime_metadata(payload: &serde_json::Value) -> serde_json::Value {
+    const RUNTIME_METADATA_FIELDS: &[&str] = &[
+        "advertised_access_modes",
+        "advertised_artifact_access",
+        "artifact_access",
+        "artifact_access_plan",
+    ];
+
+    let mut payload = payload.clone();
+    if let Some(object) = payload.as_object_mut() {
+        for field in RUNTIME_METADATA_FIELDS {
+            object.remove(*field);
+        }
+    }
+    payload
 }
 
 fn validate_transcode_video_request(request: &TranscodeVideoRequest) -> Result<(), ProtocolError> {

@@ -30,11 +30,8 @@ pub(crate) struct ProviderCatalogEntry {
 }
 
 const PROBER_SECONDARY: &[OperationKind] = &[OperationKind::HashFile];
-const TRANSCODER_SECONDARY: &[OperationKind] = &[
-    OperationKind::TranscodeAudio,
-    OperationKind::ExtractAudio,
-    OperationKind::TranscribeAudio,
-];
+const TRANSCODER_SECONDARY: &[OperationKind] =
+    &[OperationKind::TranscodeAudio, OperationKind::ExtractAudio];
 const BACKUP_SECONDARY: &[OperationKind] = &[OperationKind::DeleteArtifact];
 
 const PROVIDERS: &[ProviderCatalogEntry] = &[
