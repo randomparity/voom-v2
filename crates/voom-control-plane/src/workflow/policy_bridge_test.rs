@@ -14,7 +14,7 @@ fn bridge_maps_planned_remux_with_policy_target_and_payload() {
     let plan = plan(vec![node(PlanOperationKind::Remux, NodeStatus::Planned)]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let execution = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = execution.workflow.unwrap();
 
     assert_eq!(workflow.id, format!("policy-{}", report.report_id));
@@ -37,6 +37,18 @@ fn bridge_maps_planned_remux_with_policy_target_and_payload() {
 }
 
 #[test]
+fn bridge_builds_workflow_with_requested_limits() {
+    let plan = plan(vec![node(PlanOperationKind::Remux, NodeStatus::Planned)]);
+    let report = voom_plan::generate_compliance_report(&plan).unwrap();
+
+    let execution = workflow_plan_from_compliance(&plan, &report, 4, 2).unwrap();
+    let workflow = execution.workflow.unwrap();
+
+    assert_eq!(workflow.fan_out.max_files, 4);
+    assert_eq!(workflow.concurrency.max_in_flight_dispatches, 2);
+}
+
+#[test]
 fn bridge_rejects_legacy_planned_set_container() {
     let plan = plan(vec![node(
         PlanOperationKind::SetContainer,
@@ -44,7 +56,7 @@ fn bridge_rejects_legacy_planned_set_container() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
+    let err = single_file_workflow_plan_from_compliance(&plan, &report).unwrap_err();
 
     assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
     assert_eq!(
@@ -61,7 +73,7 @@ fn bridge_counts_non_planned_remux_nodes_without_submission() {
     ]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let execution = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
 
     assert!(execution.workflow.is_none());
     assert_eq!(execution.summary.submitted_node_count, 0);
@@ -77,7 +89,7 @@ fn bridge_returns_empty_summary_without_job_for_no_executable_nodes() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let execution = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let execution = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
 
     assert!(execution.workflow.is_none());
     assert_eq!(execution.summary.plan_id, plan.plan_id);
@@ -95,7 +107,7 @@ fn bridge_rejects_planned_unsupported_operation_before_job_creation() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let err = workflow_plan_from_compliance(&plan, &report).unwrap_err();
+    let err = single_file_workflow_plan_from_compliance(&plan, &report).unwrap_err();
 
     assert_eq!(err.code(), "POLICY_EXECUTION_ERROR");
     assert_eq!(
@@ -112,7 +124,7 @@ fn bridge_maps_planned_transcode_video() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let bridged = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeVideo);
@@ -140,7 +152,7 @@ fn bridge_maps_planned_transcode_audio() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let bridged = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::TranscodeAudio);
@@ -162,7 +174,7 @@ fn bridge_maps_planned_extract_audio() {
     )]);
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let bridged = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].operation(), OperationKind::ExtractAudio);
@@ -201,7 +213,7 @@ fn bridge_preserves_plan_edges_between_included_planned_nodes() {
     );
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let bridged = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes[0].id(), "policy-node_node_remux_first");
@@ -237,7 +249,7 @@ fn bridge_omits_dependencies_to_skipped_nodes() {
     );
     let report = voom_plan::generate_compliance_report(&plan).unwrap();
 
-    let bridged = workflow_plan_from_compliance(&plan, &report).unwrap();
+    let bridged = single_file_workflow_plan_from_compliance(&plan, &report).unwrap();
     let workflow = bridged.workflow.unwrap();
 
     assert_eq!(workflow.nodes.len(), 1);

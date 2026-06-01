@@ -890,17 +890,15 @@ impl ControlPlane {
             return Ok(None);
         }
         let bridge =
-            workflow_plan_from_compliance(plan, report).map_err(|source| PhaseDispatchFailure {
-                source,
-                run_summary: None,
+            workflow_plan_from_compliance(plan, report, planned, planned).map_err(|source| {
+                PhaseDispatchFailure {
+                    source,
+                    run_summary: None,
+                }
             })?;
-        let Some(mut workflow) = bridge.workflow else {
+        let Some(workflow) = bridge.workflow else {
             return Ok(None);
         };
-        // Override the bridge's single-file defaults so the phase runs across
-        // every active file concurrently (`policy_bridge.rs` hardcodes 1/1).
-        workflow.fan_out.max_files = planned;
-        workflow.concurrency.max_in_flight_dispatches = planned;
         // On a ticket failure the executor drains every in-flight dispatch to a
         // terminal state (so any inline commit has landed) and fails the job;
         // carry its run summary so the partial outcome reports the job-cumulative

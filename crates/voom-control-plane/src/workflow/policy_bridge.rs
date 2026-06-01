@@ -30,6 +30,8 @@ pub struct PolicyExecutionSummary {
 pub fn workflow_plan_from_compliance(
     plan: &ExecutionPlan,
     report: &voom_plan::ComplianceReport,
+    max_files: usize,
+    max_in_flight_dispatches: usize,
 ) -> Result<PolicyExecutionPlan, VoomError> {
     let mut nodes = Vec::new();
     let mut workflow_node_ids_by_plan_node_id = BTreeMap::new();
@@ -81,9 +83,9 @@ pub fn workflow_plan_from_compliance(
             id: format!("policy-{}", report.report_id),
             seed: 6,
             nodes,
-            fan_out: FanOutPolicy { max_files: 1 },
+            fan_out: FanOutPolicy { max_files },
             concurrency: ConcurrencyPolicy {
-                max_in_flight_dispatches: 1,
+                max_in_flight_dispatches,
             },
             timing: TimingPolicy {
                 base_duration_ms: 5,
@@ -93,6 +95,14 @@ pub fn workflow_plan_from_compliance(
     };
 
     Ok(PolicyExecutionPlan { workflow, summary })
+}
+
+#[cfg(test)]
+fn single_file_workflow_plan_from_compliance(
+    plan: &ExecutionPlan,
+    report: &voom_plan::ComplianceReport,
+) -> Result<PolicyExecutionPlan, VoomError> {
+    workflow_plan_from_compliance(plan, report, 1, 1)
 }
 
 fn execution_operation(operation_kind: PlanOperationKind) -> Result<OperationKind, VoomError> {
