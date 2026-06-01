@@ -27,7 +27,7 @@ pub fn generate_compliance_report(
     let report_id_preimage = report_id_preimage(plan);
     let report_id_preimage_json = crate::hash::canonical_json(&report_id_preimage)
         .map_err(|err| serialization_error(&err))?;
-    let provisional_report_id = crate::compliance_hash::report_id(&report_id_preimage)
+    let provisional_report_id = crate::compliance::hash::report_id(&report_id_preimage)
         .map_err(|err| serialization_error(&err))?;
     let checks: Vec<ComplianceCheck> = plan
         .nodes
@@ -61,7 +61,7 @@ pub fn generate_compliance_report(
         provenance: ComplianceProvenance::default(),
     };
     report.report_hash =
-        crate::compliance_hash::report_hash(&report).map_err(|err| serialization_error(&err))?;
+        crate::compliance::hash::report_hash(&report).map_err(|err| serialization_error(&err))?;
     Ok(report)
 }
 
@@ -94,7 +94,7 @@ fn report_id_preimage(plan: &ExecutionPlan) -> serde_json::Value {
 
 fn check_from_node(report_id_preimage: &str, node: &PlanNode) -> ComplianceCheck {
     ComplianceCheck {
-        check_id: crate::compliance_hash::check_id(
+        check_id: crate::compliance::hash::check_id(
             report_id_preimage,
             &node.node_id,
             node.operation_kind.as_str(),
@@ -263,5 +263,5 @@ fn serialization_error(err: &serde_json::Error) -> ComplianceReportError {
 }
 
 #[cfg(test)]
-#[path = "compliance_report_test.rs"]
+#[path = "report_test.rs"]
 mod tests;

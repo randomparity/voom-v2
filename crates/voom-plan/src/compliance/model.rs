@@ -156,5 +156,5 @@ impl Default for ComplianceProvenance {
 }
 
 #[cfg(test)]
-#[path = "compliance_model_test.rs"]
+#[path = "model_test.rs"]
 mod tests;

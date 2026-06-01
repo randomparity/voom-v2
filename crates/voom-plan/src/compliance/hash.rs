@@ -37,5 +37,5 @@ fn strip_report_hash(value: &mut Value) {
 }
 
 #[cfg(test)]
-#[path = "compliance_hash_test.rs"]
+#[path = "hash_test.rs"]
 mod tests;
