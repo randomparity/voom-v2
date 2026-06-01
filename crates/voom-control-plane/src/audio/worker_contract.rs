@@ -12,7 +12,7 @@ use super::selection::{ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan};
 use super::source::SelectedSource;
 use crate::artifact::fs::observe_regular_file;
 
-pub fn transcode_request_for(
+pub fn transcode_audio_request_for(
     selected: &SelectedSource,
     selection: &TranscodeAudioSelectionPlan,
     staging_root: &Path,
@@ -37,7 +37,7 @@ pub fn transcode_request_for(
     }
 }
 
-pub fn extract_request_for(
+pub fn extract_audio_request_for(
     selected: &SelectedSource,
     selection: &ExtractAudioSelectionPlan,
     staging_root: &Path,

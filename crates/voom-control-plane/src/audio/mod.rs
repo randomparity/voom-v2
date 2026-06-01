@@ -241,7 +241,7 @@ async fn execute_transcode_audio_inner(
     )
     .await?;
     worker_contract::revalidate_source_file(&selected).await?;
-    let request = worker_contract::transcode_request_for(
+    let request = worker_contract::transcode_audio_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
@@ -538,7 +538,7 @@ async fn execute_extract_audio_inner(
     )
     .await?;
     worker_contract::revalidate_source_file(&selected).await?;
-    let request = worker_contract::extract_request_for(
+    let request = worker_contract::extract_audio_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
