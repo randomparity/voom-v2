@@ -270,27 +270,29 @@ fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
 }
 
 async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
-    for attempt in 0..3 {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
         match command.output().await {
-            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+            Err(err) if is_text_file_busy(&err) && attempts_remaining > 0 => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             result => return result,
         }
     }
-    command.output().await
 }
 
 fn spawn_with_retry(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    for attempt in 0..3 {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
         match command.spawn() {
-            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+            Err(err) if is_text_file_busy(&err) && attempts_remaining > 0 => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             result => return result,
         }
     }
-    command.spawn()
 }
 
 fn is_text_file_busy(err: &io::Error) -> bool {
