@@ -22,15 +22,13 @@ use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::workflow::execution::executor::{
-    WorkflowChaosOptions, WorkflowExecutorOptions,
+use voom_control_plane::workflow::{
+    BranchContext, EffectiveTiming, ExpansionContext, WorkerRuntimeRegistry, WorkflowChaosOptions,
+    WorkflowExecutor, WorkflowExecutorOptions, WorkflowPlan, WorkflowRunSummary,
+    WorkflowTicketPayload, expand_backup_completion, expand_probe_completion,
+    expand_quality_completion, expand_scanner_completion, expand_transform_completion,
+    render_default_payload, render_default_payload_with_fan_out,
 };
-use voom_control_plane::workflow::plan::expansion::{
-    ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
-    expand_scanner_completion, expand_transform_completion,
-};
-use voom_control_plane::workflow::plan::ticket_payload::WorkflowTicketPayload;
-use voom_control_plane::workflow::{WorkerRuntimeRegistry, WorkflowExecutor, WorkflowPlan};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, TicketOperation, WorkerId};
 use voom_scheduler::SingleWorkerPerKindSelector;
@@ -959,9 +957,7 @@ impl DurableWorkflowFixture {
             branch_id: branch_id.to_owned(),
             operation,
             rendered_payload,
-            timing: voom_control_plane::workflow::execution::timing::EffectiveTiming::for_test(
-                25, 10,
-            ),
+            timing: EffectiveTiming::for_test(25, 10),
             source_file: Some(json!({
                 "path": format!("/library/{branch_id}.mkv"),
                 "size_bytes": 4_200_000_000_u64,
@@ -1307,7 +1303,7 @@ impl DurableWorkflowFixture {
     }
 
     fn assert_failure_summary(
-        summary: &voom_control_plane::workflow::WorkflowRunSummary,
+        summary: &WorkflowRunSummary,
         operation: OperationKind,
         class: FailureClass,
     ) -> TestResult<()> {
@@ -1326,10 +1322,7 @@ impl DurableWorkflowFixture {
         )
     }
 
-    fn assert_worker_parallel_limits(
-        &self,
-        summary: &voom_control_plane::workflow::WorkflowRunSummary,
-    ) -> TestResult<()> {
+    fn assert_worker_parallel_limits(&self, summary: &WorkflowRunSummary) -> TestResult<()> {
         for (worker_id, max_parallel) in &self.registered_workers {
             expect(
                 &format!("worker {worker_id} exceeded max_parallel {max_parallel}"),
@@ -1747,7 +1740,7 @@ async fn connect_single_connection_pool(url: &str) -> TestResult<SqlitePool> {
 }
 
 fn rendered_payload_for_seed(operation: OperationKind, branch_id: &str) -> TestResult<Value> {
-    let branch = voom_control_plane::workflow::plan::binding::BranchContext {
+    let branch = BranchContext {
         branch_id: branch_id.to_owned(),
         path: format!("/library/{branch_id}.mkv"),
         probe_codec: Some("h264".to_owned()),
@@ -1756,19 +1749,13 @@ fn rendered_payload_for_seed(operation: OperationKind, branch_id: &str) -> TestR
             "size_bytes": 4_200_000_000_u64,
         })),
     };
-    let timing = voom_control_plane::workflow::execution::timing::EffectiveTiming::for_test(25, 10);
+    let timing = EffectiveTiming::for_test(25, 10);
     if operation == OperationKind::ScanLibrary {
-        Ok(
-            voom_control_plane::workflow::plan::binding::render_default_payload_with_fan_out(
-                operation, &branch, timing, 3,
-            )?,
-        )
+        Ok(render_default_payload_with_fan_out(
+            operation, &branch, timing, 3,
+        )?)
     } else {
-        Ok(
-            voom_control_plane::workflow::plan::binding::render_default_payload(
-                operation, &branch, timing,
-            )?,
-        )
+        Ok(render_default_payload(operation, &branch, timing)?)
     }
 }
 

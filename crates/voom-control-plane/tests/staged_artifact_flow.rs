@@ -7,12 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use tempfile::{NamedTempFile, TempDir};
-use voom_control_plane::ControlPlane;
-use voom_control_plane::artifact::{
-    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, StageCopyInput,
+use voom_control_plane::scan::ScanPathInput;
+use voom_control_plane::{
+    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, ControlPlane, StageCopyInput,
     VerifyArtifactInput,
 };
-use voom_control_plane::scan::ScanPathInput;
 use voom_core::ErrorCode;
 use voom_store::repo::artifacts::ArtifactCommitState;
 use voom_test_support::worker::{

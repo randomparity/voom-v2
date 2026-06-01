@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 
 use serde::Serialize;
-use voom_control_plane::artifact::{
+use voom_control_plane::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
     CommitArtifactInput, CommitArtifactPreMutationReport, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,

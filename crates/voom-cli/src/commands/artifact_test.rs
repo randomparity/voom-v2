@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser};
 use serde_json::json;
-use voom_control_plane::artifact::{
+use voom_control_plane::{
     ArtifactDetail, ArtifactInspectionState, ArtifactSummary, CommitArtifactReport,
     CommitRecoveryReport, CommitSummary, PathFacts, PathObservation, RecoverySummary,
     StageCopyReport, VerificationSummary, VerifyArtifactReport,

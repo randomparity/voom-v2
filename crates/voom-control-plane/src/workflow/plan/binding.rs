@@ -254,6 +254,7 @@ fn insert_policy_file_source(object: &mut Map<String, Value>, source: PolicyFile
 }
 
 #[must_use]
+#[cfg(test)]
 pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchContext {
     BranchContext {
         branch_id: branch_id.to_owned(),

@@ -31,7 +31,7 @@ use crate::workflow::plan::expansion::{
 };
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::{WorkflowTicketPayload, operation_name};
-pub use crate::workflow::summary::{OperationSummary, WorkflowRunSummary};
+use crate::workflow::summary::WorkflowRunSummary;
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const POLICY_NODE_ID_PREFIX: &str = "policy-node_";

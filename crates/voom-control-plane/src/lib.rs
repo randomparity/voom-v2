@@ -45,7 +45,7 @@ use voom_store::repo::{
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
-pub mod artifact;
+mod artifact;
 mod audio;
 mod cases;
 mod media_snapshot;
@@ -83,6 +83,13 @@ pub mod workers {
     };
 }
 
+pub use artifact::{
+    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
+    CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
+    CommitArtifactReport, CommitRecoveryReport, CommitSummary, PathFacts, PathObservation,
+    RecoverySummary, StageCopyCommandError, StageCopyInput, StageCopyReport, VerificationSummary,
+    VerifyArtifactInput, VerifyArtifactReport,
+};
 pub use audio::{
     ExecuteExtractAudioInput, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
     ExecuteTranscodeAudioReport, ExtractAudioDispatcher, TranscodeAudioDispatcher,
