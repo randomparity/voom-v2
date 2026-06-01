@@ -50,6 +50,7 @@ mod audio;
 mod cases;
 mod media_snapshot;
 pub mod node_auth;
+mod operation_source;
 mod remux;
 pub mod scan;
 mod transcode;
