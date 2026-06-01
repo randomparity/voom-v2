@@ -3,16 +3,19 @@ use voom_policy::{
     CompiledOperation, DefaultStrategy, MediaSnapshotInput, TrackFilter, TrackTarget,
 };
 
-use crate::{
-    NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode,
-    remux::{
-        RemuxDefaultAction, RemuxOperationPayload, RemuxPlanningBlock, RemuxTrackAction,
-        RemuxTrackActionKind, SnapshotStreamFact, default_track_order, evaluate_filter,
-        stream_facts,
-    },
+mod payload;
+mod selection;
+
+pub use payload::{
+    RemuxDefaultAction, RemuxOperationPayload, RemuxPayloadError, RemuxTrackAction,
+    RemuxTrackActionKind,
 };
+pub use selection::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts};
+
+use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
 
 use super::{OperationPlan, video_stream_count};
+use payload::default_track_order;
 
 pub(super) enum CandidateSupport {
     Supported,

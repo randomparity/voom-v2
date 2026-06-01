@@ -14,9 +14,9 @@ use crate::{
     SafetyHints, SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
 };
 
-mod audio;
-mod remux;
-mod transcode_video;
+pub mod audio;
+pub mod remux;
+pub mod transcode_video;
 
 pub use transcode_video::video_stream_field;
 

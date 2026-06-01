@@ -1,3 +1,7 @@
+pub mod profile;
+
+pub use profile::{cpu_cost, inline_profile_id};
+
 use serde_json::json;
 use voom_policy::MediaSnapshotInput;
 
@@ -328,7 +332,7 @@ fn transcode_video_notes(
         format!("speed={}", resolved.preset),
         format!(
             "cpu_cost={}",
-            crate::transcode_video_profile::cpu_cost(&resolved.encoder, &resolved.preset)
+            profile::cpu_cost(&resolved.encoder, &resolved.preset)
         ),
         format!("crf={}", resolved.crf),
     ];

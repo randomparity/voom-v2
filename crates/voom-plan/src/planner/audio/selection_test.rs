@@ -1,10 +1,11 @@
 use voom_policy::{MediaSnapshotInput, TargetKind, TargetRef, TrackFilter};
 
 use super::{
-    AUDIO_TRANSCODE_CONTAINER, AudioBundleRole, AudioPlanShape, AudioPlanningBlock,
+    AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
     has_transcode_preservation_facts, stream_facts, transcode_audio_shape,
 };
+use crate::planner::audio::AUDIO_TRANSCODE_CONTAINER;
 
 #[test]
 fn transcode_preservation_facts_require_language_title_channels_and_commentary() {
@@ -60,7 +61,7 @@ fn stream_facts_parse_audio_streams_with_disposition_commentary() {
             title: Some("Commentary".to_owned()),
             channels: Some(2),
             default: true,
-            disposition: super::AudioDispositionFact {
+            disposition: AudioDispositionFact {
                 default: true,
                 forced: false,
                 commentary: Some(true),
@@ -164,7 +165,7 @@ fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
         title: Some("Main".to_owned()),
         channels: Some(2),
         default: false,
-        disposition: super::AudioDispositionFact {
+        disposition: AudioDispositionFact {
             default: false,
             forced: false,
             commentary,

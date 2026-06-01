@@ -1,13 +1,20 @@
 use serde_json::json;
 use voom_policy::{MediaSnapshotInput, TrackFilter};
 
-use crate::{
-    NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode,
-    audio::{
-        AudioOperationPayload, AudioOperationType, AudioPlanShape, AudioPlanningBlock,
-        extract_audio_shape, selected_audio_streams, transcode_audio_shape,
-    },
+mod payload;
+mod selection;
+
+pub use payload::{
+    AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioOperationPayload,
+    AudioOperationType, AudioPayloadError,
 };
+pub use selection::{
+    AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
+    has_transcode_preservation_facts, selected_audio_streams, stream_facts, transcode_audio_shape,
+};
+
+use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
 
 use super::OperationPlan;
 
