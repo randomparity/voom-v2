@@ -21,7 +21,6 @@ use voom_core::{
 };
 use voom_plan::{ExecutionPlan, NodeStatus, PlanningContext, PlanningRequest};
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, TargetRef};
-use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::identity::{FileLocationKind, FileVersion, IdentityRepo, MediaSnapshot};
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
@@ -644,7 +643,6 @@ impl ControlPlane {
         }
         let executor = WorkflowExecutor::with_options(
             self.clone(),
-            SingleWorkerPerKindSelector,
             runtimes,
             WorkflowExecutorOptions::from(options),
         );
@@ -877,7 +875,7 @@ impl ControlPlane {
     /// has no planned work (every file blocked, skipped, or compliant).
     async fn dispatch_phase(
         &self,
-        executor: &WorkflowExecutor<SingleWorkerPerKindSelector>,
+        executor: &WorkflowExecutor,
         job_id: JobId,
         plan: &ExecutionPlan,
         report: &voom_plan::ComplianceReport,

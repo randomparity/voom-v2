@@ -31,7 +31,6 @@ use voom_control_plane::workflow::{
 };
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, TicketOperation, WorkerId};
-use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
@@ -736,20 +735,12 @@ impl DurableWorkflowFixture {
         })
     }
 
-    fn executor(&self) -> WorkflowExecutor<SingleWorkerPerKindSelector> {
+    fn executor(&self) -> WorkflowExecutor {
         self.executor_with_options(self.executor_options.clone())
     }
 
-    fn executor_with_options(
-        &self,
-        options: WorkflowExecutorOptions,
-    ) -> WorkflowExecutor<SingleWorkerPerKindSelector> {
-        WorkflowExecutor::with_options(
-            self.cp.clone(),
-            SingleWorkerPerKindSelector,
-            self.registry.clone(),
-            options,
-        )
+    fn executor_with_options(&self, options: WorkflowExecutorOptions) -> WorkflowExecutor {
+        WorkflowExecutor::with_options(self.cp.clone(), self.registry.clone(), options)
     }
 
     fn expansion_context(&self) -> ExpansionContext<'_> {

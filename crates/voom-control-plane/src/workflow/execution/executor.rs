@@ -41,9 +41,8 @@ const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
-pub struct WorkflowExecutor<S = SingleWorkerPerKindSelector> {
+pub struct WorkflowExecutor {
     control_plane: ControlPlane,
-    selector: S,
     runtimes: WorkerRuntimeRegistry,
     options: WorkflowExecutorOptions,
 }
@@ -215,76 +214,64 @@ impl RunLoopState {
         }
     }
 
-    async fn fail_after_drain<S>(
+    async fn fail_after_drain(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
         source: VoomError,
         started: Instant,
-    ) -> WorkflowRunError
-    where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) -> WorkflowRunError {
         self.drain_active(executor, plan, workflow_id, job_id).await;
         self.fail_job(&executor.control_plane, job_id, source, started)
             .await
     }
 
-    async fn process_ready_dispatches<S>(
+    async fn process_ready_dispatches(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
-    ) where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) {
         while let Some(joined) = self.active.try_join_next() {
             self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
                 .await;
         }
     }
 
-    async fn drain_active<S>(
+    async fn drain_active(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
-    ) where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) {
         while let Some(joined) = self.active.join_next().await {
             self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
                 .await;
         }
     }
 
-    async fn wait_for_one<S>(
+    async fn wait_for_one(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
-    ) where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) {
         if let Some(joined) = self.active.join_next().await {
             self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
                 .await;
         }
     }
 
-    async fn try_spawn_dispatch<S>(
+    async fn try_spawn_dispatch(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         ticket: Ticket,
-    ) -> Result<SpawnOutcome, VoomError>
-    where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) -> Result<SpawnOutcome, VoomError> {
         executor
             .try_spawn_dispatch(
                 &mut self.active,
@@ -295,16 +282,14 @@ impl RunLoopState {
             .await
     }
 
-    async fn process_joined_dispatch<S>(
+    async fn process_joined_dispatch(
         &mut self,
-        executor: &WorkflowExecutor<S>,
+        executor: &WorkflowExecutor,
         joined: Result<DispatchOutcome, tokio::task::JoinError>,
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
-    ) where
-        S: WorkerSelector + Clone + Send + Sync + 'static,
-    {
+    ) {
         executor
             .process_joined_dispatch(
                 joined,
@@ -319,30 +304,20 @@ impl RunLoopState {
     }
 }
 
-impl<S> WorkflowExecutor<S>
-where
-    S: WorkerSelector + Clone + Send + Sync + 'static,
-{
+impl WorkflowExecutor {
     #[must_use]
-    pub fn new(control_plane: ControlPlane, selector: S, runtimes: WorkerRuntimeRegistry) -> Self {
-        Self::with_options(
-            control_plane,
-            selector,
-            runtimes,
-            WorkflowExecutorOptions::default(),
-        )
+    pub fn new(control_plane: ControlPlane, runtimes: WorkerRuntimeRegistry) -> Self {
+        Self::with_options(control_plane, runtimes, WorkflowExecutorOptions::default())
     }
 
     #[must_use]
     pub fn with_options(
         control_plane: ControlPlane,
-        selector: S,
         runtimes: WorkerRuntimeRegistry,
         options: WorkflowExecutorOptions,
     ) -> Self {
         Self {
             control_plane,
-            selector,
             runtimes,
             options,
         }
@@ -728,10 +703,8 @@ where
         let candidates = self
             .candidate_workers(workflow_payload.operation, reservations)
             .await?;
-        let worker_id = match self
-            .selector
-            .select(workflow_payload.operation, &candidates)
-        {
+        let selector = SingleWorkerPerKindSelector;
+        let worker_id = match selector.select(workflow_payload.operation, &candidates) {
             Ok(worker_id) => worker_id,
             Err(source) => {
                 if matches!(source, VoomError::NoEligibleWorker(_))

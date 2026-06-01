@@ -17,7 +17,6 @@ use voom_core::{
     BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
     TicketOperation, VoomError, WorkerId,
 };
-use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
 use voom_store::repo::identity::{
     DiscoveredFile, FileLocationKind, IngestOutcome, MediaWorkKind, NewMediaVariant, NewMediaWork,
@@ -1775,16 +1774,8 @@ impl ExecutorFixture {
             .await
     }
 
-    fn executor_with_options(
-        &self,
-        options: WorkflowExecutorOptions,
-    ) -> WorkflowExecutor<SingleWorkerPerKindSelector> {
-        WorkflowExecutor::with_options(
-            self.cp.clone(),
-            SingleWorkerPerKindSelector,
-            self.registry.clone(),
-            options,
-        )
+    fn executor_with_options(&self, options: WorkflowExecutorOptions) -> WorkflowExecutor {
+        WorkflowExecutor::with_options(self.cp.clone(), self.registry.clone(), options)
     }
 
     async fn lease_count(&self) -> i64 {
