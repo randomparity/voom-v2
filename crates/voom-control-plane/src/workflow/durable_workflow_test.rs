@@ -358,7 +358,7 @@ async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() 
 async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> TestResult<()> {
     let fixture = DurableWorkflowFixture::without_fake_providers().await?;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.max_attempts = 2;
+    options.queue.max_attempts = 2;
 
     let err = fixture
         .executor_with_options(options)
@@ -399,7 +399,7 @@ async fn pre_lease_ambiguous_worker_terminal_fails_without_dispatch() -> TestRes
         )
         .await?;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.max_attempts = 2;
+    options.queue.max_attempts = 2;
 
     let err = fixture
         .executor_with_options(options)
@@ -439,8 +439,8 @@ impl DurableWorkflowFixture {
 
     async fn start_all_fake_providers_with_max_parallel(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
-        fixture.executor_options.heartbeat_timeout = Duration::from_secs(2);
-        fixture.executor_options.progress_idle_timeout = Duration::from_secs(2);
+        fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
+        fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         for provider in provider_specs() {
             if let Err(err) = fixture
                 .register_process_provider(provider, max_parallel)
@@ -454,8 +454,8 @@ impl DurableWorkflowFixture {
 
     async fn start_all_in_process_fake_providers(max_parallel: u32) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
-        fixture.executor_options.heartbeat_timeout = Duration::from_secs(2);
-        fixture.executor_options.progress_idle_timeout = Duration::from_secs(2);
+        fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
+        fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         for provider in provider_specs() {
             fixture
                 .register_in_process_provider(provider, max_parallel)
@@ -469,9 +469,9 @@ impl DurableWorkflowFixture {
         mode: ChaosWorkerMode,
     ) -> TestResult<Self> {
         let mut options = WorkflowExecutorOptions::for_tests();
-        options.heartbeat_interval = Duration::from_millis(20);
-        options.heartbeat_timeout = Duration::from_millis(500);
-        options.progress_idle_timeout = Duration::from_millis(150);
+        options.timing.heartbeat_interval = Duration::from_millis(20);
+        options.timing.heartbeat_timeout = Duration::from_millis(500);
+        options.timing.progress_idle_timeout = Duration::from_millis(150);
         Self::start_with_chaos_override_and_executor_options(operation, mode, options, None).await
     }
 
@@ -482,10 +482,10 @@ impl DurableWorkflowFixture {
         deadlines: DeadlineFixture,
     ) -> TestResult<Self> {
         let mut options = WorkflowExecutorOptions::for_tests();
-        options.heartbeat_interval = Duration::from_millis(20);
-        options.heartbeat_timeout =
+        options.timing.heartbeat_interval = Duration::from_millis(20);
+        options.timing.heartbeat_timeout =
             Duration::from_millis(u64::from(deadlines.heartbeat_deadline_ms));
-        options.progress_idle_timeout =
+        options.timing.progress_idle_timeout =
             Duration::from_millis(u64::from(deadlines.progress_idle_deadline_ms));
         chaos.set_payload_mode_for_operation(operation, mode.payload_mode());
         options.chaos = chaos;
@@ -525,9 +525,9 @@ impl DurableWorkflowFixture {
 
     async fn start_with_unreachable_runtime_override(operation: OperationKind) -> TestResult<Self> {
         let mut fixture = Self::without_fake_providers().await?;
-        fixture.executor_options.heartbeat_interval = Duration::from_millis(20);
-        fixture.executor_options.heartbeat_timeout = Duration::from_millis(120);
-        fixture.executor_options.progress_idle_timeout = Duration::from_millis(120);
+        fixture.executor_options.timing.heartbeat_interval = Duration::from_millis(20);
+        fixture.executor_options.timing.heartbeat_timeout = Duration::from_millis(120);
+        fixture.executor_options.timing.progress_idle_timeout = Duration::from_millis(120);
         let setup = async {
             fixture
                 .register_process_providers_except(operation, 4)

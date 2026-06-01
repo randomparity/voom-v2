@@ -133,7 +133,7 @@ async fn local_reservations_prevent_worker_capacity_overrun() {
 async fn capacity_deferred_ready_ticket_does_not_block_later_ready_ticket() {
     let fixture = ExecutorFixture::capacity_deferred_then_free_worker().await;
     let mut options = timeout_options();
-    options.ready_batch_size = 8;
+    options.queue.ready_batch_size = 8;
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -200,7 +200,7 @@ async fn progress_timeout_fails_terminally() {
 async fn retriable_dispatch_failure_retries_before_terminal_failure() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Crash).await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.max_attempts = 2;
+    options.queue.max_attempts = 2;
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -214,7 +214,7 @@ async fn retriable_dispatch_failure_retries_before_terminal_failure() {
 async fn retriable_pre_lease_failure_retries_before_terminal_failure() {
     let fixture = ExecutorFixture::without_workers(1).await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.max_attempts = 2;
+    options.queue.max_attempts = 2;
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -229,8 +229,8 @@ async fn retriable_pre_lease_failure_retries_before_terminal_failure() {
 async fn heartbeat_timeout_fails_terminally() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
-    options.progress_idle_timeout = Duration::from_millis(250);
-    options.heartbeat_timeout = Duration::ZERO;
+    options.timing.progress_idle_timeout = Duration::from_millis(250);
+    options.timing.heartbeat_timeout = Duration::ZERO;
     options.chaos.disable_heartbeat_ticks = true;
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -243,9 +243,9 @@ async fn heartbeat_timeout_fails_terminally() {
 async fn heartbeat_timeout_wins_when_watchdog_deadlines_tie() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
-    options.progress_idle_timeout = Duration::ZERO;
-    options.heartbeat_timeout = Duration::ZERO;
-    options.heartbeat_interval = Duration::from_secs(1);
+    options.timing.progress_idle_timeout = Duration::ZERO;
+    options.timing.heartbeat_timeout = Duration::ZERO;
+    options.timing.heartbeat_interval = Duration::from_secs(1);
     options.chaos.disable_heartbeat_ticks = true;
 
     let err = fixture.run_with_options(options).await.unwrap_err();
@@ -259,9 +259,9 @@ async fn heartbeat_timeout_wins_when_watchdog_deadlines_tie() {
 async fn heartbeat_watchdog_is_not_starved_by_progress_frames() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::ProgressFlood).await;
     let mut options = timeout_options();
-    options.progress_idle_timeout = Duration::from_secs(1);
-    options.heartbeat_timeout = Duration::ZERO;
-    options.heartbeat_interval = Duration::from_secs(1);
+    options.timing.progress_idle_timeout = Duration::from_secs(1);
+    options.timing.heartbeat_timeout = Duration::ZERO;
+    options.timing.heartbeat_interval = Duration::from_secs(1);
     options.chaos.disable_heartbeat_ticks = true;
 
     let err = fixture.run_with_options(options).await.unwrap_err();
@@ -312,9 +312,9 @@ async fn ready_lookup_is_scoped_to_active_workflow_job() {
     let mut fixture = ExecutorFixture::with_ready_tickets(1).await;
     fixture.seed_other_job_ready_ticket(100).await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.ready_batch_size = 1;
-    options.progress_idle_timeout = Duration::from_secs(5);
-    options.heartbeat_timeout = Duration::from_secs(5);
+    options.queue.ready_batch_size = 1;
+    options.timing.progress_idle_timeout = Duration::from_secs(5);
+    options.timing.heartbeat_timeout = Duration::from_secs(5);
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -529,8 +529,8 @@ async fn policy_transcode_ticket_carries_staging_and_target_roots_from_options()
         id: FileVersionId(11),
     });
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = PathBuf::from("/tmp/voom-stage");
-    options.transcode_target_dir = PathBuf::from("/media/normalized");
+    options.artifact_roots.transcode.staging_root = PathBuf::from("/tmp/voom-stage");
+    options.artifact_roots.transcode.target_dir = PathBuf::from("/media/normalized");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -632,8 +632,8 @@ async fn policy_remux_ticket_carries_staging_and_target_roots_from_options() {
         id: FileVersionId(11),
     });
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.remux_staging_root = PathBuf::from("/tmp/voom-remux-stage");
-    options.remux_target_dir = PathBuf::from("/media/remuxed");
+    options.artifact_roots.remux.staging_root = PathBuf::from("/tmp/voom-remux-stage");
+    options.artifact_roots.remux.target_dir = PathBuf::from("/media/remuxed");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -683,8 +683,8 @@ async fn policy_transcode_audio_root_ticket_carries_source_ids_audio_payload_and
         id: FileVersionId(11),
     });
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.audio_staging_root = PathBuf::from("/tmp/audio-stage");
-    options.audio_target_dir = PathBuf::from("/media/audio-output");
+    options.artifact_roots.audio.staging_root = PathBuf::from("/tmp/audio-stage");
+    options.artifact_roots.audio.target_dir = PathBuf::from("/media/audio-output");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -866,8 +866,8 @@ async fn policy_remux_ticket_runs_real_remux_path() {
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
     let root = dir.path().canonicalize().unwrap();
-    options.remux_staging_root = root.join("stage");
-    options.remux_target_dir = root.join("out");
+    options.artifact_roots.remux.staging_root = root.join("stage");
+    options.artifact_roots.remux.target_dir = root.join("out");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -948,8 +948,8 @@ async fn policy_remux_ticket_succeeds_with_fake_runtime_remux_result() {
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
     let root = dir.path().canonicalize().unwrap();
-    options.remux_staging_root = root.join("stage");
-    options.remux_target_dir = root.join("out");
+    options.artifact_roots.remux.staging_root = root.join("stage");
+    options.artifact_roots.remux.target_dir = root.join("out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -994,8 +994,9 @@ async fn policy_remux_success_event_append_is_atomic_with_ticket_success() {
     let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
     let root = dir.path().canonicalize().unwrap();
-    options.remux_staging_root = root.join("stage");
-    options.remux_target_dir = root.join("out");
+    options.artifact_roots.remux.staging_root = root.join("stage");
+    options.artifact_roots.remux.target_dir = root.join("out");
+    let options = options.dispatch_options();
 
     super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
@@ -1084,8 +1085,9 @@ async fn policy_remux_post_commit_snapshot_failure_fails_lease_retriable() {
     let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
     let root = dir.path().canonicalize().unwrap();
-    options.remux_staging_root = root.join("stage");
-    options.remux_target_dir = root.join("out");
+    options.artifact_roots.remux.staging_root = root.join("stage");
+    options.artifact_roots.remux.target_dir = root.join("out");
+    let options = options.dispatch_options();
 
     let err = super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
@@ -1143,8 +1145,8 @@ async fn policy_remux_dispatch_uses_workflow_lease_and_idempotency_key() {
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
     let root = dir.path().canonicalize().unwrap();
-    options.remux_staging_root = root.join("stage");
-    options.remux_target_dir = root.join("out");
+    options.artifact_roots.remux.staging_root = root.join("stage");
+    options.artifact_roots.remux.target_dir = root.join("out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -1211,6 +1213,7 @@ async fn invalid_policy_remux_payload_fails_acquired_lease() {
         .await
         .unwrap();
     let runtime = fixture.registry.get(worker_id).unwrap();
+    let options = WorkflowExecutorOptions::for_tests().dispatch_options();
 
     let err = super::super::operation_adapters::dispatch_control_plane_remux(
         &fixture.cp,
@@ -1219,7 +1222,7 @@ async fn invalid_policy_remux_payload_fails_acquired_lease() {
         &workflow_payload,
         lease.id,
         &workflow_payload.rendered_payload,
-        &WorkflowExecutorOptions::for_tests(),
+        &options,
     )
     .await
     .unwrap_err();
@@ -1249,8 +1252,8 @@ async fn policy_transcode_dispatch_sends_worker_protocol_payload() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = dir.path().join("stage");
-    options.transcode_target_dir = dir.path().join("out");
+    options.artifact_roots.transcode.staging_root = dir.path().join("stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -1281,8 +1284,8 @@ async fn policy_transcode_audio_dispatch_sends_worker_protocol_payload() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.audio_staging_root = dir.path().join("audio-stage");
-    options.audio_target_dir = dir.path().join("audio-out");
+    options.artifact_roots.audio.staging_root = dir.path().join("audio-stage");
+    options.artifact_roots.audio.target_dir = dir.path().join("audio-out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -1324,8 +1327,8 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.audio_staging_root = dir.path().join("audio-stage");
-    options.audio_target_dir = dir.path().join("audio-out");
+    options.artifact_roots.audio.staging_root = dir.path().join("audio-stage");
+    options.artifact_roots.audio.target_dir = dir.path().join("audio-out");
 
     let summary = fixture.run_with_options(options).await.unwrap();
 
@@ -1372,8 +1375,8 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = dir.path().join("stage");
-    options.transcode_target_dir = dir.path().join("out");
+    options.artifact_roots.transcode.staging_root = dir.path().join("stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
 
     fixture.run_with_options(options).await.unwrap();
 
@@ -1396,13 +1399,14 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
     let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
     let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.heartbeat_interval = Duration::from_millis(10);
+    options.timing.heartbeat_interval = Duration::from_millis(10);
     let context = RuntimeDispatchContext {
         control: &fixture.cp,
         runtime: &runtime,
         ticket_id,
         lease_id,
-        options: &options,
+        timing: &options.timing,
+        chaos: &options.chaos,
     };
 
     tokio::time::pause();
@@ -1448,8 +1452,8 @@ async fn policy_transcode_dispatch_rejects_malformed_worker_result() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = dir.path().join("stage");
-    options.transcode_target_dir = dir.path().join("out");
+    options.artifact_roots.transcode.staging_root = dir.path().join("stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -1480,8 +1484,8 @@ async fn policy_transcode_dispatch_rejects_wrong_output_facts() {
         )
         .await;
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = dir.path().join("stage");
-    options.transcode_target_dir = dir.path().join("out");
+    options.artifact_roots.transcode.staging_root = dir.path().join("stage");
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -1517,8 +1521,8 @@ async fn policy_transcode_rejects_symlink_staging_root_before_worker_dispatch() 
     let symlink_root = dir.path().join("stage-link");
     std::os::unix::fs::symlink(&outside, &symlink_root).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.transcode_staging_root = symlink_root;
-    options.transcode_target_dir = dir.path().join("out");
+    options.artifact_roots.transcode.staging_root = symlink_root;
+    options.artifact_roots.transcode.target_dir = dir.path().join("out");
 
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -2967,9 +2971,9 @@ fn non_policy_remux_plan() -> WorkflowPlan {
 
 fn timeout_options() -> WorkflowExecutorOptions {
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.progress_idle_timeout = Duration::ZERO;
-    options.heartbeat_timeout = Duration::from_millis(250);
-    options.heartbeat_interval = Duration::from_millis(10);
+    options.timing.progress_idle_timeout = Duration::ZERO;
+    options.timing.heartbeat_timeout = Duration::from_millis(250);
+    options.timing.heartbeat_interval = Duration::from_millis(10);
     options
 }
 

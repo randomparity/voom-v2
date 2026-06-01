@@ -114,8 +114,8 @@ fn transcode_audio_input_for_workflow_ticket(
         source_file_version_id: context.source_file_version_id()?,
         source_location_id: context.source_location_id(),
         operation_payload,
-        staging_root: context.options.audio_staging_root.clone(),
-        target_dir: context.options.audio_target_dir.clone(),
+        staging_root: context.artifact_roots.staging_root.clone(),
+        target_dir: context.artifact_roots.target_dir.clone(),
     })
 }
 
@@ -133,8 +133,8 @@ async fn extract_audio_input_for_workflow_ticket(
         source_bundle_id: source_bundle_id_for_file_version(context, source_file_version_id)
             .await?,
         operation_payload,
-        staging_root: context.options.audio_staging_root.clone(),
-        target_dir: context.options.audio_target_dir.clone(),
+        staging_root: context.artifact_roots.staging_root.clone(),
+        target_dir: context.artifact_roots.target_dir.clone(),
     })
 }
 

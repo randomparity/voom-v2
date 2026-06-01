@@ -84,7 +84,7 @@ pub(crate) async fn dispatch_control_plane_remux(
     _workflow_payload: &crate::workflow::plan::ticket_payload::WorkflowTicketPayload,
     lease_id: voom_core::LeaseId,
     payload: &Value,
-    options: &crate::workflow::execution::executor::WorkflowExecutorOptions,
+    options: &crate::workflow::execution::executor::WorkflowDispatchOptions,
 ) -> Result<(), VoomError> {
     dispatch_control_plane_remux_context(OperationAdapterContext {
         control,
@@ -92,7 +92,9 @@ pub(crate) async fn dispatch_control_plane_remux(
         ticket,
         lease_id,
         payload,
-        options,
+        artifact_roots: &options.artifact_roots.remux,
+        timing: &options.timing,
+        chaos: &options.chaos,
     })
     .await
 }
@@ -111,8 +113,8 @@ fn remux_input_for_workflow_ticket(
         source_file_version_id: context.source_file_version_id()?,
         source_location_id: context.source_location_id(),
         operation_payload,
-        staging_root: context.options.remux_staging_root.clone(),
-        target_dir: context.options.remux_target_dir.clone(),
+        staging_root: context.artifact_roots.staging_root.clone(),
+        target_dir: context.artifact_roots.target_dir.clone(),
     })
 }
 

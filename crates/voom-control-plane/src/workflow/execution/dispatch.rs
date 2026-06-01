@@ -9,7 +9,9 @@ use voom_worker_protocol::{
     DispatchStream, NdjsonOutcome, OperationKind, OperationRequest, ProgressFrame, ProtocolError,
 };
 
-use super::executor::{WorkflowChaosOptions, WorkflowExecutorOptions};
+use super::executor::{
+    WorkflowChaosOptions, WorkflowDispatchOptions, WorkflowStreamOptions, WorkflowTimingOptions,
+};
 use super::leases::{
     fail_if_watchdog_elapsed, fail_lease_and_return, failure_class_for_error,
     heartbeat_workflow_lease, release_lease_with_retry,
@@ -39,7 +41,7 @@ pub(super) async fn dispatch_ticket(
     ticket: Ticket,
     workflow_payload: WorkflowTicketPayload,
     lease_id: LeaseId,
-    options: WorkflowExecutorOptions,
+    options: WorkflowDispatchOptions,
 ) -> DispatchOutcome {
     let worker_id = runtime.credentials.worker_id;
     let operation = workflow_payload.operation;
@@ -70,7 +72,7 @@ async fn dispatch_ticket_inner(
     ticket: &Ticket,
     workflow_payload: &WorkflowTicketPayload,
     lease_id: LeaseId,
-    options: WorkflowExecutorOptions,
+    options: WorkflowDispatchOptions,
 ) -> Result<(), VoomError> {
     let mut payload = workflow_payload.rendered_payload.clone();
     apply_chaos_payload_override(&mut payload, workflow_payload.operation, &options.chaos)?;
@@ -91,11 +93,11 @@ async fn dispatch_ticket_inner(
         operation: workflow_payload.operation,
         lease_id,
         payload,
-        heartbeat_deadline_ms: duration_millis_u32(options.heartbeat_timeout),
-        progress_idle_deadline_ms: duration_millis_u32(options.progress_idle_timeout),
+        heartbeat_deadline_ms: duration_millis_u32(options.timing.heartbeat_timeout),
+        progress_idle_deadline_ms: duration_millis_u32(options.timing.progress_idle_timeout),
     };
     let idempotency_key = format!("ticket-{}-lease-{}", ticket.id.0, lease_id.0);
-    let dispatch_timeout = no_response_timeout(&options);
+    let dispatch_timeout = no_response_timeout(&options.timing);
     let dispatch = tokio::time::timeout(
         dispatch_timeout,
         runtime
@@ -133,12 +135,13 @@ async fn dispatch_ticket_inner(
         )
         .await;
     }
+    let stream_options = options.stream_options();
     consume_dispatch_stream(
         control,
         lease_id,
         workflow_payload.operation,
         dispatch,
-        options,
+        stream_options,
     )
     .await
 }
@@ -148,14 +151,14 @@ async fn consume_dispatch_stream(
     lease_id: LeaseId,
     operation: OperationKind,
     mut dispatch: DispatchStream,
-    options: WorkflowExecutorOptions,
+    options: WorkflowStreamOptions,
 ) -> Result<(), VoomError> {
     let mut last_progress = Instant::now();
     let mut last_heartbeat = Instant::now();
-    let mut heartbeat = tokio::time::interval(options.heartbeat_interval);
+    let mut heartbeat = tokio::time::interval(options.timing.heartbeat_interval);
     loop {
-        let progress_deadline = sleep_until(last_progress + options.progress_idle_timeout);
-        let heartbeat_deadline = sleep_until(last_heartbeat + options.heartbeat_timeout);
+        let progress_deadline = sleep_until(last_progress + options.timing.progress_idle_timeout);
+        let heartbeat_deadline = sleep_until(last_heartbeat + options.timing.heartbeat_timeout);
         tokio::pin!(progress_deadline);
         tokio::pin!(heartbeat_deadline);
         tokio::select! {
@@ -169,12 +172,18 @@ async fn consume_dispatch_stream(
                             lease_id,
                             last_heartbeat,
                             last_progress,
-                            &options,
+                            &options.timing,
                         )
                         .await?;
                         last_progress = Instant::now();
                         if !options.chaos.suppresses_heartbeats_for(operation) {
-                            heartbeat_workflow_lease(control, lease_id, &mut last_heartbeat, &options).await?;
+                            heartbeat_workflow_lease(
+                                control,
+                                lease_id,
+                                &mut last_heartbeat,
+                                &options.timing,
+                            )
+                            .await?;
                         }
                     }
                     Ok(NdjsonOutcome::Terminated(frame)) => {
@@ -184,7 +193,7 @@ async fn consume_dispatch_stream(
                             lease_id,
                             last_heartbeat,
                             last_progress,
-                            &options,
+                            &options.timing,
                         )
                         .await?;
                         return handle_terminal_frame(
@@ -229,7 +238,13 @@ async fn consume_dispatch_stream(
                 ).await;
             }
             _ = heartbeat.tick(), if !options.chaos.suppresses_heartbeats_for(operation) => {
-                heartbeat_workflow_lease(control, lease_id, &mut last_heartbeat, &options).await?;
+                heartbeat_workflow_lease(
+                    control,
+                    lease_id,
+                    &mut last_heartbeat,
+                    &options.timing,
+                )
+                .await?;
             }
         }
     }
@@ -342,10 +357,10 @@ fn apply_chaos_payload_override(
     Ok(())
 }
 
-fn no_response_timeout(options: &WorkflowExecutorOptions) -> Duration {
-    options
+fn no_response_timeout(timing: &WorkflowTimingOptions) -> Duration {
+    timing
         .heartbeat_timeout
-        .min(options.progress_idle_timeout)
+        .min(timing.progress_idle_timeout)
         .max(Duration::from_millis(1))
 }
 

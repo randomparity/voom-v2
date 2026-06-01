@@ -16,7 +16,9 @@ use voom_worker_protocol::{HttpClient, WorkerCredentials};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::workflow::WorkerRuntimeRegistry;
-use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::executor::{
+    OperationArtifactRoots, WorkflowArtifactRoots, WorkflowExecutorOptions,
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -185,12 +187,12 @@ impl Default for ComplianceExecutionOptions {
     fn default() -> Self {
         let defaults = WorkflowExecutorOptions::default();
         Self {
-            transcode_staging_root: defaults.transcode_staging_root,
-            transcode_target_dir: defaults.transcode_target_dir,
-            remux_staging_root: defaults.remux_staging_root,
-            remux_target_dir: defaults.remux_target_dir,
-            audio_staging_root: defaults.audio_staging_root,
-            audio_target_dir: defaults.audio_target_dir,
+            transcode_staging_root: defaults.artifact_roots.transcode.staging_root,
+            transcode_target_dir: defaults.artifact_roots.transcode.target_dir,
+            remux_staging_root: defaults.artifact_roots.remux.staging_root,
+            remux_target_dir: defaults.artifact_roots.remux.target_dir,
+            audio_staging_root: defaults.artifact_roots.audio.staging_root,
+            audio_target_dir: defaults.artifact_roots.audio.target_dir,
         }
     }
 }
@@ -224,12 +226,14 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             audio_target_dir,
         } = options;
         Self {
-            transcode_staging_root,
-            transcode_target_dir,
-            remux_staging_root,
-            remux_target_dir,
-            audio_staging_root,
-            audio_target_dir,
+            artifact_roots: WorkflowArtifactRoots {
+                transcode: OperationArtifactRoots::new(
+                    transcode_staging_root,
+                    transcode_target_dir,
+                ),
+                remux: OperationArtifactRoots::new(remux_staging_root, remux_target_dir),
+                audio: OperationArtifactRoots::new(audio_staging_root, audio_target_dir),
+            },
             ..WorkflowExecutorOptions::default()
         }
     }

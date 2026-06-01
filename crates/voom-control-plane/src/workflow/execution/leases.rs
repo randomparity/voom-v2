@@ -7,7 +7,7 @@ use voom_core::{FailureClass, LeaseId, VoomError};
 use voom_store::repo::leases::{Lease, NewLease};
 
 use crate::ControlPlane;
-use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::executor::WorkflowTimingOptions;
 
 pub(super) async fn acquire_lease_with_retry(
     control: &ControlPlane,
@@ -84,10 +84,10 @@ pub(super) async fn fail_if_watchdog_elapsed(
     lease_id: LeaseId,
     last_heartbeat: Instant,
     last_progress: Instant,
-    options: &WorkflowExecutorOptions,
+    timing: &WorkflowTimingOptions,
 ) -> Result<(), VoomError> {
     let now = Instant::now();
-    if now.duration_since(last_heartbeat) >= options.heartbeat_timeout {
+    if now.duration_since(last_heartbeat) >= timing.heartbeat_timeout {
         return fail_lease_and_return(
             control,
             lease_id,
@@ -96,7 +96,7 @@ pub(super) async fn fail_if_watchdog_elapsed(
         )
         .await;
     }
-    if now.duration_since(last_progress) >= options.progress_idle_timeout {
+    if now.duration_since(last_progress) >= timing.progress_idle_timeout {
         return fail_lease_and_return(
             control,
             lease_id,
@@ -112,9 +112,9 @@ pub(super) async fn heartbeat_workflow_lease(
     control: &ControlPlane,
     lease_id: LeaseId,
     last_heartbeat: &mut Instant,
-    options: &WorkflowExecutorOptions,
+    timing: &WorkflowTimingOptions,
 ) -> Result<(), VoomError> {
-    heartbeat_lease_with_retry(control, lease_id, time_duration(options.lease_ttl)?).await?;
+    heartbeat_lease_with_retry(control, lease_id, time_duration(timing.lease_ttl)?).await?;
     *last_heartbeat = Instant::now();
     Ok(())
 }

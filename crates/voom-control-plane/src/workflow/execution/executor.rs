@@ -40,6 +40,8 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_PROGRESS_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_READY_BATCH_SIZE: u32 = 64;
+const DEFAULT_MAX_ATTEMPTS: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct WorkflowExecutor {
@@ -48,44 +50,66 @@ pub struct WorkflowExecutor {
     options: WorkflowExecutorOptions,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkflowExecutorOptions {
+    pub timing: WorkflowTimingOptions,
+    pub queue: WorkflowQueueOptions,
+    pub artifact_roots: WorkflowArtifactRoots,
+    pub chaos: WorkflowChaosOptions,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowTimingOptions {
     pub lease_ttl: Duration,
     pub heartbeat_interval: Duration,
     pub heartbeat_timeout: Duration,
     pub progress_idle_timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowQueueOptions {
     pub ready_batch_size: u32,
     pub max_attempts: u32,
-    pub transcode_staging_root: PathBuf,
-    pub transcode_target_dir: PathBuf,
-    pub remux_staging_root: PathBuf,
-    pub remux_target_dir: PathBuf,
-    pub audio_staging_root: PathBuf,
-    pub audio_target_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowArtifactRoots {
+    pub transcode: OperationArtifactRoots,
+    pub remux: OperationArtifactRoots,
+    pub audio: OperationArtifactRoots,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OperationArtifactRoots {
+    pub staging_root: PathBuf,
+    pub target_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowDispatchOptions {
+    pub timing: WorkflowTimingOptions,
+    pub artifact_roots: WorkflowArtifactRoots,
     pub chaos: WorkflowChaosOptions,
 }
 
-impl Default for WorkflowExecutorOptions {
+#[derive(Debug, Clone)]
+pub(crate) struct WorkflowStreamOptions {
+    pub timing: WorkflowTimingOptions,
+    pub chaos: WorkflowChaosOptions,
+}
+
+impl Default for WorkflowTimingOptions {
     fn default() -> Self {
         Self {
             lease_ttl: DEFAULT_LEASE_TTL,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
             progress_idle_timeout: DEFAULT_PROGRESS_IDLE_TIMEOUT,
-            ready_batch_size: 64,
-            max_attempts: 1,
-            transcode_staging_root: PathBuf::from("/tmp/voom/transcode/staging"),
-            transcode_target_dir: PathBuf::from("/tmp/voom/transcode/output"),
-            remux_staging_root: PathBuf::from("/tmp/voom/remux/staging"),
-            remux_target_dir: PathBuf::from("/tmp/voom/remux/output"),
-            audio_staging_root: PathBuf::from("/tmp/voom/audio/staging"),
-            audio_target_dir: PathBuf::from("/tmp/voom/audio/output"),
-            chaos: WorkflowChaosOptions::default(),
         }
     }
 }
 
-impl WorkflowExecutorOptions {
+impl WorkflowTimingOptions {
     #[cfg(test)]
     #[must_use]
     pub fn for_tests() -> Self {
@@ -94,14 +118,96 @@ impl WorkflowExecutorOptions {
             heartbeat_interval: Duration::from_millis(10),
             heartbeat_timeout: Duration::from_secs(5),
             progress_idle_timeout: Duration::from_secs(5),
-            ready_batch_size: 64,
-            max_attempts: 1,
-            transcode_staging_root: PathBuf::from("/tmp/voom-test/transcode/staging"),
-            transcode_target_dir: PathBuf::from("/tmp/voom-test/transcode/output"),
-            remux_staging_root: PathBuf::from("/tmp/voom-test/remux/staging"),
-            remux_target_dir: PathBuf::from("/tmp/voom-test/remux/output"),
-            audio_staging_root: PathBuf::from("/tmp/voom-test/audio/staging"),
-            audio_target_dir: PathBuf::from("/tmp/voom-test/audio/output"),
+        }
+    }
+}
+
+impl Default for WorkflowQueueOptions {
+    fn default() -> Self {
+        Self {
+            ready_batch_size: DEFAULT_READY_BATCH_SIZE,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        }
+    }
+}
+
+impl OperationArtifactRoots {
+    #[must_use]
+    pub fn new(staging_root: PathBuf, target_dir: PathBuf) -> Self {
+        Self {
+            staging_root,
+            target_dir,
+        }
+    }
+}
+
+impl Default for WorkflowArtifactRoots {
+    fn default() -> Self {
+        Self {
+            transcode: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom/transcode/staging"),
+                PathBuf::from("/tmp/voom/transcode/output"),
+            ),
+            remux: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom/remux/staging"),
+                PathBuf::from("/tmp/voom/remux/output"),
+            ),
+            audio: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom/audio/staging"),
+                PathBuf::from("/tmp/voom/audio/output"),
+            ),
+        }
+    }
+}
+
+impl WorkflowArtifactRoots {
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            transcode: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom-test/transcode/staging"),
+                PathBuf::from("/tmp/voom-test/transcode/output"),
+            ),
+            remux: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom-test/remux/staging"),
+                PathBuf::from("/tmp/voom-test/remux/output"),
+            ),
+            audio: OperationArtifactRoots::new(
+                PathBuf::from("/tmp/voom-test/audio/staging"),
+                PathBuf::from("/tmp/voom-test/audio/output"),
+            ),
+        }
+    }
+}
+
+impl WorkflowDispatchOptions {
+    #[must_use]
+    pub fn stream_options(&self) -> WorkflowStreamOptions {
+        WorkflowStreamOptions {
+            timing: self.timing.clone(),
+            chaos: self.chaos.clone(),
+        }
+    }
+}
+
+impl WorkflowExecutorOptions {
+    #[must_use]
+    pub(crate) fn dispatch_options(&self) -> WorkflowDispatchOptions {
+        WorkflowDispatchOptions {
+            timing: self.timing.clone(),
+            artifact_roots: self.artifact_roots.clone(),
+            chaos: self.chaos.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            timing: WorkflowTimingOptions::for_tests(),
+            queue: WorkflowQueueOptions::default(),
+            artifact_roots: WorkflowArtifactRoots::for_tests(),
             chaos: WorkflowChaosOptions::default(),
         }
     }
@@ -569,7 +675,7 @@ impl WorkflowExecutor {
                 kind: ticket_kind(operation)?,
                 priority: 0,
                 payload,
-                max_attempts: self.options.max_attempts,
+                max_attempts: self.options.queue.max_attempts,
                 created_at: now,
             })
             .await?;
@@ -587,6 +693,7 @@ impl WorkflowExecutor {
         timing: EffectiveTiming,
     ) -> Result<Value, VoomError> {
         let operation = node.operation();
+        let roots = &self.options.artifact_roots;
         match operation {
             OperationKind::ScanLibrary => root_payload_result(render_default_payload_with_fan_out(
                 operation,
@@ -599,8 +706,8 @@ impl WorkflowExecutor {
                     self.resolve_policy_file_source(target, "transcode_video")
                         .await?,
                     node.operation_payload(),
-                    &self.options.transcode_staging_root,
-                    &self.options.transcode_target_dir,
+                    &roots.transcode.staging_root,
+                    &roots.transcode.target_dir,
                     timing,
                 )),
                 None => root_payload_result(render_default_payload(operation, branch, timing)),
@@ -611,8 +718,8 @@ impl WorkflowExecutor {
                     self.resolve_policy_file_source(target, "transcode_audio")
                         .await?,
                     node.operation_payload(),
-                    &self.options.audio_staging_root,
-                    &self.options.audio_target_dir,
+                    &roots.audio.staging_root,
+                    &roots.audio.target_dir,
                     timing,
                 )),
                 None => root_payload_result(render_default_payload(operation, branch, timing)),
@@ -622,8 +729,8 @@ impl WorkflowExecutor {
                     self.resolve_policy_file_source(target, "extract_audio")
                         .await?,
                     node.operation_payload(),
-                    &self.options.audio_staging_root,
-                    &self.options.audio_target_dir,
+                    &roots.audio.staging_root,
+                    &roots.audio.target_dir,
                     timing,
                 )),
                 None => root_payload_result(render_default_payload(operation, branch, timing)),
@@ -643,11 +750,12 @@ impl WorkflowExecutor {
                 target @ (voom_plan::TargetRef::FileVersion { .. }
                 | voom_plan::TargetRef::FileLocation { .. }),
             ) => {
+                let roots = &self.options.artifact_roots.remux;
                 let rendered = render_policy_remux_payload(
                     self.resolve_policy_file_source(target, "remux").await?,
                     node.operation_payload(),
-                    &self.options.remux_staging_root,
-                    &self.options.remux_target_dir,
+                    &roots.staging_root,
+                    &roots.target_dir,
                     timing,
                 );
                 root_payload_result(rendered)
@@ -734,7 +842,7 @@ impl WorkflowExecutor {
             NewLease {
                 ticket_id: ticket.id,
                 worker_id,
-                ttl: time_duration(self.options.lease_ttl)?,
+                ttl: time_duration(self.options.timing.lease_ttl)?,
                 now: self.control_plane.clock().now(),
             },
         )
@@ -744,7 +852,7 @@ impl WorkflowExecutor {
         summary.record_dispatch(workflow_payload.operation, worker_id, reservations);
 
         let control = self.control_plane.clone();
-        let options = self.options.clone();
+        let options = self.options.dispatch_options();
         active.spawn(async move {
             dispatch_ticket(
                 control,
@@ -981,7 +1089,7 @@ impl WorkflowExecutor {
         .bind(sqlite_i64(job_id.0))
         .bind(now)
         .bind(workflow_id)
-        .bind(i64::from(self.options.ready_batch_size))
+        .bind(i64::from(self.options.queue.ready_batch_size))
         .fetch_all(&self.control_plane.pool)
         .await
         .map_err(|e| VoomError::Database(format!("workflow ready tickets for {job_id}: {e}")))?;

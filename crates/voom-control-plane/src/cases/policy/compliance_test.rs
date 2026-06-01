@@ -23,11 +23,11 @@ fn compliance_execution_defaults_use_production_transcode_paths() {
 
     assert_eq!(
         compliance_defaults.transcode_staging_root,
-        workflow_defaults.transcode_staging_root
+        workflow_defaults.artifact_roots.transcode.staging_root
     );
     assert_eq!(
         compliance_defaults.transcode_target_dir,
-        workflow_defaults.transcode_target_dir
+        workflow_defaults.artifact_roots.transcode.target_dir
     );
 }
 
@@ -38,11 +38,11 @@ fn compliance_execution_defaults_use_production_remux_paths() {
 
     assert_eq!(
         compliance_defaults.remux_staging_root,
-        workflow_defaults.remux_staging_root
+        workflow_defaults.artifact_roots.remux.staging_root
     );
     assert_eq!(
         compliance_defaults.remux_target_dir,
-        workflow_defaults.remux_target_dir
+        workflow_defaults.artifact_roots.remux.target_dir
     );
 }
 
@@ -53,11 +53,11 @@ fn compliance_execution_defaults_use_production_audio_paths() {
 
     assert_eq!(
         compliance_defaults.audio_staging_root,
-        workflow_defaults.audio_staging_root
+        workflow_defaults.artifact_roots.audio.staging_root
     );
     assert_eq!(
         compliance_defaults.audio_target_dir,
-        workflow_defaults.audio_target_dir
+        workflow_defaults.artifact_roots.audio.target_dir
     );
 }
 
@@ -75,18 +75,39 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
     let converted = WorkflowExecutorOptions::from(options.clone());
 
     assert_eq!(
-        converted.transcode_staging_root,
+        converted.artifact_roots.transcode.staging_root,
         options.transcode_staging_root
     );
-    assert_eq!(converted.transcode_target_dir, options.transcode_target_dir);
-    assert_eq!(converted.remux_staging_root, options.remux_staging_root);
-    assert_eq!(converted.remux_target_dir, options.remux_target_dir);
-    assert_eq!(converted.audio_staging_root, options.audio_staging_root);
-    assert_eq!(converted.audio_target_dir, options.audio_target_dir);
+    assert_eq!(
+        converted.artifact_roots.transcode.target_dir,
+        options.transcode_target_dir
+    );
+    assert_eq!(
+        converted.artifact_roots.remux.staging_root,
+        options.remux_staging_root
+    );
+    assert_eq!(
+        converted.artifact_roots.remux.target_dir,
+        options.remux_target_dir
+    );
+    assert_eq!(
+        converted.artifact_roots.audio.staging_root,
+        options.audio_staging_root
+    );
+    assert_eq!(
+        converted.artifact_roots.audio.target_dir,
+        options.audio_target_dir
+    );
     // Non-path fields stay at workflow defaults: the facade carries paths only.
     let workflow_defaults = WorkflowExecutorOptions::default();
-    assert_eq!(converted.max_attempts, workflow_defaults.max_attempts);
-    assert_eq!(converted.lease_ttl, workflow_defaults.lease_ttl);
+    assert_eq!(
+        converted.queue.max_attempts,
+        workflow_defaults.queue.max_attempts
+    );
+    assert_eq!(
+        converted.timing.lease_ttl,
+        workflow_defaults.timing.lease_ttl
+    );
 }
 
 #[test]
