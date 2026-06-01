@@ -8,8 +8,8 @@ use sqlx::Row;
 use tokio::fs;
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileLocationId, FileVersionId,
-    VoomError,
+    ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileAssetId, FileLocationId,
+    FileVersionId, VoomError,
 };
 use voom_events::Event;
 use voom_events::payload::{
@@ -323,10 +323,6 @@ enum PrepareCommitError {
     AfterPending(VoomError),
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "prepare is the transaction gate that keeps precondition checks and pending insert atomic"
-)]
 async fn prepare_commit_in_tx(
     cp: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -338,101 +334,33 @@ async fn prepare_commit_in_tx(
         verification_id: None,
         target_path: input.target_path.clone(),
     };
-    let handle = read_handle_facts_in_tx(tx, input.artifact_handle_id)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    let source_file_version_id = handle
-        .source_file_version_id
-        .ok_or_else(|| {
-            pre_mutation(
-                &context,
-                &VoomError::Config(format!(
-                    "artifact_handle {} is not linked to a source file_version",
-                    input.artifact_handle_id
-                )),
-            )
-        })
-        .map_err(PrepareCommitError::PreMutation)?;
-    let source = cp
-        .identity
-        .get_file_version_in_tx(tx, source_file_version_id)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?
-        .ok_or_else(|| {
-            pre_mutation(
-                &context,
-                &VoomError::NotFound(format!("file_versions {source_file_version_id} missing")),
-            )
-        })
-        .map_err(PrepareCommitError::PreMutation)?;
-    if source.retired_at.is_some() {
-        return Err(PrepareCommitError::PreMutation(pre_mutation(
-            &context,
-            &VoomError::Config(format!("file_versions {source_file_version_id} is retired")),
-        )));
-    }
+    let source = read_commit_source_facts(cp, tx, input.artifact_handle_id, &context).await?;
+    let verified_staging = read_verified_staging_facts(
+        cp,
+        tx,
+        input.artifact_handle_id,
+        &input.target_path,
+        &context,
+    )
+    .await?;
+    let paths = prepare_commit_paths(&input.target_path, &source.handle, &verified_staging).await?;
 
-    let staging = live_staging_location_in_tx(tx, input.artifact_handle_id)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    let verification = cp
-        .artifacts
-        .latest_successful_verification_for_live_staging_in_tx(tx, input.artifact_handle_id)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?
-        .ok_or_else(|| {
-            pre_mutation(
-                &context,
-                &VoomError::Config(format!(
-                    "artifact_handle {} has no successful verification for its live staging location",
-                    input.artifact_handle_id
-                )),
-            )
-        })
-        .map_err(PrepareCommitError::PreMutation)?;
-    let context = PreMutationContext {
-        artifact_handle_id: input.artifact_handle_id,
-        verification_id: Some(verification.id),
-        target_path: input.target_path.clone(),
-    };
-    if verification.artifact_location_id != staging.id || verification.path != staging.value {
-        return Err(PrepareCommitError::PreMutation(pre_mutation(
-            &context,
-            &VoomError::Config(format!(
-                "artifact verification {} is stale for live staging location {}",
-                verification.id, staging.id
-            )),
-        )));
-    }
-
-    let target_path = canonical_new_leaf_no_symlink(&input.target_path)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    let staging_path = PathBuf::from(&staging.value);
-    let expected_facts = observe_regular_file(&staging_path)
-        .await
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    require_expected_facts(&handle, &verification, &expected_facts)
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-    let temp_path = unique_temp_sibling_path(&target_path)
-        .map_err(|err| PrepareCommitError::PreMutation(pre_mutation(&context, &err)))?;
-
-    let target_path_string = target_path.display().to_string();
-    let temp_path_string = temp_path.display().to_string();
+    let target_path_string = paths.target_path.display().to_string();
+    let temp_path_string = paths.temp_path.display().to_string();
     let pending_input = NewArtifactCommitRecord {
         artifact_handle_id: input.artifact_handle_id,
-        source_file_version_id,
-        verification_id: verification.id,
+        source_file_version_id: source.source_file_version_id,
+        verification_id: verified_staging.verification.id,
         target_path: target_path_string.clone(),
         temp_path: Some(temp_path_string.clone()),
         report: json!({
             "phase": "prepared",
-            "staging_path": staging_path.display().to_string(),
+            "staging_path": paths.staging_path.display().to_string(),
             "target_path": target_path_string,
             "temp_path": temp_path_string,
-            "expected_size_bytes": expected_facts.size_bytes,
-            "expected_checksum": expected_facts.content_hash,
-            "staging_local_file_key": expected_facts.local_file_key,
+            "expected_size_bytes": paths.expected_facts.size_bytes,
+            "expected_checksum": paths.expected_facts.content_hash,
+            "staging_local_file_key": paths.expected_facts.local_file_key,
         }),
         started_at: now,
     };
@@ -441,16 +369,16 @@ async fn prepare_commit_in_tx(
             Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
                 commit_record_id: commit_record_id.0,
                 artifact_handle_id: input.artifact_handle_id.0,
-                source_file_version_id: source_file_version_id.0,
-                verification_id: verification.id.0,
-                target_path: target_path.display().to_string(),
-                temp_path: temp_path.display().to_string(),
+                source_file_version_id: source.source_file_version_id.0,
+                verification_id: verified_staging.verification.id.0,
+                target_path: paths.target_path.display().to_string(),
+                temp_path: paths.temp_path.display().to_string(),
             })
         })
         .await
         .map_err(|err| match err {
             PendingCommitRecordError::BeforePending(err) => {
-                PrepareCommitError::PreMutation(pre_mutation(&context, &err))
+                PrepareCommitError::PreMutation(pre_mutation(&verified_staging.context, &err))
             }
             PendingCommitRecordError::AfterPending(err) => PrepareCommitError::AfterPending(err),
         })?;
@@ -458,15 +386,154 @@ async fn prepare_commit_in_tx(
     Ok(PreparedCommit {
         record,
         artifact_handle_id: input.artifact_handle_id,
-        source_file_version_id,
-        source_file_asset_id: source.file_asset_id,
-        staging_location_id: staging.id,
-        staging_path,
-        target_path,
-        temp_path,
-        expected_facts,
+        source_file_version_id: source.source_file_version_id,
+        source_file_asset_id: source.source_file_asset_id,
+        staging_location_id: verified_staging.staging.id,
+        staging_path: paths.staging_path,
+        target_path: paths.target_path,
+        temp_path: paths.temp_path,
+        expected_facts: paths.expected_facts,
         promotion_started_at: now,
     })
+}
+
+#[derive(Debug)]
+struct CommitSourceFacts {
+    handle: HandleFacts,
+    source_file_version_id: FileVersionId,
+    source_file_asset_id: FileAssetId,
+}
+
+#[derive(Debug)]
+struct VerifiedStagingFacts {
+    staging: LiveStagingLocation,
+    verification: ArtifactVerification,
+    context: PreMutationContext,
+}
+
+#[derive(Debug)]
+struct CommitPreparedPaths {
+    target_path: PathBuf,
+    staging_path: PathBuf,
+    temp_path: PathBuf,
+    expected_facts: ArtifactFileFacts,
+}
+
+async fn read_commit_source_facts(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    artifact_handle_id: ArtifactHandleId,
+    context: &PreMutationContext,
+) -> Result<CommitSourceFacts, PrepareCommitError> {
+    let handle = read_handle_facts_in_tx(tx, artifact_handle_id)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    let Some(source_file_version_id) = handle.source_file_version_id else {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::Config(format!(
+                "artifact_handle {artifact_handle_id} is not linked to a source file_version"
+            )),
+        ));
+    };
+    let Some(source) = cp
+        .identity
+        .get_file_version_in_tx(tx, source_file_version_id)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?
+    else {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::NotFound(format!("file_versions {source_file_version_id} missing")),
+        ));
+    };
+    if source.retired_at.is_some() {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::Config(format!("file_versions {source_file_version_id} is retired")),
+        ));
+    }
+
+    Ok(CommitSourceFacts {
+        handle,
+        source_file_version_id,
+        source_file_asset_id: source.file_asset_id,
+    })
+}
+
+async fn read_verified_staging_facts(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    artifact_handle_id: ArtifactHandleId,
+    target_path: &Path,
+    context: &PreMutationContext,
+) -> Result<VerifiedStagingFacts, PrepareCommitError> {
+    let staging = live_staging_location_in_tx(tx, artifact_handle_id)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    let Some(verification) = cp
+        .artifacts
+        .latest_successful_verification_for_live_staging_in_tx(tx, artifact_handle_id)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?
+    else {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::Config(format!(
+                "artifact_handle {artifact_handle_id} has no successful verification for its live staging location"
+            )),
+        ));
+    };
+    let context = PreMutationContext {
+        artifact_handle_id,
+        verification_id: Some(verification.id),
+        target_path: target_path.to_owned(),
+    };
+    if verification.artifact_location_id != staging.id || verification.path != staging.value {
+        return Err(pre_mutation_error(
+            &context,
+            &VoomError::Config(format!(
+                "artifact verification {} is stale for live staging location {}",
+                verification.id, staging.id
+            )),
+        ));
+    }
+
+    Ok(VerifiedStagingFacts {
+        staging,
+        verification,
+        context,
+    })
+}
+
+async fn prepare_commit_paths(
+    target_path: &Path,
+    handle: &HandleFacts,
+    verified_staging: &VerifiedStagingFacts,
+) -> Result<CommitPreparedPaths, PrepareCommitError> {
+    let context = &verified_staging.context;
+    let target_path = canonical_new_leaf_no_symlink(target_path)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    let staging_path = PathBuf::from(&verified_staging.staging.value);
+    let expected_facts = observe_regular_file(&staging_path)
+        .await
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    require_expected_facts(handle, &verified_staging.verification, &expected_facts)
+        .map_err(|err| pre_mutation_error(context, &err))?;
+    let temp_path =
+        unique_temp_sibling_path(&target_path).map_err(|err| pre_mutation_error(context, &err))?;
+
+    Ok(CommitPreparedPaths {
+        target_path,
+        staging_path,
+        temp_path,
+        expected_facts,
+    })
+}
+
+fn pre_mutation_error(context: &PreMutationContext, err: &VoomError) -> PrepareCommitError {
+    PrepareCommitError::PreMutation(pre_mutation(context, err))
 }
 
 #[derive(Debug, Clone)]
