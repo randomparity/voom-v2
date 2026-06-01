@@ -256,6 +256,21 @@ async fn node_and_lease_heartbeat_routes_are_idempotent() {
 }
 
 #[tokio::test]
+async fn node_heartbeat_rejects_unknown_body_fields() {
+    let fixture = api_fixture().await;
+
+    let res = fixture
+        .post_json(
+            &format!("/v1/execution/node/{}/heartbeat", fixture.node_id.0),
+            "node-heartbeat-unknown-body",
+            json!({"node_id": fixture.node_id.0}),
+        )
+        .await;
+
+    assert_bad_args_envelope(res, "execution.node_heartbeat").await;
+}
+
+#[tokio::test]
 async fn complete_route_releases_ticket_consumes_plan_and_replays() {
     let fixture = api_fixture().await;
     let (lease_id, ticket_id) = fixture.acquire_lease("complete-acquire-key").await;

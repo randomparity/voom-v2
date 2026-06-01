@@ -33,6 +33,10 @@ struct AcquireRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NodeHeartbeatRequest {}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct LeaseHeartbeatRequest {
     node_id: u64,
     worker_id: u64,
@@ -134,8 +138,14 @@ async fn node_heartbeat(
         Ok(body) => body,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
+    let request: NodeHeartbeatRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(err) => {
+            return bad_args_response(NODE_HEARTBEAT_COMMAND, format!("invalid JSON body: {err}"));
+        }
+    };
     let route_instance = format!("/v1/execution/node/{node_id}/heartbeat");
-    let request_hash = match stable_request_hash("POST", &route_instance, &body) {
+    let request_hash = match stable_request_hash("POST", &route_instance, &request) {
         Ok(hash) => hash,
         Err(message) => return bad_args_response(NODE_HEARTBEAT_COMMAND, message),
     };
