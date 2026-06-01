@@ -18,7 +18,7 @@ use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::workflow::execution::timing::{EffectiveTiming, branch_codec, seeded_timing};
 
 #[derive(Debug, Clone, Copy)]
-pub struct ExpansionContext<'a> {
+pub(crate) struct ExpansionContext<'a> {
     pub control: &'a ControlPlane,
     pub plan: &'a WorkflowPlan,
     pub workflow_id: &'a str,
@@ -29,7 +29,7 @@ pub struct ExpansionContext<'a> {
 
 impl<'a> ExpansionContext<'a> {
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         control: &'a ControlPlane,
         plan: &'a WorkflowPlan,
         workflow_id: &'a str,
@@ -48,7 +48,7 @@ impl<'a> ExpansionContext<'a> {
     }
 }
 
-pub async fn expand_scanner_completion(
+pub(crate) async fn expand_scanner_completion(
     ctx: &ExpansionContext<'_>,
     scanner_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
@@ -85,7 +85,7 @@ pub async fn expand_scanner_completion(
     create_missing_tickets(ctx, specs).await
 }
 
-pub async fn expand_probe_completion(
+pub(crate) async fn expand_probe_completion(
     ctx: &ExpansionContext<'_>,
     branch_id: &str,
     probe_ticket: &Ticket,
@@ -108,7 +108,7 @@ pub async fn expand_probe_completion(
     create_missing_tickets(ctx, vec![spec]).await
 }
 
-pub async fn expand_quality_completion(
+pub(crate) async fn expand_quality_completion(
     ctx: &ExpansionContext<'_>,
     branch_id: &str,
     quality_ticket: &Ticket,
@@ -135,7 +135,7 @@ pub async fn expand_quality_completion(
     create_missing_tickets(ctx, vec![spec]).await
 }
 
-pub async fn expand_transform_completion(
+pub(crate) async fn expand_transform_completion(
     ctx: &ExpansionContext<'_>,
     branch_id: &str,
     transform_ticket: &Ticket,
@@ -160,7 +160,7 @@ pub async fn expand_transform_completion(
     create_missing_tickets(ctx, specs).await
 }
 
-pub async fn expand_backup_completion(
+pub(crate) async fn expand_backup_completion(
     ctx: &ExpansionContext<'_>,
     branch_id: &str,
     backup_ticket: &Ticket,

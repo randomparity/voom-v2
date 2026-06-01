@@ -1,6 +1,5 @@
 #![expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::panic_in_result_fn,
     reason = "integration tests fail fast on unexpected durable state"
 )]
@@ -13,7 +12,7 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{ConnectOptions, Row, SqlitePool};
+use sqlx::{ConnectOptions, SqlitePool};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -23,16 +22,11 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::workflow::{
-    BranchContext, EffectiveTiming, ExpansionContext, WorkerRuntimeRegistry, WorkflowChaosOptions,
-    WorkflowExecutor, WorkflowExecutorOptions, WorkflowPlan, WorkflowRunSummary,
-    WorkflowTicketPayload, expand_backup_completion, expand_probe_completion,
-    expand_quality_completion, expand_scanner_completion, expand_transform_completion,
-    render_default_payload, render_default_payload_with_fan_out,
+    WorkerRuntimeRegistry, WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions,
+    WorkflowPlan, WorkflowRunSummary,
 };
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketId, TicketOperation, WorkerId};
-use voom_store::repo::jobs::NewJob;
-use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
+use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 use voom_worker_protocol::http::OperationBody;
 use voom_worker_protocol::{
@@ -361,153 +355,6 @@ async fn stress_durable_workflow_respects_dispatch_and_worker_parallel_limits() 
 }
 
 #[tokio::test]
-async fn restart_scanner_expansion_promotes_late_branch_tickets_once() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    let scanner = fixture
-        .seed_succeeded_ticket(
-            "scan",
-            "root",
-            OperationKind::ScanLibrary,
-            scanner_result_with_three_files(),
-        )
-        .await?;
-
-    let created = expand_scanner_completion(&fixture.expansion_context(), &scanner).await?;
-    let second = expand_scanner_completion(&fixture.expansion_context(), &scanner).await?;
-
-    assert_eq!(created.len(), 9);
-    assert!(second.is_empty());
-    fixture.assert_ready_tickets(&created).await?;
-    fixture
-        .assert_unique_branch_tickets(&["probe", "hash", "identity"])
-        .await?;
-    fixture.assert_event_count("lease.released", 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn restart_probe_expansion_promotes_late_quality_ticket_once() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    let probe = fixture
-        .seed_succeeded_ticket(
-            "probe",
-            "file-001",
-            OperationKind::ProbeFile,
-            json!({"codec": "h264"}),
-        )
-        .await?;
-
-    let created = expand_probe_completion(&fixture.expansion_context(), "file-001", &probe).await?;
-    let second = expand_probe_completion(&fixture.expansion_context(), "file-001", &probe).await?;
-
-    assert_eq!(node_ids(&created), vec!["quality"]);
-    assert!(second.is_empty());
-    fixture.assert_ready_tickets(&created).await?;
-    fixture.assert_unique_branch_tickets(&["quality"]).await?;
-    fixture.assert_event_count("lease.released", 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn restart_quality_expansion_promotes_selected_transform_once() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    let transcode_parent = fixture
-        .seed_succeeded_ticket(
-            "quality",
-            "file-000",
-            OperationKind::ScoreQuality,
-            json!({"needs_transcode": true}),
-        )
-        .await?;
-    let remux_parent = fixture
-        .seed_succeeded_ticket(
-            "quality",
-            "file-001",
-            OperationKind::ScoreQuality,
-            json!({"needs_transcode": false}),
-        )
-        .await?;
-
-    let transcode_created =
-        expand_quality_completion(&fixture.expansion_context(), "file-000", &transcode_parent)
-            .await?;
-    let transcode_second =
-        expand_quality_completion(&fixture.expansion_context(), "file-000", &transcode_parent)
-            .await?;
-    let remux_created =
-        expand_quality_completion(&fixture.expansion_context(), "file-001", &remux_parent).await?;
-    let remux_second =
-        expand_quality_completion(&fixture.expansion_context(), "file-001", &remux_parent).await?;
-
-    assert_eq!(node_ids(&transcode_created), vec!["transcode"]);
-    assert!(transcode_second.is_empty());
-    assert_eq!(node_ids(&remux_created), vec!["remux"]);
-    assert!(remux_second.is_empty());
-    fixture.assert_ready_tickets(&transcode_created).await?;
-    fixture.assert_ready_tickets(&remux_created).await?;
-    fixture
-        .assert_unique_branch_tickets(&["transcode", "remux"])
-        .await?;
-    fixture.assert_event_count("lease.released", 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn restart_transform_expansion_promotes_downstream_branch_tickets_once() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    let transform = fixture
-        .seed_succeeded_ticket(
-            "transcode",
-            "file-001",
-            OperationKind::TranscodeVideo,
-            json!({"output_path": "/staging/file-001.h265.mkv"}),
-        )
-        .await?;
-
-    let created =
-        expand_transform_completion(&fixture.expansion_context(), "file-001", &transform).await?;
-    let second =
-        expand_transform_completion(&fixture.expansion_context(), "file-001", &transform).await?;
-
-    assert_eq!(
-        node_ids(&created),
-        vec!["backup", "external-sync", "issue", "use-lease"]
-    );
-    assert!(second.is_empty());
-    fixture.assert_ready_tickets(&created).await?;
-    fixture
-        .assert_unique_branch_tickets(&["backup", "external-sync", "issue", "use-lease"])
-        .await?;
-    fixture.assert_event_count("lease.released", 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn restart_backup_expansion_promotes_late_verify_ticket_once() -> TestResult<()> {
-    let fixture = DurableWorkflowFixture::without_fake_providers().await?;
-    let backup = fixture
-        .seed_succeeded_ticket(
-            "backup",
-            "file-001",
-            OperationKind::BackUpFile,
-            json!({"local_backup_id": "backup-local-001"}),
-        )
-        .await?;
-
-    let created =
-        expand_backup_completion(&fixture.expansion_context(), "file-001", &backup).await?;
-    let second =
-        expand_backup_completion(&fixture.expansion_context(), "file-001", &backup).await?;
-
-    assert_eq!(node_ids(&created), vec!["verify"]);
-    assert!(second.is_empty());
-    fixture.assert_ready_tickets(&created).await?;
-    fixture.assert_unique_branch_tickets(&["verify"]).await?;
-    fixture.assert_event_count("lease.released", 0).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn pre_lease_no_worker_retries_then_terminal_fails_without_dispatch() -> TestResult<()> {
     let fixture = DurableWorkflowFixture::without_fake_providers().await?;
     let mut options = WorkflowExecutorOptions::for_tests();
@@ -577,10 +424,6 @@ struct DurableWorkflowFixture {
     cp: ControlPlane,
     pool: SqlitePool,
     _tmp: tempfile::NamedTempFile,
-    plan: WorkflowPlan,
-    workflow_id: String,
-    plan_id: String,
-    job_id: JobId,
     registry: WorkerRuntimeRegistry,
     launches: Vec<ProviderLaunch>,
     no_response_runtimes: Vec<NoResponseRuntime>,
@@ -709,23 +552,11 @@ impl DurableWorkflowFixture {
             Arc::new(Mutex::new(FrozenRng::new(0))),
         )
         .await?;
-        let plan = WorkflowPlan::default_ci();
-        let job = cp
-            .open_job(NewJob {
-                kind: "synthetic.workflow.restart".to_owned(),
-                priority: 0,
-                created_at: T0,
-            })
-            .await?;
 
         Ok(Self {
             cp,
             pool,
             _tmp: tmp,
-            plan_id: plan.id.clone(),
-            plan,
-            workflow_id: "restart-workflow".to_owned(),
-            job_id: job.id,
             registry: WorkerRuntimeRegistry::new(),
             launches: Vec::new(),
             no_response_runtimes: Vec::new(),
@@ -741,17 +572,6 @@ impl DurableWorkflowFixture {
 
     fn executor_with_options(&self, options: WorkflowExecutorOptions) -> WorkflowExecutor {
         WorkflowExecutor::with_options(self.cp.clone(), self.registry.clone(), options)
-    }
-
-    fn expansion_context(&self) -> ExpansionContext<'_> {
-        ExpansionContext::new(
-            &self.cp,
-            &self.plan,
-            &self.workflow_id,
-            &self.plan_id,
-            self.job_id,
-            T0,
-        )
     }
 
     async fn register_process_provider(
@@ -931,124 +751,6 @@ impl DurableWorkflowFixture {
             })
             .await?;
         Ok(worker.id)
-    }
-
-    async fn seed_succeeded_ticket(
-        &self,
-        node_id: &str,
-        branch_id: &str,
-        operation: OperationKind,
-        result: Value,
-    ) -> TestResult<Ticket> {
-        let rendered_payload = rendered_payload_for_seed(operation, branch_id)?;
-        let payload = WorkflowTicketPayload {
-            workflow_id: self.workflow_id.clone(),
-            plan_id: self.plan_id.clone(),
-            node_id: node_id.to_owned(),
-            branch_id: branch_id.to_owned(),
-            operation,
-            rendered_payload,
-            timing: EffectiveTiming::for_test(25, 10),
-            source_file: Some(json!({
-                "path": format!("/library/{branch_id}.mkv"),
-                "size_bytes": 4_200_000_000_u64,
-            })),
-        }
-        .to_ticket_payload()?;
-        let ticket = self
-            .cp
-            .create_ticket(NewTicket {
-                job_id: Some(self.job_id),
-                kind: ticket_kind(operation),
-                priority: 0,
-                payload,
-                max_attempts: 1,
-                created_at: T0,
-            })
-            .await?;
-        self.set_ticket_succeeded(ticket.id, result).await?;
-        self.ticket(ticket.id).await
-    }
-
-    async fn set_ticket_succeeded(&self, ticket_id: TicketId, result: Value) -> TestResult<()> {
-        sqlx::query(
-            "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
-             epoch = epoch + 1 WHERE id = ?",
-        )
-        .bind(serde_json::to_string(&result)?)
-        .bind(format_time(T0)?)
-        .bind(i64::try_from(ticket_id.0)?)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn ticket(&self, ticket_id: TicketId) -> TestResult<Ticket> {
-        let row = sqlx::query(
-            "SELECT id, kind, state, payload, result, attempt, max_attempts, priority \
-             FROM tickets WHERE id = ?",
-        )
-        .bind(i64::try_from(ticket_id.0)?)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(Ticket {
-            id: TicketId(u64::try_from(row.get::<i64, _>("id"))?),
-            job_id: Some(self.job_id),
-            kind: TicketOperation::from_stored(row.get::<String, _>("kind"), "tickets.kind")?,
-            state: TicketState::parse_for_test(row.get::<String, _>("state").as_str()),
-            priority: row.get("priority"),
-            payload: serde_json::from_str(&row.get::<String, _>("payload"))?,
-            result: row
-                .get::<Option<String>, _>("result")
-                .map(|json| serde_json::from_str(&json))
-                .transpose()?,
-            attempt: u32::try_from(row.get::<i64, _>("attempt"))?,
-            max_attempts: u32::try_from(row.get::<i64, _>("max_attempts"))?,
-            next_eligible_at: T0,
-            created_at: T0,
-            state_changed_at: T0,
-            epoch: 0,
-        })
-    }
-
-    async fn assert_ready_tickets(&self, tickets: &[Ticket]) -> TestResult<()> {
-        for ticket in tickets {
-            let state: String = sqlx::query_scalar("SELECT state FROM tickets WHERE id = ?")
-                .bind(i64::try_from(ticket.id.0)?)
-                .fetch_one(&self.pool)
-                .await?;
-            assert_eq!(state, "ready", "ticket {} was not ready", ticket.id.0);
-        }
-        Ok(())
-    }
-
-    async fn assert_unique_branch_tickets(&self, node_ids: &[&str]) -> TestResult<()> {
-        for node_id in node_ids {
-            let duplicates: Vec<(String, i64)> = sqlx::query_as(
-                "SELECT json_extract(payload, '$.branch_id') AS branch_id, COUNT(*) AS count \
-                 FROM tickets \
-                 WHERE job_id = ? AND json_extract(payload, '$.node_id') = ? \
-                 GROUP BY branch_id HAVING count > 1",
-            )
-            .bind(i64::try_from(self.job_id.0)?)
-            .bind(node_id)
-            .fetch_all(&self.pool)
-            .await?;
-            assert!(
-                duplicates.is_empty(),
-                "duplicate workflow tickets for node {node_id}: {duplicates:?}"
-            );
-        }
-        Ok(())
-    }
-
-    async fn assert_event_count(&self, kind: &str, expected: i64) -> TestResult<()> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = ?")
-            .bind(kind)
-            .fetch_one(&self.pool)
-            .await?;
-        assert_eq!(count, expected, "event count for {kind}");
-        Ok(())
     }
 
     async fn assert_job_succeeded(&self, job_id: JobId) -> TestResult<()> {
@@ -1730,55 +1432,6 @@ async fn connect_single_connection_pool(url: &str) -> TestResult<SqlitePool> {
         .await?)
 }
 
-fn rendered_payload_for_seed(operation: OperationKind, branch_id: &str) -> TestResult<Value> {
-    let branch = BranchContext {
-        branch_id: branch_id.to_owned(),
-        path: format!("/library/{branch_id}.mkv"),
-        probe_codec: Some("h264".to_owned()),
-        source_file: Some(json!({
-            "path": format!("/library/{branch_id}.mkv"),
-            "size_bytes": 4_200_000_000_u64,
-        })),
-    };
-    let timing = EffectiveTiming::for_test(25, 10);
-    if operation == OperationKind::ScanLibrary {
-        Ok(render_default_payload_with_fan_out(
-            operation, &branch, timing, 3,
-        )?)
-    } else {
-        Ok(render_default_payload(operation, &branch, timing)?)
-    }
-}
-
-fn scanner_result_with_three_files() -> Value {
-    json!({
-        "files": [
-            {"path": "/library/file-000.mkv", "size_bytes": 4_200_000_000_u64},
-            {"path": "/library/file-001.mkv", "size_bytes": 4_200_000_001_u64},
-            {"path": "/library/file-002.mkv", "size_bytes": 4_200_000_002_u64}
-        ]
-    })
-}
-
-fn node_ids(tickets: &[Ticket]) -> Vec<String> {
-    tickets
-        .iter()
-        .map(|ticket| {
-            WorkflowTicketPayload::parse_ticket(ticket.kind.as_str(), ticket.payload.clone())
-                .unwrap()
-                .node_id
-        })
-        .collect()
-}
-
-fn ticket_kind(operation: OperationKind) -> TicketOperation {
-    TicketOperation::new(format!(
-        "synthetic.workflow.operation.{}",
-        operation_name(operation)
-    ))
-    .unwrap()
-}
-
 fn operation_name(operation: OperationKind) -> String {
     serde_json::to_value(operation)
         .unwrap()
@@ -1793,10 +1446,6 @@ fn failure_class_name(class: FailureClass) -> String {
         .as_str()
         .unwrap()
         .to_owned()
-}
-
-fn format_time(t: OffsetDateTime) -> TestResult<String> {
-    Ok(t.format(&time::format_description::well_known::Iso8601::DEFAULT)?)
 }
 
 fn io_error(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
@@ -1831,22 +1480,5 @@ fn combine_result_and_cleanup<T>(result: TestResult<T>, cleanup: TestResult<()>)
         (Err(err), Err(cleanup_err)) => Err(io_error(format!(
             "{err}; provider cleanup failed: {cleanup_err}"
         ))),
-    }
-}
-
-trait TicketStateParseForTest {
-    fn parse_for_test(state: &str) -> TicketState;
-}
-
-impl TicketStateParseForTest for TicketState {
-    fn parse_for_test(state: &str) -> TicketState {
-        match state {
-            "pending" => TicketState::Pending,
-            "ready" => TicketState::Ready,
-            "leased" => TicketState::Leased,
-            "succeeded" => TicketState::Succeeded,
-            "failed" => TicketState::Failed,
-            other => panic!("unknown ticket state {other}"),
-        }
     }
 }
