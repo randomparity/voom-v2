@@ -1,13 +1,12 @@
 //! Artifact orchestration owned by the control plane.
 //!
 //! These modules coordinate staged files, artifact repository rows, verification
-//! workers, host-side commits, and lifecycle events. The empty `voom-artifact`
-//! crate is reserved for future reusable domain types; this module is the
-//! authoritative runtime surface until that boundary is intentionally moved.
+//! workers, host-side commits, and lifecycle events. The `voom-artifact` crate
+//! owns narrow, store-facing artifact helpers that no longer need the full
+//! control-plane application surface.
 
 pub(crate) mod bootstrap;
 pub(crate) mod commit;
-pub(crate) mod commit_pipeline;
 pub(crate) mod fs;
 pub(crate) mod inspect;
 pub(crate) mod stage;

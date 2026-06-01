@@ -42,6 +42,7 @@ voom-plan = { version = "0.1.0-dev", path = "crates/voom-plan" }
 voom-policy = { version = "0.1.0-dev", path = "crates/voom-policy" }
 voom-scheduler = { version = "0.1.0-dev", path = "crates/voom-scheduler" }
 voom-store = { version = "0.1.0-dev", path = "crates/voom-store" }
+voom-artifact = { version = "0.1.0-dev", path = "crates/voom-artifact" }
 voom-control-plane = { version = "0.1.0-dev", path = "crates/voom-control-plane" }
 voom-api = { version = "0.1.0-dev", path = "crates/voom-api" }
 voom-worker-protocol = { version = "0.1.0-dev", path = "crates/voom-worker-protocol" }

@@ -5,6 +5,10 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::json;
 use tokio::fs;
+use voom_artifact::commit_pipeline::{
+    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
+    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
+};
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
@@ -29,10 +33,6 @@ use voom_worker_protocol::{
 use super::selection::ExtractAudioSelectionPlan;
 use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
 use crate::ControlPlane;
-use crate::artifact::commit_pipeline::{
-    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
-    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
-};
 use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, promote_staged_add_only_with_temp,
     require_expected_staging_facts, unique_temp_sibling_path,
@@ -407,7 +407,8 @@ async fn prepare_sidecar_commit(
         started_at: now,
     };
     let record = create_pending_commit_with_started_event_in_tx(
-        cp,
+        &cp.artifacts,
+        &cp.events,
         &mut tx,
         pending_input,
         |commit_record_id| {
@@ -476,7 +477,7 @@ async fn finalize_sidecar_commit(
         )
         .await?;
     append_commit_event_in_tx(
-        cp,
+        &cp.events,
         &mut tx,
         input.artifact_handle_id,
         now,
@@ -513,7 +514,8 @@ async fn mark_sidecar_recovery_required(
     let error_code = err.error_code().as_str().to_owned();
     let message = err.to_string();
     let recovered = mark_recovery_required_with_event_in_tx(
-        cp,
+        &cp.artifacts,
+        &cp.events,
         &mut tx,
         RecoveryRequiredCommit {
             commit_record_id: prepared.record.id,

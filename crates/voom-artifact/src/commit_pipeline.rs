@@ -1,43 +1,42 @@
 use time::OffsetDateTime;
 use voom_core::ids::ArtifactCommitRecordId;
 use voom_core::{ArtifactHandleId, VoomError};
-use voom_events::{Event, SubjectType};
+use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, NewArtifactCommitRecord,
+    ArtifactCommitFailure, ArtifactCommitRecord, NewArtifactCommitRecord, SqliteArtifactRepo,
 };
-
-use crate::ControlPlane;
-use crate::cases::append_event;
+use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
 #[derive(Debug)]
-pub(crate) enum PendingCommitRecordError {
+pub enum PendingCommitRecordError {
     BeforePending(VoomError),
     AfterPending(VoomError),
 }
 
 impl PendingCommitRecordError {
-    pub(crate) fn into_inner(self) -> VoomError {
+    #[must_use]
+    pub fn into_inner(self) -> VoomError {
         match self {
             Self::BeforePending(err) | Self::AfterPending(err) => err,
         }
     }
 }
 
-pub(crate) async fn create_pending_commit_with_started_event_in_tx(
-    cp: &ControlPlane,
+pub async fn create_pending_commit_with_started_event_in_tx(
+    artifacts: &SqliteArtifactRepo,
+    events: &SqliteEventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: NewArtifactCommitRecord,
     started_event: impl FnOnce(ArtifactCommitRecordId) -> Event,
 ) -> Result<ArtifactCommitRecord, PendingCommitRecordError> {
     let artifact_handle_id = input.artifact_handle_id;
     let started_at = input.started_at;
-    let record = cp
-        .artifacts
+    let record = artifacts
         .create_pending_commit_in_tx(tx, input)
         .await
         .map_err(PendingCommitRecordError::BeforePending)?;
     append_commit_event_in_tx(
-        cp,
+        events,
         tx,
         artifact_handle_id,
         started_at,
@@ -48,7 +47,8 @@ pub(crate) async fn create_pending_commit_with_started_event_in_tx(
     Ok(record)
 }
 
-pub(crate) struct RecoveryRequiredCommit {
+#[derive(Debug)]
+pub struct RecoveryRequiredCommit {
     pub commit_record_id: ArtifactCommitRecordId,
     pub artifact_handle_id: ArtifactHandleId,
     pub failure: ArtifactCommitFailure,
@@ -57,13 +57,13 @@ pub(crate) struct RecoveryRequiredCommit {
     pub occurred_at: OffsetDateTime,
 }
 
-pub(crate) async fn mark_recovery_required_with_event_in_tx(
-    cp: &ControlPlane,
+pub async fn mark_recovery_required_with_event_in_tx(
+    artifacts: &SqliteArtifactRepo,
+    events: &SqliteEventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: RecoveryRequiredCommit,
 ) -> Result<ArtifactCommitRecord, VoomError> {
-    let recovered = cp
-        .artifacts
+    let recovered = artifacts
         .mark_commit_recovery_required_in_tx(
             tx,
             input.commit_record_id,
@@ -72,7 +72,7 @@ pub(crate) async fn mark_recovery_required_with_event_in_tx(
         )
         .await?;
     append_commit_event_in_tx(
-        cp,
+        events,
         tx,
         input.artifact_handle_id,
         input.occurred_at,
@@ -82,20 +82,24 @@ pub(crate) async fn mark_recovery_required_with_event_in_tx(
     Ok(recovered)
 }
 
-pub(crate) async fn append_commit_event_in_tx(
-    cp: &ControlPlane,
+pub async fn append_commit_event_in_tx(
+    events: &SqliteEventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     artifact_handle_id: ArtifactHandleId,
     occurred_at: OffsetDateTime,
-    event: Event,
+    payload: Event,
 ) -> Result<(), VoomError> {
-    append_event(
-        &cp.events,
-        tx,
-        SubjectType::ArtifactHandle,
-        Some(artifact_handle_id.0),
-        occurred_at,
-        event,
-    )
-    .await
+    events
+        .append_in_tx(
+            tx,
+            EventEnvelope {
+                occurred_at,
+                subject_type: SubjectType::ArtifactHandle,
+                subject_id: Some(artifact_handle_id.0),
+                trace_id: None,
+                payload,
+            },
+        )
+        .await?;
+    Ok(())
 }

@@ -1,13 +1,7 @@
-//! Future home for reusable artifact domain types.
+//! Artifact domain helpers shared outside the control-plane application shell.
 //!
-//! This crate is intentionally empty today. Runtime artifact orchestration
-//! lives in `voom-control-plane::artifact`, where it can coordinate store
-//! transactions, worker dispatch, filesystem promotion, verification, and
-//! control-plane events in one application boundary.
-//!
-//! Move code here only when a type or rule is independent of that orchestration
-//! boundary and has at least one non-control-plane consumer.
+//! Keep this crate focused on artifact rules with stable inputs and outputs.
+//! Filesystem promotion, worker dispatch, and use-case assembly remain in
+//! `voom-control-plane`, which owns application workflow coordination.
 
-pub mod placeholder {
-    //! Empty marker module so the reserved crate remains a valid package.
-}
+pub mod commit_pipeline;

@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sqlx::Row;
 use tokio::fs;
+use voom_artifact::commit_pipeline::{
+    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
+    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
+};
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, ErrorCode, FailureClass, FileAssetId, FileLocationId,
@@ -25,10 +29,6 @@ use voom_store::repo::identity::{
 };
 
 use crate::ControlPlane;
-use crate::artifact::commit_pipeline::{
-    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
-    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
-};
 use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, copy_regular_file_checked,
     observe_regular_file, unique_temp_sibling_path,
@@ -364,8 +364,12 @@ async fn prepare_commit_in_tx(
         }),
         started_at: now,
     };
-    let record =
-        create_pending_commit_with_started_event_in_tx(cp, tx, pending_input, |commit_record_id| {
+    let record = create_pending_commit_with_started_event_in_tx(
+        &cp.artifacts,
+        &cp.events,
+        tx,
+        pending_input,
+        |commit_record_id| {
             Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
                 commit_record_id: commit_record_id.0,
                 artifact_handle_id: input.artifact_handle_id.0,
@@ -374,14 +378,15 @@ async fn prepare_commit_in_tx(
                 target_path: paths.target_path.display().to_string(),
                 temp_path: paths.temp_path.display().to_string(),
             })
-        })
-        .await
-        .map_err(|err| match err {
-            PendingCommitRecordError::BeforePending(err) => {
-                PrepareCommitError::PreMutation(pre_mutation(&verified_staging.context, &err))
-            }
-            PendingCommitRecordError::AfterPending(err) => PrepareCommitError::AfterPending(err),
-        })?;
+        },
+    )
+    .await
+    .map_err(|err| match err {
+        PendingCommitRecordError::BeforePending(err) => {
+            PrepareCommitError::PreMutation(pre_mutation(&verified_staging.context, &err))
+        }
+        PendingCommitRecordError::AfterPending(err) => PrepareCommitError::AfterPending(err),
+    })?;
 
     Ok(PreparedCommit {
         record,
@@ -673,7 +678,7 @@ async fn append_failed_pre_mutation(
     occurred_at: time::OffsetDateTime,
 ) -> Result<(), VoomError> {
     append_commit_event_in_tx(
-        cp,
+        &cp.events,
         tx,
         failure.artifact_handle_id,
         occurred_at,
@@ -842,7 +847,7 @@ async fn finalize_commit(
         )
         .await?;
     append_commit_event_in_tx(
-        cp,
+        &cp.events,
         &mut tx,
         prepared.artifact_handle_id,
         now,
@@ -873,7 +878,8 @@ async fn transition_recovery(
     let error_code = err.error_code().as_str().to_owned();
     let message = err.to_string();
     let recovered = mark_recovery_required_with_event_in_tx(
-        cp,
+        &cp.artifacts,
+        &cp.events,
         &mut tx,
         RecoveryRequiredCommit {
             commit_record_id: prepared.record.id,
