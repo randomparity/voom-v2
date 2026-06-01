@@ -23,6 +23,7 @@ pub mod low_level;
 pub mod ndjson;
 pub mod probe_file;
 pub mod remux;
+pub mod startup;
 pub mod transcode_video;
 pub mod transport;
 pub mod verify_artifact;
@@ -51,6 +52,11 @@ pub use remux::{
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxObservedFacts, RemuxOutput,
     RemuxRequest, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
     is_supported_remux_container,
+};
+pub use startup::{
+    DEFAULT_WORKER_BIND, WORKER_BIND_ENV, WORKER_EPOCH_ENV, WORKER_ID_ENV, WORKER_SECRET_ENV,
+    WorkerStartupError, load_worker_bind_addr_from_env, load_worker_credentials_from_env,
+    serve_worker_http,
 };
 pub use transcode_video::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,

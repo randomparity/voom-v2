@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncReadExt;
@@ -27,11 +26,11 @@ use voom_worker_protocol::{
     AudioDispositionFact, AudioObservedFacts, AudioOutputStreamFact, ExtractAudioRequest,
     ExtractAudioResult, ExtractAudioStatus, HttpServer, OperationDispatch, OperationFuture,
     OperationKind, OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
-    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, ServerHandle,
-    TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoObservedFacts,
-    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, WorkerCredentials,
-    canonical_video_codec, is_supported_transcode_video_codec,
-    is_supported_transcode_video_container,
+    RemuxObservedFacts, RemuxRequest, RemuxResult, RemuxStatus, TranscodeAudioRequest,
+    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoObservedFacts, TranscodeVideoRequest,
+    TranscodeVideoResult, TranscodeVideoStatus, WorkerStartupError, canonical_video_codec,
+    is_supported_transcode_video_codec, is_supported_transcode_video_container,
+    load_worker_bind_addr_from_env, load_worker_credentials_from_env, serve_worker_http,
 };
 
 const MAX_FAKE_DURATION_MS: u64 = 30_000;
@@ -317,14 +316,11 @@ pub fn dispatch_provider(
     Ok(dispatch)
 }
 
-pub async fn run_provider(binary_name: &'static str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_provider(binary_name: &'static str) -> Result<(), WorkerStartupError> {
     let provider = provider_definition(binary_name)
-        .ok_or_else(|| format!("unknown fake provider binary {binary_name}"))?;
-    let credentials = load_credentials()?;
-    let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:0".to_owned())
-        .parse()
-        .map_err(|e| format!("VOOM_WORKER_BIND parse failed: {e}"))?;
+        .ok_or_else(|| WorkerStartupError::unknown_provider(binary_name))?;
+    let credentials = load_worker_credentials_from_env()?;
+    let bind = load_worker_bind_addr_from_env()?;
     let server = HttpServer::new(
         credentials,
         Arc::new(move |req| {
@@ -332,10 +328,7 @@ pub async fn run_provider(binary_name: &'static str) -> Result<(), Box<dyn std::
             Box::pin(async move { dispatch_provider(&provider, &req) }) as OperationFuture
         }),
     );
-    let running = server
-        .serve(bind)
-        .await
-        .map_err(|e| format!("serve failed: {e}"))?;
+    let running = serve_worker_http(&server, bind).await?;
     print_bound(running.bound);
     let shutdown_tx = running.shutdown;
     let joined = running.joined;
@@ -1246,23 +1239,6 @@ fn operation_name(operation: OperationKind) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| format!("{operation:?}"))
-}
-
-fn load_credentials() -> Result<WorkerCredentials, Box<dyn std::error::Error>> {
-    let secret = std::env::var("VOOM_WORKER_SECRET").map_err(|_| "VOOM_WORKER_SECRET not set")?;
-    let worker_id: u64 = std::env::var("VOOM_WORKER_ID")
-        .map_err(|_| "VOOM_WORKER_ID not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_ID not parseable")?;
-    let worker_epoch: u64 = std::env::var("VOOM_WORKER_EPOCH")
-        .map_err(|_| "VOOM_WORKER_EPOCH not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_EPOCH not parseable")?;
-    Ok(WorkerCredentials {
-        worker_id: voom_core::WorkerId(worker_id),
-        worker_epoch,
-        secret: SecretString::from(secret),
-    })
 }
 
 #[expect(

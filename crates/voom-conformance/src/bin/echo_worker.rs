@@ -13,46 +13,25 @@
 //!   one `Result` (seq=1) echoing the path back.
 //! - Self-exits when stdin closes (parent-death watchdog).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use voom_worker_protocol::http::OperationDispatch;
 use voom_worker_protocol::{
     HttpServer, OperationFuture, OperationKind, OperationRequest, OperationResponse, ProgressFrame,
-    ProtocolError, ServerHandle, WorkerCredentials,
+    ProtocolError, WorkerStartupError, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env, serve_worker_http,
 };
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let secret = std::env::var("VOOM_WORKER_SECRET").map_err(|_| "VOOM_WORKER_SECRET not set")?;
-    let worker_id: u64 = std::env::var("VOOM_WORKER_ID")
-        .map_err(|_| "VOOM_WORKER_ID not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_ID not parseable")?;
-    let worker_epoch: u64 = std::env::var("VOOM_WORKER_EPOCH")
-        .map_err(|_| "VOOM_WORKER_EPOCH not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_EPOCH not parseable")?;
-    let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:0".to_owned())
-        .parse()
-        .map_err(|e| format!("VOOM_WORKER_BIND parse failed: {e}"))?;
-
-    let credentials = WorkerCredentials {
-        worker_id: voom_core::WorkerId(worker_id),
-        worker_epoch,
-        secret: SecretString::from(secret),
-    };
+async fn main() -> Result<(), WorkerStartupError> {
+    let credentials = load_worker_credentials_from_env()?;
+    let bind = load_worker_bind_addr_from_env()?;
 
     let handler = Arc::new(handle_operation);
     let server = HttpServer::new(credentials, handler);
-    let running = server
-        .serve(bind)
-        .await
-        .map_err(|e| format!("serve failed: {e}"))?;
+    let running = serve_worker_http(&server, bind).await?;
 
     println!("BOUND addr={}", running.bound);
 

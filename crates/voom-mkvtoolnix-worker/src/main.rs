@@ -3,26 +3,20 @@
     reason = "mkvtoolnix-worker advertises readiness with BOUND addr=..."
 )]
 
-use std::net::SocketAddr;
-
-use secrecy::SecretString;
 use voom_mkvtoolnix_worker::{operation_handler, preflight_from_process_env};
-use voom_worker_protocol::{HttpServer, ServerHandle, WorkerCredentials};
+use voom_worker_protocol::{
+    HttpServer, WorkerStartupError, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env, serve_worker_http,
+};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let credentials = load_credentials()?;
-    let config = preflight_from_process_env()?;
-    let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:0".to_owned())
-        .parse()
-        .map_err(|err| format!("VOOM_WORKER_BIND parse failed: {err}"))?;
+async fn main() -> Result<(), WorkerStartupError> {
+    let credentials = load_worker_credentials_from_env()?;
+    let config = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
+    let bind = load_worker_bind_addr_from_env()?;
 
     let server = HttpServer::new(credentials, operation_handler(config));
-    let running = server
-        .serve(bind)
-        .await
-        .map_err(|err| format!("serve failed: {err}"))?;
+    let running = serve_worker_http(&server, bind).await?;
 
     println!("BOUND addr={}", running.bound);
 
@@ -43,23 +37,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = watchdog.join();
     let _ = joined.await;
     Ok(())
-}
-
-fn load_credentials() -> Result<WorkerCredentials, Box<dyn std::error::Error>> {
-    let secret = std::env::var("VOOM_WORKER_SECRET").map_err(|_| "VOOM_WORKER_SECRET not set")?;
-    let worker_id: u64 = std::env::var("VOOM_WORKER_ID")
-        .map_err(|_| "VOOM_WORKER_ID not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_ID not parseable")?;
-    let worker_epoch: u64 = std::env::var("VOOM_WORKER_EPOCH")
-        .map_err(|_| "VOOM_WORKER_EPOCH not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_EPOCH not parseable")?;
-    Ok(WorkerCredentials {
-        worker_id: voom_core::WorkerId(worker_id),
-        worker_epoch,
-        secret: SecretString::from(secret),
-    })
 }
 
 #[cfg(test)]
