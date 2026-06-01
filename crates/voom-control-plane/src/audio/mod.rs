@@ -117,6 +117,13 @@ pub trait ExtractAudioDispatcher: Send + Sync {
 }
 
 impl ControlPlane {
+    /// Execute one policy-derived `transcode_audio` ticket through source
+    /// revalidation, worker staging, verification, add-only commit, and result
+    /// media-snapshot persistence.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, commit, and result-probe failures.
     pub async fn execute_transcode_audio(
         &self,
         input: ExecuteTranscodeAudioInput,
@@ -131,6 +138,12 @@ impl ControlPlane {
         .await
     }
 
+    /// Execute one policy-derived `extract_audio` ticket through source
+    /// revalidation, worker staging, verification, and add-only sidecar commit.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, and commit failures.
     pub async fn execute_extract_audio(
         &self,
         input: ExecuteExtractAudioInput,

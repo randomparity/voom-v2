@@ -136,6 +136,10 @@ impl ControlPlane {
     /// Execute one policy-derived `remux` ticket through source revalidation,
     /// worker staging, verification, add-only commit, and result snapshot
     /// persistence.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, commit, and result-probe failures.
     pub async fn execute_remux(
         &self,
         input: ExecuteRemuxInput,
