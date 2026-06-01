@@ -122,12 +122,6 @@ struct RuntimeRemuxDispatcher<'a> {
 
 #[async_trait::async_trait]
 impl RemuxDispatcher for RuntimeRemuxDispatcher<'_> {
-    async fn dispatch_remux(&self, request: RemuxRequest) -> Result<RemuxResult, VoomError> {
-        let mut progress = crate::remux::dispatch::NoopRemuxProgressSink;
-        self.dispatch_remux_with_progress(request, &mut progress)
-            .await
-    }
-
     async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,

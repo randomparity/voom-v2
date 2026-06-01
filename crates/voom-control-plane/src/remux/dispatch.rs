@@ -31,34 +31,10 @@ pub trait RemuxProgressSink: Send {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct NoopRemuxProgressSink;
-
-#[async_trait]
-impl RemuxProgressSink for NoopRemuxProgressSink {
-    async fn record_remux_progress(
-        &mut self,
-        _percent: Option<PercentBps>,
-        _message: Option<String>,
-    ) -> Result<(), VoomError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
 pub struct BundledRemuxDispatcher;
 
 #[async_trait]
 impl RemuxDispatcher for BundledRemuxDispatcher {
-    async fn dispatch_remux(&self, request: RemuxRequest) -> Result<RemuxResult, VoomError> {
-        let command = bundled_mkvtoolnix_worker_command();
-        let worker = BundledWorkerProcess::launch(WorkerId(0), command)
-            .await
-            .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
-        let result = dispatch_remux_with_client(&worker.client, &worker.credentials, request).await;
-        let _status = worker.shutdown(Duration::from_secs(5)).await;
-        result
-    }
-
     async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
@@ -187,26 +163,6 @@ pub async fn require_output_file_matches_result(
         )));
     }
     Ok(())
-}
-
-pub(crate) async fn dispatch_remux_with_client<C>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    remux: RemuxRequest,
-) -> Result<RemuxResult, VoomError>
-where
-    C: ClientHandle + ?Sized,
-{
-    let mut progress = NoopRemuxProgressSink;
-    dispatch_remux_with_client_context_and_progress(
-        client,
-        credentials,
-        "remux-control-plane",
-        LeaseId(0),
-        remux,
-        &mut progress,
-    )
-    .await
 }
 
 pub(crate) async fn dispatch_remux_with_client_context_and_progress<C>(

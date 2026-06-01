@@ -118,18 +118,11 @@ pub(crate) fn success_event_recovery_report(
 
 #[async_trait]
 pub trait RemuxDispatcher: Send + Sync {
-    async fn dispatch_remux(
-        &self,
-        request: voom_worker_protocol::RemuxRequest,
-    ) -> Result<RemuxResult, VoomError>;
-
     async fn dispatch_remux_with_progress(
         &self,
         request: voom_worker_protocol::RemuxRequest,
-        _progress: &mut dyn dispatch::RemuxProgressSink,
-    ) -> Result<RemuxResult, VoomError> {
-        self.dispatch_remux(request).await
-    }
+        progress: &mut dyn dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError>;
 }
 
 impl ControlPlane {
