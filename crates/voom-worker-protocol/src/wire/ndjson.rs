@@ -20,7 +20,7 @@
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use voom_core::LeaseId;
 
-use crate::envelope::{ProgressFrame, ProtocolError};
+use crate::{ProgressFrame, ProtocolError};
 
 const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
 

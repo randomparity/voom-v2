@@ -14,7 +14,7 @@ use std::fmt;
 use secrecy::{ExposeSecret, SecretString};
 use voom_core::WorkerId;
 
-use crate::envelope::ProtocolError;
+use crate::ProtocolError;
 
 /// Live worker identity, owned by the supervisor for one spawn.
 pub struct WorkerCredentials {

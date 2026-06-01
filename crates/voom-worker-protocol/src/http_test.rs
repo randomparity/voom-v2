@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use voom_core::{LeaseId, WorkerId};
 
 use super::*;
-use crate::ndjson::NdjsonOutcome;
+use crate::NdjsonOutcome;
 use crate::{OperationKind, ProgressFrame};
 
 fn creds() -> WorkerCredentials {

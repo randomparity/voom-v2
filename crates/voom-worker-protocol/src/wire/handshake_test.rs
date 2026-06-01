@@ -1,5 +1,5 @@
 use super::*;
-use crate::envelope::ProtocolError;
+use crate::ProtocolError;
 
 #[test]
 fn negotiate_supported_returns_agreed() {

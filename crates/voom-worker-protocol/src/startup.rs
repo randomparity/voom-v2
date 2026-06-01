@@ -9,9 +9,7 @@ use secrecy::SecretString;
 use thiserror::Error;
 use voom_core::WorkerId;
 
-use crate::credentials::WorkerCredentials;
-use crate::envelope::ProtocolError;
-use crate::transport::{ServerHandle, ServerRunning};
+use crate::{ProtocolError, ServerHandle, ServerRunning, WorkerCredentials};
 
 pub const DEFAULT_WORKER_BIND: &str = "127.0.0.1:0";
 pub const WORKER_BIND_ENV: &str = "VOOM_WORKER_BIND";

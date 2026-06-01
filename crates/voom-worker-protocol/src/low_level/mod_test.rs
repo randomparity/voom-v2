@@ -2,7 +2,7 @@ use super::*;
 use chrono::{TimeZone, Utc};
 use voom_core::LeaseId;
 
-use crate::envelope::{PercentBps, ProgressFrame};
+use crate::{PercentBps, ProgressFrame};
 
 #[test]
 fn frame_to_line_bytes_includes_newline() {

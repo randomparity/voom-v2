@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::envelope::ProtocolError;
+use crate::ProtocolError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 
-use crate::envelope::ProgressFrame;
+use crate::ProgressFrame;
 
 /// Serialize a frame to its canonical NDJSON line bytes (JSON object +
 /// `\n` terminator). This is the byte sequence the wire carries.
