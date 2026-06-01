@@ -418,7 +418,7 @@ async fn collect_body(mut stream: voom_worker_protocol::DispatchStream) -> Vec<P
                 frames.push(frame);
                 return frames;
             }
-            other => panic!("unexpected outcome {other:?}"),
+            other @ NdjsonOutcome::StreamEnd { .. } => panic!("unexpected outcome {other:?}"),
         }
     }
 }

@@ -115,7 +115,7 @@ async fn benchmark_mode_returns_cadence_progress_and_summary() {
                 assert!(payload["worker_ops_per_second_milli"].as_u64().unwrap() > 0);
                 break;
             }
-            other => panic!("unexpected outcome {other:?}"),
+            other @ NdjsonOutcome::StreamEnd { .. } => panic!("unexpected outcome {other:?}"),
         }
     }
     launch.shutdown().await;
@@ -217,7 +217,7 @@ async fn collect_body(mut stream: voom_worker_protocol::DispatchStream) -> Vec<P
                 frames.push(frame);
                 return frames;
             }
-            other => panic!("unexpected outcome {other:?}"),
+            other @ NdjsonOutcome::StreamEnd { .. } => panic!("unexpected outcome {other:?}"),
         }
     }
 }
