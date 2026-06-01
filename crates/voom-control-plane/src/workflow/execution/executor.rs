@@ -232,7 +232,7 @@ impl RunLoopState {
             .await
     }
 
-    async fn process_ready_dispatches(
+    async fn process_completed_dispatches(
         &mut self,
         executor: &WorkflowExecutor,
         plan: &WorkflowPlan,
@@ -420,7 +420,7 @@ impl WorkflowExecutor {
 
         loop {
             state
-                .process_ready_dispatches(self, &plan, &workflow_id, job_id)
+                .process_completed_dispatches(self, &plan, &workflow_id, job_id)
                 .await;
 
             state.refresh(control, job_id, started).await;
