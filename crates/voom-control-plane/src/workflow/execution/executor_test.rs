@@ -2975,11 +2975,7 @@ fn timeout_options() -> WorkflowExecutorOptions {
 }
 
 fn operation_name(operation: OperationKind) -> String {
-    serde_json::to_value(operation)
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_owned()
+    operation.as_str().to_owned()
 }
 
 fn ticket_op(value: impl Into<String>) -> TicketOperation {

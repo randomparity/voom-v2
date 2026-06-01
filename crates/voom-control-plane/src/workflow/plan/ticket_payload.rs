@@ -49,7 +49,7 @@ impl WorkflowTicketPayload {
         let mut value = serde_json::to_value(self).map_err(|e| {
             WorkflowTicketPayloadError::new(format!("workflow ticket payload encode: {e}"))
         })?;
-        let operation = operation_name(self.operation);
+        let operation = self.operation.as_str();
         let Some(rendered_payload) = value
             .get_mut("rendered_payload")
             .and_then(serde_json::Value::as_object_mut)
@@ -127,27 +127,6 @@ impl std::fmt::Display for WorkflowTicketPayloadError {
 
 impl std::error::Error for WorkflowTicketPayloadError {}
 
-pub(crate) fn operation_name(operation: OperationKind) -> &'static str {
-    match operation {
-        OperationKind::ScanLibrary => "scan_library",
-        OperationKind::ProbeFile => "probe_file",
-        OperationKind::HashFile => "hash_file",
-        OperationKind::IdentifyMedia => "identify_media",
-        OperationKind::ScoreQuality => "score_quality",
-        OperationKind::SyncExternalSystem => "sync_external_system",
-        OperationKind::BackUpFile => "back_up_file",
-        OperationKind::Remux => "remux",
-        OperationKind::TranscodeVideo => "transcode_video",
-        OperationKind::TranscodeAudio => "transcode_audio",
-        OperationKind::EditTracks => "edit_tracks",
-        OperationKind::ExtractAudio => "extract_audio",
-        OperationKind::TranscribeAudio => "transcribe_audio",
-        OperationKind::VerifyArtifact => "verify_artifact",
-        OperationKind::CommitArtifact => "commit_artifact",
-        OperationKind::DeleteArtifact => "delete_artifact",
-    }
-}
-
 pub(crate) fn ticket_operation(
     ticket_kind: &str,
 ) -> Result<OperationKind, WorkflowTicketPayloadError> {
@@ -172,8 +151,8 @@ fn operation_mismatch(
 ) -> WorkflowTicketPayloadError {
     WorkflowTicketPayloadError::new(format!(
         "operation mismatch: {source} `{}` does not match payload operation `{}`",
-        operation_name(source_operation),
-        operation_name(payload_operation)
+        source_operation.as_str(),
+        payload_operation.as_str()
     ))
 }
 

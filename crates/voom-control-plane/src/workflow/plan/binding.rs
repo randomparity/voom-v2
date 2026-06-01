@@ -6,7 +6,6 @@ use voom_core::{FileLocationId, FileVersionId};
 use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::remux::RemuxOperationPayload;
 
-use super::ticket_payload::operation_name;
 use crate::workflow::execution::timing::EffectiveTiming;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +91,7 @@ pub fn render_default_payload_with_fan_out(
     let Some(object) = payload.as_object_mut() else {
         return Err(BindingError::new("rendered payload must be a JSON object"));
     };
-    object.insert("operation".to_owned(), json!(operation_name(operation)));
+    object.insert("operation".to_owned(), json!(operation.as_str()));
     object.insert("branch_id".to_owned(), json!(branch.branch_id));
     object.insert("duration_ms".to_owned(), json!(timing.duration_ms));
     object.insert(

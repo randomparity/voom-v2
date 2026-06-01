@@ -12,7 +12,7 @@ use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 
 use super::binding::{BranchContext, render_default_payload};
 use super::model::{OperationNode, WorkflowPlan};
-use super::ticket_payload::{WorkflowTicketPayload, operation_name};
+use super::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::workflow::execution::timing::{EffectiveTiming, branch_codec, seeded_timing};
@@ -512,7 +512,7 @@ fn timing(ctx: &ExpansionContext<'_>, node_id: &str, branch_id: &str) -> Effecti
 fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
     TicketOperation::new(format!(
         "synthetic.workflow.operation.{}",
-        operation_name(operation)
+        operation.as_str()
     ))
 }
 

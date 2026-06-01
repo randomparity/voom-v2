@@ -38,7 +38,6 @@ use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
 use super::plan::expansion::branch_id_from_path;
 use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
-use super::plan::ticket_payload::operation_name;
 
 /// Bridge node ids carry this prefix; the per-file ticket lookup reconstructs the
 /// workflow node id from a plan node id (`policy_bridge.rs`).
@@ -224,7 +223,7 @@ fn per_operation_json(run: &crate::workflow::WorkflowRunSummary) -> Value {
         .iter()
         .map(|(kind, summary)| {
             (
-                operation_name(*kind).to_owned(),
+                kind.as_str().to_owned(),
                 json!({
                     "ticket_count": summary.ticket_count,
                     "dispatch_count": summary.dispatch_count,

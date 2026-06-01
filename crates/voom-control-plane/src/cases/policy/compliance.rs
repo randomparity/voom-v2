@@ -18,7 +18,6 @@ use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::workflow::WorkerRuntimeRegistry;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
-use crate::workflow::plan::ticket_payload::operation_name;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {
@@ -528,10 +527,10 @@ impl ControlPlane {
                AND wc.operation IN (?, ?, ?, ?) \
              ORDER BY w.id ASC",
         )
-        .bind(operation_name(OperationKind::Remux))
-        .bind(operation_name(OperationKind::TranscodeVideo))
-        .bind(operation_name(OperationKind::TranscodeAudio))
-        .bind(operation_name(OperationKind::ExtractAudio))
+        .bind(OperationKind::Remux.as_str())
+        .bind(OperationKind::TranscodeVideo.as_str())
+        .bind(OperationKind::TranscodeAudio.as_str())
+        .bind(OperationKind::ExtractAudio.as_str())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;

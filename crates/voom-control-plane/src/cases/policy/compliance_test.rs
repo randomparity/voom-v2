@@ -836,13 +836,7 @@ async fn register_policy_audio_worker(
 }
 
 fn operation_name(operation: OperationKind) -> &'static str {
-    match operation {
-        OperationKind::Remux => "remux",
-        OperationKind::TranscodeVideo => "transcode_video",
-        OperationKind::TranscodeAudio => "transcode_audio",
-        OperationKind::ExtractAudio => "extract_audio",
-        _ => unreachable!("compliance tests only seed remux/transcode"),
-    }
+    operation.as_str()
 }
 
 #[tokio::test]

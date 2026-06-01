@@ -30,7 +30,7 @@ use crate::workflow::plan::expansion::{
     expand_scanner_completion, expand_transform_completion,
 };
 use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
-use crate::workflow::plan::ticket_payload::{WorkflowTicketPayload, operation_name};
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::WorkflowRunSummary;
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
@@ -1157,7 +1157,7 @@ impl WorkflowExecutor {
         operation: OperationKind,
         reservations: &HashMap<WorkerId, u32>,
     ) -> Result<Vec<WorkerView>, VoomError> {
-        let operation_name = operation_name(operation);
+        let operation_name = operation.as_str();
         let rows = sqlx::query(
             "SELECT w.id AS worker_id, wg.can_execute, wg.denies, wg.max_parallel, \
                     COALESCE(held.active_leases, 0) AS active_leases \
@@ -1235,7 +1235,7 @@ fn parse_payload(ticket: &Ticket) -> Result<WorkflowTicketPayload, VoomError> {
 fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
     TicketOperation::new(format!(
         "synthetic.workflow.operation.{}",
-        operation_name(operation)
+        operation.as_str()
     ))
 }
 
