@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use voom_core::RemuxTrackGroup;
 use voom_policy::{ComparisonOp, DefaultStrategy, TrackFilter, TrackTarget};
@@ -297,11 +298,7 @@ fn parse_object_track_target(
     index: usize,
     field: &str,
 ) -> Result<TrackTarget, RemuxPayloadError> {
-    let value = object.get(field).ok_or_else(|| {
-        RemuxPayloadError::new(format!("remux {parent}[{index}] missing `{field}`"))
-    })?;
-    serde_json::from_value(value.clone())
-        .map_err(|_| RemuxPayloadError::new(format!("remux {parent}[{index}] missing `{field}`")))
+    parse_object_enum_field(object, parent, index, field)
 }
 
 fn parse_object_default_strategy(
@@ -310,11 +307,24 @@ fn parse_object_default_strategy(
     index: usize,
     field: &str,
 ) -> Result<DefaultStrategy, RemuxPayloadError> {
+    parse_object_enum_field(object, parent, index, field)
+}
+
+fn parse_object_enum_field<T>(
+    object: &serde_json::Map<String, Value>,
+    parent: &str,
+    index: usize,
+    field: &str,
+) -> Result<T, RemuxPayloadError>
+where
+    T: DeserializeOwned,
+{
     let value = object.get(field).ok_or_else(|| {
         RemuxPayloadError::new(format!("remux {parent}[{index}] missing `{field}`"))
     })?;
-    serde_json::from_value(value.clone())
-        .map_err(|_| RemuxPayloadError::new(format!("remux {parent}[{index}] missing `{field}`")))
+    serde_json::from_value(value.clone()).map_err(|err| {
+        RemuxPayloadError::new(format!("remux {parent}[{index}] invalid `{field}`: {err}"))
+    })
 }
 
 pub(crate) fn default_track_order() -> Vec<RemuxTrackGroup> {

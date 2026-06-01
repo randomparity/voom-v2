@@ -111,6 +111,48 @@ fn remux_payload_rejects_invalid_contract_fields() {
     );
 }
 
+#[test]
+fn remux_payload_distinguishes_missing_and_invalid_enum_fields() {
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "track_actions": [{"type": "keep_tracks"}]
+        }),
+        "remux track_actions[0] missing `target`",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "track_actions": [{"type": "keep_tracks", "target": "commentary"}]
+        }),
+        "remux track_actions[0] invalid `target`: unknown variant `commentary`, expected one of \
+         `video`, `audio`, `subtitle`, `attachment`",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "defaults": [{"target": "audio"}]
+        }),
+        "remux defaults[0] missing `strategy`",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "defaults": [{"target": "audio", "strategy": "middle"}]
+        }),
+        "remux defaults[0] invalid `strategy`: unknown variant `middle`, expected one of `first`, \
+         `best`, `none`, `preserve`",
+    );
+}
+
 fn assert_remux_payload_error(payload: &serde_json::Value, expected: &str) {
     let err = RemuxOperationPayload::try_from_execution_value(payload).unwrap_err();
 
