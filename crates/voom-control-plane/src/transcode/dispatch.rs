@@ -49,7 +49,7 @@ impl TranscodeVideoDispatcher for BundledTranscodeVideoDispatcher {
     }
 }
 
-pub fn request_for(
+pub fn transcode_video_request_for(
     selected: &SelectedSource,
     resolved: &ResolvedProfile,
     copy_video: bool,

@@ -82,7 +82,7 @@ impl RemuxDispatcher for BundledRemuxDispatcher {
     }
 }
 
-pub fn request_for(
+pub fn remux_request_for(
     selected: &SelectedSource,
     selection: &RemuxSelection,
     staging_root: &Path,

@@ -48,7 +48,7 @@ fn default_ffmpeg_worker_command_falls_back_to_path_when_sibling_is_missing() {
     assert_eq!(command.program, OsStr::new("voom-ffmpeg-worker"));
 }
 
-// -- request_for: carries the resolved profile (Task 6.4) --
+// -- transcode_video_request_for: carries the resolved profile (Task 6.4) --
 
 /// A non-default AV1 1080p profile so a regression that reintroduces a hardcoded
 /// `default_hevc()` would change codec/container/dims and fail these assertions.
@@ -101,9 +101,9 @@ fn selected_source() -> SelectedSource {
 }
 
 #[test]
-fn request_for_carries_resolved_profile_codec_and_container() {
+fn transcode_video_request_for_carries_resolved_profile_codec_and_container() {
     let resolved = resolved_av1_1080p_mp4();
-    let request = request_for(
+    let request = transcode_video_request_for(
         &selected_source(),
         &resolved,
         true,
