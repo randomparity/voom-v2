@@ -11,6 +11,8 @@
 //! per-`(file, phase)` workflow summary as it goes.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -309,6 +311,19 @@ struct PhaseDispatchFailure {
     run_summary: Option<crate::workflow::WorkflowRunSummary>,
 }
 
+/// Shared inputs for a fresh or resumed phase-barrier run. Everything here is
+/// prepared before a new job opens, so validation failures do not create a job
+/// that immediately needs cleanup.
+struct PhaseBarrierRunInputs {
+    policy: voom_policy::CompiledPolicy,
+    context: PlanningContext,
+    base_draft: PolicyInputSetDraft,
+    branch_ids: Vec<(FileVersionId, String)>,
+}
+
+type CoordinatorFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<CoordinatorOutcome, CoordinatorError>> + Send + 'a>>;
+
 impl ControlPlane {
     /// Drive the existing workflow executor one phase at a time across every
     /// file in a policy input set, phases acting as barriers across files
@@ -345,70 +360,16 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let inputs = self
-            .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
+            .phase_barrier_run_inputs(policy_version_id, input_set_id)
             .await?;
-        let policy = self.compiled_policy_for_version(&inputs.version).await?;
-        reject_unhandled_on_error(&policy)?;
-        let active: Vec<FileVersionId> = inputs
-            .input
-            .media_snapshots
-            .iter()
-            .filter_map(|snapshot| match snapshot.target {
-                PolicyInputTargetRef::FileVersion { id } => Some(id),
-                _ => None,
+        let inputs = Box::new(inputs);
+        self.with_phase_barrier_job(|job_id| {
+            Box::pin(async move {
+                self.run_phase_barrier_in_job(job_id, *inputs, options, runtimes)
+                    .await
             })
-            .collect();
-        // Carry the input set's non-snapshot identity forward; each phase only
-        // swaps in the projected snapshots of the still-active files.
-        let base_draft = input_set_to_draft(inputs.input);
-        let context = PlanningContext {
-            policy_version_id: Some(policy_version_id),
-            policy_input_set_id: Some(input_set_id),
-            ..PlanningContext::default()
-        };
-
-        // Derive each active file's branch id and fail fast on a collision
-        // *before* opening the job: the per-`(file, phase)` upsert is
-        // `ON CONFLICT DO NOTHING` and would silently drop a colliding file's
-        // row, losing it from the durable summary.
-        let branch_ids = self.active_branch_ids(&active).await?;
-
-        let now = self.clock().now();
-        let job = self
-            .open_job(NewJob {
-                kind: WORKFLOW_JOB_KIND.to_owned(),
-                priority: 0,
-                created_at: now,
-            })
-            .await?;
-
-        // Job-cleanup contract: once the job is open, every error path finalizes
-        // it as `failed` rather than orphaning it in `open`. A dispatch failure
-        // already failed the job inside `run_plan_in_job` (and `fail_job` is a
-        // no-op on an already-failed job), so this `fail_job` only matters for
-        // pre-dispatch errors that leave the job open. Committed per-`(file,
-        // phase)` rows are durable before the error returns (queryable via
-        // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
-        match self
-            .run_phase_barrier_in_job(
-                job.id,
-                &policy,
-                &context,
-                base_draft,
-                &branch_ids,
-                options,
-                runtimes,
-            )
-            .await
-        {
-            Ok(outcome) => Ok(outcome),
-            Err(err) => {
-                let _ = self
-                    .fail_job(job.id, err.source.to_string(), self.clock().now())
-                    .await;
-                Err(err)
-            }
-        }
+        })
+        .await
     }
 
     /// Resume a crashed or failed phase-barrier run (issue #165, spec §3/§8).
@@ -460,6 +421,57 @@ impl ControlPlane {
             .into());
         }
         let inputs = self
+            .phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .await?;
+        let inputs = Box::new(inputs);
+
+        self.with_phase_barrier_job(|job_id| {
+            Box::pin(async move {
+                self.resume_phase_barrier_in_job(job_id, prior_job_id, *inputs, options, runtimes)
+                    .await
+            })
+        })
+        .await
+    }
+
+    async fn resume_phase_barrier_in_job(
+        &self,
+        job_id: JobId,
+        prior_job_id: JobId,
+        inputs: PhaseBarrierRunInputs,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let PhaseBarrierRunInputs {
+            policy,
+            context,
+            base_draft,
+            branch_ids,
+        } = inputs;
+        if branch_ids.is_empty() || policy.phase_order.is_empty() {
+            return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
+        }
+        let files = self.initial_phase_files(&branch_ids).await?;
+        let phase_count = u32::try_from(policy.phase_order.len())
+            .map_err(|e| VoomError::Internal(format!("phase count overflow: {e}")))?;
+        let (files, backfilled) = self
+            .reconcile_resume(prior_job_id, job_id, files, phase_count)
+            .await?;
+        self.drive_phase_loop(
+            job_id, &policy, &context, base_draft, files, backfilled, options, runtimes,
+        )
+        .await
+    }
+
+    /// Prepare all shared phase-barrier inputs that are independent of the new
+    /// job. Both fresh and resume runs use the same policy/input identity,
+    /// projected planning context, base draft, and active branch-id set.
+    async fn phase_barrier_run_inputs(
+        &self,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+    ) -> Result<PhaseBarrierRunInputs, VoomError> {
+        let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let policy = self.compiled_policy_for_version(&inputs.version).await?;
@@ -473,36 +485,54 @@ impl ControlPlane {
                 _ => None,
             })
             .collect();
+
+        // Carry the input set's non-snapshot identity forward; each phase only
+        // swaps in the projected snapshots of the still-active files.
         let base_draft = input_set_to_draft(inputs.input);
         let context = PlanningContext {
             policy_version_id: Some(policy_version_id),
             policy_input_set_id: Some(input_set_id),
             ..PlanningContext::default()
         };
-        let branch_ids = self.active_branch_ids(&active).await?;
 
-        let now = self.clock().now();
+        // Derive each active file's branch id and fail fast on a collision
+        // *before* opening the job: the per-`(file, phase)` upsert is
+        // `ON CONFLICT DO NOTHING` and would silently drop a colliding file's
+        // row, losing it from the durable summary.
+        let branch_ids = self.active_branch_ids(&active).await?;
+        Ok(PhaseBarrierRunInputs {
+            policy,
+            context,
+            base_draft,
+            branch_ids,
+        })
+    }
+
+    /// Open the owned workflow job, run the supplied in-job phase-barrier work,
+    /// and fail the job on every error that escapes after opening.
+    async fn with_phase_barrier_job<'a, F>(
+        &'a self,
+        run: F,
+    ) -> Result<CoordinatorOutcome, CoordinatorError>
+    where
+        F: FnOnce(JobId) -> CoordinatorFuture<'a>,
+    {
         let job = self
             .open_job(NewJob {
                 kind: WORKFLOW_JOB_KIND.to_owned(),
                 priority: 0,
-                created_at: now,
+                created_at: self.clock().now(),
             })
             .await?;
 
-        match self
-            .resume_phase_barrier_in_job(
-                job.id,
-                prior_job_id,
-                &policy,
-                &context,
-                base_draft,
-                &branch_ids,
-                options,
-                runtimes,
-            )
-            .await
-        {
+        // Job-cleanup contract: once the job is open, every error path finalizes
+        // it as `failed` rather than orphaning it in `open`. A dispatch failure
+        // already failed the job inside `run_plan_in_job` (and `fail_job` is a
+        // no-op on an already-failed job), so this `fail_job` only matters for
+        // pre-dispatch errors that leave the job open. Committed per-`(file,
+        // phase)` rows are durable before the error returns (queryable via
+        // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
+        match run(job.id).await {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 let _ = self
@@ -511,36 +541,6 @@ impl ControlPlane {
                 Err(err)
             }
         }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "resume threads the prior job id through the same owned-job run state"
-    )]
-    async fn resume_phase_barrier_in_job(
-        &self,
-        job_id: JobId,
-        prior_job_id: JobId,
-        policy: &voom_policy::CompiledPolicy,
-        context: &PlanningContext,
-        base_draft: PolicyInputSetDraft,
-        branch_ids: &[(FileVersionId, String)],
-        options: ComplianceExecutionOptions,
-        runtimes: WorkerRuntimeRegistry,
-    ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        if branch_ids.is_empty() || policy.phase_order.is_empty() {
-            return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
-        }
-        let files = self.initial_phase_files(branch_ids).await?;
-        let phase_count = u32::try_from(policy.phase_order.len())
-            .map_err(|e| VoomError::Internal(format!("phase count overflow: {e}")))?;
-        let (files, backfilled) = self
-            .reconcile_resume(prior_job_id, job_id, files, phase_count)
-            .await?;
-        self.drive_phase_loop(
-            job_id, policy, context, base_draft, files, backfilled, options, runtimes,
-        )
-        .await
     }
 
     /// Derive a stable branch id (the file's location path stem) for every
@@ -584,28 +584,27 @@ impl ControlPlane {
         branch_id_from_path(&path)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "one owned job's run state: policy, context, draft, branch ids, options, runtimes"
-    )]
     async fn run_phase_barrier_in_job(
         &self,
         job_id: JobId,
-        policy: &voom_policy::CompiledPolicy,
-        context: &PlanningContext,
-        base_draft: PolicyInputSetDraft,
-        branch_ids: &[(FileVersionId, String)],
+        inputs: PhaseBarrierRunInputs,
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
+        let PhaseBarrierRunInputs {
+            policy,
+            context,
+            base_draft,
+            branch_ids,
+        } = inputs;
         if branch_ids.is_empty() || policy.phase_order.is_empty() {
             return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
         }
-        let files = self.initial_phase_files(branch_ids).await?;
+        let files = self.initial_phase_files(&branch_ids).await?;
         self.drive_phase_loop(
             job_id,
-            policy,
-            context,
+            &policy,
+            &context,
             base_draft,
             files,
             Vec::new(),
