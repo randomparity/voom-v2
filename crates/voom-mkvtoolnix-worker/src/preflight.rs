@@ -182,15 +182,16 @@ fn command_text(
 }
 
 fn command_output(command: &mut Command) -> io::Result<Output> {
-    for attempt in 0..3 {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
         match command.output() {
-            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+            Err(err) if is_text_file_busy(&err) && attempts_remaining > 0 => {
                 thread::sleep(Duration::from_millis(10));
             }
             result => return result,
         }
     }
-    command.output()
 }
 
 fn is_text_file_busy(err: &io::Error) -> bool {
