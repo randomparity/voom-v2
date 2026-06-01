@@ -24,6 +24,7 @@ pub mod events;
 pub mod selection;
 pub mod source;
 pub mod stage;
+mod worker_contract;
 pub(crate) mod workflow;
 
 #[derive(Debug, Clone)]
@@ -239,8 +240,8 @@ async fn execute_transcode_audio_inner(
         &selection,
     )
     .await?;
-    dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::transcode_request_for(
+    worker_contract::revalidate_source_file(&selected).await?;
+    let request = worker_contract::transcode_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
@@ -248,8 +249,8 @@ async fn execute_transcode_audio_inner(
     );
     let result = transcode.dispatch_transcode_audio(request).await?;
     context.result = Some(result.clone());
-    dispatch::validate_transcode_result(&selected, &selection, &result)?;
-    dispatch::require_transcode_output_file_matches_result(&staging.path, &result).await?;
+    worker_contract::validate_transcode_result(&selected, &selection, &result)?;
+    worker_contract::require_transcode_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_transcode(
         cp,
         &input,
@@ -536,8 +537,8 @@ async fn execute_extract_audio_inner(
         &selection,
     )
     .await?;
-    dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::extract_request_for(
+    worker_contract::revalidate_source_file(&selected).await?;
+    let request = worker_contract::extract_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
@@ -545,8 +546,8 @@ async fn execute_extract_audio_inner(
     );
     let result = extract.dispatch_extract_audio(request).await?;
     context.result = Some(result.clone());
-    dispatch::validate_extract_result(&selected, &selection, &result)?;
-    dispatch::require_extract_output_file_matches_result(&staging.path, &result).await?;
+    worker_contract::validate_extract_result(&selected, &selection, &result)?;
+    worker_contract::require_extract_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_extract(
         cp,
         &input,
