@@ -31,8 +31,9 @@ authors = ["VOOM contributors"]
 repository = "https://github.com/randomparity/voom-v2"
 
 [workspace.dependencies]
-# Pinned at the workspace level; member crates use `{ workspace = true }`.
-# All versions resolved by `cargo add` at implementation time.
+# Centralized at the workspace level; member crates use `{ workspace = true }`.
+# Cargo.lock pins reproducible application builds. Manifest requirements
+# intentionally allow SemVer-compatible updates through reviewed lockfile changes.
 
 # Internal crates.
 voom-core = { version = "0.1.0-dev", path = "crates/voom-core" }
