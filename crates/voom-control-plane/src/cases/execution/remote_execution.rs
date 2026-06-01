@@ -176,6 +176,21 @@ enum RemoteAcquirePrepared {
     },
 }
 
+#[derive(Debug)]
+struct RemoteAcquireCandidateSet {
+    tickets: Vec<Ticket>,
+    candidates: Vec<SchedulerCandidate>,
+    eligibility_by_operation: HashMap<TicketOperation, WorkerOperationEligibility>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectedCapacityFull<'a> {
+    reason_code: StoreSchedulerReasonCode,
+    selected_candidate: &'a SchedulerCandidate,
+    observed_active: u32,
+    observed_limit: u32,
+}
+
 struct RemoteCompletePrepared {
     plan_id: u64,
     evidence: JsonValue,
@@ -370,10 +385,6 @@ impl ControlPlane {
         Ok(outcome)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "remote acquire preflight is the transaction-local scheduler decision boundary"
-    )]
     async fn remote_acquire_preflight_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -408,6 +419,113 @@ impl ControlPlane {
             }));
         }
 
+        let candidate_set = self
+            .remote_acquire_candidates_in_tx(tx, input, tickets)
+            .await?;
+        let score = score_remote_candidates(&candidate_set.candidates)?;
+        match score.outcome {
+            ScoreOutcome::Idle => Err(VoomError::Internal(
+                "remote acquire scorer returned idle for non-empty candidates".to_owned(),
+            )),
+            ScoreOutcome::NoEligibleCandidate => {
+                let decision = self
+                    .scheduler_decisions
+                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
+                    .await?;
+                Ok(RemoteAcquirePrepared::NoCandidate(
+                    RemoteAcquireOutcome::NoCandidate {
+                        worker_id: input.worker_id,
+                        scheduler_decision_id: decision.id,
+                    },
+                ))
+            }
+            ScoreOutcome::Selected => {
+                self.remote_acquire_selected_in_tx(tx, input, &candidate_set, &score, now)
+                    .await
+            }
+        }
+    }
+
+    async fn remote_acquire_selected_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &RemoteAcquireInput,
+        candidate_set: &RemoteAcquireCandidateSet,
+        score: &ScoreDecision,
+        now: time::OffsetDateTime,
+    ) -> Result<RemoteAcquirePrepared, VoomError> {
+        let selected = score.selected.as_ref().ok_or_else(|| {
+            VoomError::Internal("remote acquire selected score missing tuple".to_owned())
+        })?;
+        let selected_candidate = candidate_set
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.ticket.ticket_id == selected.ticket_id
+                    && candidate.worker.worker_id == selected.worker_id
+                    && candidate.node.node_id == selected.node_id
+            })
+            .ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "remote acquire selected candidate vanished ticket={}",
+                    selected.ticket_id
+                ))
+            })?;
+        let ticket = candidate_set
+            .tickets
+            .iter()
+            .find(|ticket| ticket.id == selected.ticket_id)
+            .ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "remote acquire selected ticket vanished id={}",
+                    selected.ticket_id
+                ))
+            })?
+            .clone();
+        let eligibility = candidate_set
+            .eligibility_by_operation
+            .get(&ticket.kind)
+            .ok_or_else(|| {
+                VoomError::Internal(format!(
+                    "remote acquire selected eligibility vanished operation={}",
+                    ticket.kind
+                ))
+            })?
+            .clone();
+        if let Some(outcome) = self
+            .recheck_selected_remote_capacity_in_tx(tx, input, selected_candidate, &ticket, now)
+            .await?
+        {
+            return Ok(RemoteAcquirePrepared::NoCandidate(outcome));
+        }
+
+        let selected_access_mode = artifact_access_mode_from_scheduler(&selected.access_mode)?;
+        let scheduler_decision = self
+            .scheduler_decisions
+            .create_in_tx(
+                tx,
+                decision_from_score(
+                    input,
+                    score,
+                    Some((selected.ticket_id, selected.worker_id, selected.node_id)),
+                    now,
+                ),
+            )
+            .await?;
+        Ok(RemoteAcquirePrepared::Leased {
+            ticket,
+            eligibility,
+            scheduler_decision,
+            selected_access_mode,
+        })
+    }
+
+    async fn remote_acquire_candidates_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &RemoteAcquireInput,
+        tickets: Vec<Ticket>,
+    ) -> Result<RemoteAcquireCandidateSet, VoomError> {
         let mut eligibility_by_operation = HashMap::new();
         let mut worker_active_by_operation = HashMap::new();
         let mut worker_limit_by_operation = HashMap::new();
@@ -463,146 +581,97 @@ impl ControlPlane {
             )?);
         }
 
-        let score = score_remote_candidates(&candidates)?;
-        match score.outcome {
-            ScoreOutcome::Idle => Err(VoomError::Internal(
-                "remote acquire scorer returned idle for non-empty candidates".to_owned(),
-            )),
-            ScoreOutcome::NoEligibleCandidate => {
-                let decision = self
-                    .scheduler_decisions
-                    .create_or_suppress_in_tx(tx, decision_from_score(input, &score, None, now))
-                    .await?;
-                Ok(RemoteAcquirePrepared::NoCandidate(
-                    RemoteAcquireOutcome::NoCandidate {
-                        worker_id: input.worker_id,
-                        scheduler_decision_id: decision.id,
-                    },
-                ))
-            }
-            ScoreOutcome::Selected => {
-                let selected = score.selected.as_ref().ok_or_else(|| {
-                    VoomError::Internal("remote acquire selected score missing tuple".to_owned())
-                })?;
-                let selected_candidate = candidates
-                    .iter()
-                    .find(|candidate| {
-                        candidate.ticket.ticket_id == selected.ticket_id
-                            && candidate.worker.worker_id == selected.worker_id
-                            && candidate.node.node_id == selected.node_id
-                    })
-                    .ok_or_else(|| {
-                        VoomError::Internal(format!(
-                            "remote acquire selected candidate vanished ticket={}",
-                            selected.ticket_id
-                        ))
-                    })?;
-                let ticket = tickets
-                    .iter()
-                    .find(|ticket| ticket.id == selected.ticket_id)
-                    .ok_or_else(|| {
-                        VoomError::Internal(format!(
-                            "remote acquire selected ticket vanished id={}",
-                            selected.ticket_id
-                        ))
-                    })?
-                    .clone();
-                let eligibility = eligibility_by_operation
-                    .get(&ticket.kind)
-                    .ok_or_else(|| {
-                        VoomError::Internal(format!(
-                            "remote acquire selected eligibility vanished operation={}",
-                            ticket.kind
-                        ))
-                    })?
-                    .clone();
-                // Scoring uses advisory candidate capacity facts. Re-read the selected
-                // worker and node capacity in this transaction immediately before lease
-                // creation so capacity-full decisions record current active/limit values.
-                let worker_active = active_lease_count_for_worker_operation_in_tx(
-                    tx,
-                    input.worker_id,
-                    &ticket.kind,
-                )
+        Ok(RemoteAcquireCandidateSet {
+            tickets,
+            candidates,
+            eligibility_by_operation,
+        })
+    }
+
+    async fn recheck_selected_remote_capacity_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &RemoteAcquireInput,
+        selected_candidate: &SchedulerCandidate,
+        ticket: &Ticket,
+        now: time::OffsetDateTime,
+    ) -> Result<Option<RemoteAcquireOutcome>, VoomError> {
+        // Candidate scoring uses advisory capacity facts; re-read the selected
+        // worker and node before lease creation so capacity decisions use the
+        // current transaction view.
+        let worker_active =
+            active_lease_count_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind)
                 .await?;
-                let worker_limit =
-                    max_parallel_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind)
-                        .await?;
-                if worker_active >= worker_limit {
-                    let decision = self
-                        .scheduler_decisions
-                        .create_or_suppress_in_tx(
-                            tx,
-                            capacity_decision(
-                                input,
-                                StoreSchedulerReasonCode::WorkerCapacityFull,
-                                selected_candidate,
-                                1,
-                                worker_active,
-                                worker_limit,
-                                now,
-                            ),
-                        )
-                        .await?;
-                    return Ok(RemoteAcquirePrepared::NoCandidate(
-                        RemoteAcquireOutcome::NoCandidate {
-                            worker_id: input.worker_id,
-                            scheduler_decision_id: decision.id,
-                        },
-                    ));
-                }
-
-                let node_active = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
-                let node_limit = self
-                    .scheduler_decisions
-                    .node_limit_in_tx(tx, input.node_id)
-                    .await?;
-                if node_active >= node_limit {
-                    let decision = self
-                        .scheduler_decisions
-                        .create_or_suppress_in_tx(
-                            tx,
-                            capacity_decision(
-                                input,
-                                StoreSchedulerReasonCode::NodeCapacityFull,
-                                selected_candidate,
-                                1,
-                                node_active,
-                                node_limit,
-                                now,
-                            ),
-                        )
-                        .await?;
-                    return Ok(RemoteAcquirePrepared::NoCandidate(
-                        RemoteAcquireOutcome::NoCandidate {
-                            worker_id: input.worker_id,
-                            scheduler_decision_id: decision.id,
-                        },
-                    ));
-                }
-
-                let selected_access_mode =
-                    artifact_access_mode_from_scheduler(&selected.access_mode)?;
-                let scheduler_decision = self
-                    .scheduler_decisions
-                    .create_in_tx(
-                        tx,
-                        decision_from_score(
-                            input,
-                            &score,
-                            Some((selected.ticket_id, selected.worker_id, selected.node_id)),
-                            now,
-                        ),
-                    )
-                    .await?;
-                Ok(RemoteAcquirePrepared::Leased {
-                    ticket,
-                    eligibility,
-                    scheduler_decision,
-                    selected_access_mode,
-                })
-            }
+        let worker_limit =
+            max_parallel_for_worker_operation_in_tx(tx, input.worker_id, &ticket.kind).await?;
+        if worker_active >= worker_limit {
+            return self
+                .capacity_no_candidate_in_tx(
+                    tx,
+                    input,
+                    SelectedCapacityFull {
+                        reason_code: StoreSchedulerReasonCode::WorkerCapacityFull,
+                        selected_candidate,
+                        observed_active: worker_active,
+                        observed_limit: worker_limit,
+                    },
+                    now,
+                )
+                .await
+                .map(Some);
         }
+
+        let node_active = active_lease_count_for_node_in_tx(tx, input.node_id).await?;
+        let node_limit = self
+            .scheduler_decisions
+            .node_limit_in_tx(tx, input.node_id)
+            .await?;
+        if node_active >= node_limit {
+            return self
+                .capacity_no_candidate_in_tx(
+                    tx,
+                    input,
+                    SelectedCapacityFull {
+                        reason_code: StoreSchedulerReasonCode::NodeCapacityFull,
+                        selected_candidate,
+                        observed_active: node_active,
+                        observed_limit: node_limit,
+                    },
+                    now,
+                )
+                .await
+                .map(Some);
+        }
+
+        Ok(None)
+    }
+
+    async fn capacity_no_candidate_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: &RemoteAcquireInput,
+        capacity: SelectedCapacityFull<'_>,
+        now: time::OffsetDateTime,
+    ) -> Result<RemoteAcquireOutcome, VoomError> {
+        let decision = self
+            .scheduler_decisions
+            .create_or_suppress_in_tx(
+                tx,
+                capacity_decision(
+                    input,
+                    capacity.reason_code,
+                    capacity.selected_candidate,
+                    1,
+                    capacity.observed_active,
+                    capacity.observed_limit,
+                    now,
+                ),
+            )
+            .await?;
+        Ok(RemoteAcquireOutcome::NoCandidate {
+            worker_id: input.worker_id,
+            scheduler_decision_id: decision.id,
+        })
     }
 
     #[expect(
