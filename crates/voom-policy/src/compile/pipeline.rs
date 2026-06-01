@@ -1,7 +1,9 @@
 use crate::{
-    DiagnosticSeverity, PolicyAst, PolicyDiagnostic, ValidationResult, compiled::compile_ast,
-    parse_policy_source, validate_policy_ast,
+    DiagnosticSeverity, PolicyAst, PolicyDiagnostic, ValidationResult, parse_policy_source,
+    validate_policy_ast,
 };
+
+use super::lower::compile_ast;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompileOutput {
