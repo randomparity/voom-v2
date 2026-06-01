@@ -143,7 +143,7 @@ async fn control_plane_open_rejects_uninitialized_db() {
     let (_keep, url) = fresh_url();
     voom_store::connect_or_create(&url).await.unwrap();
     let err = ControlPlane::open(&url).await.unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::DbPartialSchema);
+    assert_eq!(err.error_code(), ErrorCode::DbUninitialized);
 }
 
 #[tokio::test]

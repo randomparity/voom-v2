@@ -1,10 +1,10 @@
 use std::{io, path::Path};
 
 use serde::Serialize;
-use voom_control_plane::ControlPlane;
 use voom_core::{ErrorCode, PolicyInputSetId, PolicyVersionId};
 use voom_policy::{FixtureName, load_fixture};
 
+use crate::commands::common::open_control_plane;
 use crate::envelope::{Local, emit_err, emit_ok};
 
 #[derive(Debug, Serialize)]
@@ -62,12 +62,9 @@ pub async fn show(
     policy_version_id: u64,
     input_set_id: u64,
 ) -> io::Result<i32> {
-    let cp = match ControlPlane::open(database_url).await {
+    let cp = match open_control_plane("plan", database_url, &local).await? {
         Ok(cp) => cp,
-        Err(err) => {
-            emit_err("plan", err.code(), err.to_string(), None, Some(local))?;
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
 
     match cp

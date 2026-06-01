@@ -1,12 +1,12 @@
 use std::io;
 
-use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
     ComplianceApplyData, ComplianceExecuteData, ComplianceExecutionOptions, ComplianceReportData,
     ComplianceRunReportData,
 };
 use voom_core::{ErrorCode, JobId, PolicyInputSetId, PolicyVersionId};
 
+use crate::commands::common::open_control_plane;
 use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok};
 
 pub type ReportData = ComplianceReportData;
@@ -83,12 +83,9 @@ async fn report_preview(
     policy_version_id: u64,
     input_set_id: u64,
 ) -> io::Result<i32> {
-    let cp = match ControlPlane::open(database_url).await {
+    let cp = match open_control_plane("compliance", database_url, &local).await? {
         Ok(cp) => cp,
-        Err(err) => {
-            emit_err("compliance", err.code(), err.to_string(), None, Some(local))?;
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
     match cp
         .generate_compliance_report(
@@ -106,12 +103,9 @@ async fn report_preview(
 }
 
 async fn report_run(database_url: &str, local: Local, job_id: u64) -> io::Result<i32> {
-    let cp = match ControlPlane::open(database_url).await {
+    let cp = match open_control_plane("compliance", database_url, &local).await? {
         Ok(cp) => cp,
-        Err(err) => {
-            emit_err("compliance", err.code(), err.to_string(), None, Some(local))?;
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
     match cp.read_compliance_run_report(JobId(job_id)).await {
         Ok(data) => emit_ok("compliance", data, Some(local), Vec::new()).map(|()| 0),
@@ -128,12 +122,9 @@ pub async fn apply(
     policy_version_id: u64,
     input_set_id: u64,
 ) -> io::Result<i32> {
-    let cp = match ControlPlane::open(database_url).await {
+    let cp = match open_control_plane("compliance", database_url, &local).await? {
         Ok(cp) => cp,
-        Err(err) => {
-            emit_err("compliance", err.code(), err.to_string(), None, Some(local))?;
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
     match cp
         .apply_compliance_report(
@@ -158,12 +149,9 @@ pub async fn execute(
     staging_root: Option<std::path::PathBuf>,
     output_dir: Option<std::path::PathBuf>,
 ) -> io::Result<i32> {
-    let cp = match ControlPlane::open(database_url).await {
+    let cp = match open_control_plane("compliance", database_url, &local).await? {
         Ok(cp) => cp,
-        Err(err) => {
-            emit_err("compliance", err.code(), err.to_string(), None, Some(local))?;
-            return Ok(2);
-        }
+        Err(code) => return Ok(code),
     };
     let mut options = ComplianceExecutionOptions::default();
     if let Some(staging_root) = staging_root {

@@ -62,10 +62,12 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
              backup or manually repair the schema_meta table."
                 .to_owned(),
         ),
-        // Codes the control plane doesn't return today; surface no hint
+        ErrorCode::DbUninitialized => {
+            Some("Database has no migrations applied — run `voom init`".to_owned())
+        }
+        // Codes without command-specific remediation here; surface no hint
         // rather than invent generic advice.
-        ErrorCode::DbUninitialized
-        | ErrorCode::DbSchemaTooNew
+        ErrorCode::DbSchemaTooNew
         | ErrorCode::DbDirtyMigration
         | ErrorCode::ConfigInvalid
         | ErrorCode::NotFound

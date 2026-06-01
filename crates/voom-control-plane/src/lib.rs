@@ -234,7 +234,12 @@ impl ControlPlane {
                      remove the failed row from _sqlx_migrations or restore from backup"
                 )));
             }
-            SchemaState::Uninitialized | SchemaState::Partial { .. } => {
+            SchemaState::Uninitialized => {
+                return Err(VoomError::UninitializedDatabase(
+                    "ControlPlane requires a Current schema; got Uninitialized".to_owned(),
+                ));
+            }
+            SchemaState::Partial { .. } => {
                 return Err(VoomError::Migration(format!(
                     "ControlPlane requires a Current schema; got {probe:?}"
                 )));

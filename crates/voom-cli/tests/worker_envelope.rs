@@ -71,7 +71,7 @@ mod worker_envelope {
     }
 
     #[tokio::test]
-    async fn worker_list_uninitialized_db_uses_schema_error_envelope() {
+    async fn worker_list_uninitialized_db_uses_uninitialized_error_envelope() {
         let tmp = NamedTempFile::new().unwrap();
         let url = sqlite_url_for(tmp.path());
         voom_store::connect_or_create(&url).await.unwrap();
@@ -82,7 +82,13 @@ mod worker_envelope {
         let mut json = envelope(output.stdout);
         assert_eq!(json["command"], "worker");
         assert_eq!(json["status"], "error");
-        assert_eq!(json["error"]["code"], "DB_PARTIAL_SCHEMA");
+        assert_eq!(json["error"]["code"], "DB_UNINITIALIZED");
+        assert!(
+            json["error"]["hint"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("voom init")
+        );
         redact_local(&mut json);
         insta::assert_json_snapshot!("worker_list_uninitialized_db", json);
     }

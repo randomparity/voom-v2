@@ -15,6 +15,13 @@ fn migration_variant_has_partial_schema_code() {
 }
 
 #[test]
+fn uninitialized_database_variant_has_uninitialized_code() {
+    let err = VoomError::UninitializedDatabase("no migrations applied".into());
+    assert_eq!(err.error_code(), ErrorCode::DbUninitialized);
+    assert_eq!(err.code(), "DB_UNINITIALIZED");
+}
+
+#[test]
 fn schema_too_new_variant_has_too_new_code() {
     let err = VoomError::SchemaTooNew("future migration applied".into());
     assert_eq!(err.error_code(), ErrorCode::DbSchemaTooNew);
