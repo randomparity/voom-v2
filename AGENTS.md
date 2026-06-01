@@ -84,14 +84,24 @@ Pre-commit hooks (installed by `just setup` via `prek install`) run fmt-check, c
 ```
 voom-core ── shared domain types (VoomError, VersionInfo, Config, IDs, Clock)
    ▲
-voom-store ── SqlitePool, MIGRATOR, schema probe, repositories
+   ├─ voom-store ── SqlitePool, MIGRATOR, schema probe, repositories
+   ├─ voom-events ── durable event envelope and payload taxonomy
+   ├─ voom-policy ── policy DSL AST, validation, compilation, fixtures
+   │     ▲
+   │     └─ voom-plan ── compliance reports and execution-plan generation
+   ├─ voom-scheduler ── worker scoring and selection domain
+   └─ voom-worker-protocol ── worker HTTP/NDJSON contracts and typed payloads
    ▲
-voom-control-plane ── app-services layer (ControlPlane::open / health)
+voom-control-plane ── app-services layer and workflow orchestration
    ▲
 voom-api (axum router, no binary yet)   voom-cli (`voom` binary)
 ```
 
-Empty placeholder crates (`voom-events`, `voom-policy`, `voom-plan`, `voom-scheduler`, `voom-artifact`, `voom-worker-protocol`) exist so the boundary is visible from Sprint 0; they get real code in later sprints. Don't put logic in them without checking the spec.
+Worker binaries (`voom-ffprobe-worker`, `voom-ffmpeg-worker`,
+`voom-mkvtoolnix-worker`, `voom-verify-artifact-worker`) depend on
+`voom-worker-protocol` for their external contract. Test and fake-support crates
+live outside the production dependency path. `voom-artifact` is intentionally
+reserved; don't put logic in it without checking the spec.
 
 ### Load-bearing invariants
 
@@ -99,7 +109,7 @@ Several behaviors are deliberate and documented in `docs/adr/` + `docs/specs/voo
 
 - **`connect()` vs `init()` are separate.** `voom_store::connect` opens an existing DB and **never creates files or directories**. Only `voom init` (the CLI command) calls `voom_store::init`, which is the sole path that creates databases and applies migrations. `ControlPlane::open` wraps `connect` — read-side code paths must never migrate. (`docs/adr/0003`.)
 - **Tickets route work; events record facts.** Durable ticket/lease rows are the only mechanism that schedules execution. Events are append-only facts for audit/UI/metrics — they do not claim, lease, or trigger work directly. (`docs/adr/0001`.)
-- **All providers are out-of-process workers.** No in-process fast path. The empty `voom-worker-protocol` crate marks the boundary. (`docs/adr/0002`.)
+- **All providers are out-of-process workers.** No in-process fast path. `voom-worker-protocol` marks and enforces the HTTP/NDJSON contract boundary. (`docs/adr/0002`.)
 - **Stack is tokio + sqlx + axum, async-first.** Blocking code is the exception. Migrations are embedded via `sqlx::migrate!` against `migrations/`.
 
 ### CLI output contract
