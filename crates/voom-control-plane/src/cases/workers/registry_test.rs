@@ -225,12 +225,12 @@ async fn register_worker_for_node_links_worker_and_emits_required_event_sequence
 
 #[tokio::test]
 async fn register_worker_for_node_debug_redacts_node_token_plaintext() {
-    let token = "voom-node-v1.secret-token";
-    let input = worker_for_node_input(voom_core::NodeId(1), token, "worker-a");
+    let node_auth_plaintext = "voom-node-v1.redaction-check";
+    let input = worker_for_node_input(voom_core::NodeId(1), node_auth_plaintext, "worker-a");
 
     let debug = format!("{input:?}");
 
-    assert!(!debug.contains(token));
+    assert!(!debug.contains(node_auth_plaintext));
 }
 
 #[tokio::test]

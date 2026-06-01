@@ -42,20 +42,21 @@ async fn nodes_debug_redacts_auth_token_hash_but_keeps_hint() {
     let (pool, _tmp) = fresh_pool().await;
     let repo = SqliteNodeRepo::new(pool.clone());
     let hash = "voom-node-token-sha256-v1:debug-secret";
+    let expected_hint = "hint1234";
     let input = NewNode {
         name: "synthetic-a".to_owned(),
         kind: NodeKind::Synthetic,
         registered_at: T0,
         heartbeat_ttl_seconds: 60,
         auth_token_hash: hash.to_owned(),
-        auth_token_hint: "hint1234".to_owned(),
+        auth_token_hint: expected_hint.to_owned(),
         metadata: serde_json::json!({"zone":"test"}),
     };
 
     let input_debug = format!("{input:?}");
     assert!(!input_debug.contains(hash));
     assert!(!input_debug.contains("voom-node-token-sha256-v1:"));
-    assert!(input_debug.contains("hint1234"));
+    assert!(input_debug.contains(expected_hint));
 
     let mut tx = pool.begin().await.unwrap();
     let node = repo.register_in_tx(&mut tx, input).await.unwrap();

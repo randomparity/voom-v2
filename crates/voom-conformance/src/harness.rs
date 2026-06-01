@@ -78,13 +78,13 @@ impl Harness {
     pub async fn launch(&self) -> std::io::Result<WorkerLaunch> {
         let worker_id: u64 = 1;
         let worker_epoch: u64 = 0;
-        // Sprint 2 generates a per-spawn random secret; for the
+        // Sprint 2 generates a per-spawn random bearer value; for the
         // bootstrap echo-worker test path we use a deterministic
         // value so failure diagnostics are predictable.
-        let secret = "phase1-bootstrap-secret".to_owned();
+        let bootstrap_bearer = "phase1-bootstrap-fixture".to_owned();
 
         let mut cmd = tokio::process::Command::new(&self.worker_binary);
-        cmd.env("VOOM_WORKER_SECRET", &secret)
+        cmd.env("VOOM_WORKER_SECRET", &bootstrap_bearer)
             .env("VOOM_WORKER_ID", worker_id.to_string())
             .env("VOOM_WORKER_EPOCH", worker_epoch.to_string())
             .env("VOOM_WORKER_BIND", "127.0.0.1:0")
@@ -123,7 +123,7 @@ impl Harness {
         let credentials = WorkerCredentials {
             worker_id: voom_core::WorkerId(worker_id),
             worker_epoch,
-            secret: SecretString::from(secret),
+            secret: SecretString::from(bootstrap_bearer),
         };
 
         Ok(WorkerLaunch {

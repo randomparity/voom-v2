@@ -292,7 +292,8 @@ async fn idempotency_exact_byte_replay_returns_cached_response(
     launch: &crate::WorkerLaunch,
     case: &OperationCase,
 ) -> Result<(), String> {
-    let request = operation_request(35, case, "raw-replay")?;
+    let body = operation_body(35, case.operation, case.valid_payload.clone())?;
+    let request = operation_request_with_creds(launch, &launch.credentials, "raw-replay", &body);
     let first = send_raw(launch.bound, request.clone()).await?;
     let second = send_raw(launch.bound, request).await?;
     let first = RawHttpResponse::parse(&first)?;
@@ -348,30 +349,6 @@ async fn send_operation_with_creds(
         operation_request_with_creds(launch, creds, idempotency_key, &body),
     )
     .await
-}
-
-fn operation_request(
-    lease_id: u64,
-    case: &OperationCase,
-    idempotency_key: &str,
-) -> Result<Bytes, String> {
-    let body = operation_body(lease_id, case.operation, case.valid_payload.clone())?;
-    let creds = WorkerCredentials {
-        worker_id: voom_core::WorkerId(1),
-        worker_epoch: 0,
-        secret: secrecy::SecretString::from("phase1-bootstrap-secret"),
-    };
-    let headers = auth_headers(&creds, idempotency_key);
-    let header_refs = headers
-        .iter()
-        .map(|(k, v)| (*k, v.as_str()))
-        .collect::<Vec<_>>();
-    Ok(raw_post_request(
-        "127.0.0.1",
-        "/v1/operations",
-        &body,
-        &header_refs,
-    ))
 }
 
 fn operation_request_with_creds(
