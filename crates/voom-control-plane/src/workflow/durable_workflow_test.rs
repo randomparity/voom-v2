@@ -9,6 +9,11 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::ControlPlane;
+use crate::workflow::{
+    WorkerRuntimeRegistry, WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions,
+    WorkflowPlan, WorkflowRunSummary,
+};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -20,11 +25,6 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use voom_control_plane::ControlPlane;
-use voom_control_plane::workflow::{
-    WorkerRuntimeRegistry, WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions,
-    WorkflowPlan, WorkflowRunSummary,
-};
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};

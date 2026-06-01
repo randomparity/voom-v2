@@ -10,6 +10,7 @@ use voom_core::OperationKind;
 use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError, WorkerId};
 use voom_scheduler::{SingleWorkerPerKindSelector, WorkerSelector, WorkerView};
 use voom_store::repo::identity::IdentityRepo;
+#[cfg(test)]
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
@@ -85,6 +86,7 @@ impl Default for WorkflowExecutorOptions {
 }
 
 impl WorkflowExecutorOptions {
+    #[cfg(test)]
     #[must_use]
     pub fn for_tests() -> Self {
         Self {
@@ -113,6 +115,7 @@ pub struct WorkflowChaosOptions {
 }
 
 impl WorkflowChaosOptions {
+    #[cfg(test)]
     #[must_use]
     pub fn suppress_heartbeats_for_operation(operation: OperationKind) -> Self {
         Self {
@@ -121,6 +124,7 @@ impl WorkflowChaosOptions {
         }
     }
 
+    #[cfg(test)]
     pub fn set_payload_mode_for_operation(
         &mut self,
         operation: OperationKind,
@@ -306,11 +310,6 @@ impl RunLoopState {
 
 impl WorkflowExecutor {
     #[must_use]
-    pub fn new(control_plane: ControlPlane, runtimes: WorkerRuntimeRegistry) -> Self {
-        Self::with_options(control_plane, runtimes, WorkflowExecutorOptions::default())
-    }
-
-    #[must_use]
     pub fn with_options(
         control_plane: ControlPlane,
         runtimes: WorkerRuntimeRegistry,
@@ -323,6 +322,7 @@ impl WorkflowExecutor {
         }
     }
 
+    #[cfg(test)]
     pub async fn submit_and_run(
         &self,
         plan: WorkflowPlan,
@@ -363,7 +363,7 @@ impl WorkflowExecutor {
 
     /// Run one plan inside a caller-owned, already-open job.
     ///
-    /// Unlike [`Self::submit_and_run`], this does not open or succeed the job:
+    /// Unlike the test-only `submit_and_run` helper, this does not open or succeed the job:
     /// the caller owns the job lifecycle. The phase-barrier coordinator (#162)
     /// calls this once per phase against a single job and calls `succeed_job`
     /// itself after the last phase. On an in-phase ticket failure the job is

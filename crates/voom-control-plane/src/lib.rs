@@ -56,7 +56,7 @@ mod remux;
 pub mod scan;
 mod transcode;
 pub(crate) mod worker_process;
-pub mod workflow;
+mod workflow;
 
 pub mod execution {
     pub use crate::cases::execution::remote_execution::{
@@ -102,6 +102,8 @@ pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
 pub use transcode::{
     ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,
 };
+pub use workflow::coordinator::{CoordinatorError, CoordinatorOutcome};
+pub use workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
 /// `LeaseRepo::fail` (and any future caller that needs full-jitter

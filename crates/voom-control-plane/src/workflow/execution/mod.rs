@@ -5,8 +5,6 @@ pub(crate) mod operation_adapters;
 pub(crate) mod runtime;
 pub(crate) mod timing;
 
-pub use executor::{
-    WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions, WorkflowRunError,
-};
-pub use runtime::WorkerRuntimeRegistry;
-pub use timing::EffectiveTiming;
+#[cfg(test)]
+pub(crate) use executor::{WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions};
+pub(crate) use runtime::WorkerRuntimeRegistry;

@@ -11,6 +11,7 @@ use crate::ControlPlane;
 
 #[derive(Debug, Clone)]
 pub struct WorkflowRunSummary {
+    #[cfg(test)]
     pub job_id: JobId,
     pub branch_count: u32,
     pub ticket_count: u32,
@@ -26,6 +27,7 @@ pub struct WorkflowRunSummary {
 }
 
 impl WorkflowRunSummary {
+    #[cfg(test)]
     #[must_use]
     pub fn operation_count(&self, operation: OperationKind) -> u64 {
         self.per_operation
@@ -33,6 +35,7 @@ impl WorkflowRunSummary {
             .map_or(0, |summary| summary.success_count)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn max_active_for_worker(&self, worker_id: WorkerId) -> u32 {
         self.max_active_by_worker
@@ -57,8 +60,19 @@ pub struct OperationSummary {
 }
 
 impl WorkflowRunSummary {
-    pub(super) fn empty(job_id: JobId, elapsed: Duration) -> Self {
+    pub(super) fn empty(
+        #[cfg_attr(
+            not(test),
+            expect(
+                unused_variables,
+                reason = "job_id is retained in test summaries for durable workflow assertions"
+            )
+        )]
+        job_id: JobId,
+        elapsed: Duration,
+    ) -> Self {
         Self {
+            #[cfg(test)]
             job_id,
             branch_count: 0,
             ticket_count: 0,

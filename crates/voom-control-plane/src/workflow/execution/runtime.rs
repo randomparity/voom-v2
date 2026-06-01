@@ -22,6 +22,7 @@ impl WorkerRuntimeRegistry {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn with_in_process_runtime<C>(
         mut self,
         worker_id: WorkerId,

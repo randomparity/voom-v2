@@ -55,6 +55,7 @@ impl std::fmt::Display for WorkflowPlanError {
 impl std::error::Error for WorkflowPlanError {}
 
 impl WorkflowPlan {
+    #[cfg(test)]
     #[must_use]
     pub fn default_ci() -> Self {
         Self {
@@ -192,6 +193,7 @@ impl WorkflowPlanError {
     }
 }
 
+#[cfg(test)]
 fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> OperationNode {
     OperationNode {
         id: id.to_owned(),
@@ -204,6 +206,7 @@ fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> Operati
     }
 }
 
+#[cfg(test)]
 fn selected_operation(
     id: &str,
     operation: OperationKind,
@@ -221,6 +224,7 @@ fn selected_operation(
     }
 }
 
+#[cfg(test)]
 fn operation_after_selected(
     id: &str,
     operation: OperationKind,

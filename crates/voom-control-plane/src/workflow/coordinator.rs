@@ -352,7 +352,7 @@ impl ControlPlane {
     ///
     /// # Errors
     /// See [`Self::run_phase_barrier`].
-    pub async fn run_phase_barrier_with_runtimes(
+    pub(crate) async fn run_phase_barrier_with_runtimes(
         &self,
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
@@ -405,7 +405,7 @@ impl ControlPlane {
     ///
     /// # Errors
     /// See [`Self::resume_phase_barrier`].
-    pub async fn resume_phase_barrier_with_runtimes(
+    pub(crate) async fn resume_phase_barrier_with_runtimes(
         &self,
         prior_job_id: JobId,
         policy_version_id: PolicyVersionId,
