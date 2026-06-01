@@ -1,14 +1,11 @@
-pub mod artifact;
 pub(crate) mod common;
-pub mod compliance;
-pub mod health;
-pub mod init;
-pub mod node;
-pub mod plan;
-pub mod policy;
-pub mod profile;
-pub mod scan;
-pub mod scheduler;
-pub mod token_source;
-pub mod version;
-pub mod worker;
+mod execution;
+mod media;
+#[path = "policy/mod.rs"]
+mod policy_domain;
+mod system;
+
+pub use execution::{node, scheduler, worker};
+pub use media::{artifact, profile, scan};
+pub use policy_domain::{compliance, plan, policy};
+pub use system::{health, init, token_source, version};
