@@ -40,6 +40,16 @@ pub async fn observe_file_facts(path: &Path) -> Result<ObservedFileFacts, Worker
         }
         hasher.update(&buffer[..read]);
     }
+    let final_metadata = file
+        .metadata()
+        .await
+        .map_err(|err| artifact_unavailable(path, err))?;
+    if metadata_changed(&metadata, &final_metadata) {
+        return Err(WorkerError::ArtifactChecksumMismatch(format!(
+            "artifact path {} changed while ffprobe worker was reading it",
+            path.display()
+        )));
+    }
 
     Ok(ObservedFileFacts {
         size_bytes: metadata.len(),
@@ -84,6 +94,10 @@ fn artifact_not_regular(path: &Path) -> WorkerError {
         "artifact path {} is not a regular file",
         path.display()
     ))
+}
+
+fn metadata_changed(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.len() != after.len() || before.modified().ok() != after.modified().ok()
 }
 
 fn modified_at(metadata: &std::fs::Metadata) -> Option<String> {

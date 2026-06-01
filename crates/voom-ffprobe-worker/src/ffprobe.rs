@@ -423,6 +423,13 @@ impl From<WorkerError> for FfprobeError {
                 }),
                 message,
             },
+            WorkerError::ArtifactChecksumMismatch(message) => Self::ArtifactChecksumMismatch {
+                payload: serde_json::json!({
+                    "stage": "observe_file",
+                    "message": message,
+                }),
+                message,
+            },
             WorkerError::MalformedWorkerResult(message) => malformed_worker_result(
                 "normalize_ffprobe_json",
                 format!("ffprobe JSON normalization failed: {message}"),

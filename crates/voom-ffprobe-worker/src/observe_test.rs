@@ -96,6 +96,34 @@ async fn observe_file_facts_rejects_missing_path_with_context() {
     assert!(message.contains(&path.display().to_string()), "{message}");
 }
 
+#[test]
+fn metadata_changed_detects_length_drift() {
+    let dir_result = tempfile::tempdir();
+    assert!(dir_result.is_ok());
+    let Ok(dir) = dir_result else {
+        return;
+    };
+    let before_path = dir.path().join("before.mp4");
+    let after_path = dir.path().join("after.mp4");
+    let before_write = std::fs::write(&before_path, b"a");
+    assert!(before_write.is_ok());
+    let after_write = std::fs::write(&after_path, b"ab");
+    assert!(after_write.is_ok());
+    let before = std::fs::metadata(&before_path);
+    assert!(before.is_ok());
+    let Ok(before) = before else {
+        return;
+    };
+    let after = std::fs::metadata(&after_path);
+    assert!(after.is_ok());
+    let Ok(after) = after else {
+        return;
+    };
+
+    assert!(metadata_changed(&before, &after));
+    assert!(!metadata_changed(&before, &before));
+}
+
 fn error_message<T>(result: &Result<T, WorkerError>) -> String {
     match result {
         Ok(_) => String::new(),
