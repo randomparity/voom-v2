@@ -1,5 +1,6 @@
-//! `SqliteArtifactRepo` — owns `artifact_handles` + `artifact_locations` + `artifact_lineage`.
+//! Artifact persistence split into semantic repository contracts.
 
+use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
@@ -236,6 +237,110 @@ impl SqliteArtifactRepo {
 }
 
 impl Repository for SqliteArtifactRepo {}
+
+#[async_trait]
+pub trait ArtifactHandleRepo: Repository {
+    async fn create_handle_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactHandle,
+    ) -> Result<ArtifactHandle, VoomError>;
+    async fn create_handle(&self, input: NewArtifactHandle) -> Result<ArtifactHandle, VoomError>;
+    async fn record_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactLocation,
+    ) -> Result<ArtifactLocation, VoomError>;
+    async fn record_location(
+        &self,
+        input: NewArtifactLocation,
+    ) -> Result<ArtifactLocation, VoomError>;
+    async fn retire_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        location_id: ArtifactLocationId,
+        now: OffsetDateTime,
+    ) -> Result<ArtifactHandleId, VoomError>;
+    async fn retire_location(
+        &self,
+        location_id: ArtifactLocationId,
+        now: OffsetDateTime,
+    ) -> Result<ArtifactHandleId, VoomError>;
+    async fn record_lineage_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactLineage,
+    ) -> Result<ArtifactLineage, VoomError>;
+    async fn record_lineage(&self, input: NewArtifactLineage)
+    -> Result<ArtifactLineage, VoomError>;
+    async fn get_handle(&self, id: ArtifactHandleId) -> Result<Option<ArtifactHandle>, VoomError>;
+    async fn list_locations_for_handle(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactLocation>, VoomError>;
+}
+
+#[async_trait]
+pub trait ArtifactVerificationRepo: Repository {
+    async fn record_verification_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactVerification,
+    ) -> Result<ArtifactVerification, VoomError>;
+    async fn latest_successful_verification_for_live_staging_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Option<ArtifactVerification>, VoomError>;
+    async fn list_verifications(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactVerification>, VoomError>;
+}
+
+#[async_trait]
+pub trait ArtifactCommitRepo: Repository {
+    async fn create_pending_commit_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactCommitRecord,
+    ) -> Result<ArtifactCommitRecord, VoomError>;
+    async fn mark_commit_committed_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        result_file_version_id: FileVersionId,
+        result_file_location_id: FileLocationId,
+        promotion_started_at: OffsetDateTime,
+        finished_at: OffsetDateTime,
+    ) -> Result<ArtifactCommitRecord, VoomError>;
+    async fn mark_commit_failed_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        failure: ArtifactCommitFailure,
+    ) -> Result<ArtifactCommitRecord, VoomError>;
+    async fn mark_commit_recovery_required_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        failure: ArtifactCommitFailure,
+        recovery_reason: String,
+    ) -> Result<ArtifactCommitRecord, VoomError>;
+    async fn get_commit_record(
+        &self,
+        id: ArtifactCommitRecordId,
+    ) -> Result<Option<ArtifactCommitRecord>, VoomError>;
+    async fn list_commit_records(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactCommitRecord>, VoomError>;
+    async fn record_verified_sidecar_commit_rows_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewSidecarArtifactCommit,
+    ) -> Result<SidecarArtifactCommit, VoomError>;
+}
 
 impl SqliteArtifactRepo {
     pub async fn create_handle_in_tx(
@@ -839,6 +944,188 @@ impl SqliteArtifactRepo {
             file_version_id,
             file_location_id,
         })
+    }
+}
+
+#[async_trait]
+impl ArtifactHandleRepo for SqliteArtifactRepo {
+    async fn create_handle_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactHandle,
+    ) -> Result<ArtifactHandle, VoomError> {
+        SqliteArtifactRepo::create_handle_in_tx(self, tx, input).await
+    }
+
+    async fn create_handle(&self, input: NewArtifactHandle) -> Result<ArtifactHandle, VoomError> {
+        SqliteArtifactRepo::create_handle(self, input).await
+    }
+
+    async fn record_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactLocation,
+    ) -> Result<ArtifactLocation, VoomError> {
+        SqliteArtifactRepo::record_location_in_tx(self, tx, input).await
+    }
+
+    async fn record_location(
+        &self,
+        input: NewArtifactLocation,
+    ) -> Result<ArtifactLocation, VoomError> {
+        SqliteArtifactRepo::record_location(self, input).await
+    }
+
+    async fn retire_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        location_id: ArtifactLocationId,
+        now: OffsetDateTime,
+    ) -> Result<ArtifactHandleId, VoomError> {
+        SqliteArtifactRepo::retire_location_in_tx(self, tx, location_id, now).await
+    }
+
+    async fn retire_location(
+        &self,
+        location_id: ArtifactLocationId,
+        now: OffsetDateTime,
+    ) -> Result<ArtifactHandleId, VoomError> {
+        SqliteArtifactRepo::retire_location(self, location_id, now).await
+    }
+
+    async fn record_lineage_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactLineage,
+    ) -> Result<ArtifactLineage, VoomError> {
+        SqliteArtifactRepo::record_lineage_in_tx(self, tx, input).await
+    }
+
+    async fn record_lineage(
+        &self,
+        input: NewArtifactLineage,
+    ) -> Result<ArtifactLineage, VoomError> {
+        SqliteArtifactRepo::record_lineage(self, input).await
+    }
+
+    async fn get_handle(&self, id: ArtifactHandleId) -> Result<Option<ArtifactHandle>, VoomError> {
+        SqliteArtifactRepo::get_handle(self, id).await
+    }
+
+    async fn list_locations_for_handle(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactLocation>, VoomError> {
+        SqliteArtifactRepo::list_locations_for_handle(self, handle_id).await
+    }
+}
+
+#[async_trait]
+impl ArtifactVerificationRepo for SqliteArtifactRepo {
+    async fn record_verification_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactVerification,
+    ) -> Result<ArtifactVerification, VoomError> {
+        SqliteArtifactRepo::record_verification_in_tx(self, tx, input).await
+    }
+
+    async fn latest_successful_verification_for_live_staging_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Option<ArtifactVerification>, VoomError> {
+        SqliteArtifactRepo::latest_successful_verification_for_live_staging_in_tx(
+            self, tx, handle_id,
+        )
+        .await
+    }
+
+    async fn list_verifications(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactVerification>, VoomError> {
+        SqliteArtifactRepo::list_verifications(self, handle_id).await
+    }
+}
+
+#[async_trait]
+impl ArtifactCommitRepo for SqliteArtifactRepo {
+    async fn create_pending_commit_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewArtifactCommitRecord,
+    ) -> Result<ArtifactCommitRecord, VoomError> {
+        SqliteArtifactRepo::create_pending_commit_in_tx(self, tx, input).await
+    }
+
+    async fn mark_commit_committed_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        result_file_version_id: FileVersionId,
+        result_file_location_id: FileLocationId,
+        promotion_started_at: OffsetDateTime,
+        finished_at: OffsetDateTime,
+    ) -> Result<ArtifactCommitRecord, VoomError> {
+        SqliteArtifactRepo::mark_commit_committed_in_tx(
+            self,
+            tx,
+            id,
+            result_file_version_id,
+            result_file_location_id,
+            promotion_started_at,
+            finished_at,
+        )
+        .await
+    }
+
+    async fn mark_commit_failed_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        failure: ArtifactCommitFailure,
+    ) -> Result<ArtifactCommitRecord, VoomError> {
+        SqliteArtifactRepo::mark_commit_failed_in_tx(self, tx, id, failure).await
+    }
+
+    async fn mark_commit_recovery_required_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: ArtifactCommitRecordId,
+        failure: ArtifactCommitFailure,
+        recovery_reason: String,
+    ) -> Result<ArtifactCommitRecord, VoomError> {
+        SqliteArtifactRepo::mark_commit_recovery_required_in_tx(
+            self,
+            tx,
+            id,
+            failure,
+            recovery_reason,
+        )
+        .await
+    }
+
+    async fn get_commit_record(
+        &self,
+        id: ArtifactCommitRecordId,
+    ) -> Result<Option<ArtifactCommitRecord>, VoomError> {
+        SqliteArtifactRepo::get_commit_record(self, id).await
+    }
+
+    async fn list_commit_records(
+        &self,
+        handle_id: ArtifactHandleId,
+    ) -> Result<Vec<ArtifactCommitRecord>, VoomError> {
+        SqliteArtifactRepo::list_commit_records(self, handle_id).await
+    }
+
+    async fn record_verified_sidecar_commit_rows_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        input: NewSidecarArtifactCommit,
+    ) -> Result<SidecarArtifactCommit, VoomError> {
+        SqliteArtifactRepo::record_verified_sidecar_commit_rows_in_tx(self, tx, input).await
     }
 }
 

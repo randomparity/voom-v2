@@ -3,7 +3,7 @@ use voom_core::ids::ArtifactCommitRecordId;
 use voom_core::{ArtifactHandleId, VoomError};
 use voom_events::{Event, EventEnvelope, SubjectType};
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, NewArtifactCommitRecord, SqliteArtifactRepo,
+    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitRepo, NewArtifactCommitRecord,
 };
 use voom_store::repo::events::{EventRepo, SqliteEventRepo};
 
@@ -22,13 +22,16 @@ impl PendingCommitRecordError {
     }
 }
 
-pub async fn create_pending_commit_with_started_event_in_tx(
-    artifacts: &SqliteArtifactRepo,
+pub async fn create_pending_commit_with_started_event_in_tx<R>(
+    artifacts: &R,
     events: &SqliteEventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: NewArtifactCommitRecord,
     started_event: impl FnOnce(ArtifactCommitRecordId) -> Event,
-) -> Result<ArtifactCommitRecord, PendingCommitRecordError> {
+) -> Result<ArtifactCommitRecord, PendingCommitRecordError>
+where
+    R: ArtifactCommitRepo + ?Sized,
+{
     let artifact_handle_id = input.artifact_handle_id;
     let started_at = input.started_at;
     let record = artifacts
@@ -57,12 +60,15 @@ pub struct RecoveryRequiredCommit {
     pub occurred_at: OffsetDateTime,
 }
 
-pub async fn mark_recovery_required_with_event_in_tx(
-    artifacts: &SqliteArtifactRepo,
+pub async fn mark_recovery_required_with_event_in_tx<R>(
+    artifacts: &R,
     events: &SqliteEventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     input: RecoveryRequiredCommit,
-) -> Result<ArtifactCommitRecord, VoomError> {
+) -> Result<ArtifactCommitRecord, VoomError>
+where
+    R: ArtifactCommitRepo + ?Sized,
+{
     let recovered = artifacts
         .mark_commit_recovery_required_in_tx(
             tx,

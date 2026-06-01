@@ -21,8 +21,9 @@ pub use artifact_access_plans::{
     SqliteArtifactAccessPlanRepo,
 };
 pub use artifacts::{
-    ArtifactHandle, ArtifactLineage, ArtifactLocation, NewArtifactHandle, NewArtifactLineage,
-    NewArtifactLocation, SqliteArtifactRepo,
+    ArtifactCommitRepo, ArtifactHandle, ArtifactHandleRepo, ArtifactLineage, ArtifactLocation,
+    ArtifactVerificationRepo, NewArtifactHandle, NewArtifactLineage, NewArtifactLocation,
+    SqliteArtifactRepo,
 };
 pub use commit_safety_gate::{
     AbortReason, AffectedScopeClosure, AliasResolutionError, AliasResolver, BypassKind,
