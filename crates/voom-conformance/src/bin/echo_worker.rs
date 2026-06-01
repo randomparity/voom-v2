@@ -51,7 +51,7 @@ async fn main() -> Result<(), WorkerStartupError> {
     Ok(())
 }
 
-fn handle_operation(req: OperationRequest) -> OperationFuture {
+pub(crate) fn handle_operation(req: OperationRequest) -> OperationFuture {
     Box::pin(async move {
         if req.operation != OperationKind::ProbeFile {
             return Err(ProtocolError::UnknownOperation {

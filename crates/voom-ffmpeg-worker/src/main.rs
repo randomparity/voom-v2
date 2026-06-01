@@ -4,7 +4,7 @@
 )]
 
 use voom_ffmpeg_worker::{
-    ALL_VIDEO_ENCODERS, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler,
+    ALL_VIDEO_ENCODERS, DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, operation_handler, preflight,
     preflight_from_process_env,
 };
 use voom_worker_protocol::{
@@ -16,18 +16,7 @@ use voom_worker_protocol::{
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let preflight = preflight_from_process_env().map_err(WorkerStartupError::dependency)?;
-    let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
-        .iter()
-        .filter(|encoder| preflight.has_encoder(encoder))
-        .map(|encoder| (*encoder).to_owned())
-        .collect();
-    let config = FfmpegConfig::new(
-        preflight.ffmpeg_path,
-        preflight.ffprobe_path,
-        preflight.ffmpeg_version,
-        DEFAULT_PROCESS_TIMEOUT,
-    )
-    .with_available_video_encoders(available_video_encoders);
+    let config = ffmpeg_config_from_preflight(preflight);
     let bind = load_worker_bind_addr_from_env()?;
 
     let server = HttpServer::new(credentials, operation_handler(config));
@@ -53,3 +42,22 @@ async fn main() -> Result<(), WorkerStartupError> {
     let _ = joined.await;
     Ok(())
 }
+
+fn ffmpeg_config_from_preflight(preflight: preflight::FfmpegPreflight) -> FfmpegConfig {
+    let available_video_encoders: Vec<String> = ALL_VIDEO_ENCODERS
+        .iter()
+        .filter(|encoder| preflight.has_encoder(encoder))
+        .map(|encoder| (*encoder).to_owned())
+        .collect();
+    FfmpegConfig::new(
+        preflight.ffmpeg_path,
+        preflight.ffprobe_path,
+        preflight.ffmpeg_version,
+        DEFAULT_PROCESS_TIMEOUT,
+    )
+    .with_available_video_encoders(available_video_encoders)
+}
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

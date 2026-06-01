@@ -5,7 +5,7 @@
 
 use voom_verify_artifact_worker::operation_handler;
 use voom_worker_protocol::{
-    HttpServer, WorkerStartupError, load_worker_bind_addr_from_env,
+    HttpServer, WorkerCredentials, WorkerStartupError, load_worker_bind_addr_from_env,
     load_worker_credentials_from_env, serve_worker_http,
 };
 
@@ -14,7 +14,7 @@ async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let bind = load_worker_bind_addr_from_env()?;
 
-    let server = HttpServer::new(credentials, operation_handler());
+    let server = worker_server(credentials);
     let running = serve_worker_http(&server, bind).await?;
 
     println!("BOUND addr={}", running.bound);
@@ -37,3 +37,11 @@ async fn main() -> Result<(), WorkerStartupError> {
     let _ = joined.await;
     Ok(())
 }
+
+fn worker_server(credentials: WorkerCredentials) -> HttpServer {
+    HttpServer::new(credentials, operation_handler())
+}
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;

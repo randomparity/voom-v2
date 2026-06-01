@@ -5,7 +5,7 @@
 
 use voom_ffprobe_worker::{FfprobeConfig, operation_handler_with_config};
 use voom_worker_protocol::{
-    HttpServer, WorkerStartupError, load_worker_bind_addr_from_env,
+    HttpServer, WorkerCredentials, WorkerStartupError, load_worker_bind_addr_from_env,
     load_worker_credentials_from_env, serve_worker_http,
 };
 
@@ -14,10 +14,7 @@ async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let bind = load_worker_bind_addr_from_env()?;
 
-    let server = HttpServer::new(
-        credentials,
-        operation_handler_with_config(FfprobeConfig::from_process_env()),
-    );
+    let server = worker_server(credentials);
     let running = serve_worker_http(&server, bind).await?;
 
     println!("BOUND addr={}", running.bound);
@@ -40,3 +37,14 @@ async fn main() -> Result<(), WorkerStartupError> {
     let _ = joined.await;
     Ok(())
 }
+
+fn worker_server(credentials: WorkerCredentials) -> HttpServer {
+    HttpServer::new(
+        credentials,
+        operation_handler_with_config(FfprobeConfig::from_process_env()),
+    )
+}
+
+#[cfg(test)]
+#[path = "main_test.rs"]
+mod tests;
