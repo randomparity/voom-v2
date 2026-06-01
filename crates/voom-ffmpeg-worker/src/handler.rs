@@ -612,12 +612,13 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
             ),
         ));
     }
-    if voom_worker_protocol::validate_profile_against_descriptor(&request.profile).is_err() {
+    if let Err(reason) = voom_worker_protocol::validate_profile_against_descriptor(&request.profile)
+    {
         return Err(config_invalid(
             "request",
             format!(
-                "transcode_video profile `{}` failed encoder descriptor validation",
-                request.profile.name
+                "transcode_video profile `{}` failed encoder descriptor validation: {reason}",
+                request.profile.name,
             ),
         ));
     }

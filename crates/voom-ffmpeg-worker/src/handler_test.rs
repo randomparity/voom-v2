@@ -93,9 +93,9 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    // error message should mention the profile name (default-hevc) or the encoder
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("default-hevc") || err.to_string().contains("descriptor"),
+        message.contains("default-hevc") && message.contains("unknown encoder `libx264`"),
         "unexpected error: {err}"
     );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
