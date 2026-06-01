@@ -406,31 +406,16 @@ fn force_path_token_serde_renders_bypass_as_snake_case_array() {
 }
 
 #[test]
-fn validate_bypass_accepts_sprint_1_kinds() {
-    // Sprint 1 ships exactly `ClosureIncomplete`. The validator's
-    // forward-compat role means there is nothing currently
-    // constructible at the type level that the validator rejects;
-    // the smoke test pins the accept-path so the forward-compat
-    // helper stays wired (a future bypass kind that needs rejection
-    // adds a sibling negative test alongside its `BypassKind` variant).
-    let mut bypass = std::collections::BTreeSet::new();
-    bypass.insert(BypassKind::ClosureIncomplete);
-    let t = ForcePathToken {
-        actor: "ops@example.com".to_owned(),
-        reason: "fs offline".to_owned(),
-        bypass,
-    };
-    validate_bypass(&t).unwrap();
-
-    // Empty bypass set is also accepted — the token carries audit
-    // metadata even when no bypass bit is requested. The closure
-    // walker will treat this exactly like `override_token = None`.
-    let t_empty = ForcePathToken {
+fn force_path_token_allows_empty_bypass_set() {
+    let token = ForcePathToken {
         actor: "ops@example.com".to_owned(),
         reason: "no-op token".to_owned(),
         bypass: std::collections::BTreeSet::new(),
     };
-    validate_bypass(&t_empty).unwrap();
+
+    let json = serde_json::to_value(&token).unwrap();
+
+    assert_eq!(json["bypass"], serde_json::json!([]));
 }
 
 #[test]

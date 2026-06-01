@@ -431,9 +431,10 @@ pub enum CommitGateResult {
 /// Input to `prepare_destructive_commit`. `override_token` carries the
 /// optional force-path bypass token; `None` is the default
 /// gate-respecting path that aborts on any closure-walk
-/// `AliasResolutionError::Unreachable`. `Some(token)` after
-/// `validate_bypass` passes drives the closure-incomplete bypass branch
-/// (see `prepare_destructive_commit` / `authorize_destructive_commit`).
+/// `AliasResolutionError::Unreachable`. `Some(token)` can drive the
+/// closure-incomplete bypass branch when `token.bypass` contains
+/// `BypassKind::ClosureIncomplete` (see `prepare_destructive_commit` /
+/// `authorize_destructive_commit`).
 /// The token JSON is persisted to `commit_intents.override_token`
 /// atomically with the `commit.intent_recorded` insert so Phase B can
 /// re-read it.
@@ -485,36 +486,13 @@ pub enum BypassKind {
 /// Force-path bypass token. Stored as a JSON blob in
 /// `commit_intents.override_token`. The struct shape, derive-based
 /// JSON serde, and the `BTreeSet<BypassKind>` carrier for ordered
-/// deduplicated bypass bits live here; canonical serde, the
-/// `validate_bypass` helper, and `commit.forced_override` emission
-/// live with the force-path entry point.
+/// deduplicated bypass bits live here; canonical serde and
+/// `commit.forced_override` emission live with the force-path entry point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForcePathToken {
     pub actor: String,
     pub reason: String,
     pub bypass: BTreeSet<BypassKind>,
-}
-
-/// Validate a force-path token's bypass set before any state change.
-/// `ClosureIncomplete` is the only sanctioned bypass kind; any other
-/// bit would be rejected with
-/// `VoomError::Config("force-path bypass not supported: <name>")`.
-///
-/// The single-variant `BypassKind` enum makes any unsupported bit
-/// unrepresentable today. Keeping this check in the state-changing
-/// path makes the force-bypass invariant explicit at the gate boundary.
-///
-/// # Errors
-///
-/// `VoomError::Config` with a descriptive message naming the
-/// unsupported `BypassKind` tag.
-pub fn validate_bypass(token: &ForcePathToken) -> Result<(), VoomError> {
-    for kind in &token.bypass {
-        match kind {
-            BypassKind::ClosureIncomplete => {}
-        }
-    }
-    Ok(())
 }
 
 /// `snake_case` wire-format tag for one `BypassKind`. Matches the

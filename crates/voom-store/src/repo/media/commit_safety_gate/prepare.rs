@@ -11,7 +11,7 @@ use super::{
     CommitIntentRecordedPayload, CommitTarget, DestructiveCommit, Event, EventEnvelope, EventRepo,
     EvidenceDrift, EvidenceId, EvidenceRevalidationResult, ForcePathToken, IdentityRepo,
     LeaseScope, OffsetDateTime, SqlitePool, SubjectType, UseLeaseId, VoomError, begin_gate_tx,
-    bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64, validate_bypass,
+    bypass_kind_str, consult_pending_commit_lock_in_tx, iso8601, u64_from_i64,
 };
 
 // ============================================================================
@@ -291,22 +291,21 @@ pub(super) fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
 /// `input.override_token` is the sanctioned force-path bypass. `None`
 /// (the default) routes any `AliasResolutionError::Unreachable`
 /// from the closure walker straight to `BlockedByClosureIncomplete`.
-/// `Some(token)` after `validate_bypass` accepts the token funnels the
-/// matching `Unreachable` into the bypass branch (the closure walk
-/// proceeds with whatever DB-internal aliases were already enumerated;
-/// the external resolver's contribution is lost). The token JSON is
-/// persisted to `commit_intents.override_token` atomically with the
-/// `commit.intent_recorded` insert; `commit.forced_override` is emitted
-/// once at prepare time (authorize does not re-emit). The audit signal
-/// and the bypass logic ship together in this same tx — no in-tree
-/// caller has access to a bypass branch without the matching audit row.
+/// If `Some(token)` contains `BypassKind::ClosureIncomplete`, a matching
+/// `Unreachable` flows into the bypass branch (the closure walk proceeds
+/// with whatever DB-internal aliases were already enumerated; the
+/// external resolver's contribution is lost). The token JSON is persisted
+/// to `commit_intents.override_token` atomically with the
+/// `commit.intent_recorded` insert;
+/// `commit.forced_override` is emitted once at prepare time (authorize
+/// does not re-emit). The audit signal and the bypass logic ship
+/// together in this same tx — no in-tree caller has access to a bypass
+/// branch without the matching audit row.
 ///
 /// # Errors
 ///
-/// `VoomError::Config` if `input.override_token = Some(token)` and the
-/// token's bypass set contains an unsupported `BypassKind` (validation
-/// runs before any tx opens; no row materializes). `VoomError::Database`
-/// / `VoomError::Internal` on storage failures (including
+/// `VoomError::Config` if evidence is invalid. `VoomError::Database` /
+/// `VoomError::Internal` on storage failures (including
 /// `AliasResolutionError::Database` from an external alias source).
 /// Gate-check failures return `Ok(PrepareOutcome::Blocked)` rather than
 /// `Err` — `Err` is reserved for genuine storage failures that the
@@ -327,12 +326,6 @@ pub async fn prepare_destructive_commit(
         accepted_evidence_ids,
         override_token,
     } = input;
-
-    // Validate the token before opening any tx — an invalid bypass bit
-    // never lands a commit_intents row.
-    if let Some(token) = &override_token {
-        validate_bypass(token)?;
-    }
 
     let target_json = encode_target(&target)?;
     let accepted_evidence_ids_json = encode_evidence_ids(&accepted_evidence_ids)?;

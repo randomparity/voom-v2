@@ -31,7 +31,7 @@ pub use commit_safety_gate::{
     CommitGateResult, CommitIntent, CommitIntentState, CommitPermit, CommitTarget,
     DestructiveCommit, EvidenceDrift, EvidenceRevalidationResult, FileLocationProposal,
     ForcePathToken, MutationOutcome, PendingCommitIntent, PrepareOutcome, TargetEpochDrift,
-    TargetMemberKind, prepare_destructive_commit, validate_bypass,
+    TargetMemberKind, prepare_destructive_commit,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use issues::{

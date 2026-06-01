@@ -1170,10 +1170,9 @@ pub struct CommitAbortedPostMutationPayload {
 /// `commit.forced_override` — emitted by `prepare_destructive_commit`
 /// when the caller threads a non-`None` `ForcePathToken` through
 /// `DestructiveCommit.override_token`. Recorded once at prepare time,
-/// after `validate_bypass` accepts the token and atomically with the
-/// `commit.intent_recorded` insert / `commit_intents.override_token`
-/// column write. Authorize does not re-emit — the audit signal is
-/// single-shot per commit.
+/// atomically with the `commit.intent_recorded` insert /
+/// `commit_intents.override_token` column write. Authorize does not
+/// re-emit — the audit signal is single-shot per commit.
 ///
 /// `bypass` is the canonical `snake_case` rendering of every
 /// `BypassKind` bit in the token's set (sorted ascending; the on-disk
