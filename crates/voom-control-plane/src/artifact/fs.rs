@@ -316,7 +316,7 @@ pub async fn promote_staged_add_only_with_temp(
     .await
 }
 
-async fn require_expected_staging_facts(
+pub(crate) async fn require_expected_staging_facts(
     staging: &Path,
     expected: &ArtifactFileFacts,
 ) -> Result<ArtifactFileFacts, VoomError> {

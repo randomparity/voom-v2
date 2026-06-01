@@ -35,7 +35,7 @@ use crate::artifact::commit_pipeline::{
 };
 use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, promote_staged_add_only_with_temp,
-    unique_temp_sibling_path,
+    require_expected_staging_facts, unique_temp_sibling_path,
 };
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
@@ -278,7 +278,7 @@ pub async fn commit_audio_extract_sidecar(
     input: CommitAudioExtractSidecarInput,
 ) -> Result<CommitAudioExtractSidecarReport, VoomError> {
     let prepared = prepare_sidecar_commit(cp, &input).await?;
-    match promote_sidecar(&prepared, &input.output).await {
+    match promote_sidecar(&prepared).await {
         Ok(()) => {}
         Err(err) => {
             let report = mark_sidecar_recovery_required(cp, &prepared, &input, err).await?;
@@ -366,6 +366,7 @@ struct PreparedSidecarCommit {
     staging_path: PathBuf,
     target_path: PathBuf,
     temp_path: PathBuf,
+    expected_facts: ArtifactFileFacts,
 }
 
 async fn prepare_sidecar_commit(
@@ -374,6 +375,15 @@ async fn prepare_sidecar_commit(
 ) -> Result<PreparedSidecarCommit, VoomError> {
     let target_path = canonical_new_leaf_no_symlink(&input.target_path).await?;
     let temp_path = canonical_new_leaf_no_symlink(unique_temp_sibling_path(&target_path)?).await?;
+    let reported_facts = ArtifactFileFacts {
+        path: input.staging_path.clone(),
+        size_bytes: input.output.size_bytes,
+        content_hash: input.output.content_hash.clone(),
+        modified_at: None,
+        local_file_key: input.output.local_file_key.clone(),
+    };
+    let expected_facts =
+        require_expected_staging_facts(&input.staging_path, &reported_facts).await?;
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
     let pending_input = NewArtifactCommitRecord {
@@ -390,6 +400,9 @@ async fn prepare_sidecar_commit(
             "staging_path": input.staging_path.display().to_string(),
             "target_path": target_path.display().to_string(),
             "temp_path": temp_path.display().to_string(),
+            "expected_size_bytes": expected_facts.size_bytes,
+            "expected_checksum": expected_facts.content_hash,
+            "staging_local_file_key": expected_facts.local_file_key,
         }),
         started_at: now,
     };
@@ -416,24 +429,16 @@ async fn prepare_sidecar_commit(
         staging_path: input.staging_path.clone(),
         target_path,
         temp_path,
+        expected_facts,
     })
 }
 
-async fn promote_sidecar(
-    prepared: &PreparedSidecarCommit,
-    expected: &AudioObservedFacts,
-) -> Result<(), VoomError> {
+async fn promote_sidecar(prepared: &PreparedSidecarCommit) -> Result<(), VoomError> {
     promote_staged_add_only_with_temp(
         &prepared.staging_path,
         &prepared.target_path,
         &prepared.temp_path,
-        &ArtifactFileFacts {
-            path: prepared.staging_path.clone(),
-            size_bytes: expected.size_bytes,
-            content_hash: expected.content_hash.clone(),
-            modified_at: None,
-            local_file_key: expected.local_file_key.clone(),
-        },
+        &prepared.expected_facts,
     )
     .await?;
     Ok(())
@@ -453,8 +458,8 @@ async fn finalize_sidecar_commit(
             NewSidecarArtifactCommit {
                 commit_record_id: prepared.record.id,
                 target_path: prepared.target_path.display().to_string(),
-                content_hash: input.output.content_hash.clone(),
-                size_bytes: input.output.size_bytes,
+                content_hash: prepared.expected_facts.content_hash.clone(),
+                size_bytes: prepared.expected_facts.size_bytes,
                 observed_at: now,
                 finished_at: now,
             },
