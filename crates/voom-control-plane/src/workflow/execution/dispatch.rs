@@ -1,7 +1,8 @@
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
+use tokio::time::Instant;
 use voom_core::{ErrorCode, FailureClass, LeaseId, TicketId, VoomError, WorkerId};
 use voom_store::repo::tickets::Ticket;
 use voom_worker_protocol::{
@@ -364,7 +365,5 @@ fn duration_millis_u32(duration: Duration) -> u32 {
 }
 
 fn sleep_until(deadline: Instant) -> Pin<Box<tokio::time::Sleep>> {
-    Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
-        deadline,
-    )))
+    Box::pin(tokio::time::sleep_until(deadline))
 }

@@ -11,10 +11,11 @@ use secrecy::SecretString;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::io::{AsyncWriteExt, DuplexStream};
+use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{
-    BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, SystemClock,
-    TicketId, VoomError, WorkerId,
+    BundleId, ErrorCode, FailureClass, FileVersionId, JobId, LeaseId, MediaSnapshotId, TicketId,
+    VoomError, WorkerId,
 };
 use voom_scheduler::SingleWorkerPerKindSelector;
 use voom_store::repo::bundles::{BundleMemberRole, NewAssetBundle};
@@ -35,6 +36,9 @@ use voom_worker_protocol::{
 
 use super::super::leases::retry_on_database_locked;
 use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::operation_adapters::{
+    RuntimeDispatchContext, await_with_lease_heartbeats,
+};
 use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 use crate::workflow::execution::timing::EffectiveTiming;
 use crate::workflow::plan::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
@@ -208,7 +212,7 @@ async fn heartbeat_timeout_fails_terminally() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
     options.progress_idle_timeout = Duration::from_millis(250);
-    options.heartbeat_timeout = Duration::from_millis(20);
+    options.heartbeat_timeout = Duration::ZERO;
     options.chaos.disable_heartbeat_ticks = true;
     let err = fixture.run_with_options(options).await.unwrap_err();
 
@@ -221,8 +225,8 @@ async fn heartbeat_timeout_fails_terminally() {
 async fn heartbeat_timeout_wins_when_watchdog_deadlines_tie() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::Hang).await;
     let mut options = timeout_options();
-    options.progress_idle_timeout = Duration::from_millis(20);
-    options.heartbeat_timeout = Duration::from_millis(20);
+    options.progress_idle_timeout = Duration::ZERO;
+    options.heartbeat_timeout = Duration::ZERO;
     options.heartbeat_interval = Duration::from_secs(1);
     options.chaos.disable_heartbeat_ticks = true;
 
@@ -238,7 +242,7 @@ async fn heartbeat_watchdog_is_not_starved_by_progress_frames() {
     let fixture = ExecutorFixture::single_worker_with_behavior(FakeBehavior::ProgressFlood).await;
     let mut options = timeout_options();
     options.progress_idle_timeout = Duration::from_secs(1);
-    options.heartbeat_timeout = Duration::from_millis(20);
+    options.heartbeat_timeout = Duration::ZERO;
     options.heartbeat_interval = Duration::from_secs(1);
     options.chaos.disable_heartbeat_ticks = true;
 
@@ -1322,6 +1326,14 @@ fn workflow_tempdir() -> tempfile::TempDir {
     tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
+fn parse_test_time(value: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(
+        value,
+        &time::format_description::well_known::Iso8601::DEFAULT,
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn policy_transcode_success_result_includes_generated_staging_path() {
     let mut fixture = ExecutorFixture::without_workers(0).await;
@@ -1360,35 +1372,41 @@ async fn policy_transcode_success_result_includes_generated_staging_path() {
 }
 
 #[tokio::test]
-async fn policy_transcode_heartbeats_outer_workflow_lease_while_running() {
-    let mut fixture = ExecutorFixture::without_workers(0).await;
-    let dir = workflow_tempdir();
-    let source_path = dir.path().join("Movie.mkv");
-    let (source_file_version_id, _source_location_id) = fixture
-        .seed_local_source_at_path(&source_path, b"movie-bytes")
-        .await;
-    fixture.plan = policy_transcode_plan(TargetRef::FileVersion {
-        id: source_file_version_id,
-    });
-    fixture
-        .register_worker(
-            "transcode-worker",
-            OperationKind::TranscodeVideo,
-            1,
-            FakeBehavior::SlowTranscodeResult,
-        )
-        .await;
+async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs() {
+    let fixture = ExecutorFixture::with_ready_tickets(1).await;
+    let worker_id = fixture.worker_id();
+    let (ticket_id, lease_id) = fixture.create_heartbeat_test_lease(worker_id).await;
+    let runtime = fixture.registry.get(worker_id).unwrap();
     let mut options = WorkflowExecutorOptions::for_tests();
     options.heartbeat_interval = Duration::from_millis(10);
-    options.transcode_staging_root = dir.path().join("stage");
-    options.transcode_target_dir = dir.path().join("out");
+    let context = RuntimeDispatchContext {
+        control: &fixture.cp,
+        runtime: &runtime,
+        ticket_id,
+        lease_id,
+        options: &options,
+    };
 
-    fixture.run_with_options(options).await.unwrap();
+    tokio::time::pause();
+    fixture.clock.advance(time::Duration::milliseconds(80));
+    let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        Ok::<_, VoomError>(())
+    });
+    tokio::pin!(heartbeat);
+    tokio::select! {
+        result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    tokio::time::advance(Duration::from_millis(80)).await;
+    heartbeat.await.unwrap();
+    tokio::time::resume();
 
     let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
     assert!(
         last_heartbeat_at > acquired_at,
-        "long control-plane transcode must keep the outer workflow lease fresh"
+        "heartbeat wrapper must keep the outer workflow lease fresh: \
+         acquired_at={acquired_at}, last_heartbeat_at={last_heartbeat_at}"
     );
 }
 
@@ -1516,6 +1534,7 @@ fn summary_branch_count_only_excludes_synthetic_root_ticket() {
 
 struct ExecutorFixture {
     cp: crate::ControlPlane,
+    clock: Arc<ManualClock>,
     _tmp: tempfile::NamedTempFile,
     plan: WorkflowPlan,
     registry: WorkerRuntimeRegistry,
@@ -1588,15 +1607,17 @@ impl ExecutorFixture {
         let url = format!("sqlite://{}", tmp.path().display());
         let _ = voom_store::init(&url).await.unwrap();
         let pool = voom_store::connect(&url).await.unwrap();
+        let clock = Arc::new(ManualClock::new(T0));
         let cp = crate::ControlPlane::open_with_pool_and_rng(
             pool,
-            Arc::new(SystemClock),
+            clock.clone(),
             Arc::new(Mutex::new(FrozenRng::new(0))),
         )
         .await
         .unwrap();
         Self {
             cp,
+            clock,
             _tmp: tmp,
             plan: independent_hash_plan(ticket_count),
             registry: WorkerRuntimeRegistry::new(),
@@ -1729,6 +1750,51 @@ impl ExecutorFixture {
             .unwrap()
     }
 
+    async fn create_heartbeat_test_lease(&self, worker_id: WorkerId) -> (TicketId, LeaseId) {
+        let job_id = self.open_workflow_job().await;
+        let operation = OperationKind::HashFile;
+        let payload = WorkflowTicketPayload::new_for_test(
+            "heartbeat-workflow",
+            "heartbeat-plan",
+            "hash",
+            "root",
+            operation,
+            json!({
+                "operation": operation_name(operation),
+                "path": "/library/root.mkv",
+            }),
+        )
+        .to_ticket_payload()
+        .unwrap();
+        let ticket = self
+            .cp
+            .create_ticket(NewTicket {
+                job_id: Some(job_id),
+                kind: format!("synthetic.workflow.operation.{}", operation_name(operation)),
+                priority: 0,
+                payload,
+                max_attempts: 1,
+                created_at: self.cp.clock().now(),
+            })
+            .await
+            .unwrap();
+        self.cp
+            .mark_ready_if_unblocked(ticket.id, self.cp.clock().now())
+            .await
+            .unwrap();
+        let lease = self
+            .cp
+            .acquire_lease(NewLease {
+                ticket_id: ticket.id,
+                worker_id,
+                ttl: time::Duration::seconds(5),
+                now: self.cp.clock().now(),
+            })
+            .await
+            .unwrap();
+        (ticket.id, lease.id)
+    }
+
     async fn held_lease_count(&self) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE state = 'held'")
             .fetch_one(&self.cp.pool)
@@ -1782,11 +1848,17 @@ impl ExecutorFixture {
             .id
     }
 
-    async fn first_lease_heartbeat_window(&self) -> (String, String) {
-        sqlx::query_as("SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1")
-            .fetch_one(&self.cp.pool)
-            .await
-            .unwrap()
+    async fn first_lease_heartbeat_window(&self) -> (OffsetDateTime, OffsetDateTime) {
+        let (acquired_at, last_heartbeat_at): (String, String) = sqlx::query_as(
+            "SELECT acquired_at, last_heartbeat_at FROM leases ORDER BY id ASC LIMIT 1",
+        )
+        .fetch_one(&self.cp.pool)
+        .await
+        .unwrap();
+        (
+            parse_test_time(&acquired_at),
+            parse_test_time(&last_heartbeat_at),
+        )
     }
 
     async fn seed_other_job_ready_ticket(&mut self, priority: i64) {
@@ -2195,7 +2267,6 @@ enum FakeBehavior {
     RequireRemuxProtocolPayload,
     RequireCorrelatedRemuxDispatch,
     RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable,
-    SlowTranscodeResult,
     MalformedTranscodeResult,
     WrongTranscodeOutputFacts,
     RequireCorrelatedTranscodeAudioDispatch,
@@ -2335,14 +2406,8 @@ async fn write_behavior(
         | FakeBehavior::RequireRemuxProtocolPayload
         | FakeBehavior::RequireCorrelatedRemuxDispatch
         | FakeBehavior::RequireRemuxProtocolPayloadThenMkvtoolnixUnavailable
-        | FakeBehavior::SlowTranscodeResult
         | FakeBehavior::RequireCorrelatedTranscodeAudioDispatch
         | FakeBehavior::RequireCorrelatedExtractAudioDispatch => {
-            let delay = match behavior {
-                FakeBehavior::SlowTranscodeResult => Duration::from_millis(80),
-                _ => Duration::from_millis(25),
-            };
-            tokio::time::sleep(delay).await;
             let payload = match request.operation {
                 OperationKind::TranscodeVideo => {
                     transcode_result_payload_for_request(&request).await
@@ -2379,22 +2444,20 @@ async fn write_behavior(
             let _ = writer.write_all(b"{not-json}\n").await;
         }
         FakeBehavior::Hang => {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            std::future::pending::<()>().await;
         }
         FakeBehavior::ProgressFlood => {
             for seq in 0..128 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
                 write_frame(&mut writer, progress_frame(&request, seq)).await;
+                tokio::task::yield_now().await;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            std::future::pending::<()>().await;
         }
         FakeBehavior::Crash | FakeBehavior::DispatchError => {}
         FakeBehavior::MalformedTranscodeResult => {
-            tokio::time::sleep(Duration::from_millis(25)).await;
             write_frame(&mut writer, result_frame(&request, json!({"ok": true}))).await;
         }
         FakeBehavior::WrongTranscodeOutputFacts => {
-            tokio::time::sleep(Duration::from_millis(25)).await;
             let mut payload = transcode_result_payload_for_request(&request).await;
             payload["output_container"] = json!("mp4");
             payload["output_video_codec"] = json!("h264");
@@ -2840,7 +2903,7 @@ fn non_policy_remux_plan() -> WorkflowPlan {
 
 fn timeout_options() -> WorkflowExecutorOptions {
     let mut options = WorkflowExecutorOptions::for_tests();
-    options.progress_idle_timeout = Duration::from_millis(20);
+    options.progress_idle_timeout = Duration::ZERO;
     options.heartbeat_timeout = Duration::from_millis(250);
     options.heartbeat_interval = Duration::from_millis(10);
     options

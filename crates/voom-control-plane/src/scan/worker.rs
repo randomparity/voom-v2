@@ -136,6 +136,18 @@ impl BundledWorkerProcess {
         })
     }
 
+    #[cfg(test)]
+    async fn launch_with_startup_timeout(
+        worker_id: WorkerId,
+        command: WorkerCommand,
+        startup_timeout: Duration,
+    ) -> Result<Self, ScanWorkerError> {
+        Ok(Self {
+            inner: WorkerProcess::launch_with_startup_timeout(worker_id, command, startup_timeout)
+                .await?,
+        })
+    }
+
     #[must_use]
     pub const fn worker_id(&self) -> WorkerId {
         self.inner.worker_id

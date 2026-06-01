@@ -176,6 +176,23 @@ impl BundledWorkerProcess {
         worker_id: WorkerId,
         command: WorkerCommand,
     ) -> Result<Self, WorkerProcessError> {
+        Self::launch_inner(worker_id, command, STARTUP_TIMEOUT).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn launch_with_startup_timeout(
+        worker_id: WorkerId,
+        command: WorkerCommand,
+        startup_timeout: Duration,
+    ) -> Result<Self, WorkerProcessError> {
+        Self::launch_inner(worker_id, command, startup_timeout).await
+    }
+
+    async fn launch_inner(
+        worker_id: WorkerId,
+        command: WorkerCommand,
+        startup_timeout: Duration,
+    ) -> Result<Self, WorkerProcessError> {
         let credentials = random_credentials(worker_id);
         let mut child = spawn_worker(command, &credentials)?;
         let stdin = child
@@ -188,7 +205,7 @@ impl BundledWorkerProcess {
                 "worker process missing stdout pipe",
             ));
         };
-        let bound = match read_bound_address(stdout).await {
+        let bound = match read_bound_address(stdout, startup_timeout).await {
             Ok(bound) => bound,
             Err(err) => {
                 kill_and_wait(&mut child).await;
@@ -327,9 +344,10 @@ pub(crate) fn fresh_lease_id() -> LeaseId {
 
 async fn read_bound_address(
     stdout: impl tokio::io::AsyncRead + Unpin,
+    startup_timeout: Duration,
 ) -> Result<SocketAddr, WorkerProcessError> {
     let mut lines = BufReader::new(stdout).lines();
-    let line_result = timeout(STARTUP_TIMEOUT, lines.next_line()).await;
+    let line_result = timeout(startup_timeout, lines.next_line()).await;
     let line = match line_result {
         Ok(Ok(Some(line))) => line,
         Ok(Ok(None)) => {
@@ -344,7 +362,7 @@ async fn read_bound_address(
         }
         Err(_) => {
             return Err(WorkerProcessError::worker_crash(format!(
-                "timed out after {STARTUP_TIMEOUT:?} waiting for worker bound address"
+                "timed out after {startup_timeout:?} waiting for worker bound address"
             )));
         }
     };

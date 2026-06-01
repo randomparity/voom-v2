@@ -1,7 +1,8 @@
 use std::future::Future;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
+use tokio::time::Instant;
 use voom_core::{FailureClass, LeaseId, VoomError};
 use voom_store::repo::leases::{Lease, NewLease};
 

@@ -130,17 +130,25 @@ async fn consecutive_dispatches_use_distinct_nonzero_protocol_lease_ids() {
 async fn launch_timeout_reaps_child_that_never_prints_bound_address() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("worker.pid");
-    let script = format!("printf '%s' $$ > '{}'; exec sleep 60", pid_file.display());
+    let script = format!("printf '%s' $$ > '{}'; read ignored", pid_file.display());
     let command = WorkerCommand::new("/bin/sh").arg("-c").arg(script);
 
-    let started = std::time::Instant::now();
-    let err = BundledWorkerProcess::launch(WorkerId(46), command)
-        .await
-        .unwrap_err();
+    let launch = BundledWorkerProcess::launch_with_startup_timeout(
+        WorkerId(46),
+        command,
+        Duration::from_secs(5),
+    );
+    tokio::pin!(launch);
+    tokio::select! {
+        err = &mut launch => panic!("worker launch finished before startup timeout: {err:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    let pid = wait_for_pid_file(&pid_file).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let err = launch.await.unwrap_err();
 
-    assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
     assert_process_exited(pid.trim());
 }
 
@@ -356,4 +364,14 @@ fn assert_process_exited(pid: &str) {
         .status()
         .unwrap();
     assert!(!status.success(), "child process {pid} still exists");
+}
+
+async fn wait_for_pid_file(path: &Path) -> String {
+    for _ in 0..1_000 {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("worker did not create pid file {}", path.display());
 }
