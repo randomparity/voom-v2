@@ -14,23 +14,24 @@ use voom_store::repo::jobs::NewJob;
 use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 
-use super::binding::{
-    BranchContext, PolicyFileSource, render_default_payload, render_default_payload_with_fan_out,
-    render_policy_extract_audio_payload, render_policy_remux_payload,
-    render_policy_transcode_audio_payload, render_policy_transcode_payload,
-};
 use super::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
-use super::expansion::{
+use super::leases::{acquire_lease_with_retry, failure_class_for_error, time_duration};
+use super::runtime::WorkerRuntimeRegistry;
+use super::timing::{EffectiveTiming, seeded_timing};
+use crate::ControlPlane;
+use crate::workflow::plan::binding::{
+    BindingError, BranchContext, PolicyFileSource, render_default_payload,
+    render_default_payload_with_fan_out, render_policy_extract_audio_payload,
+    render_policy_remux_payload, render_policy_transcode_audio_payload,
+    render_policy_transcode_payload,
+};
+use crate::workflow::plan::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
 };
-use super::leases::{acquire_lease_with_retry, failure_class_for_error, time_duration};
-use super::model::{WorkflowNode, WorkflowPlan};
-use super::runtime::WorkerRuntimeRegistry;
-pub use super::summary::{OperationSummary, WorkflowRunSummary};
-use super::ticket_payload::{WorkflowTicketPayload, operation_name};
-use super::timing::{EffectiveTiming, seeded_timing};
-use crate::ControlPlane;
+use crate::workflow::plan::model::{WorkflowNode, WorkflowPlan};
+use crate::workflow::plan::ticket_payload::{WorkflowTicketPayload, operation_name};
+pub use crate::workflow::summary::{OperationSummary, WorkflowRunSummary};
 
 pub(crate) const WORKFLOW_JOB_KIND: &str = "synthetic.workflow";
 const POLICY_NODE_ID_PREFIX: &str = "policy-node_";
@@ -663,9 +664,9 @@ where
                 );
                 root_payload_result(rendered)
             }
-            Some(target) => Err(root_payload_error(&super::binding::BindingError::new(
-                format!("remux requires file_version or file_location target, got {target:?}"),
-            ))),
+            Some(target) => Err(root_payload_error(&BindingError::new(format!(
+                "remux requires file_version or file_location target, got {target:?}"
+            )))),
             None => {
                 root_payload_result(render_default_payload(OperationKind::Remux, branch, timing))
             }
@@ -1222,13 +1223,11 @@ where
     }
 }
 
-fn root_payload_result(
-    result: Result<Value, super::binding::BindingError>,
-) -> Result<Value, VoomError> {
+fn root_payload_result(result: Result<Value, BindingError>) -> Result<Value, VoomError> {
     result.map_err(|error| root_payload_error(&error))
 }
 
-fn root_payload_error(error: &super::binding::BindingError) -> VoomError {
+fn root_payload_error(error: &BindingError) -> VoomError {
     VoomError::Config(format!("workflow root payload binding: {error}"))
 }
 

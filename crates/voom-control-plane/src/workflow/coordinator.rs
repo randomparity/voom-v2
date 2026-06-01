@@ -35,11 +35,11 @@ use crate::cases::policy::compliance::ComplianceExecutionOptions;
 use crate::cases::policy::plans::input_set_to_draft;
 use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
 
-use super::WorkerRuntimeRegistry;
-use super::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
-use super::expansion::branch_id_from_path;
-use super::policy_bridge::workflow_plan_from_compliance;
-use super::ticket_payload::operation_name;
+use super::execution::WorkerRuntimeRegistry;
+use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
+use super::plan::expansion::branch_id_from_path;
+use super::plan::policy_bridge::workflow_plan_from_compliance;
+use super::plan::ticket_payload::operation_name;
 
 /// Bridge node ids carry this prefix; the per-file ticket lookup reconstructs the
 /// workflow node id from a plan node id (`policy_bridge.rs`).

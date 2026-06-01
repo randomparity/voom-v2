@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tempfile::{NamedTempFile, TempDir};
 use time::OffsetDateTime;
 use voom_control_plane::policy::PolicyInputFromScanInput;
-use voom_control_plane::workflow::ticket_payload::WorkflowTicketPayload;
+use voom_control_plane::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::test_support::sqlite_url_for;

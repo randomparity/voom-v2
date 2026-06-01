@@ -34,12 +34,12 @@ use voom_worker_protocol::{
 };
 
 use super::super::leases::retry_on_database_locked;
-use crate::workflow::executor::WorkflowExecutorOptions;
-use crate::workflow::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
-use crate::workflow::runtime::WorkerRuntimeRegistry;
+use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
+use crate::workflow::execution::timing::EffectiveTiming;
+use crate::workflow::plan::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::is_synthetic_root_ticket;
-use crate::workflow::ticket_payload::WorkflowTicketPayload;
-use crate::workflow::timing::EffectiveTiming;
 use crate::workflow::{WorkflowExecutor, WorkflowRunSummary};
 use voom_plan::TargetRef;
 
@@ -1674,7 +1674,9 @@ impl ExecutorFixture {
         self.first_worker_id.unwrap()
     }
 
-    async fn run(&self) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
+    async fn run(
+        &self,
+    ) -> Result<WorkflowRunSummary, crate::workflow::execution::executor::WorkflowRunError> {
         self.run_with_options(WorkflowExecutorOptions::for_tests())
             .await
     }
@@ -1682,7 +1684,7 @@ impl ExecutorFixture {
     async fn run_with_policy(
         &self,
         concurrency: ConcurrencyPolicy,
-    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
+    ) -> Result<WorkflowRunSummary, crate::workflow::execution::executor::WorkflowRunError> {
         let mut plan = self.plan.clone();
         plan.concurrency = concurrency;
         self.executor_with_options(WorkflowExecutorOptions::for_tests())
@@ -1693,7 +1695,7 @@ impl ExecutorFixture {
     async fn run_with_options(
         &self,
         options: WorkflowExecutorOptions,
-    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
+    ) -> Result<WorkflowRunSummary, crate::workflow::execution::executor::WorkflowRunError> {
         self.executor_with_options(options)
             .submit_and_run(self.plan.clone())
             .await
@@ -1702,7 +1704,7 @@ impl ExecutorFixture {
     async fn run_plan(
         &self,
         plan: WorkflowPlan,
-    ) -> Result<WorkflowRunSummary, crate::workflow::executor::WorkflowRunError> {
+    ) -> Result<WorkflowRunSummary, crate::workflow::execution::executor::WorkflowRunError> {
         self.executor_with_options(WorkflowExecutorOptions::for_tests())
             .submit_and_run(plan)
             .await
@@ -2407,7 +2409,7 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
     // runs the bundled ffprobe against a parseable file. The probe only verifies
     // size+hash against these bytes; the container/codec the result claims are
     // not asserted by these dispatch/heartbeat tests.
-    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2438,7 +2440,7 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
 
 async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<RemuxRequest>(request.payload.clone()).unwrap();
-    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2483,7 +2485,7 @@ async fn transcode_audio_result_payload_for_request(request: &OperationRequest) 
     // launches the bundled ffprobe against a parseable file. The probe only
     // verifies size+hash against these bytes; the container/codec the result
     // claims are not asserted by these dispatch/heartbeat tests.
-    let output_bytes = include_bytes!("../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2630,11 +2632,11 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
                 })
             })
             .collect(),
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 3 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 3 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 4,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
@@ -2665,11 +2667,11 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
             depends_on_selected: Vec::new(),
             provides_selected: None,
         })],
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
@@ -2720,11 +2722,11 @@ fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -
             depends_on_selected: Vec::new(),
             provides_selected: None,
         })],
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
@@ -2801,11 +2803,11 @@ fn policy_audio_plan(
             depends_on_selected: Vec::new(),
             provides_selected: None,
         })],
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
@@ -2825,11 +2827,11 @@ fn non_policy_remux_plan() -> WorkflowPlan {
             depends_on_selected: Vec::new(),
             provides_selected: None,
         })],
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },
@@ -2869,11 +2871,11 @@ fn policy_chain_plan(nodes: Vec<WorkflowNode>) -> WorkflowPlan {
         id: "policy-node-expansion-test".to_owned(),
         seed: 7,
         nodes,
-        fan_out: crate::workflow::model::FanOutPolicy { max_files: 1 },
+        fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 4,
         },
-        timing: crate::workflow::model::TimingPolicy {
+        timing: crate::workflow::plan::model::TimingPolicy {
             base_duration_ms: 10,
             jitter_ms: 0,
         },

@@ -6,7 +6,7 @@ use voom_core::{FailureClass, LeaseId, VoomError};
 use voom_store::repo::leases::{Lease, NewLease};
 
 use crate::ControlPlane;
-use crate::workflow::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::executor::WorkflowExecutorOptions;
 
 pub(super) async fn acquire_lease_with_retry(
     control: &ControlPlane,

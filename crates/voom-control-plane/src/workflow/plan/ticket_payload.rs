@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use voom_core::OperationKind;
 
-use super::timing::EffectiveTiming;
+use crate::workflow::execution::timing::EffectiveTiming;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowTicketPayload {

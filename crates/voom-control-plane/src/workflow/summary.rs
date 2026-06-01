@@ -6,7 +6,7 @@ use sqlx::Row;
 use voom_core::OperationKind;
 use voom_core::{FailureClass, JobId, WorkerId};
 
-use super::ticket_payload::WorkflowTicketPayload;
+use super::plan::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;
 
 #[derive(Debug, Clone)]

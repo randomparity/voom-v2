@@ -16,9 +16,9 @@ use voom_worker_protocol::{HttpClient, WorkerCredentials};
 
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
-use crate::workflow::{
-    WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::operation_name,
-};
+use crate::workflow::WorkerRuntimeRegistry;
+use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::plan::ticket_payload::operation_name;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ComplianceReportData {

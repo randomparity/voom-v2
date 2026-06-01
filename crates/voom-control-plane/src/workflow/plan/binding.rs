@@ -7,7 +7,7 @@ use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::remux::RemuxOperationPayload;
 
 use super::ticket_payload::operation_name;
-use super::timing::EffectiveTiming;
+use crate::workflow::execution::timing::EffectiveTiming;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchContext {

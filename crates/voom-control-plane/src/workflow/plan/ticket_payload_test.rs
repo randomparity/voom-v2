@@ -1,4 +1,4 @@
-use crate::workflow::ticket_payload::WorkflowTicketPayload;
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use voom_core::OperationKind;
 
 #[test]

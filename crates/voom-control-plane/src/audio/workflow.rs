@@ -11,11 +11,11 @@ use crate::audio::{
     TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
     execute_transcode_audio_with_dispatchers,
 };
-use crate::workflow::leases::{
+use crate::workflow::execution::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
 
-use crate::workflow::operation_adapters::{
+use crate::workflow::execution::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
     workflow_idempotency_key,
 };

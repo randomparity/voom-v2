@@ -10,9 +10,9 @@ use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
 use crate::cases::{count, cp, transcodable_input};
-use crate::workflow::{
-    WorkerRuntimeRegistry, executor::WorkflowExecutorOptions, ticket_payload::WorkflowTicketPayload,
-};
+use crate::workflow::WorkerRuntimeRegistry;
+use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 

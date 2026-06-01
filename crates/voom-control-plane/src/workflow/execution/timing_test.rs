@@ -1,4 +1,4 @@
-use crate::workflow::timing::{branch_codec, seeded_timing};
+use crate::workflow::execution::timing::{branch_codec, seeded_timing};
 
 #[test]
 fn default_seed_two_codec_fixture_exercises_both_transform_paths() {

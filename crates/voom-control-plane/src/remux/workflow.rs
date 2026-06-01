@@ -8,12 +8,12 @@ use crate::remux::{
     ExecuteRemuxInput, RemuxDispatcher, execute_remux_with_deferred_success_event,
     success_event_recovery_report,
 };
-use crate::workflow::leases::{
+use crate::workflow::execution::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
     retry_on_database_locked,
 };
 
-use crate::workflow::operation_adapters::{
+use crate::workflow::execution::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
     workflow_idempotency_key,
 };
@@ -79,12 +79,12 @@ pub(crate) async fn dispatch_control_plane_remux_context(
 #[cfg(test)]
 pub(crate) async fn dispatch_control_plane_remux(
     control: &crate::ControlPlane,
-    runtime: &crate::workflow::runtime::WorkerRuntime,
+    runtime: &crate::workflow::execution::runtime::WorkerRuntime,
     ticket: &voom_store::repo::tickets::Ticket,
-    _workflow_payload: &crate::workflow::ticket_payload::WorkflowTicketPayload,
+    _workflow_payload: &crate::workflow::plan::ticket_payload::WorkflowTicketPayload,
     lease_id: voom_core::LeaseId,
     payload: &Value,
-    options: &crate::workflow::executor::WorkflowExecutorOptions,
+    options: &crate::workflow::execution::executor::WorkflowExecutorOptions,
 ) -> Result<(), VoomError> {
     dispatch_control_plane_remux_context(OperationAdapterContext {
         control,

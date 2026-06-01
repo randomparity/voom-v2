@@ -7,7 +7,7 @@ use voom_worker_protocol::{
     ClientHandle, DispatchStream, OperationRequest, ProtocolError, WorkerCredentials,
 };
 
-use crate::workflow::runtime::WorkerRuntimeRegistry;
+use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 
 #[tokio::test]
 async fn registry_returns_registered_in_process_runtime() {

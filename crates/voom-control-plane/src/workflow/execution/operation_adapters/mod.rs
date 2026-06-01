@@ -6,8 +6,8 @@ use voom_core::{FileLocationId, FileVersionId, JobId, LeaseId, TicketId, VoomErr
 use voom_store::repo::tickets::Ticket;
 
 use crate::ControlPlane;
-use crate::workflow::executor::WorkflowExecutorOptions;
-use crate::workflow::runtime::WorkerRuntime;
+use crate::workflow::execution::executor::WorkflowExecutorOptions;
+use crate::workflow::execution::runtime::WorkerRuntime;
 
 #[cfg(test)]
 pub(super) use crate::remux::workflow::dispatch_control_plane_remux;
@@ -116,10 +116,10 @@ where
         tokio::select! {
             result = &mut future => return result,
             _ = heartbeat.tick(), if !context.options.chaos.suppresses_heartbeats_for(operation) => {
-                crate::workflow::leases::heartbeat_lease_with_retry(
+                crate::workflow::execution::leases::heartbeat_lease_with_retry(
                     context.control,
                     context.lease_id,
-                    crate::workflow::leases::time_duration(context.options.lease_ttl)?,
+                    crate::workflow::execution::leases::time_duration(context.options.lease_ttl)?,
                 )
                 .await?;
             }

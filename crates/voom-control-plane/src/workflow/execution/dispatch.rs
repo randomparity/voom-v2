@@ -15,8 +15,8 @@ use super::leases::{
 };
 use super::operation_adapters::dispatch_control_plane_ticket;
 use super::runtime::WorkerRuntime;
-use super::ticket_payload::WorkflowTicketPayload;
 use crate::ControlPlane;
+use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 #[derive(Debug)]
 pub(super) struct DispatchOutcome {
