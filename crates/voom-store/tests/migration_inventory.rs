@@ -36,6 +36,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0013_audio_sidecar_support.sql",
     "0014_video_profiles.sql",
     "0015_workflow_summaries.sql",
+    "0016_worker_grant_max_parallel_wildcard.sql",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -203,6 +204,73 @@ async fn staged_artifact_commit_migration_preserves_seeded_file_version_links() 
     .execute(&pool)
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn worker_grant_max_parallel_migration_rewrites_legacy_limit() {
+    let migration_path = migrations_dir().join("0016_worker_grant_max_parallel_wildcard.sql");
+    assert!(
+        migration_path.is_file(),
+        "{} must exist before the upgrade path can be exercised",
+        migration_path.display()
+    );
+
+    let tmp = NamedTempFile::new().unwrap();
+    let url = sqlite_url_for(tmp.path());
+    let pool = connect_or_create(&url).await.unwrap();
+
+    migrator_through(15).run(&pool).await.unwrap();
+
+    sqlx::query(
+        "INSERT INTO workers \
+         (name, kind, status, registered_at, last_seen_at, epoch) \
+         VALUES ('worker-a', 'local', 'active', '2026-05-25T00:00:00Z', \
+                 '2026-05-25T00:00:00Z', 0)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let worker_id = sqlx::query_scalar::<_, i64>("SELECT id FROM workers WHERE name = 'worker-a'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO worker_grants \
+         (worker_id, can_execute, can_access_read, can_access_write, denies, max_parallel) \
+         VALUES (?, '[\"probe_file\"]', '[]', '[]', '[]', ?)",
+    )
+    .bind(worker_id)
+    .bind(serde_json::json!({"limit": 3}).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO worker_grants \
+         (worker_id, can_execute, can_access_read, can_access_write, denies, max_parallel) \
+         VALUES (?, '[\"transcode_video\"]', '[]', '[]', '[]', ?)",
+    )
+    .bind(worker_id)
+    .bind(serde_json::json!({"limit": 5, "transcode_video": 2}).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    MIGRATOR.run(&pool).await.unwrap();
+
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT max_parallel FROM worker_grants ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let values = rows
+        .iter()
+        .map(|row| serde_json::from_str::<serde_json::Value>(row).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values[0], serde_json::json!({"*": 3}));
+    assert_eq!(values[1], serde_json::json!({"transcode_video": 2}));
 }
 
 #[test]

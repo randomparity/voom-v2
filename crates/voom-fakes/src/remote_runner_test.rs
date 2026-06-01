@@ -189,7 +189,7 @@ impl RemoteRunnerFixture {
                     can_access_read: Vec::new(),
                     can_access_write: Vec::new(),
                     denies: Vec::new(),
-                    max_parallel: json!({"limit": 1}),
+                    max_parallel: json!({"*": 1}),
                 }],
             })
             .await

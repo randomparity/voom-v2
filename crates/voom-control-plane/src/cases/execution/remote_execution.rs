@@ -1583,7 +1583,6 @@ async fn max_parallel_for_worker_operation_in_tx(
 
     let mut operation_limit = None;
     let mut wildcard_limit = None;
-    let mut legacy_limit = None;
     for row in rows {
         let raw: String = row
             .try_get("max_parallel")
@@ -1598,16 +1597,9 @@ async fn max_parallel_for_worker_operation_in_tx(
             wildcard_limit,
             json_positive_u32(value.get("*"), "max_parallel wildcard")?,
         );
-        legacy_limit = max_optional_limit(
-            legacy_limit,
-            json_positive_u32(value.get("limit"), "max_parallel limit")?,
-        );
     }
 
-    Ok(operation_limit
-        .or(wildcard_limit)
-        .or(legacy_limit)
-        .unwrap_or(1))
+    Ok(operation_limit.or(wildcard_limit).unwrap_or(1))
 }
 
 fn max_optional_limit(current: Option<u32>, candidate: Option<u32>) -> Option<u32> {

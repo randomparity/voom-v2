@@ -444,7 +444,7 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
     sqlx::query("UPDATE worker_grants SET max_parallel = ? WHERE worker_id = ?")
-        .bind(serde_json::to_string(&json!({"limit": 2})).unwrap())
+        .bind(serde_json::to_string(&json!({"*": 2})).unwrap())
         .bind(i64::try_from(fixture.worker_id.0).unwrap())
         .execute(fixture.cp.pool_for_test())
         .await
@@ -1270,7 +1270,7 @@ async fn fixture_with_options(
                 can_access_read: Vec::new(),
                 can_access_write: Vec::new(),
                 denies: denies.iter().map(|op| ticket_op(op)).collect(),
-                max_parallel: json!({"limit": 1}),
+                max_parallel: json!({"*": 1}),
             }],
         })
         .await
