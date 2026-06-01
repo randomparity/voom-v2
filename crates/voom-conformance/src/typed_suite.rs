@@ -502,7 +502,7 @@ async fn drain_stream(
     loop {
         match frames.next_frame().await? {
             NdjsonOutcome::Frame(_) => {}
-            NdjsonOutcome::Terminated(_) | NdjsonOutcome::Closed => return Ok(()),
+            NdjsonOutcome::Terminated(_) => return Ok(()),
             NdjsonOutcome::StreamEnd { .. } => {
                 return Err(ProtocolError::MalformedFrame {
                     detail: "stream ended before terminal".to_owned(),
