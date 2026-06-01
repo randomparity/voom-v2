@@ -50,9 +50,9 @@ pub(super) enum PhaseAAbort {
     ClosureIncomplete {
         message: String,
     },
-    /// Round-7 finding #3: another in-flight `commit_intents` row
-    /// (`state IN ('pending','authorized')`) already covers a scope
-    /// member of the new commit's `closure_initial`. Carries the
+    /// Another in-flight `commit_intents` row (`state IN
+    /// ('pending','authorized')`) already covers a scope member of the
+    /// new commit's `closure_initial`. Carries the
     /// existing commit's `commit_id` and the offending scope so the
     /// blocked caller can wait / take-over without re-querying.
     PendingCommit {
@@ -67,9 +67,9 @@ impl PhaseAAbort {
             Self::UseLease { .. } => AbortReason::FreshLease,
             Self::StaleEvidence { .. } => AbortReason::StaleEvidence,
             Self::ClosureIncomplete { .. } => AbortReason::ClosureIncomplete,
-            // The new pending-commit abort reuses `AbortReason::Other`
-            // because the existing variant set is closed (round-2 fix);
-            // the `"pending_commit"` string is the durable column value.
+            // The pending-commit abort reuses `AbortReason::Other`
+            // because the existing variant set is closed; the
+            // `"pending_commit"` string is the durable column value.
             Self::PendingCommit { .. } => AbortReason::Other("pending_commit".to_owned()),
         }
     }
@@ -149,9 +149,9 @@ async fn phase_a_gate_abort_with_event(
     aborted_at: OffsetDateTime,
     abort: PhaseAAbort,
 ) -> Result<CommitId, VoomError> {
-    // two-tx: tx 1 inserts the aborted row. Round-8 finding #2: both
-    // legs of the two-tx pattern route through `begin_gate_tx` so the
-    // gate's BEGIN IMMEDIATE invariant holds even on the abort path.
+    // The first leg of the two-tx abort pattern inserts the aborted
+    // row. Both legs route through `begin_gate_tx` so the gate's
+    // BEGIN IMMEDIATE invariant holds even on the abort path.
     let started_iso = iso8601(row.started_at)?;
     let aborted_iso = iso8601(aborted_at)?;
     let mut tx1 = begin_gate_tx(pool).await?;
@@ -286,7 +286,8 @@ pub(super) fn commit_target_kind_str(t: &CommitTarget) -> &'static str {
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
 /// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
-/// gate's tx handle (round-5 fix).
+/// gate's tx handle, preserving the gate snapshot and avoiding nested
+/// connection waits.
 ///
 /// `input.override_token` is the sanctioned force-path bypass (commit
 /// 10). `None` (the default) routes any `AliasResolutionError::Unreachable`
@@ -505,8 +506,8 @@ async fn run_phase_a_gate_in_tx(
         }));
     }
 
-    // Step 4 (round-7): overlapping-prepare check. Consult the
-    // pending-commit lock for every scope member of `closure` BEFORE
+    // Step 4: overlapping-prepare check. Consult the pending-commit
+    // lock for every scope member of `closure` BEFORE
     // landing the new `pending` row. Without this, two operators
     // preparing destructive commits on overlapping scope both end up
     // with `pending` (and later `authorized`) intents. Iterate from

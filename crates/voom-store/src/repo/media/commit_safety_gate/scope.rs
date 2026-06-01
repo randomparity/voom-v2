@@ -69,7 +69,7 @@ pub(super) async fn build_closure(
         }));
     };
 
-    // DB-internal live alias enumeration on the same tx (round-5 fix).
+    // Enumerate DB-internal live aliases on the same gate transaction.
     let live_locations: BTreeSet<FileLocationId> = identity_repo
         .list_live_file_locations_by_version_in_tx(tx, version.id)
         .await?
@@ -147,7 +147,7 @@ pub(super) async fn build_closure(
     // Warnings stay empty unless the force-path bypass swallowed an
     // `Unreachable` (commit 10) — in which case the dropped resolver
     // message rides along on the closure as a non-fatal annotation.
-    // Round-3 invariant: warnings do NOT contribute to closure drift
+    // Invariant: warnings do NOT contribute to closure drift
     // (`id_member_delta` ignores them), so the bypass-introduced
     // warning cannot mask the Phase B closure-grew trip-wire.
     let closure = AffectedScopeClosure {

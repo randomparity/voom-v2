@@ -644,8 +644,7 @@ pub trait IdentityRepo: Repository {
     ) -> Result<FileLocation, VoomError>;
     /// Atomically retire `retired_id` under its `expected_epoch` guard
     /// and insert a new `FileLocation` on the same `FileVersion`. Two
-    /// defense-in-depth guards layered inside this method (Codex
-    /// round-6):
+    /// defense-in-depth guards layered inside this method:
     ///
     /// 1. **Cross-version pre-check.** The retired row is fetched in
     ///    the caller's transaction and rejected with
@@ -1395,11 +1394,10 @@ impl IdentityRepo for SqliteIdentityRepo {
         new_location: NewFileLocation,
         retired_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError> {
-        // Round-6 finding #1: cross-version pre-check inside identity.
-        // The method is a public IdentityRepo trait method, so the
-        // "Phase C is the sole caller" assumption is not enforceable.
-        // Fetch the retired row in-tx; reject mismatches with Conflict
-        // before the retire UPDATE runs.
+        // Cross-version pre-check inside identity: this public
+        // IdentityRepo trait method cannot rely on Phase C being the
+        // only caller. Fetch the retired row in-tx and reject
+        // mismatches before the retire UPDATE runs.
         let retired_row = get_file_location_in_tx(tx, retired_id)
             .await?
             .ok_or_else(|| {
@@ -1418,8 +1416,8 @@ impl IdentityRepo for SqliteIdentityRepo {
             )));
         }
 
-        // Round-6 finding #2: SAVEPOINT around UPDATE retire + INSERT
-        // new. ROLLBACK TO on any inner Err restores the outer tx to
+        // Wrap UPDATE retire + INSERT new in a savepoint. ROLLBACK TO
+        // on any inner Err restores the outer tx to
         // pre-UPDATE state, so a caller that commits the outer tx
         // after the inner failure observes the old row still live.
         let mut sp = tx.begin().await.map_err(|e| {

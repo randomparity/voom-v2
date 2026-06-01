@@ -53,9 +53,9 @@ pub struct FileLocationProposal {
 /// because the schema and the cascade semantics needed to retire
 /// those rows safely are not yet defined:
 /// - `DeleteFileVersion`: retiring a version leaves live
-///   `FileLocation` rows pointing at it (Codex round-5). The safe
-///   cascade — atomically retire every location under the version
-///   using the snapshotted epochs — needs its own design pass.
+///   `FileLocation` rows pointing at it. The safe cascade —
+///   atomically retire every location under the version using the
+///   snapshotted epochs — needs its own design pass.
 /// - `ArchiveFileVersion`: `file_versions` schema (migration 0003)
 ///   has no `archived_at` column.
 /// - `ArchiveBundle` / `DeleteBundle`: same schema-column gap.
@@ -422,9 +422,9 @@ pub enum CommitGateResult {
     /// `commit.aborted_post_mutation` with
     /// `reason = 'stale_target_epoch'`.
     BlockedByStaleTargetEpoch { drift: Vec<TargetEpochDrift> },
-    /// Round-7 finding #1: post-trip-wire DB mutation (identity
-    /// dispatch / intent completion / event append) failed AFTER the
-    /// caller had already performed the durable filesystem mutation.
+    /// A post-trip-wire DB mutation (identity dispatch, intent
+    /// completion, or event append) failed after the caller had
+    /// already performed the durable filesystem mutation.
     /// Phase C wraps that block in a SAVEPOINT; on Err the savepoint
     /// rolls back and the outer tx transitions the intent to
     /// `recovery_required` with `recovery_reason = 'mutation_failed'`.
@@ -573,9 +573,8 @@ pub enum AliasResolutionError {
 /// (which has no transaction parameter) would either observe
 /// rows outside the gate's tx snapshot or, on single-connection
 /// pools, deadlock waiting for the connection already held by the
-/// open tx. Codex round-5 review surfaced this hazard; the
-/// previously-shipped `SqliteAliasResolver` (commit 2) was deleted
-/// as part of the round-5 fix.
+/// open tx. The previously shipped `SqliteAliasResolver` was deleted
+/// to keep DB-internal enumeration on the gate transaction.
 ///
 /// Object-safe by construction: no generics, no associated types.
 /// Callers in Phase A / B / C hold a `&dyn AliasResolver` for
@@ -710,7 +709,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
 }
 
 /// Open a commit-safety-gate transaction with `BEGIN IMMEDIATE` so
-/// `SQLite` takes a RESERVED lock at tx start (round-8 finding #2).
+/// `SQLite` takes a RESERVED lock at tx start.
 /// Every gate entry point — `prepare_destructive_commit`,
 /// `authorize_destructive_commit`, `finalize_destructive_commit`,
 /// `abort_destructive_commit` — plus the two-tx helper

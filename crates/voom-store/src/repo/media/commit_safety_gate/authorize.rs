@@ -52,7 +52,8 @@ pub enum AuthorizeOutcome {
 /// `alias_resolver` covers **external** (non-DB) alias sources only.
 /// DB-internal alias enumeration goes through
 /// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
-/// gate's tx handle (round-5 fix).
+/// gate's tx handle, preserving the gate snapshot and avoiding nested
+/// connection waits.
 ///
 /// On success the durable row state is:
 /// - `state = 'authorized'`

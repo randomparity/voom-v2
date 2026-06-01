@@ -50,7 +50,8 @@ pub enum FinalizeOutcome {
 /// `alias_resolver` covers **external** (non-DB) alias sources only;
 /// DB-internal alias enumeration goes through
 /// `IdentityRepo::list_live_file_locations_by_version_in_tx` on the
-/// gate's tx handle (round-5 fix).
+/// gate's tx handle, preserving the gate snapshot and avoiding nested
+/// connection waits.
 ///
 /// The four trip-wire sub-branches per sprint spec §9.3.2 Phase C
 /// step 3, plus the per-member epoch guard added under §3:
@@ -107,8 +108,8 @@ pub async fn finalize_destructive_commit(
 
     let row = read_authorized_intent_in_tx(&mut tx, permit.commit_id(), permit.epoch()).await?;
 
-    // Round-7 finding #2: destructure Applied { observed }. The caller's
-    // observed-alias set (if any) is merged with the recomputed
+    // Destructure Applied { observed }. The caller's observed-alias
+    // set (if any) is merged with the recomputed
     // closure_final inside the trip-wire path so members the caller saw
     // but the resolver/DB did not surface drive `BlockedByClosureGrew`
     // with the merged delta. NotPerformed never carries observed.
@@ -129,16 +130,11 @@ pub async fn finalize_destructive_commit(
     // path must transition the row to `recovery_required` rather than
     // propagate Err and leave the row stuck in `'authorized'`.
     //
-    // Round-8 finding #1: the recovery boundary now wraps the entire
-    // post-Applied block (snapshot decode + trip-wire recompute +
-    // either silent path or trip-wire branch). Round-7 wrapped only
-    // the silent dispatch + completion + event append; the trip-wire
-    // recompute itself ran through `?` and could propagate
-    // `VoomError::Internal` from a Phase C closure-walker abort,
-    // bypassing recovery entirely. The single outer savepoint
-    // subsumes the round-7 inner savepoint; on inner Err the
-    // savepoint rolls back to pre-Applied-accept state and the outer
-    // tx writes the `mutation_failed` recovery transition.
+    // The recovery boundary wraps the entire post-Applied block
+    // (snapshot decode, trip-wire recompute, and either silent path or
+    // trip-wire branch). The single outer savepoint ensures any inner
+    // Err rolls back to pre-Applied-accept state and the outer tx
+    // writes the `mutation_failed` recovery transition.
     finalize_applied_with_recovery_boundary(
         tx,
         identity_repo,
@@ -152,8 +148,8 @@ pub async fn finalize_destructive_commit(
     .await
 }
 
-/// Round-8 finding #1: the recovery boundary covering every
-/// post-Applied-accept failure path. Wraps the snapshot decode,
+/// Recovery boundary covering every post-Applied-accept failure path.
+/// Wraps the snapshot decode,
 /// trip-wire recompute, silent-path dispatch + completion + event
 /// append, and trip-wire UPDATE + events inside a single savepoint.
 /// On Ok, releases the savepoint and commits the outer tx. On Err,
@@ -262,15 +258,13 @@ async fn finalize_applied_inner(
     now: OffsetDateTime,
 ) -> Result<FinalizeOutcome, VoomError> {
     // Decode the durable per-member epoch snapshot Phase B wrote.
-    // A decode failure here is one of the round-8 failure modes the
-    // recovery boundary closes: previously `?` propagated out of
-    // finalize without a recovery transition.
+    // Decode failures must route through the recovery boundary rather
+    // than propagate out of finalize without a recovery transition.
     let snapshot = decode_target_row_epochs(&row.target_row_epochs_json)?;
-    // Run the defensive trip-wires. Round-8 finding #1: a Phase C
-    // closure-walker abort (translated to `VoomError::Internal`) used
-    // to propagate via `?` here, leaving the row stuck in
-    // `'authorized'`. Now any Err inside this call rolls the
-    // savepoint back and routes through `finalize_mutation_failed_in_tx`.
+    // Run the defensive trip-wires. Any Err inside this call rolls
+    // the savepoint back and routes through
+    // `finalize_mutation_failed_in_tx` instead of leaving the row in
+    // `authorized`.
     let trip_wire = run_phase_c_trip_wires_in_tx(
         sp,
         identity_repo,
@@ -579,9 +573,9 @@ async fn run_phase_c_trip_wires_in_tx(
         }
     };
 
-    // Round-7 finding #2: merge any caller-observed closure with the
-    // recomputed one. Members the caller saw but the resolver/DB
-    // didn't enumerate must contribute to the drift signal — otherwise
+    // Merge any caller-observed closure with the recomputed one.
+    // Members the caller saw but the resolver/DB didn't enumerate must
+    // contribute to the drift signal — otherwise
     // the trip-wire silently drops aliases the caller already touched.
     // The union is the authoritative `closure_final` for the recheck.
     let closure_final = merge_observed_into_closure(&closure_final_walked, observed);
@@ -754,12 +748,10 @@ async fn push_drift_if_mismatch(
 
 /// Silent-path success branch. Dispatches the durable identity
 /// mutation, transitions the row to `completed`, and emits the
-/// completed event. Round-8 finding #1: the recovery-boundary
-/// savepoint is owned by `finalize_applied_with_recovery_boundary`
-/// (the caller of this function); the round-7 inner savepoint has
-/// been subsumed because the outer boundary now covers every
-/// post-Applied failure path, including the trip-wire recompute that
-/// previously ran outside the savepoint.
+/// completed event. The recovery-boundary savepoint is owned by
+/// `finalize_applied_with_recovery_boundary` (the caller of this
+/// function), so every post-Applied failure path shares the same
+/// rollback and `mutation_failed` recovery transition.
 #[expect(
     clippy::too_many_arguments,
     reason = "Phase C silent path needs the full execution context; splitting would scatter the §9.3.2 step 4-5 invariants under one helper"
@@ -815,15 +807,15 @@ async fn finalize_silent_path_in_tx(
     })
 }
 
-/// Round-7 finding #1 recovery branch. After the silent-path savepoint
-/// rolls back on an inner Err, transition the commit-intent row to
-/// `recovery_required` with `recovery_reason = 'mutation_failed'`,
-/// emit `commit.aborted_post_mutation` (`reason='mutation_failed'`)
-/// plus `commit.recovery_required`, and return a `CommitGateOutcome`
-/// carrying `BlockedByMutationFailed { error }`. The caller commits the
-/// outer tx. The closure delta / fresh-lease arrays on the post-
-/// mutation event are empty because no trip-wire fired; the
-/// mutation-failure path is distinct from the four §9.3.2 trip-wires.
+/// Recovery branch for post-filesystem mutation database failures.
+/// After the recovery-boundary savepoint rolls back on an inner Err,
+/// transition the commit-intent row to `recovery_required` with
+/// `recovery_reason = 'mutation_failed'`, emit the matching audit
+/// events, and return a `CommitGateOutcome` carrying
+/// `BlockedByMutationFailed { error }`. The caller commits the outer
+/// tx. The closure delta / fresh-lease arrays on the post-mutation
+/// event are empty because no trip-wire fired; the mutation-failure
+/// path is distinct from the four §9.3.2 trip-wires.
 async fn finalize_mutation_failed_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_repo: &dyn EventRepo,
@@ -873,10 +865,10 @@ async fn finalize_mutation_failed_in_tx(
 /// sourcing `expected_epoch` from the snapshot decoded from
 /// `commit_intents.target_row_epochs`. `FileLocationProposal` →
 /// `NewFileLocation` conversion happens here, in Phase C, by reading
-/// the retired row's `file_version_id` inside the tx — the round-6
-/// enforcement point. `DeleteFileVersion` / `ArchiveFileVersion`
-/// dispatch is deferred per the round-5 fix (§3) and these variants
-/// do not exist in Sprint 1's `CommitTarget`.
+/// the retired row's `file_version_id` inside the tx. The
+/// `DeleteFileVersion` / `ArchiveFileVersion` dispatch paths are
+/// deferred because safe cascade semantics are not part of Sprint 1's
+/// `CommitTarget`.
 async fn dispatch_durable_mutation_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
@@ -896,9 +888,9 @@ async fn dispatch_durable_mutation_in_tx(
         CommitTarget::ReplaceFileLocation { retired, new }
         | CommitTarget::MoveFileLocation { retired, new } => {
             let expected = expected_epoch_for(snapshot, TargetMemberKind::FileLocation, retired.0)?;
-            // Round-6 enforcement: read the retired row inside the tx
-            // to pair `FileLocationProposal` with `file_version_id`.
-            // The proposal type carries no version field by
+            // Read the retired row inside the tx to pair
+            // `FileLocationProposal` with `file_version_id`. The
+            // proposal type carries no version field by
             // construction; this is the single sanctioned conversion
             // site and the inner-ring cross-version invariant inside
             // `replace_file_location_in_tx` is the matching defense.
@@ -1176,10 +1168,10 @@ async fn emit_recovery_required_event(
     Ok(())
 }
 
-/// Round-7 finding #1: emit `commit.aborted_post_mutation` with
-/// `reason='mutation_failed'`. The delta / lease / drift arrays are
-/// empty — the mutation-failure path is orthogonal to the four §9.3.2
-/// trip-wires. Audit consumers route on the `reason` tag.
+/// Emit `commit.aborted_post_mutation` with `reason='mutation_failed'`.
+/// The delta / lease / drift arrays are empty because the mutation-
+/// failure path is orthogonal to the four §9.3.2 trip-wires. Audit
+/// consumers route on the `reason` tag.
 async fn emit_mutation_failed_post_mutation_event(
     event_repo: &dyn EventRepo,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -1216,7 +1208,7 @@ async fn emit_mutation_failed_post_mutation_event(
     Ok(())
 }
 
-/// Round-7 finding #1: emit `commit.recovery_required` with
+/// Emit `commit.recovery_required` with
 /// `recovery_reason='mutation_failed'` alongside the post-mutation
 /// event so recovery tooling can decode the signal from a single row
 /// without joining back to the post-mutation event.
@@ -1256,15 +1248,14 @@ async fn emit_mutation_failed_recovery_required_event(
     Ok(())
 }
 
-/// Round-7 finding #2: merge the caller-observed closure (when
-/// `Some(_)`) with the recomputed `closure_final`. Members the caller
-/// saw but the resolver / DB-internal listing didn't surface end up in
-/// the merged set; the closure-grew trip-wire then sees them as
-/// `added_*` entries on the delta. The four ID sets are unioned;
-/// `resolution_warnings` is intentionally NOT carried over from
-/// `observed` (warnings do not contribute to drift — see
-/// `AffectedScopeClosure::id_member_delta` doc). Returns `walked`
-/// unchanged when `observed` is `None`.
+/// Merge the caller-observed closure (when `Some(_)`) with the
+/// recomputed `closure_final`. Members the caller saw but the resolver
+/// / DB-internal listing didn't surface end up in the merged set; the
+/// closure-grew trip-wire then sees them as `added_*` entries on the
+/// delta. The four ID sets are unioned; `resolution_warnings` is
+/// intentionally NOT carried over from `observed` (warnings do not
+/// contribute to drift — see `AffectedScopeClosure::id_member_delta`
+/// doc). Returns `walked` unchanged when `observed` is `None`.
 fn merge_observed_into_closure(
     walked: &AffectedScopeClosure,
     observed: Option<&AffectedScopeClosure>,
