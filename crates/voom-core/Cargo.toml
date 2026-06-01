@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-test-support = []
+test = []
 
 [dependencies]
 directories = "6.0.0"

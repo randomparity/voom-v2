@@ -12,6 +12,12 @@ use crate::operation_kind::OperationKind;
 pub struct TicketOperation(String);
 
 impl TicketOperation {
+    /// Create a ticket operation token from trusted configuration input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Config`] when the token is empty or contains
+    /// characters outside the ticket-operation wire format.
     pub fn new(value: impl Into<String>) -> Result<Self, VoomError> {
         let value = value.into();
         validate_operation_token(&value).map_err(|reason| {
@@ -20,6 +26,12 @@ impl TicketOperation {
         Ok(Self(value))
     }
 
+    /// Rebuild a ticket operation token loaded from persistent storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Database`] when the stored token is empty or
+    /// contains characters outside the ticket-operation wire format.
     pub fn from_stored(value: impl Into<String>, field: &str) -> Result<Self, VoomError> {
         let value = value.into();
         validate_operation_token(&value).map_err(|reason| {

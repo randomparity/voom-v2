@@ -10,7 +10,7 @@ use voom_store::{SchemaState, connect, expected_migrations, init, probe_schema};
 
 // Integration tests use the disk-backed public `init(url)` exclusively.
 // The :memory: + init_on path is covered by Task 11's lib-internal unit tests.
-// init_on is not re-exported from voom-store and is gated behind test-support.
+// init_on is not re-exported from voom-store and is gated behind the test feature.
 
 #[tokio::test]
 async fn init_on_disk_creates_schema_meta() {

@@ -26,4 +26,4 @@ tempfile = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tower = { version = "0.5.3", features = ["util"] }
-voom-store = { workspace = true, features = ["test-support"] }
+voom-store = { workspace = true, features = ["test"] }

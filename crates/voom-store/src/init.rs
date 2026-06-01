@@ -24,9 +24,9 @@ pub async fn init(url: &str) -> Result<InitReport, VoomError> {
 }
 
 /// Run migrations on an already-open pool. **Test-only public surface** —
-/// gated behind the `test-support` feature so production crates cannot reach
+/// gated behind the `test` feature so production crates cannot reach
 /// it. Use `init(url)` in production code.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub async fn init_on(pool: &SqlitePool) -> Result<InitReport, VoomError> {
     run_migrations_on(pool).await
 }

@@ -28,7 +28,7 @@ tempfile = { workspace = true }
 time = { workspace = true }
 voom-api = { workspace = true }
 voom-control-plane = { workspace = true }
-voom-store = { workspace = true, features = ["test-support"] }
+voom-store = { workspace = true, features = ["test"] }
 
 [[bin]]
 name = "fake-scanner"

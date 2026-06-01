@@ -17,7 +17,7 @@ pub mod pool;
 pub mod repo;
 pub mod schema;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod test_support;
 
 pub use init::{InitReport, init};

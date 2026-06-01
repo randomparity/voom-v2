@@ -8,7 +8,7 @@
 //! Core domain types shared by every voom-* crate.
 
 pub mod clock;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod clock_test_support;
 pub mod config;
 pub mod encoder_caps;
@@ -18,7 +18,7 @@ pub mod ids;
 pub mod issue;
 pub mod operation_kind;
 pub mod remux;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, feature = "test"))]
 pub mod rng_test_support;
 pub mod ticket_operation;
 pub mod transcode_video_profile;

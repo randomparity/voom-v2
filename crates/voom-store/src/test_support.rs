@@ -1,5 +1,5 @@
 //! Test-only helpers shared across the workspace. Gated behind the
-//! `test-support` feature so production crates cannot reach this module.
+//! `test` feature so production crates cannot reach this module.
 //!
 //! ### Why no centralized lint preamble
 //!
@@ -17,7 +17,7 @@
 //! `tempfile::NamedTempFile` is intentionally not used inside these helpers
 //! — that would force `tempfile` into voom-store's production dependency
 //! graph (cargo unifies features across the workspace, so a dev-dep enabling
-//! `test-support` propagates the dep tree). Callers create the temp file in
+//! `test` propagates the dep tree). Callers create the temp file in
 //! their own dev-deps and pass the path in. The boilerplate saved is the
 //! 4-line `format!` / `init` / `connect` ritual.
 

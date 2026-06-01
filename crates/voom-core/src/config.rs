@@ -13,6 +13,11 @@ pub enum LogFormat {
 }
 
 impl LogFormat {
+    /// Parse a log format token from configuration or environment input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Config`] when `s` is not `text` or `json`.
     pub fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "text" => Ok(Self::Text),
@@ -83,6 +88,11 @@ impl Config {
     /// Resolve config, reading any missing values from the supplied env source.
     ///
     /// Used by tests with `MapEnv` and by `resolve()` with `ProcessEnv`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Config`] when defaults cannot resolve user
+    /// configuration directories or when the effective log format is invalid.
     pub fn resolve_from<E: EnvSource>(
         env: &E,
         database_url_override: Option<String>,
@@ -109,6 +119,11 @@ impl Config {
     }
 
     /// Production entry point — reads from the live process environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VoomError::Config`] when defaults cannot resolve user
+    /// configuration directories or when the effective log format is invalid.
     pub fn resolve(
         database_url_override: Option<String>,
         log_level_override: Option<String>,

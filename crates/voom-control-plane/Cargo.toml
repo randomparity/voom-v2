@@ -16,7 +16,7 @@ workspace = true
 # dedicated case handler (e.g. ticket_dependencies setup). Never enable in
 # production binaries — those callers must go through the case-handler
 # layer so every durable state change pairs with EventRepo::append_in_tx.
-test-support = ["voom-store/test-support"]
+test = ["voom-store/test"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -47,7 +47,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "time", "test-util"] }
 # FrozenRng/SeededRng from voom-core::rng_test_support, used by lease
 # case tests to pin the backoff jitter.
-voom-core = { workspace = true, features = ["test-support"] }
+voom-core = { workspace = true, features = ["test"] }
 voom-fake-support = { workspace = true }
 voom-ffmpeg-worker = { workspace = true }
 voom-test-support = { workspace = true }

@@ -303,25 +303,25 @@ impl ControlPlane {
 
     // Test-support accessors let integration tests seed and inspect durable
     // state directly; production code uses the fields inside case handlers.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn events(&self) -> &SqliteEventRepo {
         &self.events
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn tickets(&self) -> &SqliteTicketRepo {
         &self.tickets
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn workers(&self) -> &SqliteWorkerRepo {
         &self.workers
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn leases(&self) -> &SqliteLeaseRepo {
         &self.leases
@@ -371,37 +371,37 @@ impl ControlPlane {
         self.video_profiles.get_by_name(name).await
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
         &self.artifact_access_plans
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn artifacts(&self) -> &SqliteArtifactRepo {
         &self.artifacts
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn identity(&self) -> &SqliteIdentityRepo {
         &self.identity
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
         &self.workflow_summaries
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn use_leases(&self) -> &SqliteUseLeaseRepo {
         &self.use_leases
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
         &self.policy_inputs

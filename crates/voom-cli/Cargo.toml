@@ -43,5 +43,5 @@ sqlx = { workspace = true }
 tempfile = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
-voom-store = { workspace = true, features = ["test-support"] }
+voom-store = { workspace = true, features = ["test"] }
 voom-test-support = { workspace = true }

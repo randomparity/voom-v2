@@ -1,4 +1,4 @@
-//! Test-only RNGs. Gated behind the `test-support` feature, mirroring
+//! Test-only RNGs. Gated behind the `test` feature, mirroring
 //! the `clock_test_support` pattern.
 //!
 //! `FrozenRng` returns a fixed `u32` from every call — wire it into

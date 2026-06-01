@@ -1,4 +1,4 @@
-//! Test-only clocks. Gated behind the `test-support` feature.
+//! Test-only clocks. Gated behind the `test` feature.
 
 use std::sync::Mutex;
 use time::{Duration, OffsetDateTime};
