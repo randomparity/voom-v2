@@ -4,9 +4,7 @@ use voom_core::OperationKind;
 use voom_core::VoomError;
 use voom_plan::{ExecutionPlan, NodeStatus, PlanOperationKind};
 
-use super::{
-    ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
-};
+use super::{ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowPlan};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PolicyExecutionPlan {
@@ -91,7 +89,7 @@ pub fn workflow_plan_from_compliance(
                 let workflow_node_id = format!("policy-node_{}", node.node_id);
                 workflow_node_ids_by_plan_node_id
                     .insert(node.node_id.clone(), workflow_node_id.clone());
-                nodes.push(WorkflowNode::Operation(OperationNode {
+                nodes.push(OperationNode {
                     id: workflow_node_id,
                     operation,
                     policy_target: Some(node.target.clone()),
@@ -99,7 +97,7 @@ pub fn workflow_plan_from_compliance(
                     depends_on: Vec::new(),
                     depends_on_selected: Vec::new(),
                     provides_selected: None,
-                }));
+                });
                 summary.submitted_node_count += 1;
                 *summary
                     .per_operation
@@ -159,7 +157,7 @@ fn execution_operation(operation_kind: PlanOperationKind) -> Result<OperationKin
 fn apply_plan_dependencies(
     plan: &ExecutionPlan,
     workflow_node_ids_by_plan_node_id: &BTreeMap<String, String>,
-    nodes: &mut [WorkflowNode],
+    nodes: &mut [OperationNode],
 ) {
     let mut dependencies_by_workflow_node_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for edge in &plan.edges {
@@ -177,12 +175,8 @@ fn apply_plan_dependencies(
             .push(from_workflow_node_id.clone());
     }
     for node in nodes {
-        match node {
-            WorkflowNode::Operation(operation) => {
-                if let Some(depends_on) = dependencies_by_workflow_node_id.remove(&operation.id) {
-                    operation.depends_on = depends_on;
-                }
-            }
+        if let Some(depends_on) = dependencies_by_workflow_node_id.remove(&node.id) {
+            node.depends_on = depends_on;
         }
     }
 }

@@ -11,7 +11,7 @@ use voom_events::{Event, SubjectType};
 use voom_store::repo::tickets::{NewTicket, Ticket, TicketRepo, TicketState};
 
 use super::binding::{BranchContext, render_default_payload};
-use super::model::{WorkflowNode, WorkflowPlan};
+use super::model::{OperationNode, WorkflowPlan};
 use super::ticket_payload::{WorkflowTicketPayload, operation_name};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
@@ -447,7 +447,7 @@ fn operation_for_node(plan: &WorkflowPlan, node_id: &str) -> Result<OperationKin
     plan.nodes
         .iter()
         .find(|node| node.id() == node_id)
-        .map(WorkflowNode::operation)
+        .map(OperationNode::operation)
         .ok_or_else(|| VoomError::Config(format!("workflow node `{node_id}` not found")))
 }
 

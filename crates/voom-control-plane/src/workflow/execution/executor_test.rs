@@ -41,7 +41,7 @@ use crate::workflow::execution::operation_adapters::{
 };
 use crate::workflow::execution::runtime::WorkerRuntimeRegistry;
 use crate::workflow::execution::timing::EffectiveTiming;
-use crate::workflow::plan::model::{ConcurrencyPolicy, OperationNode, WorkflowNode, WorkflowPlan};
+use crate::workflow::plan::model::{ConcurrencyPolicy, OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 use crate::workflow::summary::is_synthetic_root_ticket;
 use crate::workflow::{WorkflowExecutor, WorkflowRunSummary};
@@ -2684,16 +2684,14 @@ fn independent_hash_plan(ticket_count: usize) -> WorkflowPlan {
         id: format!("executor-test-{ticket_count}"),
         seed: 2,
         nodes: (0..ticket_count)
-            .map(|index| {
-                WorkflowNode::Operation(OperationNode {
-                    id: format!("hash-{index}"),
-                    operation: OperationKind::HashFile,
-                    policy_target: None,
-                    operation_payload: Value::Null,
-                    depends_on: Vec::new(),
-                    depends_on_selected: Vec::new(),
-                    provides_selected: None,
-                })
+            .map(|index| OperationNode {
+                id: format!("hash-{index}"),
+                operation: OperationKind::HashFile,
+                policy_target: None,
+                operation_payload: Value::Null,
+                depends_on: Vec::new(),
+                depends_on_selected: Vec::new(),
+                provides_selected: None,
             })
             .collect(),
         fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 3 },
@@ -2716,7 +2714,7 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
     WorkflowPlan {
         id: "policy-transcode-test".to_owned(),
         seed: 12,
-        nodes: vec![WorkflowNode::Operation(OperationNode {
+        nodes: vec![OperationNode {
             id: "policy-node_transcode".to_owned(),
             operation: OperationKind::TranscodeVideo,
             policy_target: Some(target),
@@ -2730,7 +2728,7 @@ fn policy_transcode_plan(target: TargetRef) -> WorkflowPlan {
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,
-        })],
+        }],
         fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
@@ -2777,7 +2775,7 @@ fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -
     WorkflowPlan {
         id: "policy-remux-test".to_owned(),
         seed: 12,
-        nodes: vec![WorkflowNode::Operation(OperationNode {
+        nodes: vec![OperationNode {
             id: "policy-node_remux".to_owned(),
             operation: OperationKind::Remux,
             policy_target: Some(target),
@@ -2785,7 +2783,7 @@ fn policy_remux_plan_with_payload(target: TargetRef, operation_payload: Value) -
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,
-        })],
+        }],
         fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
@@ -2858,7 +2856,7 @@ fn policy_audio_plan(
     WorkflowPlan {
         id: id.to_owned(),
         seed: 12,
-        nodes: vec![WorkflowNode::Operation(OperationNode {
+        nodes: vec![OperationNode {
             id: node_id.to_owned(),
             operation,
             policy_target: Some(target),
@@ -2866,7 +2864,7 @@ fn policy_audio_plan(
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,
-        })],
+        }],
         fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
@@ -2882,7 +2880,7 @@ fn non_policy_remux_plan() -> WorkflowPlan {
     WorkflowPlan {
         id: "non-policy-remux-test".to_owned(),
         seed: 12,
-        nodes: vec![WorkflowNode::Operation(OperationNode {
+        nodes: vec![OperationNode {
             id: "remux".to_owned(),
             operation: OperationKind::Remux,
             policy_target: None,
@@ -2890,7 +2888,7 @@ fn non_policy_remux_plan() -> WorkflowPlan {
             depends_on: Vec::new(),
             depends_on_selected: Vec::new(),
             provides_selected: None,
-        })],
+        }],
         fan_out: crate::workflow::plan::model::FanOutPolicy { max_files: 1 },
         concurrency: ConcurrencyPolicy {
             max_in_flight_dispatches: 1,
@@ -2929,8 +2927,8 @@ fn workflow_ticket_op(operation: OperationKind) -> TicketOperation {
     ))
 }
 
-fn policy_hash_node(id: &str, depends_on: &[&str]) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+fn policy_hash_node(id: &str, depends_on: &[&str]) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation: OperationKind::HashFile,
         policy_target: None,
@@ -2938,10 +2936,10 @@ fn policy_hash_node(id: &str, depends_on: &[&str]) -> WorkflowNode {
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: None,
-    })
+    }
 }
 
-fn policy_chain_plan(nodes: Vec<WorkflowNode>) -> WorkflowPlan {
+fn policy_chain_plan(nodes: Vec<OperationNode>) -> WorkflowPlan {
     WorkflowPlan {
         id: "policy-node-expansion-test".to_owned(),
         seed: 7,

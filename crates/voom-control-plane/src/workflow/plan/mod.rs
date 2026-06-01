@@ -4,6 +4,4 @@ pub mod model;
 pub mod policy_bridge;
 pub mod ticket_payload;
 
-pub use model::{
-    ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
-};
+pub use model::{ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowPlan};

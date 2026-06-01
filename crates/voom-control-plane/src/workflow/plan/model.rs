@@ -8,15 +8,10 @@ use voom_plan::TargetRef;
 pub struct WorkflowPlan {
     pub id: String,
     pub seed: u64,
-    pub nodes: Vec<WorkflowNode>,
+    pub nodes: Vec<OperationNode>,
     pub fan_out: FanOutPolicy,
     pub concurrency: ConcurrencyPolicy,
     pub timing: TimingPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub enum WorkflowNode {
-    Operation(OperationNode),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -152,54 +147,40 @@ impl WorkflowPlan {
     }
 }
 
-impl WorkflowNode {
+impl OperationNode {
     #[must_use]
     pub fn id(&self) -> &str {
-        match self {
-            Self::Operation(node) => &node.id,
-        }
+        &self.id
     }
 
     #[must_use]
     pub fn operation(&self) -> OperationKind {
-        match self {
-            Self::Operation(node) => node.operation,
-        }
+        self.operation
     }
 
     #[must_use]
     pub fn depends_on(&self) -> &[String] {
-        match self {
-            Self::Operation(node) => &node.depends_on,
-        }
+        &self.depends_on
     }
 
     #[must_use]
     pub fn depends_on_selected(&self) -> &[String] {
-        match self {
-            Self::Operation(node) => &node.depends_on_selected,
-        }
+        &self.depends_on_selected
     }
 
     #[must_use]
     pub fn provides_selected(&self) -> Option<&str> {
-        match self {
-            Self::Operation(node) => node.provides_selected.as_deref(),
-        }
+        self.provides_selected.as_deref()
     }
 
     #[must_use]
     pub fn policy_target(&self) -> Option<&TargetRef> {
-        match self {
-            Self::Operation(node) => node.policy_target.as_ref(),
-        }
+        self.policy_target.as_ref()
     }
 
     #[must_use]
     pub fn operation_payload(&self) -> &Value {
-        match self {
-            Self::Operation(node) => &node.operation_payload,
-        }
+        &self.operation_payload
     }
 }
 
@@ -211,8 +192,8 @@ impl WorkflowPlanError {
     }
 }
 
-fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -220,7 +201,7 @@ fn operation(id: &str, operation: OperationKind, depends_on: &[&str]) -> Workflo
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: None,
-    })
+    }
 }
 
 fn selected_operation(
@@ -228,8 +209,8 @@ fn selected_operation(
     operation: OperationKind,
     depends_on: &[&str],
     provides_selected: &str,
-) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -237,15 +218,15 @@ fn selected_operation(
         depends_on: depends_on.iter().map(ToString::to_string).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: Some(provides_selected.to_owned()),
-    })
+    }
 }
 
 fn operation_after_selected(
     id: &str,
     operation: OperationKind,
     depends_on_selected: &[&str],
-) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -256,10 +237,10 @@ fn operation_after_selected(
             .map(ToString::to_string)
             .collect(),
         provides_selected: None,
-    })
+    }
 }
 
-fn reject_cycles(nodes: &HashMap<&str, &WorkflowNode>) -> Result<(), WorkflowPlanError> {
+fn reject_cycles(nodes: &HashMap<&str, &OperationNode>) -> Result<(), WorkflowPlanError> {
     let selected_providers = selected_providers(nodes.values().copied());
     let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
@@ -270,7 +251,7 @@ fn reject_cycles(nodes: &HashMap<&str, &WorkflowNode>) -> Result<(), WorkflowPla
 }
 
 fn selected_providers<'a>(
-    nodes: impl Iterator<Item = &'a WorkflowNode>,
+    nodes: impl Iterator<Item = &'a OperationNode>,
 ) -> HashMap<&'a str, Vec<&'a str>> {
     let mut providers: HashMap<&str, Vec<&str>> = HashMap::new();
     for node in nodes {
@@ -283,7 +264,7 @@ fn selected_providers<'a>(
 
 fn visit<'a>(
     id: &'a str,
-    nodes: &HashMap<&'a str, &'a WorkflowNode>,
+    nodes: &HashMap<&'a str, &'a OperationNode>,
     selected_providers: &HashMap<&'a str, Vec<&'a str>>,
     visiting: &mut HashSet<&'a str>,
     visited: &mut HashSet<&'a str>,

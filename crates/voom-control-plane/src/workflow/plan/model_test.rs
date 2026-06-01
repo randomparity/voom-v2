@@ -1,5 +1,5 @@
 use crate::workflow::plan::model::{
-    ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
+    ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowPlan,
 };
 use voom_core::OperationKind;
 
@@ -106,7 +106,7 @@ fn valid_plan() -> WorkflowPlan {
     ])
 }
 
-fn plan_with_nodes<const N: usize>(nodes: [WorkflowNode; N]) -> WorkflowPlan {
+fn plan_with_nodes<const N: usize>(nodes: [OperationNode; N]) -> WorkflowPlan {
     WorkflowPlan {
         id: "test-plan".to_owned(),
         seed: 1,
@@ -122,8 +122,12 @@ fn plan_with_nodes<const N: usize>(nodes: [WorkflowNode; N]) -> WorkflowPlan {
     }
 }
 
-fn node<const N: usize>(id: &str, operation: OperationKind, depends_on: [&str; N]) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+fn node<const N: usize>(
+    id: &str,
+    operation: OperationKind,
+    depends_on: [&str; N],
+) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -131,15 +135,15 @@ fn node<const N: usize>(id: &str, operation: OperationKind, depends_on: [&str; N
         depends_on: depends_on.into_iter().map(str::to_owned).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: None,
-    })
+    }
 }
 
 fn node_after_selected<const N: usize>(
     id: &str,
     operation: OperationKind,
     depends_on_selected: [&str; N],
-) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -147,7 +151,7 @@ fn node_after_selected<const N: usize>(
         depends_on: Vec::new(),
         depends_on_selected: depends_on_selected.into_iter().map(str::to_owned).collect(),
         provides_selected: None,
-    })
+    }
 }
 
 fn selected_node<const N: usize>(
@@ -155,8 +159,8 @@ fn selected_node<const N: usize>(
     operation: OperationKind,
     depends_on: [&str; N],
     provides_selected: &str,
-) -> WorkflowNode {
-    WorkflowNode::Operation(OperationNode {
+) -> OperationNode {
+    OperationNode {
         id: id.to_owned(),
         operation,
         policy_target: None,
@@ -164,5 +168,5 @@ fn selected_node<const N: usize>(
         depends_on: depends_on.into_iter().map(str::to_owned).collect(),
         depends_on_selected: Vec::new(),
         provides_selected: Some(provides_selected.to_owned()),
-    })
+    }
 }

@@ -29,7 +29,7 @@ use crate::workflow::plan::expansion::{
     ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
     expand_scanner_completion, expand_transform_completion,
 };
-use crate::workflow::plan::model::{WorkflowNode, WorkflowPlan};
+use crate::workflow::plan::model::{OperationNode, WorkflowPlan};
 use crate::workflow::plan::ticket_payload::{WorkflowTicketPayload, operation_name};
 pub use crate::workflow::summary::{OperationSummary, WorkflowRunSummary};
 
@@ -540,7 +540,7 @@ where
     async fn create_node_ticket(
         &self,
         plan: &WorkflowPlan,
-        node: &WorkflowNode,
+        node: &OperationNode,
         workflow_id: &str,
         job_id: JobId,
         now: OffsetDateTime,
@@ -594,7 +594,7 @@ where
     async fn render_root_payload(
         &self,
         plan: &WorkflowPlan,
-        node: &WorkflowNode,
+        node: &OperationNode,
         branch: &BranchContext,
         timing: EffectiveTiming,
     ) -> Result<Value, VoomError> {
@@ -646,7 +646,7 @@ where
 
     async fn render_root_remux_payload(
         &self,
-        node: &WorkflowNode,
+        node: &OperationNode,
         branch: &BranchContext,
         timing: EffectiveTiming,
     ) -> Result<Value, VoomError> {
@@ -891,7 +891,7 @@ where
     /// Dynamically expands the dependents of a just-succeeded policy-bridge node.
     ///
     /// Policy plans (node ids prefixed `policy-node_`) can be arbitrary DAGs whose
-    /// edges are declared via [`WorkflowNode::depends_on`]. Workflow tickets do not
+    /// edges are declared via [`OperationNode::depends_on`]. Workflow tickets do not
     /// use the store's declarative dependency table, so each downstream node's
     /// ticket must be created here once all of its parents have succeeded.
     async fn expand_policy_node_completion(
@@ -1256,17 +1256,17 @@ fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
 /// Reports whether `node` lists `parent_id` among its direct dependencies.
 ///
 /// Only `depends_on` (node ids) is consulted. `depends_on_selected` holds
-/// dependency-*group* names resolved through [`WorkflowNode::provides_selected`],
+/// dependency-*group* names resolved through [`OperationNode::provides_selected`],
 /// not node ids, and no policy plan currently emits selected dependencies; their
 /// completion gating is therefore left undefined here rather than guessed.
-fn depends_on_node(node: &WorkflowNode, parent_id: &str) -> bool {
+fn depends_on_node(node: &OperationNode, parent_id: &str) -> bool {
     node.depends_on().iter().any(|id| id == parent_id)
 }
 
 /// Reports whether every direct dependency of `node` has a succeeded ticket. A
 /// join node is created only once all of its parents are present in `succeeded`,
 /// so the last parent to finish triggers creation exactly once.
-fn all_dependencies_succeeded(node: &WorkflowNode, succeeded: &HashSet<String>) -> bool {
+fn all_dependencies_succeeded(node: &OperationNode, succeeded: &HashSet<String>) -> bool {
     node.depends_on()
         .iter()
         .all(|dependency| succeeded.contains(dependency))
