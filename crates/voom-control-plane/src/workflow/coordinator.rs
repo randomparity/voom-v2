@@ -582,9 +582,9 @@ impl ControlPlane {
     /// summary.
     ///
     /// # Errors
-    /// Returns [`crate::workflow::CoordinatorError`] when durable inputs are
-    /// missing, the policy fails to compile, or a phase's tickets fail. Any
-    /// error after the job opens finalizes the job as `failed`.
+    /// Returns [`CoordinatorError`] when durable inputs are missing, the policy
+    /// fails to compile, or a phase's tickets fail. Any error after the job
+    /// opens finalizes the job as `failed`.
     pub async fn run_phase_barrier(
         &self,
         policy_version_id: PolicyVersionId,
@@ -625,13 +625,13 @@ impl ControlPlane {
     /// Resume a crashed or failed phase-barrier run (issue #165, spec §3/§8).
     /// Opens a **new** job and reconciles each file against `prior_job_id`'s
     /// per-`(file, phase)` rows (ADR-0009). Pass the **most-recently-failed**
-    /// run's job id (the latest
-    /// [`crate::workflow::CoordinatorError`].`partial.job_id`).
+    /// run's job id (the latest [`CoordinatorError::partial`] outcome's
+    /// `job_id`).
     ///
     /// # Errors
-    /// Returns [`crate::workflow::CoordinatorError`] when `prior_job_id` does
-    /// not exist, durable inputs are missing, the policy declares an unsupported
-    /// `on_error`, or a phase's tickets fail.
+    /// Returns [`CoordinatorError`] when `prior_job_id` does not exist, durable
+    /// inputs are missing, the policy declares an unsupported `on_error`, or a
+    /// phase's tickets fail.
     pub async fn resume_phase_barrier(
         &self,
         prior_job_id: JobId,
