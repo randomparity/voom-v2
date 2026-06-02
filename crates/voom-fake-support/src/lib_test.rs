@@ -57,6 +57,10 @@ fn scanner_fan_out_count_controls_file_count() {
     let terminal = terminal_payload(&frames);
     assert_eq!(terminal["files"].as_array().unwrap().len(), 3);
     assert_eq!(terminal["files"][0]["path"], "/library/file-000.mkv");
+    assert_eq!(
+        terminal["files"][0]["content_hash"],
+        format!("blake3:{}", blake3::hash(b"/library/file-000.mkv").to_hex())
+    );
     assert_eq!(terminal["files"][2]["path"], "/library/file-002.mkv");
 }
 
@@ -210,7 +214,7 @@ fn fake_transcoder_returns_typed_audio_result_for_protocol_payload() {
 #[test]
 fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
     let output_path = unique_output_path("fake-transcoder-video.mkv");
-    let request_payload = serde_json::to_value(TranscodeVideoRequest {
+    let mut request_payload = serde_json::to_value(TranscodeVideoRequest {
         input: TranscodeVideoInput {
             path: "/library/file-001.mkv".to_owned(),
             expected: TranscodeVideoExpectedFacts {
@@ -231,6 +235,9 @@ fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
         copy_video: false,
     })
     .unwrap();
+    let payload_object = request_payload.as_object_mut().unwrap();
+    payload_object.insert("branch_id".to_owned(), serde_json::json!("file-001"));
+    payload_object.insert("operation".to_owned(), serde_json::json!("transcode_video"));
     let req = request(OperationKind::TranscodeVideo, request_payload);
 
     let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();

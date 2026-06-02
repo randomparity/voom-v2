@@ -140,7 +140,7 @@ pub(crate) async fn expand_transform_completion(
     branch_id: &str,
     transform_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
-    let output_path = string_result_field(transform_ticket, "output_path")?;
+    let output_path = transform_result_output_path(transform_ticket)?;
     let branch = BranchContext {
         branch_id: branch_id.to_owned(),
         path: output_path,
@@ -480,6 +480,27 @@ fn string_result_field(ticket: &Ticket, field: &str) -> Result<String, VoomError
         .ok_or_else(|| {
             VoomError::Config(format!(
                 "ticket {} result field `{field}` must be a string",
+                ticket.id
+            ))
+        })
+}
+
+fn transform_result_output_path(ticket: &Ticket) -> Result<String, VoomError> {
+    let result = ticket
+        .result
+        .as_ref()
+        .ok_or_else(|| VoomError::Config(format!("ticket {} result is required", ticket.id)))?;
+    if let Some(path) = result.get("output_path").and_then(Value::as_str) {
+        return Ok(path.to_owned());
+    }
+    result
+        .get("output")
+        .and_then(|output| output.get("local_file_key"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            VoomError::Config(format!(
+                "ticket {} result must include `output_path` or `output.local_file_key`",
                 ticket.id
             ))
         })

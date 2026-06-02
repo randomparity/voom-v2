@@ -307,6 +307,11 @@ fn protocol_payload_without_runtime_metadata(payload: &serde_json::Value) -> ser
         "advertised_artifact_access",
         "artifact_access",
         "artifact_access_plan",
+        "branch_id",
+        "duration_ms",
+        "operation",
+        "progress_interval_ms",
+        "scenario",
     ];
 
     let mut payload = payload.clone();

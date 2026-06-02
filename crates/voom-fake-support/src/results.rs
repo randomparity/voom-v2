@@ -425,9 +425,12 @@ fn scanner_files(
     let count = fan_out_count.unwrap_or(1);
     let files = (0..count)
         .map(|index| {
+            let path = format!("{base}/file-{index:03}.mkv");
             serde_json::json!({
-                "path": format!("{base}/file-{index:03}.mkv"),
+                "path": path.clone(),
                 "size_bytes": 4_200_000_000_u64 + u64::from(index),
+                "content_hash": blake3_checksum(path.as_bytes()),
+                "local_file_key": path,
             })
         })
         .collect::<Vec<_>>();

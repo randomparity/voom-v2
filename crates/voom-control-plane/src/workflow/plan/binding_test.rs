@@ -50,6 +50,37 @@ fn default_payload_rendering_covers_default_ci_operations() {
 }
 
 #[test]
+fn default_transcode_payload_uses_worker_protocol_shape() {
+    let rendered = render_default_payload(
+        OperationKind::TranscodeVideo,
+        &branch_context_with_probe_codec("file-001", "h264"),
+        EffectiveTiming::for_test(25, 10),
+    )
+    .unwrap();
+
+    assert_eq!(rendered["operation"], "transcode_video");
+    assert_eq!(rendered["input"]["path"], "/library/file-001.mkv");
+    assert_eq!(
+        rendered["input"]["expected"]["size_bytes"],
+        4_200_000_000_u64
+    );
+    assert_eq!(
+        rendered["input"]["expected"]["content_hash"],
+        "blake3:file-001"
+    );
+    assert_eq!(rendered["output"]["container"], "mkv");
+    assert_eq!(rendered["output"]["video_codec"], "hevc");
+    assert_eq!(rendered["output"]["overwrite"], true);
+    assert_eq!(rendered["profile"]["name"], "default-hevc");
+    assert!(
+        rendered["output"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("/file-001/file-001.default-hevc.hevc.mkv")
+    );
+}
+
+#[test]
 fn scan_payload_uses_effective_fan_out() {
     let rendered = render_default_payload_with_fan_out(
         OperationKind::ScanLibrary,

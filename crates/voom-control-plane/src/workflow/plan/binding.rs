@@ -5,7 +5,12 @@ use voom_core::OperationKind;
 use voom_core::{FileLocationId, FileVersionId};
 use voom_plan::audio::{AudioOperationPayload, AudioOperationType};
 use voom_plan::remux::RemuxOperationPayload;
+use voom_worker_protocol::{
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest,
+};
 
+use crate::transcode::stage::{OutputName, output_file_name};
 use crate::workflow::execution::timing::EffectiveTiming;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,11 +72,7 @@ pub fn render_default_payload_with_fan_out(
             "path": branch.path,
             "container": "mkv",
         }),
-        OperationKind::TranscodeVideo => json!({
-            "path": branch.path,
-            "profile": "default",
-            "target_codec": "h265",
-        }),
+        OperationKind::TranscodeVideo => render_default_transcode_video_payload(branch)?,
         OperationKind::CommitArtifact => json!({
             "path": branch.path,
             "reason": "quality_regression",
@@ -99,6 +100,44 @@ pub fn render_default_payload_with_fan_out(
         json!(timing.progress_interval_ms),
     );
     Ok(payload)
+}
+
+fn render_default_transcode_video_payload(branch: &BranchContext) -> Result<Value, BindingError> {
+    let profile = TranscodeVideoProfile::default_hevc();
+    let staging_root = "/tmp/voom/default-workflow/transcode/staging";
+    let output_name = OutputName {
+        source_path: &branch.path,
+        profile_id: &profile.name,
+        codec: &profile.target_codec,
+        container: "mkv",
+    };
+    let request = TranscodeVideoRequest {
+        input: TranscodeVideoInput {
+            path: source_file_string(branch, "path")?.to_owned(),
+            expected: TranscodeVideoExpectedFacts {
+                size_bytes: source_file_u64(branch, "size_bytes")?,
+                content_hash: source_file_string(branch, "content_hash")?.to_owned(),
+                modified_at: source_file_optional_string(branch, "modified_at")?,
+                local_file_key: source_file_optional_string(branch, "local_file_key")?,
+            },
+        },
+        output: TranscodeVideoOutput {
+            staging_root: staging_root.to_owned(),
+            path: format!(
+                "{}/{}/{}",
+                staging_root,
+                branch.branch_id,
+                output_file_name(&output_name)
+            ),
+            container: "mkv".to_owned(),
+            video_codec: profile.target_codec.clone(),
+            overwrite: true,
+        },
+        profile,
+        copy_video: false,
+    };
+    serde_json::to_value(request)
+        .map_err(|err| BindingError::new(format!("transcode_video payload encode: {err}")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,7 +298,7 @@ pub fn branch_context_with_probe_codec(branch_id: &str, codec: &str) -> BranchCo
         branch_id: branch_id.to_owned(),
         path: format!("/library/{branch_id}.mkv"),
         probe_codec: Some(codec.to_owned()),
-        source_file: None,
+        source_file: Some(test_source_file(branch_id)),
     }
 }
 
@@ -268,6 +307,66 @@ fn required_string<'a>(payload: &'a Value, field: &str) -> Result<&'a str, Bindi
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| BindingError::new(format!("transcode_video payload missing `{field}`")))
+}
+
+fn source_file(branch: &BranchContext) -> Result<&Value, BindingError> {
+    branch.source_file.as_ref().ok_or_else(|| {
+        BindingError::new(format!(
+            "transcode_video branch `{}` missing source_file facts",
+            branch.branch_id
+        ))
+    })
+}
+
+fn source_file_string<'a>(
+    branch: &'a BranchContext,
+    field: &'static str,
+) -> Result<&'a str, BindingError> {
+    source_file(branch)?
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BindingError::new(format!(
+                "transcode_video source_file for branch `{}` missing string `{field}`",
+                branch.branch_id
+            ))
+        })
+}
+
+fn source_file_optional_string(
+    branch: &BranchContext,
+    field: &'static str,
+) -> Result<Option<String>, BindingError> {
+    match source_file(branch)?.get(field) {
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(BindingError::new(format!(
+            "transcode_video source_file for branch `{}` field `{field}` must be a string",
+            branch.branch_id
+        ))),
+    }
+}
+
+fn source_file_u64(branch: &BranchContext, field: &'static str) -> Result<u64, BindingError> {
+    source_file(branch)?
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            BindingError::new(format!(
+                "transcode_video source_file for branch `{}` missing unsigned `{field}`",
+                branch.branch_id
+            ))
+        })
+}
+
+#[cfg(test)]
+fn test_source_file(branch_id: &str) -> Value {
+    json!({
+        "path": format!("/library/{branch_id}.mkv"),
+        "size_bytes": 4_200_000_000_u64,
+        "content_hash": format!("blake3:{branch_id}"),
+        "local_file_key": format!("/library/{branch_id}.mkv")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

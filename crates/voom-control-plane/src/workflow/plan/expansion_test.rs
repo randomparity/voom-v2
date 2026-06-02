@@ -203,6 +203,37 @@ async fn transform_completion_creates_downstream_work_but_not_verify() {
 }
 
 #[tokio::test]
+async fn transform_completion_accepts_typed_transcode_output_facts() {
+    let fixture = WorkflowExpansionFixture::new().await;
+    let transform = fixture
+        .seed_succeeded_ticket(
+            "transcode",
+            "file-001",
+            OperationKind::TranscodeVideo,
+            serde_json::json!({
+                "output": {
+                    "local_file_key": "/tmp/voom/transcode/file-001.hevc.mkv"
+                }
+            }),
+        )
+        .await;
+
+    let created = expand_transform_completion(&fixture.ctx(), "file-001", &transform)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        node_ids(&created),
+        vec!["backup", "external-sync", "issue", "use-lease"]
+    );
+    let backup = fixture.ticket("backup", "file-001").await;
+    assert_eq!(
+        backup.rendered_payload["path"],
+        "/tmp/voom/transcode/file-001.hevc.mkv"
+    );
+}
+
+#[tokio::test]
 async fn backup_completion_creates_verify_after_local_backup_id_exists() {
     let fixture = WorkflowExpansionFixture::new().await;
     let backup = fixture
@@ -404,10 +435,7 @@ impl WorkflowExpansionFixture {
             operation,
             rendered_payload,
             timing: timing(),
-            source_file: Some(serde_json::json!({
-                "path": format!("/library/{branch_id}.mkv"),
-                "size_bytes": 4_200_000_000_u64,
-            })),
+            source_file: Some(source_file_for_branch(branch_id)),
         }
         .to_ticket_payload()
         .unwrap();
@@ -443,10 +471,7 @@ impl WorkflowExpansionFixture {
             operation,
             rendered_payload,
             timing: timing(),
-            source_file: Some(serde_json::json!({
-                "path": format!("/library/{branch_id}.mkv"),
-                "size_bytes": 4_200_000_000_u64,
-            })),
+            source_file: Some(source_file_for_branch(branch_id)),
         }
         .to_ticket_payload()
         .unwrap();
@@ -573,9 +598,9 @@ fn node_ids(tickets: &[Ticket]) -> Vec<String> {
 fn scanner_result_with_three_files() -> Value {
     serde_json::json!({
         "files": [
-            {"path": "/library/file-000.mkv", "size_bytes": 4_200_000_000_u64},
-            {"path": "/library/file-001.mkv", "size_bytes": 4_200_000_001_u64},
-            {"path": "/library/file-002.mkv", "size_bytes": 4_200_000_002_u64}
+            source_file_for_branch_with_size("file-000", 4_200_000_000_u64),
+            source_file_for_branch_with_size("file-001", 4_200_000_001_u64),
+            source_file_for_branch_with_size("file-002", 4_200_000_002_u64)
         ]
     })
 }
@@ -588,7 +613,7 @@ fn branch_for_seed(branch_id: &str, operation: OperationKind) -> BranchContext {
             branch_id: branch_id.to_owned(),
             path: format!("/library/{branch_id}.mkv"),
             probe_codec: Some("h264".to_owned()),
-            source_file: None,
+            source_file: Some(source_file_for_branch(branch_id)),
         }
     }
 }
@@ -603,6 +628,19 @@ fn ticket_kind(operation: OperationKind) -> TicketOperation {
 
 fn timing() -> EffectiveTiming {
     EffectiveTiming::for_test(25, 10)
+}
+
+fn source_file_for_branch(branch_id: &str) -> Value {
+    source_file_for_branch_with_size(branch_id, 4_200_000_000_u64)
+}
+
+fn source_file_for_branch_with_size(branch_id: &str, size_bytes: u64) -> Value {
+    serde_json::json!({
+        "path": format!("/library/{branch_id}.mkv"),
+        "size_bytes": size_bytes,
+        "content_hash": format!("blake3:{branch_id}"),
+        "local_file_key": format!("/library/{branch_id}.mkv")
+    })
 }
 
 fn format_time(t: OffsetDateTime) -> String {
