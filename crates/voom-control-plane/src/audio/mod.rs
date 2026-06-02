@@ -24,6 +24,8 @@ pub mod events;
 pub mod selection;
 pub mod source;
 pub mod stage;
+mod worker_contract;
+pub(crate) mod workflow;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteTranscodeAudioInput {
@@ -116,6 +118,13 @@ pub trait ExtractAudioDispatcher: Send + Sync {
 }
 
 impl ControlPlane {
+    /// Execute one policy-derived `transcode_audio` ticket through source
+    /// revalidation, worker staging, verification, add-only commit, and result
+    /// media-snapshot persistence.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, commit, and result-probe failures.
     pub async fn execute_transcode_audio(
         &self,
         input: ExecuteTranscodeAudioInput,
@@ -130,6 +139,12 @@ impl ControlPlane {
         .await
     }
 
+    /// Execute one policy-derived `extract_audio` ticket through source
+    /// revalidation, worker staging, verification, and add-only sidecar commit.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, and commit failures.
     pub async fn execute_extract_audio(
         &self,
         input: ExecuteExtractAudioInput,
@@ -225,17 +240,17 @@ async fn execute_transcode_audio_inner(
         &selection,
     )
     .await?;
-    dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::transcode_request_for(
+    worker_contract::revalidate_source_file(&selected).await?;
+    let request = worker_contract::transcode_audio_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
         &staging.path,
-    )?;
+    );
     let result = transcode.dispatch_transcode_audio(request).await?;
     context.result = Some(result.clone());
-    dispatch::validate_transcode_result(&selected, &selection, &result)?;
-    dispatch::require_transcode_output_file_matches_result(&staging.path, &result).await?;
+    worker_contract::validate_transcode_result(&selected, &selection, &result)?;
+    worker_contract::require_transcode_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_transcode(
         cp,
         &input,
@@ -522,17 +537,17 @@ async fn execute_extract_audio_inner(
         &selection,
     )
     .await?;
-    dispatch::revalidate_source_file(&selected).await?;
-    let request = dispatch::extract_request_for(
+    worker_contract::revalidate_source_file(&selected).await?;
+    let request = worker_contract::extract_audio_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
         &staging.path,
-    )?;
+    );
     let result = extract.dispatch_extract_audio(request).await?;
     context.result = Some(result.clone());
-    dispatch::validate_extract_result(&selected, &selection, &result)?;
-    dispatch::require_extract_output_file_matches_result(&staging.path, &result).await?;
+    worker_contract::validate_extract_result(&selected, &selection, &result)?;
+    worker_contract::require_extract_output_file_matches_result(&staging.path, &result).await?;
     let staged = commit::record_staged_audio_extract(
         cp,
         &input,

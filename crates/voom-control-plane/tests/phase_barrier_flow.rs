@@ -4,25 +4,25 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
+use voom_control_plane::CoordinatorOutcome;
+use voom_control_plane::policy::ComplianceExecutionOptions;
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
-use voom_control_plane::workflow::coordinator::CoordinatorOutcome;
 use voom_core::{FileVersionId, MediaSnapshotId};
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, PhaseOutcome, SqliteWorkflowSummaryRepo,
-    WorkflowSummaryRepo,
 };
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
+    target_debug_binary,
 };
 
 /// The phase-barrier coordinator drives one `plan_phase` per phase across every
@@ -37,14 +37,15 @@ use voom_test_support::worker::{
 async fn phase_barrier_commits_every_file_in_a_single_phase() {
     // The post-commit result probe runs REAL ffprobe against the committed
     // output; hide any canned `ffprobe` stub installed by sibling tests.
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source_one = tmp.path().join("Movie1.mp4");
-    let source_two = tmp.path().join("Movie2.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source_one = root.join("Movie1.mp4");
+    let source_two = root.join("Movie2.mp4");
     generate_h264_fixture(&source_one);
     generate_h264_fixture(&source_two);
 
@@ -75,13 +76,13 @@ async fn phase_barrier_commits_every_file_in_a_single_phase() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let outcome = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -228,13 +229,14 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
 /// the canonical `mkv` — orthogonal to the chain-advance behavior under test.)
 #[tokio::test]
 async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source = tmp.path().join("Chain.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Chain.mp4");
     generate_h264_fixture(&source);
 
     let db = NamedTempFile::new().unwrap();
@@ -262,13 +264,13 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let outcome = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -426,14 +428,15 @@ async fn assert_reprobe_and_lineage_chain(
 /// returns a `partial` outcome, and the job is `failed`.
 #[tokio::test]
 async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let good = tmp.path().join("Good.mp4");
-    let doomed = tmp.path().join("Doomed.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let good = root.join("Good.mp4");
+    let doomed = root.join("Doomed.mp4");
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
 
@@ -468,13 +471,13 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
         .unwrap();
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let result = cp
         .run_phase_barrier(
             policy.version.id,
             input.id,
             ComplianceExecutionOptions {
-                transcode_staging_root: tmp.path().join("stage"),
+                transcode_staging_root: root.join("stage"),
                 transcode_target_dir: out_dir.clone(),
                 ..ComplianceExecutionOptions::default()
             },
@@ -510,15 +513,16 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
 /// re-enters `Doomed` (it commits) without re-mutating `Good`, under a new job.
 #[tokio::test]
 async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let good = tmp.path().join("Good.mp4");
-    let doomed = tmp.path().join("Doomed.mp4");
-    let doomed_bak = tmp.path().join("Doomed.bak");
+    let root = tmp.path().canonicalize().unwrap();
+    let good = root.join("Good.mp4");
+    let doomed = root.join("Doomed.mp4");
+    let doomed_bak = root.join("Doomed.bak");
     generate_h264_fixture(&good);
     generate_h264_fixture(&doomed);
     std::fs::copy(&doomed, &doomed_bak).unwrap();
@@ -551,9 +555,9 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
         ]))
         .await
         .unwrap();
-    let out_dir = tmp.path().join("out");
+    let out_dir = root.join("out");
     let options = ComplianceExecutionOptions {
-        transcode_staging_root: tmp.path().join("stage"),
+        transcode_staging_root: root.join("stage"),
         transcode_target_dir: out_dir.clone(),
         ..ComplianceExecutionOptions::default()
     };
@@ -746,47 +750,6 @@ fn two_file_input(files: &[(&str, ScannedFile)]) -> PolicyInputSetDraft {
         bundle_targets: Vec::new(),
         quality_profiles: Vec::new(),
         issues: Vec::new(),
-    }
-}
-
-/// Hide the canned test-helper `ffprobe` sibling so the bundled probe worker
-/// runs real ffprobe (see `video_transcode_flow.rs` for the rationale). The
-/// static mutex serializes any real-ffprobe cases in this binary.
-fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = target_debug_binary("ffprobe");
-    let hidden = path.with_file_name("ffprobe.phase-barrier-flow-hidden");
-    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
-        bytes
-            .windows(b"ffprobe version test-helper".len())
-            .any(|window| window == b"ffprobe version test-helper")
-    });
-    if is_stub {
-        std::fs::rename(&path, &hidden).unwrap();
-    }
-    FfprobeSiblingGuard {
-        path,
-        hidden,
-        restore: is_stub,
-        _lock: lock,
-    }
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-    restore: bool,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.restore && self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
     }
 }
 

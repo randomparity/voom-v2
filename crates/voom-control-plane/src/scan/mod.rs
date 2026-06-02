@@ -5,17 +5,19 @@ use std::time::Duration;
 
 use voom_core::{
     BundleId, ErrorCode, FailureClass, FileAssetId, FileLocationId, FileVersionId, MediaSnapshotId,
-    VoomError, WorkerId,
+    VoomError, WorkerId, format_iso8601,
 };
 use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult};
 
 use crate::ControlPlane;
 
-pub mod bootstrap;
-pub mod discovery;
-pub mod hash;
-pub mod persist;
-pub mod worker;
+pub(crate) mod bootstrap;
+pub(crate) mod discovery;
+pub(crate) mod hash;
+pub(crate) mod persist;
+pub(crate) mod worker;
+
+pub use discovery::{ScanMode, is_supported_media_path, is_supported_sidecar_path};
 
 #[derive(Debug, Clone)]
 pub struct ScanPathInput {
@@ -25,7 +27,7 @@ pub struct ScanPathInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanReport {
     pub path: PathBuf,
-    pub mode: discovery::ScanMode,
+    pub mode: ScanMode,
     pub summary: ScanSummary,
     pub files: Vec<ScanFileReport>,
     pub skipped: Vec<ScanFileReport>,
@@ -127,10 +129,6 @@ impl ControlPlane {
         self.scan_path_with_launcher(input, &mut launcher).await
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "scan orchestration is a linear per-file state machine; splitting would obscure the failure report updates"
-    )]
     async fn scan_path_with_launcher<L>(
         &self,
         input: ScanPathInput,
@@ -142,65 +140,45 @@ impl ControlPlane {
         let discovered = discovery::discover_path(&input.path)
             .await
             .map_err(|err| discovery_error(input.path.clone(), &err))?;
-        let mut report = ScanReport::from_discovered(&discovered);
+        let mut report = ScanReportBuilder::from_discovered(&discovered);
         if discovered.candidates.is_empty() {
-            return Ok(report);
+            return Ok(report.finish());
         }
-        let worker_id = self
-            .ensure_scan_worker()
-            .await
-            .map_err(|err| command_error_from_voom(&err, report.clone()))?;
-        let mut worker = launcher
-            .launch_ffprobe(worker_id)
-            .await
-            .map_err(|err| command_error_from_worker(&err, report.clone()))?;
+        let mut worker = self.launch_scan_worker(launcher, &report).await?;
+        let worker_id = worker.worker_id();
 
         let result = async {
             for candidate in discovered.candidates {
                 let candidate_facts = match hash::observe_candidate_file(&candidate.path).await {
                     Ok(facts) => facts,
                     Err(err) => {
-                        push_scan_error(
-                            &mut report,
-                            candidate.path,
-                            ScanReportFileStatus::Failed,
-                            None,
-                            None,
-                            scan_file_error_from_discovery(&err),
-                        );
-                        return Err(command_error_from_report_tail(report));
+                        return Err(report.fail_observe(candidate.path, &err));
                     }
                 };
                 let request = match probe_request(&candidate.path, &candidate_facts) {
                     Ok(request) => request,
                     Err(error) => {
-                        push_scan_error(
-                            &mut report,
+                        return Err(report.fail_probe_request(
                             candidate.path,
-                            ScanReportFileStatus::Failed,
-                            Some(&candidate_facts),
-                            Some(worker.worker_id()),
+                            &candidate_facts,
+                            worker_id,
                             error,
-                        );
-                        return Err(command_error_from_report_tail(report));
+                        ));
                     }
                 };
-                launcher.record_dispatch(worker.worker_id());
+                launcher.record_dispatch(worker_id);
                 let probe = match worker.dispatch_probe_file(request).await {
                     Ok(probe) => {
-                        report.summary.probed += 1;
+                        report.record_probe();
                         probe
                     }
                     Err(err) => {
-                        push_scan_error(
-                            &mut report,
+                        return Err(report.fail_worker(
                             candidate.path,
-                            ScanReportFileStatus::Failed,
-                            Some(&candidate_facts),
-                            Some(worker.worker_id()),
-                            scan_file_error_from_worker(&err),
-                        );
-                        return Err(command_error_from_worker(&err, report));
+                            &candidate_facts,
+                            worker_id,
+                            &err,
+                        ));
                     }
                 };
                 match persist::persist_scanned_media_snapshot(
@@ -214,47 +192,55 @@ impl ControlPlane {
                 .await
                 {
                     Ok(persisted) => {
-                        report.summary.ingested += 1;
-                        report.summary.ingested +=
-                            u64::try_from(persisted.sidecars.len()).unwrap_or(u64::MAX);
-                        report.summary.snapshots_recorded += 1;
-                        report.files.push(scanned_file_report(
+                        report.push_scanned_file(
                             candidate.path,
                             &candidate_facts,
-                            worker.worker_id(),
+                            worker_id,
                             &persisted,
-                        ));
+                        );
                     }
                     Err(persist::ScanPersistError::File(err)) => {
-                        push_scan_error(
-                            &mut report,
+                        return Err(report.fail_persist_file(
                             candidate.path,
-                            err.status(),
-                            Some(&candidate_facts),
-                            Some(worker.worker_id()),
-                            scan_file_error_from_persist(&err),
-                        );
-                        return Err(command_error_from_report_tail(report));
+                            &candidate_facts,
+                            worker_id,
+                            &err,
+                        ));
                     }
                     Err(persist::ScanPersistError::Store(err)) => {
-                        push_scan_error(
-                            &mut report,
+                        return Err(report.fail_voom(
                             candidate.path,
-                            ScanReportFileStatus::Failed,
-                            Some(&candidate_facts),
-                            Some(worker.worker_id()),
-                            scan_file_error_from_voom(&err),
-                        );
-                        return Err(command_error_from_voom(&err, report));
+                            &candidate_facts,
+                            worker_id,
+                            &err,
+                        ));
                     }
                 }
             }
 
-            Ok(report)
+            Ok(report.finish())
         }
         .await;
         worker.shutdown().await;
         result
+    }
+
+    async fn launch_scan_worker<L>(
+        &self,
+        launcher: &mut L,
+        report: &ScanReportBuilder,
+    ) -> Result<Box<dyn ProbeWorkerSession + Send>, ScanCommandError>
+    where
+        L: ScanWorkerLauncher + Send,
+    {
+        let worker_id = self
+            .ensure_scan_worker()
+            .await
+            .map_err(|err| command_error_from_voom(&err, report.report().clone()))?;
+        launcher
+            .launch_ffprobe(worker_id)
+            .await
+            .map_err(|err| command_error_from_worker(&err, report.report().clone()))
     }
 
     async fn ensure_scan_worker(&self) -> Result<WorkerId, VoomError> {
@@ -309,7 +295,7 @@ impl ScanWorkerLauncher for BundledFfprobeLauncher {
 #[async_trait::async_trait]
 impl ProbeWorkerSession for worker::BundledWorkerProcess {
     fn worker_id(&self) -> WorkerId {
-        self.worker_id
+        self.worker_id()
     }
 
     async fn dispatch_probe_file(
@@ -324,7 +310,11 @@ impl ProbeWorkerSession for worker::BundledWorkerProcess {
     }
 }
 
-impl ScanReport {
+struct ScanReportBuilder {
+    report: ScanReport,
+}
+
+impl ScanReportBuilder {
     fn from_discovered(discovered: &discovery::DiscoveredScan) -> Self {
         let skipped = discovered
             .skipped
@@ -354,15 +344,194 @@ impl ScanReport {
             u64::try_from(discovered.candidates.len() + sidecar_count + skipped.len())
                 .unwrap_or(u64::MAX);
         Self {
-            path: discovered.root.clone(),
-            mode: discovered.mode,
-            summary: ScanSummary {
-                discovered: discovered_count,
-                skipped: u64::try_from(skipped.len()).unwrap_or(u64::MAX),
-                ..ScanSummary::default()
+            report: ScanReport {
+                path: discovered.root.clone(),
+                mode: discovered.mode,
+                summary: ScanSummary {
+                    discovered: discovered_count,
+                    skipped: u64::try_from(skipped.len()).unwrap_or(u64::MAX),
+                    ..ScanSummary::default()
+                },
+                files: Vec::new(),
+                skipped,
             },
-            files: Vec::new(),
-            skipped,
+        }
+    }
+
+    const fn report(&self) -> &ScanReport {
+        &self.report
+    }
+
+    fn finish(self) -> ScanReport {
+        self.report
+    }
+
+    fn record_probe(&mut self) {
+        self.report.summary.probed += 1;
+    }
+
+    fn push_scanned_file(
+        &mut self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        persisted: &persist::PersistedScan,
+    ) {
+        self.report.summary.ingested += 1;
+        self.report.summary.ingested += u64::try_from(persisted.sidecars.len()).unwrap_or(u64::MAX);
+        self.report.summary.snapshots_recorded += 1;
+        self.report
+            .files
+            .push(Self::scanned_file_report(path, facts, worker_id, persisted));
+    }
+
+    fn push_error(
+        &mut self,
+        path: PathBuf,
+        status: ScanReportFileStatus,
+        facts: Option<&hash::ObservedFileFacts>,
+        worker_id: Option<WorkerId>,
+        error: ScanFileErrorReport,
+    ) {
+        self.report.summary.failed += 1;
+        self.report.files.push(ScanFileReport {
+            path,
+            status,
+            file_asset_id: None,
+            file_version_id: None,
+            file_location_id: None,
+            media_snapshot_id: None,
+            content_hash: facts.map(|facts| facts.content_hash.clone()),
+            size_bytes: facts.map(|facts| facts.size_bytes),
+            probe_worker_id: worker_id,
+            bundle_id: None,
+            bundle_member_role: None,
+            sidecars: Vec::new(),
+            error: Some(error),
+        });
+    }
+
+    fn fail_file(
+        mut self,
+        path: PathBuf,
+        status: ScanReportFileStatus,
+        facts: Option<&hash::ObservedFileFacts>,
+        worker_id: Option<WorkerId>,
+        error: ScanFileErrorReport,
+    ) -> ScanCommandError {
+        self.push_error(path, status, facts, worker_id, error);
+        command_error_from_report_tail(self.finish())
+    }
+
+    fn fail_observe(self, path: PathBuf, err: &discovery::ScanError) -> ScanCommandError {
+        self.fail_file(
+            path,
+            ScanReportFileStatus::Failed,
+            None,
+            None,
+            scan_file_error_from_discovery(err),
+        )
+    }
+
+    fn fail_probe_request(
+        self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        error: ScanFileErrorReport,
+    ) -> ScanCommandError {
+        self.fail_file(
+            path,
+            ScanReportFileStatus::Failed,
+            Some(facts),
+            Some(worker_id),
+            error,
+        )
+    }
+
+    fn fail_persist_file(
+        self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        err: &persist::ScanFileError,
+    ) -> ScanCommandError {
+        self.fail_file(
+            path,
+            err.status(),
+            Some(facts),
+            Some(worker_id),
+            scan_file_error_from_persist(err),
+        )
+    }
+
+    fn fail_worker(
+        mut self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        err: &worker::ScanWorkerError,
+    ) -> ScanCommandError {
+        self.push_error(
+            path,
+            ScanReportFileStatus::Failed,
+            Some(facts),
+            Some(worker_id),
+            scan_file_error_from_worker(err),
+        );
+        command_error_from_worker(err, self.finish())
+    }
+
+    fn fail_voom(
+        mut self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        err: &VoomError,
+    ) -> ScanCommandError {
+        self.push_error(
+            path,
+            ScanReportFileStatus::Failed,
+            Some(facts),
+            Some(worker_id),
+            scan_file_error_from_voom(err),
+        );
+        command_error_from_voom(err, self.finish())
+    }
+
+    fn scanned_file_report(
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        persisted: &persist::PersistedScan,
+    ) -> ScanFileReport {
+        ScanFileReport {
+            path,
+            status: ScanReportFileStatus::Scanned,
+            file_asset_id: Some(persisted.file_asset_id),
+            file_version_id: Some(persisted.file_version_id),
+            file_location_id: Some(persisted.file_location_id),
+            media_snapshot_id: Some(persisted.media_snapshot_id),
+            content_hash: Some(facts.content_hash.clone()),
+            size_bytes: Some(facts.size_bytes),
+            probe_worker_id: Some(worker_id),
+            bundle_id: persisted.bundle_id,
+            bundle_member_role: persisted.bundle_member_role.clone(),
+            sidecars: persisted
+                .sidecars
+                .iter()
+                .map(|sidecar| ScanSidecarReport {
+                    path: sidecar.path.clone(),
+                    file_asset_id: sidecar.file_asset_id,
+                    file_version_id: sidecar.file_version_id,
+                    file_location_id: sidecar.file_location_id,
+                    bundle_id: sidecar.bundle_id,
+                    bundle_member_role: sidecar.bundle_member_role.clone(),
+                    content_hash: sidecar.content_hash.clone(),
+                    size_bytes: sidecar.size_bytes,
+                })
+                .collect(),
+            error: None,
         }
     }
 }
@@ -386,79 +555,16 @@ fn probe_request(
             content_hash: facts.content_hash.clone(),
             modified_at: facts
                 .modified_at
-                .map(|modified| chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339()),
+                .map(|modified| format_iso8601(time::OffsetDateTime::from(modified))),
             local_file_key: None,
         },
     })
 }
 
-fn scanned_file_report(
-    path: PathBuf,
-    facts: &hash::ObservedFileFacts,
-    worker_id: WorkerId,
-    persisted: &persist::PersistedScan,
-) -> ScanFileReport {
-    ScanFileReport {
-        path,
-        status: ScanReportFileStatus::Scanned,
-        file_asset_id: Some(persisted.file_asset_id),
-        file_version_id: Some(persisted.file_version_id),
-        file_location_id: Some(persisted.file_location_id),
-        media_snapshot_id: Some(persisted.media_snapshot_id),
-        content_hash: Some(facts.content_hash.clone()),
-        size_bytes: Some(facts.size_bytes),
-        probe_worker_id: Some(worker_id),
-        bundle_id: persisted.bundle_id,
-        bundle_member_role: persisted.bundle_member_role.clone(),
-        sidecars: persisted
-            .sidecars
-            .iter()
-            .map(|sidecar| ScanSidecarReport {
-                path: sidecar.path.clone(),
-                file_asset_id: sidecar.file_asset_id,
-                file_version_id: sidecar.file_version_id,
-                file_location_id: sidecar.file_location_id,
-                bundle_id: sidecar.bundle_id,
-                bundle_member_role: sidecar.bundle_member_role.clone(),
-                content_hash: sidecar.content_hash.clone(),
-                size_bytes: sidecar.size_bytes,
-            })
-            .collect(),
-        error: None,
-    }
-}
-
-fn push_scan_error(
-    report: &mut ScanReport,
-    path: PathBuf,
-    status: ScanReportFileStatus,
-    facts: Option<&hash::ObservedFileFacts>,
-    worker_id: Option<WorkerId>,
-    error: ScanFileErrorReport,
-) {
-    report.summary.failed += 1;
-    report.files.push(ScanFileReport {
-        path,
-        status,
-        file_asset_id: None,
-        file_version_id: None,
-        file_location_id: None,
-        media_snapshot_id: None,
-        content_hash: facts.map(|facts| facts.content_hash.clone()),
-        size_bytes: facts.map(|facts| facts.size_bytes),
-        probe_worker_id: worker_id,
-        bundle_id: None,
-        bundle_member_role: None,
-        sidecars: Vec::new(),
-        error: Some(error),
-    });
-}
-
 fn file_status_from_discovery(status: discovery::FileScanStatus) -> ScanReportFileStatus {
     match status {
-        discovery::FileScanStatus::SkippedInaccessible => ScanReportFileStatus::SkippedInaccessible,
-        discovery::FileScanStatus::SkippedSymlink
-        | discovery::FileScanStatus::SkippedUnsupportedExtension => {
+        discovery::FileScanStatus::Inaccessible => ScanReportFileStatus::SkippedInaccessible,
+        discovery::FileScanStatus::Symlink | discovery::FileScanStatus::UnsupportedExtension => {
             ScanReportFileStatus::SkippedUnsupportedExtension
         }
     }

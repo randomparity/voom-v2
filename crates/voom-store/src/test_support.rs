@@ -1,5 +1,5 @@
 //! Test-only helpers shared across the workspace. Gated behind the
-//! `test-support` feature so production crates cannot reach this module.
+//! `test` feature so production crates cannot reach this module.
 //!
 //! ### Why no centralized lint preamble
 //!
@@ -17,7 +17,7 @@
 //! `tempfile::NamedTempFile` is intentionally not used inside these helpers
 //! — that would force `tempfile` into voom-store's production dependency
 //! graph (cargo unifies features across the workspace, so a dev-dep enabling
-//! `test-support` propagates the dep tree). Callers create the temp file in
+//! `test` propagates the dep tree). Callers create the temp file in
 //! their own dev-deps and pass the path in. The boilerplate saved is the
 //! 4-line `format!` / `init` / `connect` ritual.
 
@@ -26,12 +26,12 @@ use std::path::Path;
 use serde_json::Value as JsonValue;
 use sqlx::SqlitePool;
 use time::OffsetDateTime;
-use voom_core::{JobId, VoomError};
+use voom_core::{JobId, TicketOperation, VoomError};
 
 use crate::init::init;
 use crate::pool::connect;
-use crate::repo::tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketRepo};
-use crate::repo::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind, WorkerRepo};
+use crate::repo::execution::tickets::{NewTicket, SqliteTicketRepo, Ticket};
+use crate::repo::execution::workers::{NewWorker, SqliteWorkerRepo, Worker, WorkerKind};
 
 /// Shared default timestamp for builder fixtures and tests. Keyed on
 /// `OffsetDateTime::UNIX_EPOCH` so snapshot diffs are stable across runs.
@@ -166,11 +166,11 @@ impl TicketBuilder {
     ///
     /// # Errors
     ///
-    /// Propagates `TicketRepo::create` errors.
+    /// Propagates `SqliteTicketRepo::create` errors.
     pub async fn build(self, repo: &SqliteTicketRepo) -> Result<Ticket, VoomError> {
         repo.create(NewTicket {
             job_id: self.job_id,
-            kind: self.kind,
+            kind: TicketOperation::new(self.kind)?,
             priority: self.priority,
             payload: self.payload,
             max_attempts: self.max_attempts,
@@ -225,7 +225,7 @@ impl WorkerBuilder {
     ///
     /// # Errors
     ///
-    /// Propagates `WorkerRepo::register` errors.
+    /// Propagates `SqliteWorkerRepo::register` errors.
     pub async fn build(self, repo: &SqliteWorkerRepo) -> Result<Worker, VoomError> {
         repo.register(NewWorker {
             name: self.name,
@@ -249,7 +249,7 @@ use std::collections::BTreeSet;
 
 use voom_core::ids::{FileLocationId, FileVersionId};
 
-use crate::repo::commit_safety_gate::{AliasResolutionError, AliasResolver};
+use crate::repo::media::commit_safety_gate::{AliasResolutionError, AliasResolver};
 
 #[derive(Debug, Clone)]
 pub struct FailingAliasResolver {

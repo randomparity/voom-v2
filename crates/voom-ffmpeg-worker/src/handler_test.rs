@@ -44,6 +44,24 @@ async fn output_path_escape_is_config_invalid() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_video_output_symlink_is_config_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = request(dir.path(), &input).await;
+    std::os::unix::fs::symlink(dir.path().join("missing-target.mkv"), &request.output.path)
+        .unwrap();
+
+    let err = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("already exists"));
+}
+
 #[tokio::test]
 async fn unsupported_output_contract_is_rejected_before_ffmpeg() {
     let dir = tempfile::tempdir().unwrap();
@@ -75,9 +93,9 @@ async fn unsupported_profile_contract_is_rejected_before_ffmpeg() {
         .unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    // error message should mention the profile name (default-hevc) or the encoder
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("default-hevc") || err.to_string().contains("descriptor"),
+        message.contains("default-hevc") && message.contains("unknown encoder `libx264`"),
         "unexpected error: {err}"
     );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());

@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 serde_json = { workspace = true }
 voom-control-plane = { workspace = true }
+voom-core = { workspace = true }
 voom-store = { workspace = true }
 
 [lints]

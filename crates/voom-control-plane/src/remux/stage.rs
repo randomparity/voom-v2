@@ -9,6 +9,7 @@ pub struct PreparedStagingPath {
     pub path: PathBuf,
 }
 
+#[cfg(test)]
 pub async fn staging_path(
     staging_root: &Path,
     ticket_id: TicketId,

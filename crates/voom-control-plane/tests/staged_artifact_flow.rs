@@ -4,25 +4,27 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
 use tempfile::{NamedTempFile, TempDir};
-use voom_control_plane::ControlPlane;
-use voom_control_plane::artifact::commit::CommitArtifactInput;
-use voom_control_plane::artifact::inspect::{ArtifactInspectionState, ArtifactListInput};
-use voom_control_plane::artifact::stage::StageCopyInput;
-use voom_control_plane::artifact::verify::VerifyArtifactInput;
 use voom_control_plane::scan::ScanPathInput;
+use voom_control_plane::{
+    ArtifactInspectionState, ArtifactListInput, CommitArtifactInput, ControlPlane, StageCopyInput,
+    VerifyArtifactInput,
+};
 use voom_core::ErrorCode;
 use voom_store::repo::artifacts::ArtifactCommitState;
+use voom_test_support::worker::{
+    FfprobeSiblingGuard, cargo_bin_or_build, install_fake_ffprobe_sibling, target_debug_binary,
+    workspace_root,
+};
 
 const BASIC_FFPROBE_JSON: &str =
     include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
 
 #[tokio::test]
 async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
-    install_worker_siblings();
+    let _ffprobe_guard = install_worker_siblings();
     let (cp, _db, dir) = fixture().await;
     let media = tiny_media_fixture();
 
@@ -70,7 +72,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
 
 #[tokio::test]
 async fn commit_rejections_and_recovery_visibility_are_inspectable() {
-    install_worker_siblings();
+    let _ffprobe_guard = install_worker_siblings();
     let (cp, db, dir) = fixture().await;
     let unverified = stage_fixture(&cp, dir.path(), "unverified").await;
     let verified = verified_fixture(&cp, dir.path(), "drift").await;
@@ -208,102 +210,19 @@ async fn inject_recovery_required(url: &str, staged: &StagedFixture, dir: &Path)
     .unwrap();
 }
 
-fn install_worker_siblings() {
+fn install_worker_siblings() -> FfprobeSiblingGuard {
     copy_worker_to_profile_dir("voom-ffprobe-worker");
     copy_worker_to_profile_dir("voom-verify-artifact-worker");
-    copy_ffprobe_to_profile_dir();
+    install_fake_ffprobe_sibling(success_ffprobe_binary(), "staged-artifact-flow").unwrap()
 }
 
 fn copy_worker_to_profile_dir(package: &'static str) {
-    let worker = built_worker_binary(package);
-    let sibling = target_debug_dir().join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
-    if sibling != *worker {
-        std::fs::copy(worker, sibling).unwrap();
+    let worker = cargo_bin_or_build(package, package).unwrap();
+    let sibling = target_debug_binary(package);
+    if sibling != worker {
+        std::fs::copy(worker, &sibling).unwrap();
+        make_executable(&sibling);
     }
-}
-
-fn copy_ffprobe_to_profile_dir() {
-    let ffprobe = target_debug_dir().join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(success_ffprobe_binary(), &ffprobe).unwrap();
-    make_executable(&ffprobe);
-}
-
-fn built_worker_binary(package: &'static str) -> &'static PathBuf {
-    static FFPROBE: OnceLock<PathBuf> = OnceLock::new();
-    static VERIFY: OnceLock<PathBuf> = OnceLock::new();
-    let cell = if package == "voom-ffprobe-worker" {
-        &FFPROBE
-    } else {
-        &VERIFY
-    };
-    cell.get_or_init(|| {
-        let mut command = Command::new("cargo");
-        command.args(["build", "-p", package, "--bin", package]);
-        if let Some(target) = cargo_build_target() {
-            command.args(["--target", &target]);
-        }
-        let status = command.current_dir(workspace_root()).status().unwrap();
-        assert!(status.success(), "cargo build for {package} failed");
-        let binary = target_debug_dir().join(format!("{package}{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            binary.is_file(),
-            "worker binary not found at {}",
-            binary.display()
-        );
-        binary
-    })
-}
-
-fn target_debug_dir() -> PathBuf {
-    let debug_dir = explicit_target_dir().unwrap_or_else(current_exe_target_dir);
-    if let Some(target) = cargo_build_target() {
-        return debug_dir.join(target).join("debug");
-    }
-    debug_dir.join("debug")
-}
-
-fn explicit_target_dir() -> Option<PathBuf> {
-    std::env::var_os("CARGO_TARGET_DIR").map(|target_dir| {
-        let target_dir = PathBuf::from(target_dir);
-        if target_dir.is_absolute() {
-            target_dir
-        } else {
-            workspace_root().join(target_dir)
-        }
-    })
-}
-
-fn current_exe_target_dir() -> PathBuf {
-    let current_exe = std::env::current_exe().unwrap();
-    let deps_dir = current_exe.parent().unwrap();
-    if deps_dir.file_name().is_some_and(|name| name == "deps") {
-        let profile_dir = deps_dir.parent().unwrap();
-        if cargo_build_target().is_some() {
-            return profile_dir.parent().and_then(Path::parent).map_or_else(
-                || profile_dir.parent().unwrap().to_path_buf(),
-                Path::to_path_buf,
-            );
-        }
-        return profile_dir.parent().unwrap().to_path_buf();
-    }
-    deps_dir
-        .parent()
-        .map_or_else(|| deps_dir.to_path_buf(), Path::to_path_buf)
-}
-
-fn cargo_build_target() -> Option<String> {
-    std::env::var("CARGO_BUILD_TARGET")
-        .ok()
-        .filter(|target| !target.is_empty())
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf()
 }
 
 fn tiny_media_fixture() -> PathBuf {

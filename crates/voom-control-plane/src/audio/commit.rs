@@ -5,6 +5,10 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::json;
 use tokio::fs;
+use voom_artifact::commit_pipeline::{
+    PendingCommitRecordError, RecoveryRequiredCommit, append_commit_event_in_tx,
+    create_pending_commit_with_started_event_in_tx, mark_recovery_required_with_event_in_tx,
+};
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
@@ -16,10 +20,10 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, ArtifactRepo,
-    NewArtifactCommitRecord, NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
+    ArtifactCommitFailure, ArtifactCommitRecord, ArtifactCommitState, NewArtifactCommitRecord,
+    NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
 };
-use voom_store::repo::bundles::{BundleMemberRole, BundleRepo, NewBundleMember};
+use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,
@@ -31,7 +35,7 @@ use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
 use crate::ControlPlane;
 use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, promote_staged_add_only_with_temp,
-    unique_temp_sibling_path,
+    require_expected_staging_facts, unique_temp_sibling_path,
 };
 use crate::cases::{append_event, begin_tx, commit_tx};
 use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
@@ -274,7 +278,7 @@ pub async fn commit_audio_extract_sidecar(
     input: CommitAudioExtractSidecarInput,
 ) -> Result<CommitAudioExtractSidecarReport, VoomError> {
     let prepared = prepare_sidecar_commit(cp, &input).await?;
-    match promote_sidecar(&prepared, &input.output).await {
+    match promote_sidecar(&prepared).await {
         Ok(()) => {}
         Err(err) => {
             let report = mark_sidecar_recovery_required(cp, &prepared, &input, err).await?;
@@ -362,6 +366,7 @@ struct PreparedSidecarCommit {
     staging_path: PathBuf,
     target_path: PathBuf,
     temp_path: PathBuf,
+    expected_facts: ArtifactFileFacts,
 }
 
 async fn prepare_sidecar_commit(
@@ -370,71 +375,71 @@ async fn prepare_sidecar_commit(
 ) -> Result<PreparedSidecarCommit, VoomError> {
     let target_path = canonical_new_leaf_no_symlink(&input.target_path).await?;
     let temp_path = canonical_new_leaf_no_symlink(unique_temp_sibling_path(&target_path)?).await?;
+    let reported_facts = ArtifactFileFacts {
+        path: input.staging_path.clone(),
+        size_bytes: input.output.size_bytes,
+        content_hash: input.output.content_hash.clone(),
+        modified_at: None,
+        local_file_key: input.output.local_file_key.clone(),
+    };
+    let expected_facts =
+        require_expected_staging_facts(&input.staging_path, &reported_facts).await?;
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
-    let record = cp
-        .artifacts
-        .create_pending_commit_in_tx(
-            &mut tx,
-            NewArtifactCommitRecord {
-                artifact_handle_id: input.artifact_handle_id,
-                source_file_version_id: input.source_file_version_id,
-                verification_id: input.verification_id,
-                target_path: target_path.display().to_string(),
-                temp_path: Some(temp_path.display().to_string()),
-                report: json!({
-                    "operation": "extract_audio_sidecar",
-                    "phase": "prepared",
-                    "source_bundle_id": input.source_bundle_id.0,
-                    "role": bundle_role(input.role).as_str(),
-                    "staging_path": input.staging_path.display().to_string(),
-                    "target_path": target_path.display().to_string(),
-                    "temp_path": temp_path.display().to_string(),
-                }),
-                started_at: now,
-            },
-        )
-        .await?;
-    append_event(
+    let pending_input = NewArtifactCommitRecord {
+        artifact_handle_id: input.artifact_handle_id,
+        source_file_version_id: input.source_file_version_id,
+        verification_id: input.verification_id,
+        target_path: target_path.display().to_string(),
+        temp_path: Some(temp_path.display().to_string()),
+        report: json!({
+            "operation": "extract_audio_sidecar",
+            "phase": "prepared",
+            "source_bundle_id": input.source_bundle_id.0,
+            "role": bundle_role(input.role).as_str(),
+            "staging_path": input.staging_path.display().to_string(),
+            "target_path": target_path.display().to_string(),
+            "temp_path": temp_path.display().to_string(),
+            "expected_size_bytes": expected_facts.size_bytes,
+            "expected_checksum": expected_facts.content_hash,
+            "staging_local_file_key": expected_facts.local_file_key,
+        }),
+        started_at: now,
+    };
+    let record = create_pending_commit_with_started_event_in_tx(
+        &cp.artifacts,
         &cp.events,
         &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(input.artifact_handle_id.0),
-        now,
-        Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
-            commit_record_id: record.id.0,
-            artifact_handle_id: input.artifact_handle_id.0,
-            source_file_version_id: input.source_file_version_id.0,
-            verification_id: input.verification_id.0,
-            target_path: target_path.display().to_string(),
-            temp_path: temp_path.display().to_string(),
-        }),
+        pending_input,
+        |commit_record_id| {
+            Event::ArtifactCommitStarted(ArtifactCommitStartedPayload {
+                commit_record_id: commit_record_id.0,
+                artifact_handle_id: input.artifact_handle_id.0,
+                source_file_version_id: input.source_file_version_id.0,
+                verification_id: input.verification_id.0,
+                target_path: target_path.display().to_string(),
+                temp_path: temp_path.display().to_string(),
+            })
+        },
     )
-    .await?;
+    .await
+    .map_err(PendingCommitRecordError::into_inner)?;
     commit_tx(tx).await?;
     Ok(PreparedSidecarCommit {
         record,
         staging_path: input.staging_path.clone(),
         target_path,
         temp_path,
+        expected_facts,
     })
 }
 
-async fn promote_sidecar(
-    prepared: &PreparedSidecarCommit,
-    expected: &AudioObservedFacts,
-) -> Result<(), VoomError> {
+async fn promote_sidecar(prepared: &PreparedSidecarCommit) -> Result<(), VoomError> {
     promote_staged_add_only_with_temp(
         &prepared.staging_path,
         &prepared.target_path,
         &prepared.temp_path,
-        &ArtifactFileFacts {
-            path: prepared.staging_path.clone(),
-            size_bytes: expected.size_bytes,
-            content_hash: expected.content_hash.clone(),
-            modified_at: None,
-            local_file_key: expected.local_file_key.clone(),
-        },
+        &prepared.expected_facts,
     )
     .await?;
     Ok(())
@@ -454,8 +459,8 @@ async fn finalize_sidecar_commit(
             NewSidecarArtifactCommit {
                 commit_record_id: prepared.record.id,
                 target_path: prepared.target_path.display().to_string(),
-                content_hash: input.output.content_hash.clone(),
-                size_bytes: input.output.size_bytes,
+                content_hash: prepared.expected_facts.content_hash.clone(),
+                size_bytes: prepared.expected_facts.size_bytes,
                 observed_at: now,
                 finished_at: now,
             },
@@ -471,11 +476,10 @@ async fn finalize_sidecar_commit(
             },
         )
         .await?;
-    append_event(
+    append_commit_event_in_tx(
         &cp.events,
         &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(input.artifact_handle_id.0),
+        input.artifact_handle_id,
         now,
         Event::ArtifactCommitCompleted(ArtifactCommitCompletedPayload {
             commit_record_id: sidecar.commit_record.id.0,
@@ -506,35 +510,34 @@ async fn mark_sidecar_recovery_required(
 ) -> Result<CommitAudioExtractSidecarReport, VoomError> {
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
-    let recovered = cp
-        .artifacts
-        .mark_commit_recovery_required_in_tx(
-            &mut tx,
-            prepared.record.id,
-            ArtifactCommitFailure {
-                failure_class: "commit_failure".to_owned(),
-                error_code: err.error_code().as_str().to_owned(),
-                message: err.to_string(),
-                finished_at: now,
-            },
-            "audio sidecar commit failed after durable prepare".to_owned(),
-        )
-        .await?;
-    append_event(
+    let recovery_reason = "audio sidecar commit failed after durable prepare".to_owned();
+    let error_code = err.error_code().as_str().to_owned();
+    let message = err.to_string();
+    let recovered = mark_recovery_required_with_event_in_tx(
+        &cp.artifacts,
         &cp.events,
         &mut tx,
-        SubjectType::ArtifactHandle,
-        Some(input.artifact_handle_id.0),
-        now,
-        Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
-            commit_record_id: prepared.record.id.0,
-            artifact_handle_id: input.artifact_handle_id.0,
-            target_path: prepared.target_path.display().to_string(),
-            temp_path: prepared.temp_path.display().to_string(),
-            recovery_reason: "audio sidecar commit failed after durable prepare".to_owned(),
-            error_code: err.error_code().as_str().to_owned(),
-            message: err.to_string(),
-        }),
+        RecoveryRequiredCommit {
+            commit_record_id: prepared.record.id,
+            artifact_handle_id: input.artifact_handle_id,
+            failure: ArtifactCommitFailure {
+                failure_class: "commit_failure".to_owned(),
+                error_code: error_code.clone(),
+                message: message.clone(),
+                finished_at: now,
+            },
+            recovery_reason: recovery_reason.clone(),
+            event: Event::ArtifactCommitRecoveryRequired(ArtifactCommitRecoveryRequiredPayload {
+                commit_record_id: prepared.record.id.0,
+                artifact_handle_id: input.artifact_handle_id.0,
+                target_path: prepared.target_path.display().to_string(),
+                temp_path: prepared.temp_path.display().to_string(),
+                recovery_reason,
+                error_code,
+                message,
+            }),
+            occurred_at: now,
+        },
     )
     .await?;
     commit_tx(tx).await?;

@@ -11,8 +11,7 @@ use voom_core::{
 };
 use voom_events::EventKind;
 use voom_store::repo::artifacts::{
-    ArtifactCommitFailure, ArtifactCommitState, ArtifactRepo, NewArtifactCommitRecord,
-    NewArtifactLocation,
+    ArtifactCommitFailure, ArtifactCommitState, NewArtifactCommitRecord, NewArtifactLocation,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::identity::{

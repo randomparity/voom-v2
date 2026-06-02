@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use voom_core::clock_test_support::ManualClock;
 use voom_core::rng_test_support::FrozenRng;
-use voom_store::repo::workers::{NewGrant, NewWorker, WorkerKind, WorkerRepo, WorkerStatus};
+use voom_store::repo::workers::{NewGrant, NewWorker, WorkerKind, WorkerStatus};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -91,10 +91,10 @@ async fn denied_builtin_ffprobe_execute_grant_fails_loudly() {
     cp.workers()
         .record_grant(NewGrant {
             worker_id: worker.id,
-            can_execute: vec!["probe_file".to_owned()],
+            can_execute: vec![TicketOperation::from(OperationKind::ProbeFile)],
             can_access_read: Vec::new(),
             can_access_write: Vec::new(),
-            denies: vec!["probe_file".to_owned()],
+            denies: vec![TicketOperation::from(OperationKind::ProbeFile)],
             max_parallel: serde_json::json!({}),
         })
         .await

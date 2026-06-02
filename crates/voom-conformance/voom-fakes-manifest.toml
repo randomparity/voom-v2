@@ -81,8 +81,8 @@ required = true
 
 [[binaries.operations]]
 operation = "transcode_video"
-valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
-invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
+valid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.video.mkv", container = "mkv", video_codec = "hevc", overwrite = false }, profile = { name = "default-hevc", target_codec = "hevc", encoder = "libx265", crf = 23, preset = "medium" }, copy_video = false }
+invalid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.video.mkv", container = "mkv", video_codec = "bad_codec", overwrite = false }, profile = { name = "default-hevc", target_codec = "hevc", encoder = "libx265", crf = 23, preset = "medium" }, copy_video = false }
 
 [[binaries.operations]]
 operation = "transcode_audio"
@@ -93,11 +93,6 @@ invalid_payload = { input = { path = "/library/movie.mkv", expected = { size_byt
 operation = "extract_audio"
 valid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.ogg", container = "ogg", audio_codec = "opus", overwrite = false }, selection = { snapshot_stream_id = "stream-1", provider_stream_index = 1 } }
 invalid_payload = { input = { path = "/library/movie.mkv", expected = { size_bytes = 5, content_hash = "blake3:input" } }, output = { staging_root = "/tmp/voom-stage", path = "/tmp/voom-stage/movie.audio.ogg", container = "ogg", audio_codec = "bad_codec", overwrite = false }, selection = { snapshot_stream_id = "stream-1", provider_stream_index = 1 } }
-
-[[binaries.operations]]
-operation = "transcribe_audio"
-valid_payload = { path = "/library/movie.mkv", target_codec = "h265", scenario = "default" }
-invalid_payload = { path = "/library/movie.mkv", target_codec = "bad_codec" }
 
 [[binaries]]
 name = "fake-remuxer"

@@ -13,14 +13,14 @@
 
 use serde_json::{Value as JsonValue, json};
 use voom_core::{FailureClass, NodeId, TicketId, VoomError, WorkerId};
-use voom_worker_protocol::OperationKind;
+use voom_core::{OperationKind, TicketOperation};
 
 pub const SCORING_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketCandidate {
     pub ticket_id: TicketId,
-    pub operation: String,
+    pub operation: TicketOperation,
     pub priority: i64,
     pub next_eligible_at_epoch_seconds: i64,
 }
@@ -222,7 +222,7 @@ impl SchedulerScorer {
 
             explanation_candidates.push(json!({
                 "ticket_id": candidate.ticket.ticket_id.0,
-                "operation": candidate.ticket.operation,
+                "operation": candidate.ticket.operation.as_str(),
                 "worker_id": candidate.worker.worker_id.0,
                 "node_id": candidate.node.node_id.0,
                 "eligible": eligible,
@@ -235,7 +235,7 @@ impl SchedulerScorer {
 
         let explanation = json!({
             "scoring_version": SCORING_VERSION,
-            "operation": operation,
+            "operation": operation.as_str(),
             "weights": weights_json(),
             "candidates": explanation_candidates,
         });

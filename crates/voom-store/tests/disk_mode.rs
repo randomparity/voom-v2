@@ -14,10 +14,10 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::SystemClock;
-use voom_store::repo::leases::{LeaseRepo, NewLease, ReleaseReason};
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
-use voom_store::repo::workers::{NewWorker, WorkerKind, WorkerRepo};
+use voom_core::{SystemClock, TicketOperation};
+use voom_store::repo::leases::{NewLease, ReleaseReason};
+use voom_store::repo::tickets::{NewTicket, TicketState};
+use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::{T0, sqlite_url_for};
 use voom_store::{connect, init};
 
@@ -36,7 +36,7 @@ async fn m1_fixture_flow_persists_across_reconnect() {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: "disk.test".to_owned(),
+                kind: TicketOperation::new("disk.test").unwrap(),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 1,

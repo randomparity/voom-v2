@@ -1,4 +1,4 @@
-use chrono::Utc;
+use time::OffsetDateTime;
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use voom_core::LeaseId;
 use voom_worker_protocol::{NdjsonReader, ProgressFrame, ProtocolError};
@@ -41,7 +41,6 @@ where
                 reader.next_frame().await?;
                 return Ok(());
             }
-            voom_worker_protocol::NdjsonOutcome::Closed => return Ok(()),
             voom_worker_protocol::NdjsonOutcome::StreamEnd { .. } => {
                 return Err(ProtocolError::MalformedFrame {
                     detail: "stream ended before terminal".to_owned(),
@@ -76,7 +75,7 @@ pub fn has_frame_after_terminal(bytes: &[u8], expected: LeaseId) -> Result<bool,
 }
 
 pub fn fixture_bytes(mode: FixtureMode, expected: LeaseId) -> Result<Vec<u8>, ProtocolError> {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let mut bytes = Vec::new();
     let progress = ProgressFrame::Progress {
         lease_id: match mode {

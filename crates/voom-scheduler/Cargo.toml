@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 serde_json.workspace = true
 voom-core.workspace = true
-voom-worker-protocol.workspace = true
 
 [lints]
 workspace = true

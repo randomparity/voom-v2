@@ -1,5 +1,11 @@
 use super::*;
-use voom_worker_protocol::{OperationDispatch, OperationKind, ProgressFrame, http::OperationBody};
+use voom_worker_protocol::{
+    AudioExpectedFacts, AudioStreamRef, OperationDispatch, OperationKind, ProgressFrame,
+    TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult,
+    TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus, http::OperationBody,
+};
 
 #[test]
 fn provider_definition_rejects_unsupported_operation() {
@@ -51,6 +57,10 @@ fn scanner_fan_out_count_controls_file_count() {
     let terminal = terminal_payload(&frames);
     assert_eq!(terminal["files"].as_array().unwrap().len(), 3);
     assert_eq!(terminal["files"][0]["path"], "/library/file-000.mkv");
+    assert_eq!(
+        terminal["files"][0]["content_hash"],
+        format!("blake3:{}", blake3::hash(b"/library/file-000.mkv").to_hex())
+    );
     assert_eq!(terminal["files"][2]["path"], "/library/file-002.mkv");
 }
 
@@ -119,43 +129,131 @@ fn prober_result_preserves_bound_codec_when_present() {
 }
 
 #[test]
-fn remux_and_transcode_emit_output_path() {
-    let remux = request(
+fn remux_legacy_payload_emits_output_path() {
+    let req = request(
         OperationKind::Remux,
         serde_json::json!({"path": "/library/file-000.mkv", "container": "mkv"}),
     );
-    let transcode = request(
-        OperationKind::TranscodeVideo,
-        serde_json::json!({"path": "/library/file-001.mkv", "target_codec": "h265"}),
-    );
-    for (provider, req) in [("fake-remuxer", remux), ("fake-transcoder", transcode)] {
-        let result = dispatch_provider(&provider_definition(provider).unwrap(), &req).unwrap();
-        let body = body_bytes_for_test(result);
-        let frames = decode_frames(&body);
-        let payload = terminal_payload(&frames);
-        assert!(
-            payload["output_path"]
-                .as_str()
-                .unwrap()
-                .starts_with("/library/")
-        );
-    }
-}
 
-#[test]
-fn fake_transcoder_accepts_audio_transcode_codec() {
-    let req = request(
-        OperationKind::TranscodeAudio,
-        serde_json::json!({"path": "/library/file-001.mkv", "target_codec": "opus"}),
-    );
-
-    let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();
+    let result = dispatch_provider(&provider_definition("fake-remuxer").unwrap(), &req).unwrap();
     let body = body_bytes_for_test(result);
     let frames = decode_frames(&body);
     let payload = terminal_payload(&frames);
 
-    assert_eq!(payload["operation"], "transcode_audio");
-    assert_eq!(payload["target_codec"], "opus");
+    assert!(
+        payload["output_path"]
+            .as_str()
+            .unwrap()
+            .starts_with("/library/")
+    );
+}
+
+#[test]
+fn fake_transcoder_rejects_legacy_payload() {
+    let req = request(
+        OperationKind::TranscodeVideo,
+        serde_json::json!({"path": "/library/file-001.mkv", "target_codec": "h265"}),
+    );
+
+    let err =
+        dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap_err();
+
+    let voom_worker_protocol::ProtocolError::InvalidPayload { detail } = err else {
+        panic!("expected invalid payload for legacy fake-transcoder request");
+    };
+    assert!(detail.contains("requires typed input, output, and profile payload"));
+}
+
+#[test]
+fn fake_transcoder_returns_typed_audio_result_for_protocol_payload() {
+    let output_path = unique_output_path("fake-transcoder-audio.mkv");
+    let request_payload = serde_json::to_value(TranscodeAudioRequest {
+        input: TranscodeAudioInput {
+            path: "/library/file-001.mkv".to_owned(),
+            expected: AudioExpectedFacts {
+                size_bytes: 12_345,
+                content_hash: "blake3:input".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: TranscodeAudioOutput {
+            staging_root: output_path.parent().unwrap().to_string_lossy().into_owned(),
+            path: output_path.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            overwrite: true,
+        },
+        selection: TranscodeAudioSelection {
+            selected_streams: vec![AudioStreamRef {
+                snapshot_stream_id: "stream-1".to_owned(),
+                provider_stream_index: 1,
+            }],
+        },
+        audio: TranscodeAudioSettings {
+            target_codec: "opus".to_owned(),
+            profile: "default-opus".to_owned(),
+        },
+    })
+    .unwrap();
+    let req = request(OperationKind::TranscodeAudio, request_payload);
+
+    let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames).clone();
+    let result: TranscodeAudioResult = serde_json::from_value(payload).unwrap();
+
+    assert_eq!(result.status, TranscodeAudioStatus::Transcoded);
+    assert_eq!(result.provider, "fake-transcoder");
+    assert_eq!(result.output_container, "mkv");
+    assert_eq!(result.output_audio_codecs, vec!["opus".to_owned()]);
+    assert!(output_path.is_file());
+    let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
+fn fake_transcoder_returns_typed_video_result_for_protocol_payload() {
+    let output_path = unique_output_path("fake-transcoder-video.mkv");
+    let mut request_payload = serde_json::to_value(TranscodeVideoRequest {
+        input: TranscodeVideoInput {
+            path: "/library/file-001.mkv".to_owned(),
+            expected: TranscodeVideoExpectedFacts {
+                size_bytes: 12_345,
+                content_hash: "blake3:input".to_owned(),
+                modified_at: None,
+                local_file_key: Some("input-key".to_owned()),
+            },
+        },
+        output: TranscodeVideoOutput {
+            staging_root: output_path.parent().unwrap().to_string_lossy().into_owned(),
+            path: output_path.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            video_codec: "hevc".to_owned(),
+            overwrite: true,
+        },
+        profile: TranscodeVideoProfile::default_hevc(),
+        copy_video: false,
+    })
+    .unwrap();
+    let payload_object = request_payload.as_object_mut().unwrap();
+    payload_object.insert("branch_id".to_owned(), serde_json::json!("file-001"));
+    payload_object.insert("operation".to_owned(), serde_json::json!("transcode_video"));
+    let req = request(OperationKind::TranscodeVideo, request_payload);
+
+    let result = dispatch_provider(&provider_definition("fake-transcoder").unwrap(), &req).unwrap();
+    let body = body_bytes_for_test(result);
+    let frames = decode_frames(&body);
+    let payload = terminal_payload(&frames).clone();
+    let result: TranscodeVideoResult = serde_json::from_value(payload).unwrap();
+
+    assert_eq!(result.status, TranscodeVideoStatus::Transcoded);
+    assert_eq!(result.provider, "fake-transcoder");
+    assert_eq!(result.input_pre.size_bytes, 12_345);
+    assert_eq!(result.input_post.content_hash, "blake3:input");
+    assert_eq!(result.output_container, "mkv");
+    assert_eq!(result.output_video_codec, "hevc");
+    assert!(output_path.is_file());
+    let _ = std::fs::remove_file(output_path);
 }
 
 #[test]
@@ -294,4 +392,11 @@ fn artifact_access_payload(
         },
         "advertised_artifact_access": advertised_artifact_access
     })
+}
+
+fn unique_output_path(file_name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "voom-fake-support-{}-{file_name}",
+        std::process::id()
+    ))
 }

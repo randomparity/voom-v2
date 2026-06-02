@@ -55,8 +55,6 @@ Core units:
 - `WorkflowPlan`: typed DAG with an id, seed, bounded fan-out
   settings, default lease TTL, default timing bounds,
   `max_in_flight_dispatches`, and nodes.
-- `WorkflowNode`: enum reserved for future high-level nodes. Phase 7
-  accepts only operation-backed nodes.
 - `OperationNode`: node id, `OperationKind`, static payload,
   dependencies, output bindings, optional fan-out role, and optional
   timing overrides.
@@ -480,7 +478,6 @@ relevant ticket reaches terminal `failed`.
 Public control-plane additions:
 
 - `WorkflowPlan`
-- `WorkflowNode`
 - `OperationNode`
 - `OutputBinding`
 - `TimingPolicy`

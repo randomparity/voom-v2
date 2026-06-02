@@ -25,6 +25,7 @@ pub mod events;
 pub mod selection;
 pub mod source;
 pub mod stage;
+pub(crate) mod workflow;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteRemuxInput {
@@ -117,24 +118,21 @@ pub(crate) fn success_event_recovery_report(
 
 #[async_trait]
 pub trait RemuxDispatcher: Send + Sync {
-    async fn dispatch_remux(
-        &self,
-        request: voom_worker_protocol::RemuxRequest,
-    ) -> Result<RemuxResult, VoomError>;
-
     async fn dispatch_remux_with_progress(
         &self,
         request: voom_worker_protocol::RemuxRequest,
-        _progress: &mut dyn dispatch::RemuxProgressSink,
-    ) -> Result<RemuxResult, VoomError> {
-        self.dispatch_remux(request).await
-    }
+        progress: &mut dyn dispatch::RemuxProgressSink,
+    ) -> Result<RemuxResult, VoomError>;
 }
 
 impl ControlPlane {
     /// Execute one policy-derived `remux` ticket through source revalidation,
     /// worker staging, verification, add-only commit, and result snapshot
     /// persistence.
+    ///
+    /// # Errors
+    /// Returns stable `VoomError` variants for source selection, staging,
+    /// worker, verification, commit, and result-probe failures.
     pub async fn execute_remux(
         &self,
         input: ExecuteRemuxInput,
@@ -254,18 +252,12 @@ async fn execute_remux_core(
         failure.record_failure(&err).await?;
         return Err(err);
     }
-    let request = match dispatch::request_for(
+    let request = dispatch::remux_request_for(
         &selected,
         &selection,
         &staging.canonical_root,
         &staging_path,
-    ) {
-        Ok(request) => request,
-        Err(err) => {
-            failure.record_failure(&err).await?;
-            return Err(err);
-        }
-    };
+    );
     let mut progress = EventRemuxProgressSink {
         cp,
         input: &input,

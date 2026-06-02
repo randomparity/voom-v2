@@ -4,7 +4,7 @@
 )]
 
 //! Linear ten-ticket chain plus a cycle-attempt sub-test. Exercises
-//! `TicketRepo::add_dependency` cycle detection and the
+//! `SqliteTicketRepo::add_dependency` cycle detection and the
 //! `mark_ready_if_unblocked` downstream-unlock cascade that the
 //! `ControlPlane` release use case will call after each ticket succeeds.
 
@@ -14,9 +14,9 @@ use serde_json::json;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, VoomError};
+use voom_core::{SystemClock, TicketOperation, VoomError};
 use voom_store::repo::leases::NewLease;
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
@@ -29,6 +29,10 @@ async fn cp() -> (ControlPlane, tempfile::NamedTempFile) {
         .await
         .unwrap();
     (cp, tmp)
+}
+
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
 }
 
 #[tokio::test]
@@ -50,7 +54,7 @@ async fn linear_chain_unlocks_in_order() {
         let t = cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: format!("step-{i}"),
+                kind: ticket_op(&format!("step-{i}")),
                 priority: 0,
                 payload: json!({}),
                 max_attempts: 1,
@@ -122,7 +126,7 @@ async fn cycle_attempt_is_rejected() {
     let a = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "a".to_owned(),
+            kind: ticket_op("a"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,
@@ -133,7 +137,7 @@ async fn cycle_attempt_is_rejected() {
     let b = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "b".to_owned(),
+            kind: ticket_op("b"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,
@@ -144,7 +148,7 @@ async fn cycle_attempt_is_rejected() {
     let c = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "c".to_owned(),
+            kind: ticket_op("c"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,

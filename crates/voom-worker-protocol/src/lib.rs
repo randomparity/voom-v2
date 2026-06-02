@@ -13,22 +13,20 @@
 //! module skeleton so subsequent commits can fill it without
 //! disturbing the build.
 
-pub mod audio;
-pub mod credentials;
 pub mod encoder_caps;
-pub mod envelope;
-pub mod handshake;
 pub mod http;
 pub mod low_level;
-pub mod ndjson;
-pub mod operation_kind;
-pub mod probe_file;
-pub mod remux;
-pub mod transcode_video;
+mod operations;
+pub mod startup;
 pub mod transport;
-pub mod verify_artifact;
+mod wire;
 
-pub use audio::{
+pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
+pub use http::{
+    HttpClient, HttpServer, OperationDispatch, OperationFuture, OperationHandler, RoutePolicy,
+    route_policy,
+};
+pub use operations::audio::{
     AudioDispositionFact, AudioExpectedFacts, AudioObservedFacts, AudioOutputStreamFact,
     AudioStreamRef, EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER, ExtractAudioInput,
     ExtractAudioOutput, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
@@ -36,25 +34,15 @@ pub use audio::{
     TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult,
     TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
 };
-pub use credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
-pub use encoder_caps::{EncoderDescriptor, PresetDomain, encoder_descriptor};
-pub use envelope::{OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError};
-pub use handshake::{HandshakeRequest, HandshakeResponse, negotiate};
-pub use http::{
-    HttpClient, HttpServer, OperationDispatch, OperationFuture, OperationHandler, RoutePolicy,
-    route_policy,
-};
-pub use ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
-pub use operation_kind::OperationKind;
-pub use probe_file::{
+pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };
-pub use remux::{
+pub use operations::remux::{
     REMUX_CONTAINER_MKV, RemuxExpectedFacts, RemuxInput, RemuxObservedFacts, RemuxOutput,
     RemuxRequest, RemuxResult, RemuxSelection, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
     is_supported_remux_container,
 };
-pub use transcode_video::{
+pub use operations::transcode_video::{
     TRANSCODE_VIDEO_CODEC, TRANSCODE_VIDEO_CODEC_ALIAS_H265, TRANSCODE_VIDEO_CODEC_AV1,
     TRANSCODE_VIDEO_CONTAINER, TRANSCODE_VIDEO_CONTAINER_MP4, TRANSCODE_VIDEO_PROFILE,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoObservedFacts,
@@ -63,8 +51,20 @@ pub use transcode_video::{
     is_supported_transcode_video_container, normalize_codec_token,
     validate_profile_against_descriptor,
 };
-pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
-pub use verify_artifact::{
+pub use operations::verify_artifact::{
     VerifyArtifactExpectedFacts, VerifyArtifactObservedFacts, VerifyArtifactRequest,
     VerifyArtifactResult, VerifyArtifactStatus,
 };
+pub use startup::{
+    DEFAULT_WORKER_BIND, WORKER_BIND_ENV, WORKER_EPOCH_ENV, WORKER_ID_ENV, WORKER_SECRET_ENV,
+    WorkerStartupError, load_worker_bind_addr_from_env, load_worker_credentials_from_env,
+    serve_worker_http,
+};
+pub use transport::{ClientHandle, DispatchStream, NdjsonStream, ServerHandle, ServerRunning};
+pub use voom_core::OperationKind;
+pub use wire::credentials::{PresentedCredentials, WorkerCredentials, validate_credentials};
+pub use wire::envelope::{
+    OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
+};
+pub use wire::handshake::{HandshakeRequest, HandshakeResponse, negotiate};
+pub use wire::ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};

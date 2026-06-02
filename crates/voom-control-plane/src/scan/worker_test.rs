@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, ExpectedFileFacts, HttpClient, HttpServer, OperationDispatch, OperationFuture,
@@ -31,9 +31,9 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_probe_file() {
         .await
         .unwrap();
 
-    assert_eq!(worker.worker_id, worker_id);
-    assert_eq!(worker.credentials.worker_id, worker_id);
-    let handshake = worker.client.handshake(voom_core::PROTOCOL_VERSION).await;
+    assert_eq!(worker.worker_id(), worker_id);
+    assert_eq!(worker.credentials().worker_id, worker_id);
+    let handshake = worker.client().handshake(voom_core::PROTOCOL_VERSION).await;
     assert!(handshake.is_ok());
     assert_worker_rejects_different_presented_id(&worker).await;
     let result = worker
@@ -51,10 +51,10 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_probe_file() {
 }
 
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {
-    let mut wrong_credentials = worker.credentials.clone();
-    wrong_credentials.worker_id = WorkerId(worker.worker_id.0 + 1);
+    let mut wrong_credentials = worker.credentials().clone();
+    wrong_credentials.worker_id = WorkerId(worker.worker_id().0 + 1);
     let err = worker
-        .client
+        .client()
         .dispatch(
             &wrong_credentials,
             "wrong-presented-worker-id",
@@ -130,17 +130,25 @@ async fn consecutive_dispatches_use_distinct_nonzero_protocol_lease_ids() {
 async fn launch_timeout_reaps_child_that_never_prints_bound_address() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("worker.pid");
-    let script = format!("printf '%s' $$ > '{}'; exec sleep 60", pid_file.display());
+    let script = format!("printf '%s' $$ > '{}'; read ignored", pid_file.display());
     let command = WorkerCommand::new("/bin/sh").arg("-c").arg(script);
 
-    let started = std::time::Instant::now();
-    let err = BundledWorkerProcess::launch(WorkerId(46), command)
-        .await
-        .unwrap_err();
+    let launch = BundledWorkerProcess::launch_with_startup_timeout(
+        WorkerId(46),
+        command,
+        Duration::from_secs(5),
+    );
+    tokio::pin!(launch);
+    tokio::select! {
+        err = &mut launch => panic!("worker launch finished before startup timeout: {err:?}"),
+        () = tokio::task::yield_now() => {}
+    }
+    let pid = wait_for_pid_file(&pid_file).await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let err = launch.await.unwrap_err();
 
-    assert!(started.elapsed() < Duration::from_secs(10));
     assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
     assert_process_exited(pid.trim());
 }
 
@@ -151,9 +159,32 @@ fn dispatch_setup_protocol_failures_are_worker_crashes() {
         "response read: unexpected end of file",
         "response decode: expected value at line 1 column 1",
     ] {
-        let err = map_dispatch_protocol_error(&ProtocolError::MalformedFrame {
+        let protocol_error = ProtocolError::MalformedFrame {
             detail: detail.to_owned(),
-        });
+        };
+        let err = map_dispatch_protocol_error_message(
+            &protocol_error,
+            format!("worker dispatch failed: {protocol_error}"),
+        );
+
+        assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+        assert_eq!(err.error_code(), ErrorCode::WorkerCrash);
+    }
+}
+
+#[test]
+fn dispatch_backpressure_protocol_failures_are_worker_crashes() {
+    for protocol_error in [
+        ProtocolError::DuplicateIdempotencyKey {
+            key: "probe-idempotency".to_owned(),
+            original_status: "active".to_owned(),
+        },
+        ProtocolError::ServiceAtCapacity,
+    ] {
+        let err = map_dispatch_protocol_error_message(
+            &protocol_error,
+            format!("worker dispatch failed: {protocol_error}"),
+        );
 
         assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
         assert_eq!(err.error_code(), ErrorCode::WorkerCrash);
@@ -258,7 +289,7 @@ fn capture_lease_handler(seen: Arc<Mutex<Vec<LeaseId>>>) -> OperationHandler {
         let seen = seen.clone();
         Box::pin(async move {
             seen.lock().unwrap().push(req.lease_id);
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let result = ProgressFrame::Result {
                 lease_id: req.lease_id,
                 seq: 0,
@@ -356,4 +387,14 @@ fn assert_process_exited(pid: &str) {
         .status()
         .unwrap();
     assert!(!status.success(), "child process {pid} still exists");
+}
+
+async fn wait_for_pid_file(path: &Path) -> String {
+    for _ in 0..1_000 {
+        if let Ok(pid) = std::fs::read_to_string(path) {
+            return pid;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("worker did not create pid file {}", path.display());
 }

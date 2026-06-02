@@ -24,6 +24,7 @@ pub mod events;
 pub mod resolve;
 pub mod source;
 pub mod stage;
+pub(crate) mod workflow;
 
 #[derive(Debug, Clone)]
 pub struct ExecuteTranscodeVideoInput {
@@ -153,13 +154,14 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let target_path = stage::target_path(&input.target_dir, &output_name).await?;
 
     events::record_started(cp, &input, selected.location.id, &staging_path).await?;
-    let request = dispatch::request_for(
+    dispatch::revalidate_source_file(&selected).await?;
+    let request = dispatch::transcode_video_request_for(
         &selected,
         &input.resolved,
         copy_video,
         &input.staging_root,
         &staging_path,
-    )?;
+    );
     let result = transcode.dispatch_transcode_video(request.clone()).await?;
     dispatch::validate_result(&selected, &request, &result)?;
     dispatch::require_output_file_matches_result(&staging_path, &result).await?;

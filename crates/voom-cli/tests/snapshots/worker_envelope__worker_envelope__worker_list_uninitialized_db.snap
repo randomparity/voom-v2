@@ -13,7 +13,8 @@ expression: json
   },
   "warnings": [],
   "error": {
-    "code": "DB_PARTIAL_SCHEMA",
-    "message": "migration error: ControlPlane requires a Current schema; got Uninitialized"
+    "code": "DB_UNINITIALIZED",
+    "message": "uninitialized database: ControlPlane requires a Current schema; got Uninitialized",
+    "hint": "Database has no migrations applied — run `voom init`"
   }
 }

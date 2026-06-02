@@ -15,17 +15,17 @@
 )]
 
 use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
 use serde::Deserialize;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use voom_worker_protocol::{
     HandshakeRequest, OperationKind, OperationRequest, OperationResponse, ProgressFrame,
-    ProtocolError, WorkerCredentials,
+    ProtocolError, WorkerCredentials, WorkerStartupError, load_worker_bind_addr_from_env,
+    load_worker_credentials_from_env,
 };
 
 const MAX_DURATION_MS: u64 = 30_000;
@@ -65,14 +65,16 @@ struct RawChaosPayload {
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let credentials = load_credentials()?;
-    let bind: SocketAddr = std::env::var("VOOM_WORKER_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:0".to_owned())
-        .parse()
-        .map_err(|e| format!("VOOM_WORKER_BIND parse failed: {e}"))?;
-    let listener = TcpListener::bind(bind).await?;
-    println!("BOUND addr={}", listener.local_addr()?);
+async fn main() -> Result<(), WorkerStartupError> {
+    let credentials = load_worker_credentials_from_env()?;
+    let bind = load_worker_bind_addr_from_env()?;
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|source| WorkerStartupError::bind(bind, source))?;
+    let bound = listener
+        .local_addr()
+        .map_err(|source| WorkerStartupError::io("read bound worker address", source))?;
+    println!("BOUND addr={bound}");
     let cache = std::sync::Arc::new(tokio::sync::Mutex::new(IdempotencyCache::new(
         IDEMPOTENCY_CACHE_CAPACITY,
     )));
@@ -97,23 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = watchdog.await;
     Ok(())
-}
-
-fn load_credentials() -> Result<WorkerCredentials, Box<dyn std::error::Error>> {
-    let secret = std::env::var("VOOM_WORKER_SECRET").map_err(|_| "VOOM_WORKER_SECRET not set")?;
-    let worker_id: u64 = std::env::var("VOOM_WORKER_ID")
-        .map_err(|_| "VOOM_WORKER_ID not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_ID not parseable")?;
-    let worker_epoch: u64 = std::env::var("VOOM_WORKER_EPOCH")
-        .map_err(|_| "VOOM_WORKER_EPOCH not set")?
-        .parse()
-        .map_err(|_| "VOOM_WORKER_EPOCH not parseable")?;
-    Ok(WorkerCredentials {
-        worker_id: voom_core::WorkerId(worker_id),
-        worker_epoch,
-        secret: SecretString::from(secret),
-    })
 }
 
 async fn handle_connection(
@@ -541,7 +526,7 @@ fn json_response<T: serde::Serialize>(status: &'static str, value: &T) -> ChaosR
 }
 
 fn baseline_body(req: &OperationRequest, payload: &ChaosPayload) -> Result<Vec<u8>, ProtocolError> {
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let progress = ProgressFrame::Progress {
         lease_id: req.lease_id,
         seq: 0,
@@ -572,7 +557,7 @@ fn progress_body(req: &OperationRequest, count: usize) -> Result<Vec<u8>, Protoc
         let frame = ProgressFrame::Progress {
             lease_id: req.lease_id,
             seq: seq as u64,
-            emitted_at: Utc::now(),
+            emitted_at: OffsetDateTime::now_utc(),
             percent: None,
             message: Some("chaos progress".to_owned()),
             payload: Some(serde_json::json!({"mode": "progress"})),
@@ -598,7 +583,7 @@ fn fixed_operation_response(
 fn operation_response_line(req: &OperationRequest) -> Result<Vec<u8>, ProtocolError> {
     let response = OperationResponse {
         lease_id: req.lease_id,
-        accepted_at: Utc::now(),
+        accepted_at: OffsetDateTime::now_utc(),
     };
     let mut out = serde_json::to_vec(&response).map_err(|e| ProtocolError::InvalidPayload {
         detail: format!("response encode: {e}"),

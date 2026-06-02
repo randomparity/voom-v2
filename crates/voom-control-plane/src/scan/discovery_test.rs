@@ -49,7 +49,7 @@ async fn directory_discovery_returns_supported_media_in_lexicographic_order() {
     assert_eq!(discovered.skipped.len(), 1);
     assert_eq!(
         discovered.skipped[0].status,
-        FileScanStatus::SkippedUnsupportedExtension
+        FileScanStatus::UnsupportedExtension
     );
 }
 
@@ -118,7 +118,7 @@ async fn unsupported_file_inside_directory_is_skipped() {
     assert_eq!(discovered.skipped.len(), 1);
     assert_eq!(
         discovered.skipped[0].status,
-        FileScanStatus::SkippedUnsupportedExtension
+        FileScanStatus::UnsupportedExtension
     );
 }
 
@@ -192,7 +192,7 @@ async fn directory_walk_does_not_traverse_symlinked_directory() {
             .all(|candidate| !candidate.path.ends_with("outside.mp4"))
     );
     assert_eq!(discovered.skipped.len(), 1);
-    assert_eq!(discovered.skipped[0].status, FileScanStatus::SkippedSymlink);
+    assert_eq!(discovered.skipped[0].status, FileScanStatus::Symlink);
 }
 
 #[tokio::test]
@@ -217,8 +217,5 @@ async fn unreadable_child_directory_is_skipped_without_aborting_scan() {
         readable.canonicalize().unwrap()
     );
     assert_eq!(discovered.skipped.len(), 1);
-    assert_eq!(
-        discovered.skipped[0].status,
-        FileScanStatus::SkippedInaccessible
-    );
+    assert_eq!(discovered.skipped[0].status, FileScanStatus::Inaccessible);
 }

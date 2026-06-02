@@ -6,8 +6,8 @@ use voom_core::{
     ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
 };
 use voom_store::repo::artifacts::{
-    ArtifactCommitRecord, ArtifactCommitState, ArtifactLocation, ArtifactRepo,
-    ArtifactVerification, ArtifactVerificationStatus,
+    ArtifactCommitRecord, ArtifactCommitState, ArtifactLocation, ArtifactVerification,
+    ArtifactVerificationStatus,
 };
 
 use crate::ControlPlane;

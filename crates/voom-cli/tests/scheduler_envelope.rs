@@ -11,8 +11,8 @@ use tempfile::NamedTempFile;
 use time::OffsetDateTime;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_store::repo::scheduler_decisions::{
-    NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerDecisionRepo,
-    SchedulerReasonCode, SchedulerRequestSource, SqliteSchedulerDecisionRepo,
+    NewSchedulerDecision, SchedulerDecisionKind, SchedulerDecisionOutcome, SchedulerReasonCode,
+    SchedulerRequestSource, SqliteSchedulerDecisionRepo,
 };
 
 mod scheduler_envelope {

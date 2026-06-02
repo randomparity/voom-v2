@@ -4,7 +4,7 @@
 )]
 
 use tempfile::NamedTempFile;
-use voom_store::repo::{SchemaMetaRepo, SqliteSchemaMetaRepo};
+use voom_store::repo::SqliteSchemaMetaRepo;
 use voom_store::test_support::fresh_initialized_pool_at;
 
 #[tokio::test]

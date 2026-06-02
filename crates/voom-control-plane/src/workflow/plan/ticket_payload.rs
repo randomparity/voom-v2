@@ -1,0 +1,161 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use voom_core::OperationKind;
+
+use crate::workflow::execution::timing::EffectiveTiming;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowTicketPayload {
+    pub workflow_id: String,
+    pub plan_id: String,
+    pub node_id: String,
+    pub branch_id: String,
+    pub operation: OperationKind,
+    pub rendered_payload: Value,
+    pub timing: EffectiveTiming,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowTicketPayloadError {
+    detail: String,
+}
+
+impl WorkflowTicketPayload {
+    #[must_use]
+    pub fn new_for_test(
+        workflow_id: &str,
+        plan_id: &str,
+        node_id: &str,
+        branch_id: &str,
+        operation: OperationKind,
+        rendered_payload: Value,
+    ) -> Self {
+        let timing = EffectiveTiming::for_test(25, 10);
+        Self {
+            workflow_id: workflow_id.to_owned(),
+            plan_id: plan_id.to_owned(),
+            node_id: node_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            operation,
+            rendered_payload,
+            timing,
+            source_file: None,
+        }
+    }
+
+    pub fn to_ticket_payload(&self) -> Result<Value, WorkflowTicketPayloadError> {
+        let mut value = serde_json::to_value(self).map_err(|e| {
+            WorkflowTicketPayloadError::new(format!("workflow ticket payload encode: {e}"))
+        })?;
+        let operation = self.operation.as_str();
+        let Some(rendered_payload) = value
+            .get_mut("rendered_payload")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Err(WorkflowTicketPayloadError::new(
+                "rendered_payload must be a JSON object",
+            ));
+        };
+        match rendered_payload.get("operation").and_then(Value::as_str) {
+            Some(rendered_operation) if rendered_operation == operation => {}
+            Some(rendered_operation) => {
+                let rendered_operation = parse_operation_name(rendered_operation)?;
+                return Err(operation_mismatch(
+                    "rendered_payload.operation",
+                    rendered_operation,
+                    self.operation,
+                ));
+            }
+            None => {
+                rendered_payload.insert("operation".to_owned(), json!(operation));
+            }
+        }
+        Ok(value)
+    }
+
+    pub fn parse_ticket(
+        ticket_kind: &str,
+        payload: Value,
+    ) -> Result<Self, WorkflowTicketPayloadError> {
+        let ticket_operation = ticket_operation(ticket_kind)?;
+        let parsed: Self = serde_json::from_value(payload).map_err(|e| {
+            WorkflowTicketPayloadError::new(format!("workflow ticket payload decode: {e}"))
+        })?;
+        if ticket_operation != parsed.operation {
+            return Err(operation_mismatch(
+                "ticket kind suffix",
+                ticket_operation,
+                parsed.operation,
+            ));
+        }
+
+        let rendered_operation = parsed
+            .rendered_payload
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                WorkflowTicketPayloadError::new("rendered_payload.operation is required")
+            })?;
+        let rendered_operation = parse_operation_name(rendered_operation)?;
+        if rendered_operation != parsed.operation {
+            return Err(operation_mismatch(
+                "rendered_payload.operation",
+                rendered_operation,
+                parsed.operation,
+            ));
+        }
+
+        Ok(parsed)
+    }
+}
+
+impl WorkflowTicketPayloadError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for WorkflowTicketPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for WorkflowTicketPayloadError {}
+
+pub(crate) fn ticket_operation(
+    ticket_kind: &str,
+) -> Result<OperationKind, WorkflowTicketPayloadError> {
+    let Some(operation) = ticket_kind.strip_prefix("synthetic.workflow.operation.") else {
+        return Err(WorkflowTicketPayloadError::new(format!(
+            "workflow ticket kind `{ticket_kind}` must start with synthetic.workflow.operation."
+        )));
+    };
+    parse_operation_name(operation)
+}
+
+fn parse_operation_name(operation: &str) -> Result<OperationKind, WorkflowTicketPayloadError> {
+    serde_json::from_value(Value::String(operation.to_owned())).map_err(|e| {
+        WorkflowTicketPayloadError::new(format!("unknown workflow operation `{operation}`: {e}"))
+    })
+}
+
+fn operation_mismatch(
+    source: &str,
+    source_operation: OperationKind,
+    payload_operation: OperationKind,
+) -> WorkflowTicketPayloadError {
+    WorkflowTicketPayloadError::new(format!(
+        "operation mismatch: {source} `{}` does not match payload operation `{}`",
+        source_operation.as_str(),
+        payload_operation.as_str()
+    ))
+}
+
+#[cfg(test)]
+#[path = "ticket_payload_test.rs"]
+mod tests;

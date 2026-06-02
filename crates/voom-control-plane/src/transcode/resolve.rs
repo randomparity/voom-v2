@@ -4,11 +4,13 @@
 //! the single point where a policy's `VideoProfileRef` becomes a concrete
 //! `TranscodeVideoProfile` plus an output container, consumed by the planner.
 
-use voom_core::VoomError;
+use voom_core::{
+    TranscodeVideoProfile, VoomError, canonical_video_codec, encoder_descriptor,
+    normalize_codec_token, validate_profile_against_descriptor,
+};
 use voom_plan::inline_profile_id;
 use voom_policy::{MediaSnapshotInput, VideoProfileRef, VideoProfileSettings};
-use voom_store::repo::video_profiles::{SqliteVideoProfileRepo, VideoProfileRepo};
-use voom_worker_protocol::TranscodeVideoProfile;
+use voom_store::repo::video_profiles::SqliteVideoProfileRepo;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedProfile {
@@ -52,13 +54,12 @@ pub async fn resolve_video_profile_ref(
     // malformed seed row, a future writer that passes the migration's coarse SQL
     // CHECKs, or a future reference arm cannot resolve a profile the encoder
     // descriptor refuses.
-    voom_worker_protocol::validate_profile_against_descriptor(&resolved.profile)
-        .map_err(VoomError::Config)?;
+    validate_profile_against_descriptor(&resolved.profile).map_err(VoomError::Config)?;
     Ok(resolved)
 }
 
 fn inline_to_worker_profile(s: &VideoProfileSettings) -> Result<TranscodeVideoProfile, VoomError> {
-    let descriptor = voom_worker_protocol::encoder_descriptor(&s.encoder)
+    let descriptor = encoder_descriptor(&s.encoder)
         .ok_or_else(|| VoomError::Config(format!("unknown encoder `{}`", s.encoder)))?;
     Ok(TranscodeVideoProfile {
         name: inline_profile_id(s),
@@ -141,7 +142,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
     let Some(observed_codec) = snapshot.video_codec.as_deref() else {
         return false;
     };
-    let codec_matches = voom_worker_protocol::canonical_video_codec(observed_codec)
+    let codec_matches = canonical_video_codec(observed_codec)
         .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&profile.target_codec));
     if !codec_matches {
         return false;
@@ -181,9 +182,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
         let Some(observed_cp) = voom_plan::video_stream_field(snapshot, "profile") else {
             return false;
         };
-        if voom_worker_protocol::normalize_codec_token(observed_cp)
-            != voom_worker_protocol::normalize_codec_token(target_cp)
-        {
+        if normalize_codec_token(observed_cp) != normalize_codec_token(target_cp) {
             return false;
         }
     }
@@ -193,9 +192,7 @@ pub fn decide_copy_video(profile: &TranscodeVideoProfile, snapshot: &MediaSnapsh
         let Some(observed_cl) = voom_plan::video_stream_field(snapshot, "level") else {
             return false;
         };
-        if voom_worker_protocol::normalize_codec_token(observed_cl)
-            != voom_worker_protocol::normalize_codec_token(target_cl)
-        {
+        if normalize_codec_token(observed_cl) != normalize_codec_token(target_cl) {
             return false;
         }
     }

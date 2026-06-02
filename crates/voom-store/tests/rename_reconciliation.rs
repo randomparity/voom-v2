@@ -21,7 +21,7 @@ use voom_store::repo::identity::{
     RenameProof,
 };
 use voom_store::repo::use_leases::{
-    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseRepo,
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind,
 };
 use voom_store::test_support::T0;
 

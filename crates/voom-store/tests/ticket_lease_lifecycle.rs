@@ -18,11 +18,11 @@ use std::sync::Mutex;
 
 use voom_control_plane::ControlPlane;
 use voom_core::rng_test_support::FrozenRng;
-use voom_core::{FailureClass, SystemClock};
+use voom_core::{FailureClass, SystemClock, TicketOperation};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::leases::{LeaseRepo, NewLease};
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_store::repo::leases::NewLease;
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
@@ -59,6 +59,10 @@ async fn count_kind(cp: &ControlPlane, kind: EventKind) -> usize {
         .len()
 }
 
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
 #[tokio::test]
 async fn happy_path_ready_leased_succeeded_with_events() {
     let (cp, _tmp) = cp().await;
@@ -66,7 +70,7 @@ async fn happy_path_ready_leased_succeeded_with_events() {
     let t = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "ingest.scan".to_owned(),
+            kind: ticket_op("ingest.scan"),
             priority: 0,
             payload: json!({}),
             max_attempts: 2,
@@ -126,7 +130,7 @@ async fn max_attempts_2_via_fail_retriable_yields_two_dispatched_attempts() {
     let t = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "test.noop".to_owned(),
+            kind: ticket_op("test.noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 2,
@@ -206,7 +210,7 @@ async fn max_attempts_2_via_expire_due_yields_two_dispatched_attempts() {
     let t = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "test.noop".to_owned(),
+            kind: ticket_op("test.noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 2,
@@ -270,7 +274,7 @@ async fn max_attempts_3_mixed_fail_and_expire_due() {
     let t = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "test.noop".to_owned(),
+            kind: ticket_op("test.noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 3,
@@ -369,7 +373,7 @@ async fn force_release_requeue_rejects_when_exhausted() {
     let t = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "test.noop".to_owned(),
+            kind: ticket_op("test.noop"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,

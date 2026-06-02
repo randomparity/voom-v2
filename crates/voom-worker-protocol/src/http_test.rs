@@ -5,14 +5,15 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use chrono::{TimeZone, Utc};
 use hyper::StatusCode;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Notify;
 use voom_core::{LeaseId, WorkerId};
 
 use super::*;
-use crate::ndjson::NdjsonOutcome;
+use crate::NdjsonOutcome;
 use crate::{OperationKind, ProgressFrame};
 
 fn creds() -> WorkerCredentials {
@@ -33,8 +34,8 @@ fn request(lease_id: LeaseId, payload: serde_json::Value) -> OperationRequest {
     }
 }
 
-fn fixed_time() -> chrono::DateTime<chrono::Utc> {
-    Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap()
+fn fixed_time() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_779_192_000).unwrap()
 }
 
 fn progress(lease_id: LeaseId, seq: u64) -> ProgressFrame {
@@ -123,10 +124,7 @@ fn streaming_handler(calls: Arc<AtomicUsize>) -> OperationHandler {
     })
 }
 
-fn slow_streaming_handler(
-    calls: Arc<AtomicUsize>,
-    gate: Arc<tokio::sync::Notify>,
-) -> OperationHandler {
+fn slow_streaming_handler(calls: Arc<AtomicUsize>, gate: Arc<Notify>) -> OperationHandler {
     Arc::new(move |req: OperationRequest| {
         let calls = calls.clone();
         let gate = gate.clone();
@@ -147,13 +145,45 @@ fn slow_streaming_handler(
     })
 }
 
+#[derive(Debug, Default)]
+struct WorkerCompletionGate {
+    release: Notify,
+    finished: Notify,
+    is_finished: AtomicBool,
+}
+
+impl WorkerCompletionGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn mark_finished(&self) {
+        self.is_finished.store(true, Ordering::SeqCst);
+        self.finished.notify_waiters();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.is_finished.load(Ordering::SeqCst)
+    }
+
+    async fn wait_finished(&self) {
+        while !self.is_finished() {
+            self.finished.notified().await;
+        }
+    }
+}
+
 fn client_aborts_before_worker_finishes_handler(
     calls: Arc<AtomicUsize>,
-    worker_finished: Arc<AtomicBool>,
+    worker: Arc<WorkerCompletionGate>,
 ) -> OperationHandler {
     Arc::new(move |req: OperationRequest| {
         let calls = calls.clone();
-        let worker_finished = worker_finished.clone();
+        let worker = worker.clone();
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
@@ -162,9 +192,9 @@ fn client_aborts_before_worker_finishes_handler(
             });
             tokio::spawn(async move {
                 writer.write_frame(&progress(req.lease_id, 0)).unwrap();
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                worker.release.notified().await;
                 let _ = writer.write_frame(&result_frame(req.lease_id, 1));
-                worker_finished.store(true, Ordering::SeqCst);
+                worker.mark_finished();
                 let _ = writer.finish();
             });
             Ok(dispatch)
@@ -174,11 +204,11 @@ fn client_aborts_before_worker_finishes_handler(
 
 fn worker_aborts_after_response_handler(
     calls: Arc<AtomicUsize>,
-    worker_finished: Arc<AtomicBool>,
+    worker: Arc<WorkerCompletionGate>,
 ) -> OperationHandler {
     Arc::new(move |req: OperationRequest| {
         let calls = calls.clone();
-        let worker_finished = worker_finished.clone();
+        let worker = worker.clone();
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             let (mut writer, dispatch) = OperationDispatch::streaming(OperationResponse {
@@ -187,7 +217,7 @@ fn worker_aborts_after_response_handler(
             });
             tokio::spawn(async move {
                 writer.write_frame(&progress(req.lease_id, 0)).unwrap();
-                worker_finished.store(true, Ordering::SeqCst);
+                worker.mark_finished();
             });
             Ok(dispatch)
         })
@@ -200,7 +230,7 @@ async fn collect_body(mut dispatch: DispatchStream) -> Vec<NdjsonOutcome> {
         let outcome = dispatch.frames.next_frame().await.unwrap();
         let done = matches!(
             outcome,
-            NdjsonOutcome::Terminated(_) | NdjsonOutcome::StreamEnd { .. } | NdjsonOutcome::Closed
+            NdjsonOutcome::Terminated(_) | NdjsonOutcome::StreamEnd { .. }
         );
         outcomes.push(outcome);
         if done {
@@ -208,17 +238,6 @@ async fn collect_body(mut dispatch: DispatchStream) -> Vec<NdjsonOutcome> {
         }
     }
     outcomes
-}
-
-async fn wait_until(mut condition: impl FnMut() -> bool) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    while !condition() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "condition was not met before timeout"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
 }
 
 async fn running_server(handler: OperationHandler) -> (SocketAddr, ServerRunning) {
@@ -239,8 +258,11 @@ async fn write_chunk(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> std::i
 async fn server_streaming_dispatch_returns_before_terminal_frame() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls_for_handler = calls.clone();
+    let terminal_gate = Arc::new(Notify::new());
+    let terminal_gate_for_handler = terminal_gate.clone();
     let handler: OperationHandler = Arc::new(move |req| {
         let calls_for_handler = calls_for_handler.clone();
+        let terminal_gate = terminal_gate_for_handler.clone();
         Box::pin(async move {
             calls_for_handler.fetch_add(1, Ordering::SeqCst);
             let (mut writer, body) = OperationDispatch::streaming(OperationResponse {
@@ -249,7 +271,7 @@ async fn server_streaming_dispatch_returns_before_terminal_frame() {
             });
             tokio::spawn(async move {
                 writer.write_frame(&progress(req.lease_id, 0)).unwrap();
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                terminal_gate.notified().await;
                 writer.write_frame(&result_frame(req.lease_id, 1)).unwrap();
                 writer.finish().unwrap();
             });
@@ -259,20 +281,22 @@ async fn server_streaming_dispatch_returns_before_terminal_frame() {
 
     let (addr, running) = running_server(handler).await;
     let client = HttpClient::new(addr);
-    let start = std::time::Instant::now();
-    let mut dispatch = client
-        .dispatch(
+    let mut dispatch = tokio::time::timeout(
+        Duration::from_secs(1),
+        client.dispatch(
             &creds(),
             "streaming-server-1",
             request(LeaseId(1), serde_json::json!({})),
-        )
-        .await
-        .unwrap();
-    assert!(start.elapsed() < Duration::from_millis(150));
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(matches!(
         dispatch.frames.next_frame().await.unwrap(),
         NdjsonOutcome::Frame(_)
     ));
+    terminal_gate.notify_one();
     assert!(matches!(
         dispatch.frames.next_frame().await.unwrap(),
         NdjsonOutcome::Terminated(_)
@@ -370,9 +394,8 @@ async fn handler_error_clears_active_idempotency_entry() {
 #[tokio::test]
 async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let worker_finished = Arc::new(AtomicBool::new(false));
-    let handler =
-        client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
+    let worker = WorkerCompletionGate::new();
+    let handler = client_aborts_before_worker_finishes_handler(calls.clone(), worker.clone());
     let (addr, running) = running_server(handler).await;
     let client = HttpClient::new(addr);
     let req = request(LeaseId(13), serde_json::json!({"path": "/tmp/a"}));
@@ -387,7 +410,7 @@ async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() 
     ));
     drop(first);
 
-    assert!(!worker_finished.load(Ordering::SeqCst));
+    assert!(!worker.is_finished());
     let duplicate = client
         .dispatch(&creds(), "aborted-stream", req)
         .await
@@ -397,6 +420,8 @@ async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() 
         ProtocolError::DuplicateIdempotencyKey { .. }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    worker.release();
+    worker.wait_finished().await;
     let _ = running.shutdown.send(());
     let _ = running.joined.await;
 }
@@ -404,9 +429,8 @@ async fn aborted_client_stream_keeps_active_idempotency_until_worker_terminal() 
 #[tokio::test]
 async fn dropped_client_stream_replays_after_worker_terminal() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let worker_finished = Arc::new(AtomicBool::new(false));
-    let handler =
-        client_aborts_before_worker_finishes_handler(calls.clone(), worker_finished.clone());
+    let worker = WorkerCompletionGate::new();
+    let handler = client_aborts_before_worker_finishes_handler(calls.clone(), worker.clone());
     let (addr, running) = running_server(handler).await;
     let client = HttpClient::new(addr);
     let req = request(LeaseId(15), serde_json::json!({"path": "/tmp/a"}));
@@ -420,7 +444,8 @@ async fn dropped_client_stream_replays_after_worker_terminal() {
         NdjsonOutcome::Frame(_)
     ));
     drop(first);
-    wait_until(|| worker_finished.load(Ordering::SeqCst)).await;
+    worker.release();
+    worker.wait_finished().await;
 
     let replay = collect_body(
         client
@@ -439,8 +464,8 @@ async fn dropped_client_stream_replays_after_worker_terminal() {
 #[tokio::test]
 async fn worker_abort_after_response_clears_active_idempotency_entry() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let worker_finished = Arc::new(AtomicBool::new(false));
-    let handler = worker_aborts_after_response_handler(calls.clone(), worker_finished.clone());
+    let worker = WorkerCompletionGate::new();
+    let handler = worker_aborts_after_response_handler(calls.clone(), worker.clone());
     let (addr, running) = running_server(handler).await;
     let client = HttpClient::new(addr);
     let req = request(LeaseId(14), serde_json::json!({"path": "/tmp/a"}));
@@ -454,7 +479,7 @@ async fn worker_abort_after_response_clears_active_idempotency_entry() {
         NdjsonOutcome::Frame(_)
     ));
     let _ = first.frames.next_frame().await.unwrap_err();
-    wait_until(|| worker_finished.load(Ordering::SeqCst)).await;
+    worker.wait_finished().await;
 
     let _ = client.dispatch(&creds(), "worker-abort", req).await;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -466,8 +491,10 @@ async fn worker_abort_after_response_clears_active_idempotency_entry() {
 async fn dispatch_returns_after_response_line_before_progress_stream_finishes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let body_gate = Arc::new(Notify::new());
+    let body_gate_for_server = body_gate.clone();
 
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut buf = [0_u8; 4096];
         let _ = stream.read(&mut buf).await.unwrap();
@@ -487,7 +514,7 @@ async fn dispatch_returns_after_response_line_before_progress_stream_finishes() 
         write_chunk(&mut stream, &response_line).await.unwrap();
         stream.flush().await.unwrap();
 
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        body_gate_for_server.notified().await;
         write_chunk(
             &mut stream,
             &ndjson_bytes(&[progress(LeaseId(1), 0), result_frame(LeaseId(1), 1)]),
@@ -499,7 +526,7 @@ async fn dispatch_returns_after_response_line_before_progress_stream_finishes() 
 
     let client = HttpClient::new(addr);
     let timed = tokio::time::timeout(
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         client.dispatch(
             &creds(),
             "idem-1",
@@ -511,9 +538,19 @@ async fn dispatch_returns_after_response_line_before_progress_stream_finishes() 
         timed.is_ok(),
         "dispatch must return after OperationResponse line"
     );
-    let dispatch = timed.unwrap().unwrap();
+    let mut dispatch = timed.unwrap().unwrap();
 
     assert_eq!(dispatch.response.lease_id, LeaseId(1));
+    body_gate.notify_one();
+    assert!(matches!(
+        dispatch.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Frame(_)
+    ));
+    assert!(matches!(
+        dispatch.frames.next_frame().await.unwrap(),
+        NdjsonOutcome::Terminated(_)
+    ));
+    server.await.unwrap();
 }
 
 #[tokio::test]

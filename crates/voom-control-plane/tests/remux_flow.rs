@@ -4,18 +4,19 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileLocationId, FileVersionId, MediaSnapshotId};
+use voom_plan::PlanOperationKind;
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
+    target_debug_binary,
 };
 
 const REMUX_POLICY: &str = r#"
@@ -39,7 +40,7 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-mkvtoolnix-worker").unwrap();
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("remux-flow").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
     let source = tmp.path().join("Movie.mkv");
@@ -89,7 +90,7 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
         .await
         .unwrap();
     assert_eq!(plan.plan.nodes.len(), 1);
-    assert_eq!(plan.plan.nodes[0].operation_kind, "remux");
+    assert_eq!(plan.plan.nodes[0].operation_kind, PlanOperationKind::Remux);
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
     assert_eq!(
         plan.plan.nodes[0].operation_payload["source_media_snapshot_id"],
@@ -175,7 +176,7 @@ async fn assert_scanned_stream_facts(
 async fn assert_remux_execution_result(
     url: &str,
     out_dir: &Path,
-    executed: &voom_control_plane::cases::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::policy::ComplianceExecuteData,
 ) {
     let result = ticket_result(url, executed.summary.job_id, "remux").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();
@@ -306,38 +307,6 @@ fn require_command(program: &str, args: &[&str]) {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn hide_stale_fake_ffprobe_sibling() -> Option<FfprobeSiblingGuard> {
-    let path = target_debug_binary("ffprobe");
-    let bytes = std::fs::read(&path).ok()?;
-    if !bytes
-        .windows(b"ffprobe version test-helper".len())
-        .any(|window| window == b"ffprobe version test-helper")
-    {
-        return None;
-    }
-    let hidden = path.with_file_name(format!("ffprobe.remux-flow-hidden-{}", std::process::id()));
-    std::fs::rename(&path, &hidden).unwrap_or_else(|err| {
-        panic!(
-            "cannot hide stale test-helper ffprobe sibling {} before real scan: {err}",
-            path.display()
-        )
-    });
-    Some(FfprobeSiblingGuard { path, hidden })
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
-    }
 }
 
 fn generate_remux_fixture(path: &Path) {

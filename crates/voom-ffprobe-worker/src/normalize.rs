@@ -6,6 +6,8 @@ use voom_core::FailureClass;
 pub enum WorkerError {
     #[error("artifact unavailable: {0}")]
     ArtifactUnavailable(String),
+    #[error("artifact checksum mismatch: {0}")]
+    ArtifactChecksumMismatch(String),
     #[error("malformed worker result: {0}")]
     MalformedWorkerResult(String),
 }
@@ -15,6 +17,7 @@ impl WorkerError {
     pub const fn failure_class(&self) -> FailureClass {
         match self {
             Self::ArtifactUnavailable(_) => FailureClass::ArtifactUnavailable,
+            Self::ArtifactChecksumMismatch(_) => FailureClass::ArtifactChecksumMismatch,
             Self::MalformedWorkerResult(_) => FailureClass::MalformedWorkerResult,
         }
     }

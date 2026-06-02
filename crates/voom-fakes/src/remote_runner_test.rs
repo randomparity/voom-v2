@@ -2,14 +2,13 @@ use secrecy::ExposeSecret;
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_api::router_with_control_plane;
-use voom_control_plane::cases::nodes::RegisterNodeInput;
-use voom_control_plane::cases::workers::{
-    NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
+use voom_control_plane::workers::{
+    NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterNodeInput, RegisterWorkerForNodeInput,
 };
 use voom_control_plane::{ControlPlane, HealthPlane};
-use voom_core::{NodeId, TicketId, WorkerId};
+use voom_core::{NodeId, TicketId, TicketOperation, WorkerId};
 use voom_store::repo::nodes::NodeKind;
-use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketRepo, TicketState};
+use voom_store::repo::tickets::{NewTicket, SqliteTicketRepo, TicketState};
 use voom_store::repo::workers::WorkerKind;
 use voom_store::test_support::sqlite_url_for;
 
@@ -17,18 +16,52 @@ use super::{RemoteRunnerConfig, RemoteSyntheticRunner};
 
 const OP: &str = "transcode_video";
 
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
+}
+
+fn transcode_video_ticket(input_path: &str, output_name: &str) -> serde_json::Value {
+    let output_path = std::env::temp_dir().join(format!(
+        "voom-remote-runner-{}-{output_name}",
+        std::process::id()
+    ));
+    json!({
+        "input": {
+            "path": input_path,
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": output_path.parent().unwrap().to_string_lossy().into_owned(),
+            "path": output_path.to_string_lossy().into_owned(),
+            "container": "mkv",
+            "video_codec": "hevc",
+            "overwrite": true
+        },
+        "profile": {
+            "name": "default-hevc",
+            "target_codec": "hevc",
+            "encoder": "libx265",
+            "crf": 23_u8,
+            "preset": "medium"
+        },
+        "artifact_access": {
+            "inputs": ["handle:input:test"],
+            "outputs": ["handle:output:test"]
+        }
+    })
+}
+
 #[tokio::test]
 async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
-        .ready_ticket(json!({
-            "path": "/library/movie.mkv",
-            "target_codec": "h265",
-            "artifact_access": {
-                "inputs": ["handle:input:test"],
-                "outputs": ["handle:output:test"]
-            }
-        }))
+        .ready_ticket(transcode_video_ticket(
+            "/library/movie.mkv",
+            "runner-primary.mkv",
+        ))
         .await;
 
     let mut config = fixture.config();
@@ -52,27 +85,19 @@ async fn runner_polls_acquires_dispatches_heartbeats_and_completes() {
 async fn runner_uses_fresh_idempotency_keys_for_each_run() {
     let fixture = RemoteRunnerFixture::new().await;
     let first_ticket = fixture
-        .ready_ticket(json!({
-            "path": "/library/movie.mkv",
-            "target_codec": "h265",
-            "artifact_access": {
-                "inputs": ["handle:input:test"],
-                "outputs": ["handle:output:test"]
-            }
-        }))
+        .ready_ticket(transcode_video_ticket(
+            "/library/movie.mkv",
+            "runner-first.mkv",
+        ))
         .await;
     let runner = RemoteSyntheticRunner::new(fixture.config());
 
     let first = runner.run_once_to_completion().await.unwrap();
     let second_ticket = fixture
-        .ready_ticket(json!({
-            "path": "/library/second.mkv",
-            "target_codec": "h265",
-            "artifact_access": {
-                "inputs": ["handle:input:test"],
-                "outputs": ["handle:output:test"]
-            }
-        }))
+        .ready_ticket(transcode_video_ticket(
+            "/library/second.mkv",
+            "runner-second.mkv",
+        ))
         .await;
     let second = runner.run_once_to_completion().await.unwrap();
 
@@ -101,14 +126,10 @@ async fn runner_instances_use_random_idempotency_run_ids() {
 async fn runner_fails_lease_when_configured_artifact_access_is_incompatible() {
     let fixture = RemoteRunnerFixture::new().await;
     let ticket_id = fixture
-        .ready_ticket(json!({
-            "path": "/library/movie.mkv",
-            "target_codec": "h265",
-            "artifact_access": {
-                "inputs": ["handle:input:test"],
-                "outputs": ["handle:output:test"]
-            }
-        }))
+        .ready_ticket(transcode_video_ticket(
+            "/library/movie.mkv",
+            "runner-failure.mkv",
+        ))
         .await;
 
     let mut config = fixture.config();
@@ -157,18 +178,18 @@ impl RemoteRunnerFixture {
                 name: "remote-worker".to_owned(),
                 kind: WorkerKind::Remote,
                 capabilities: vec![NewWorkerCapabilityDraft {
-                    operation: OP.to_owned(),
+                    operation: ticket_op(OP),
                     codecs: vec!["json".to_owned()],
                     hardware: Vec::new(),
                     artifact_access: vec!["shared_mount".to_owned()],
                     extra: json!({}),
                 }],
                 grants: vec![NewWorkerGrantDraft {
-                    can_execute: vec![OP.to_owned()],
+                    can_execute: vec![ticket_op(OP)],
                     can_access_read: Vec::new(),
                     can_access_write: Vec::new(),
                     denies: Vec::new(),
-                    max_parallel: json!({"limit": 1}),
+                    max_parallel: json!({"*": 1}),
                 }],
             })
             .await
@@ -210,7 +231,7 @@ impl RemoteRunnerFixture {
             .cp
             .create_ticket(NewTicket {
                 job_id: None,
-                kind: OP.to_owned(),
+                kind: ticket_op(OP),
                 priority: 0,
                 payload,
                 max_attempts: 2,

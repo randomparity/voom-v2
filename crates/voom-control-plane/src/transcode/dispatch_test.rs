@@ -1,6 +1,7 @@
 use super::*;
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 use voom_core::{FileAssetId, FileLocationId, FileVersionId};
 use voom_store::repo::identity::{FileLocation, FileLocationKind, FileVersion, ProducedBy};
@@ -47,7 +48,7 @@ fn default_ffmpeg_worker_command_falls_back_to_path_when_sibling_is_missing() {
     assert_eq!(command.program, OsStr::new("voom-ffmpeg-worker"));
 }
 
-// -- request_for: carries the resolved profile (Task 6.4) --
+// -- transcode_video_request_for: carries the resolved profile (Task 6.4) --
 
 /// A non-default AV1 1080p profile so a regression that reintroduces a hardcoded
 /// `default_hevc()` would change codec/container/dims and fail these assertions.
@@ -95,24 +96,25 @@ fn selected_source() -> SelectedSource {
             retired_at: None,
             epoch: 0,
         },
+        canonical_path: PathBuf::from("/canonical/library/Movie.mkv"),
     }
 }
 
 #[test]
-fn request_for_carries_resolved_profile_codec_and_container() {
+fn transcode_video_request_for_carries_resolved_profile_codec_and_container() {
     let resolved = resolved_av1_1080p_mp4();
-    let request = request_for(
+    let request = transcode_video_request_for(
         &selected_source(),
         &resolved,
         true,
         Path::new("/tmp/stage"),
         Path::new("/tmp/stage/Movie.av1-1080p.av1.mp4"),
-    )
-    .unwrap();
+    );
 
     // The dispatched request must carry the RESOLVED profile verbatim, not a
     // hardcoded default.
     assert_eq!(request.profile, resolved.profile);
+    assert_eq!(request.input.path, "/canonical/library/Movie.mkv");
     assert_eq!(request.output.container, "mp4");
     assert_eq!(request.output.video_codec, "av1");
     assert!(request.copy_video);

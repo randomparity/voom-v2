@@ -214,6 +214,8 @@ impl ErrorCode {
 pub enum VoomError {
     #[error("database error: {0}")]
     Database(String),
+    #[error("uninitialized database: {0}")]
+    UninitializedDatabase(String),
     #[error("migration error: {0}")]
     Migration(String),
     #[error("dirty migration: {0}")]
@@ -297,6 +299,7 @@ impl VoomError {
     pub fn error_code(&self) -> ErrorCode {
         match self {
             Self::Database(_) => ErrorCode::DbUnreachable,
+            Self::UninitializedDatabase(_) => ErrorCode::DbUninitialized,
             Self::Migration(_) => ErrorCode::DbPartialSchema,
             Self::DirtyMigration(_) => ErrorCode::DbDirtyMigration,
             Self::SchemaTooNew(_) => ErrorCode::DbSchemaTooNew,

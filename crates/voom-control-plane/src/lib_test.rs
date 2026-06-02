@@ -3,7 +3,7 @@ use serde_json::json;
 use voom_core::{NodeId, TicketId, WorkerId};
 use voom_store::repo::scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionKind, SchedulerDecisionOutcome,
-    SchedulerDecisionRepo, SchedulerReasonCode, SchedulerRequestSource,
+    SchedulerReasonCode, SchedulerRequestSource,
 };
 
 fn fresh_url() -> (tempfile::NamedTempFile, String) {
@@ -86,8 +86,6 @@ async fn health_on_existing_but_uninitialized_db_is_uninitialized() {
 
 #[tokio::test]
 async fn open_exposes_seeded_video_profiles() {
-    use voom_store::repo::video_profiles::VideoProfileRepo;
-
     let (_keep, url) = fresh_url();
     voom_store::init(&url).await.unwrap();
     let cp = ControlPlane::open(&url).await.unwrap();
@@ -143,7 +141,7 @@ async fn control_plane_open_rejects_uninitialized_db() {
     let (_keep, url) = fresh_url();
     voom_store::connect_or_create(&url).await.unwrap();
     let err = ControlPlane::open(&url).await.unwrap_err();
-    assert_eq!(err.error_code(), ErrorCode::DbPartialSchema);
+    assert_eq!(err.error_code(), ErrorCode::DbUninitialized);
 }
 
 #[tokio::test]

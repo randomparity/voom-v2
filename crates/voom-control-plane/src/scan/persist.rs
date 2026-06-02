@@ -16,7 +16,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::{
-    bundles::{BundleMemberRole, BundleRepo, NewAssetBundle, NewBundleMember},
+    bundles::{BundleMemberRole, NewAssetBundle, NewBundleMember},
     identity::{
         DiscoveredFile, FileLocationKind, IdentityRepo, IngestOutcome, MediaWorkKind,
         NewMediaSnapshot, NewMediaVariant, NewMediaWork,

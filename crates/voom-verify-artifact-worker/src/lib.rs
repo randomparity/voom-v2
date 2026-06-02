@@ -1,3 +1,8 @@
+//! Artifact verification worker operations.
+//!
+//! The crate observes artifact file facts and exposes worker-protocol handlers
+//! that compare verification requests against local filesystem state.
+
 #![cfg_attr(
     test,
     expect(

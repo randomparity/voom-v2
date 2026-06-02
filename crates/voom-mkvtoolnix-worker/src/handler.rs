@@ -3,7 +3,7 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
     OperationDispatch, OperationFuture, OperationHandler, OperationKind, OperationRequest,
@@ -118,7 +118,7 @@ fn handle_operation_with_config(
         }
 
         let lease_id = req.lease_id;
-        let accepted_at = Utc::now();
+        let accepted_at = OffsetDateTime::now_utc();
         let payload = match serde_json::from_value::<RemuxRequest>(req.payload) {
             Ok(payload) => payload,
             Err(err) => {
@@ -638,7 +638,7 @@ fn expected_output_stream_order<'a>(
 
 fn success_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     result: RemuxResult,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -648,7 +648,7 @@ fn success_dispatch(
     let result = ProgressFrame::Result {
         lease_id,
         seq: 1,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     };
     Ok(OperationDispatch::buffered(
@@ -662,7 +662,7 @@ fn success_dispatch(
 
 fn error_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     err: &MkvtoolnixWorkerError,
     seq: u64,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -677,7 +677,7 @@ fn error_dispatch(
 
 fn error_dispatch_with_progress(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     err: &MkvtoolnixWorkerError,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -690,7 +690,7 @@ fn error_dispatch_with_progress(
     ))
 }
 
-fn progress_frame(lease_id: LeaseId, emitted_at: chrono::DateTime<chrono::Utc>) -> ProgressFrame {
+fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
         seq: 0,
@@ -705,7 +705,7 @@ fn error_frame(lease_id: LeaseId, err: &MkvtoolnixWorkerError, seq: u64) -> Prog
     ProgressFrame::Error {
         lease_id,
         seq,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: err.failure_class(),
         code: err.error_code(),
         message: err.to_string(),

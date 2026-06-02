@@ -13,10 +13,10 @@ use tokio::io::AsyncRead;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::credentials::WorkerCredentials;
-use crate::envelope::{OperationRequest, OperationResponse, ProtocolError};
-use crate::handshake::HandshakeResponse;
-use crate::ndjson::NdjsonReader;
+use crate::{
+    HandshakeResponse, NdjsonReader, OperationRequest, OperationResponse, ProtocolError,
+    WorkerCredentials,
+};
 
 /// Crate-owned NDJSON byte stream type. Erases the underlying
 /// transport's body type (hyper today, TLS-wrapped tomorrow) behind

@@ -12,11 +12,11 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary, WorkflowSummaryRepo,
+    FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary,
 };
 
-use crate::cases::compliance::ComplianceExecutionOptions;
 use crate::cases::cp;
+use crate::cases::policy::compliance::ComplianceExecutionOptions;
 
 use super::{active_version_with_snapshot, project_media_snapshot_input};
 

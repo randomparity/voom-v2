@@ -3,10 +3,9 @@ use super::*;
 use serde_json::json;
 use sqlx::Row;
 use time::OffsetDateTime;
+use voom_core::ErrorCode;
 use voom_core::rng_test_support::FrozenRng;
-use voom_store::repo::artifacts::{
-    ArtifactRepo, ArtifactVerificationStatus, NewArtifactVerification,
-};
+use voom_store::repo::artifacts::{ArtifactVerificationStatus, NewArtifactVerification};
 use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
@@ -62,7 +61,7 @@ async fn record_staged_audio_extract_writes_lineage_with_stream_id_and_role() {
 }
 
 #[tokio::test]
-async fn sidecar_prepare_records_pending_before_promotion_failure_marks_recovery() {
+async fn sidecar_prepare_rejects_missing_staging_before_pending_commit() {
     let (cp, _db, dir) = fixture().await;
     let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
     let staged = record_staged_audio_extract(
@@ -78,7 +77,7 @@ async fn sidecar_prepare_records_pending_before_promotion_failure_marks_recovery
     let verification =
         record_successful_verification(&cp, &staged, &dir.path().join("missing-staged.ogg")).await;
 
-    let report = commit_audio_extract_sidecar(
+    let err = commit_audio_extract_sidecar(
         &cp,
         CommitAudioExtractSidecarInput {
             artifact_handle_id: staged.artifact_handle_id,
@@ -92,21 +91,58 @@ async fn sidecar_prepare_records_pending_before_promotion_failure_marks_recovery
         },
     )
     .await
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(report.state, ArtifactCommitState::RecoveryRequired);
-    // A recovery-path report has no durable result IDs — they must be absent,
-    // not a sentinel zero that an observer could mistake for a real ID.
-    assert_eq!(report.result_file_version_id, None);
-    assert_eq!(report.result_file_location_id, None);
-    let recovery = report.recovery_required.unwrap();
-    assert_eq!(recovery.commit_record_id, report.commit_record_id);
-    assert_eq!(recovery.source_bundle_id, voom_core::ids::BundleId(777));
-    assert_eq!(recovery.role, "external_audio");
-    assert_eq!(recovery.error_code, "ARTIFACT_UNAVAILABLE");
-    assert!(!recovery.staging_exists);
-    assert_eq!(recovery.result_file_version_id, None);
-    assert_eq!(recovery.result_file_location_id, None);
+    assert_eq!(err.error_code(), ErrorCode::ArtifactUnavailable);
+    assert_eq!(artifact_commit_record_count(&cp).await, 0);
+    assert_eq!(event_count(&cp, "artifact.commit_started").await, 0);
+    assert_eq!(
+        event_count(&cp, "artifact.commit_recovery_required").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn sidecar_prepare_rejects_staging_fact_mismatch_before_pending_commit() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"changed").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result(),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    let err = commit_audio_extract_sidecar(
+        &cp,
+        CommitAudioExtractSidecarInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            verification_id: verification,
+            source_file_version_id: source.file_version_id,
+            source_bundle_id: voom_core::ids::BundleId(777),
+            role: voom_plan::audio::AudioBundleRole::ExternalAudio,
+            staging_path,
+            target_path: dir.path().join("target.ogg"),
+            output: observed(10, "blake3:output"),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert_eq!(artifact_commit_record_count(&cp).await, 0);
+    assert_eq!(event_count(&cp, "artifact.commit_started").await, 0);
+    assert_eq!(
+        event_count(&cp, "artifact.commit_recovery_required").await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -412,6 +448,14 @@ fn blake3_checksum(bytes: &[u8]) -> String {
 async fn event_count(cp: &crate::ControlPlane, kind: &str) -> i64 {
     let row = sqlx::query("SELECT COUNT(*) AS count FROM events WHERE kind = ?")
         .bind(kind)
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    row.try_get("count").unwrap()
+}
+
+async fn artifact_commit_record_count(cp: &crate::ControlPlane) -> i64 {
+    let row = sqlx::query("SELECT COUNT(*) AS count FROM artifact_commit_records")
         .fetch_one(cp.pool_for_test())
         .await
         .unwrap();

@@ -23,18 +23,15 @@ fn operation_request_uses_manifest_case_operation_payload_and_deadlines() {
 fn operation_request_can_use_manifest_invalid_payload() {
     let case = OperationCase {
         operation: voom_worker_protocol::OperationKind::TranscodeVideo,
-        valid_payload: serde_json::json!({"path": "/library/example.mkv", "target_codec": "h265"}),
-        invalid_payload: serde_json::json!({"path": "/library/example.mkv", "target_codec": "bad_codec"}),
+        valid_payload: valid_transcode_video_payload(),
+        invalid_payload: invalid_transcode_video_payload(),
     };
     let req = operation_request(voom_core::LeaseId(8), &case, PayloadKind::Invalid);
     assert_eq!(
         req.operation,
         voom_worker_protocol::OperationKind::TranscodeVideo
     );
-    assert_eq!(
-        req.payload,
-        serde_json::json!({"path": "/library/example.mkv", "target_codec": "bad_codec"})
-    );
+    assert_eq!(req.payload, invalid_transcode_video_payload());
 }
 
 #[test]
@@ -47,25 +44,13 @@ fn operation_case_checks_include_invalid_payload_for_every_operation() {
         operations: vec![
             OperationCase {
                 operation: voom_worker_protocol::OperationKind::TranscodeVideo,
-                valid_payload: serde_json::json!({
-                    "path": "/library/example.mkv",
-                    "target_codec": "h265"
-                }),
-                invalid_payload: serde_json::json!({
-                    "path": "/library/example.mkv",
-                    "target_codec": "bad_codec"
-                }),
+                valid_payload: valid_transcode_video_payload(),
+                invalid_payload: invalid_transcode_video_payload(),
             },
             OperationCase {
                 operation: voom_worker_protocol::OperationKind::ExtractAudio,
-                valid_payload: serde_json::json!({
-                    "path": "/library/example.mkv",
-                    "target_codec": "h265"
-                }),
-                invalid_payload: serde_json::json!({
-                    "path": "/library/example.mkv",
-                    "target_codec": "bad_codec"
-                }),
+                valid_payload: valid_extract_audio_payload(),
+                invalid_payload: invalid_extract_audio_payload(),
             },
         ],
         path: None,
@@ -85,4 +70,70 @@ fn operation_case_checks_include_invalid_payload_for_every_operation() {
     assert!(names.contains(
         &"fake-transcoder::extract_audio::operation_case_rejects_invalid_payload".to_owned()
     ));
+}
+
+fn valid_transcode_video_payload() -> serde_json::Value {
+    transcode_video_payload("hevc")
+}
+
+fn invalid_transcode_video_payload() -> serde_json::Value {
+    transcode_video_payload("bad_codec")
+}
+
+fn transcode_video_payload(output_video_codec: &str) -> serde_json::Value {
+    serde_json::json!({
+        "input": {
+            "path": "/library/example.mkv",
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": "/tmp/voom-stage",
+            "path": "/tmp/voom-stage/example.video.mkv",
+            "container": "mkv",
+            "video_codec": output_video_codec,
+            "overwrite": false
+        },
+        "profile": {
+            "name": "default-hevc",
+            "target_codec": "hevc",
+            "encoder": "libx265",
+            "crf": 23_u8,
+            "preset": "medium"
+        },
+        "copy_video": false
+    })
+}
+
+fn valid_extract_audio_payload() -> serde_json::Value {
+    extract_audio_payload("opus")
+}
+
+fn invalid_extract_audio_payload() -> serde_json::Value {
+    extract_audio_payload("bad_codec")
+}
+
+fn extract_audio_payload(audio_codec: &str) -> serde_json::Value {
+    serde_json::json!({
+        "input": {
+            "path": "/library/example.mkv",
+            "expected": {
+                "size_bytes": 5_u64,
+                "content_hash": "blake3:input"
+            }
+        },
+        "output": {
+            "staging_root": "/tmp/voom-stage",
+            "path": "/tmp/voom-stage/example.audio.ogg",
+            "container": "ogg",
+            "audio_codec": audio_codec,
+            "overwrite": false
+        },
+        "selection": {
+            "snapshot_stream_id": "stream-1",
+            "provider_stream_index": 1_u32
+        }
+    })
 }

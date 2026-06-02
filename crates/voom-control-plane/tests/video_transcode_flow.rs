@@ -4,35 +4,36 @@
     reason = "integration test setup should fail loudly with direct assertions"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::json;
 use tempfile::NamedTempFile;
 use voom_control_plane::ControlPlane;
-use voom_control_plane::cases::compliance::ComplianceExecutionOptions;
-use voom_control_plane::cases::policy_inputs::PolicyInputFromScanInput;
+use voom_control_plane::policy::{ComplianceExecutionOptions, PolicyInputFromScanInput};
 use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::{FileVersionId, MediaSnapshotId};
+use voom_plan::PlanOperationKind;
 use voom_policy::{
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef, load_policy_fixture,
 };
 use voom_store::repo::identity::{IdentityRepo, SqliteIdentityRepo};
 use voom_test_support::worker::{
-    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, target_debug_binary,
+    TestWorkerConfig, TestWorkerLaunch, cargo_build_package, hide_stale_fake_ffprobe_sibling,
+    target_debug_binary,
 };
 
 #[tokio::test]
 async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
-    // The post-commit result probe must run REAL ffprobe against the committed
-    // output; hide any canned test-helper `ffprobe` stub installed by sibling
-    // tests in the shared profile dir.
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
+    // The post-commit result probe must run REAL ffprobe against the committed
+    // output; hide any canned test-helper `ffprobe` stub installed by sibling
+    // tests in the shared profile dir.
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("video-transcode-flow").unwrap();
 
-    let tmp = tempfile::TempDir::new().unwrap();
+    let tmp = test_tempdir();
     let source = tmp.path().join("Movie.mp4");
     generate_h264_fixture(&source);
 
@@ -80,7 +81,10 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
         .generate_compliance_report(policy.version.id, input.id)
         .await
         .unwrap();
-    assert_eq!(plan.plan.nodes[0].operation_kind, "transcode_video");
+    assert_eq!(
+        plan.plan.nodes[0].operation_kind,
+        PlanOperationKind::TranscodeVideo
+    );
     assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
@@ -113,7 +117,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
 async fn assert_transcode_execution_result(
     url: &str,
     out_dir: &Path,
-    executed: &voom_control_plane::cases::compliance::ComplianceExecuteData,
+    executed: &voom_control_plane::policy::ComplianceExecuteData,
 ) -> (FileVersionId, MediaSnapshotId) {
     let result = ticket_result(url, executed.summary.job_id, "transcode_video").await;
     let result_file_version_id = FileVersionId(result["result_file_version_id"].as_u64().unwrap());
@@ -265,51 +269,6 @@ fn input_for(
     }
 }
 
-/// Hide the canned test-helper `ffprobe` sibling (installed by other tests in
-/// the shared profile dir) so the bundled probe worker runs real ffprobe. The
-/// static mutex serializes any real-ffprobe cases in this binary: they share the
-/// single `ffprobe` sibling path (derived from the running test binary so it
-/// tracks the active cargo target dir), so a future second test would otherwise
-/// race silently (one test restoring the stub while another is probing). The
-/// guard restores the stub on drop.
-fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = target_debug_binary("ffprobe");
-    let hidden = path.with_file_name("ffprobe.video-transcode-flow-hidden");
-    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
-        bytes
-            .windows(b"ffprobe version test-helper".len())
-            .any(|window| window == b"ffprobe version test-helper")
-    });
-    if is_stub {
-        std::fs::rename(&path, &hidden).unwrap();
-    }
-    FfprobeSiblingGuard {
-        path,
-        hidden,
-        restore: is_stub,
-        _lock: lock,
-    }
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-    restore: bool,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.restore && self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
-    }
-}
-
 fn generate_h264_fixture(path: &Path) {
     let status = Command::new("ffmpeg")
         .args([
@@ -335,6 +294,10 @@ fn generate_h264_fixture(path: &Path) {
         status.success(),
         "ffmpeg fixture generation failed: {status}"
     );
+}
+
+fn test_tempdir() -> tempfile::TempDir {
+    tempfile::TempDir::new_in(std::env::current_dir().unwrap()).unwrap()
 }
 
 struct TranscodeWorkerLaunch {

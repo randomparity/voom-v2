@@ -60,6 +60,11 @@ const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_video_pr
 /// compile time.
 const MIGRATION_0015_SQL: &str = include_str!("../../../migrations/0015_workflow_summaries.sql");
 
+/// SQL for migration 0016 (worker grant `max_parallel` wildcard normalization),
+/// embedded at compile time.
+const MIGRATION_0016_SQL: &str =
+    include_str!("../../../migrations/0016_worker_grant_max_parallel_wildcard.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -178,6 +183,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("workflow_summaries"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0015_SQL),
+            false,
+        ),
+        Migration::new(
+            16,
+            Cow::Borrowed("worker_grant_max_parallel_wildcard"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0016_SQL),
             false,
         ),
     ]),

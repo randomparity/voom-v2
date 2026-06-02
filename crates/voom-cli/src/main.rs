@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
+use serde::Serialize;
 use voom_cli::cli::{
     ArtifactCommand, Cli, Command, ComplianceCommand, NodeCommand, PlanCommand, PolicyCommand,
     ProfileCommand, SchedulerCommand, WorkerCommand,
@@ -11,10 +12,15 @@ use voom_cli::commands::{
     artifact, compliance, health, init, node, plan, policy, profile, scan, scheduler, version,
     worker,
 };
-use voom_cli::envelope::{Local, emit_err};
+use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
 use voom_control_plane::HealthPlane;
 use voom_core::{Config, ErrorCode, VoomError};
+
+#[derive(Debug, Serialize)]
+struct HelpData {
+    text: String,
+}
 
 /// Process exit codes used by the `voom` binary. The numeric values are
 /// public contract: agents key on these.
@@ -54,21 +60,33 @@ async fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(e) => {
             let kind = e.kind();
-            // --help/--version use clap's success-exit path; let it through
-            // verbatim because there's no JSON envelope yet for those.
-            //
+            if matches!(kind, clap::error::ErrorKind::DisplayHelp) {
+                let data = HelpData {
+                    text: e.render().to_string(),
+                };
+                let _ = emit_ok("help", data, None, Vec::new());
+                return ExitCode::from(Exit::Ok as u8);
+            }
+            if matches!(kind, clap::error::ErrorKind::DisplayVersion) {
+                match version::run() {
+                    Ok(()) => return ExitCode::from(Exit::Ok as u8),
+                    Err(err) => {
+                        let _ = emit_err(
+                            "version",
+                            ErrorCode::Internal.as_str(),
+                            err.to_string(),
+                            Some("Could not emit version envelope".to_owned()),
+                            None,
+                        );
+                        return ExitCode::from(Exit::Failure as u8);
+                    }
+                }
+            }
             // DisplayHelpOnMissingArgumentOrSubcommand is deliberately NOT
             // treated as success: invoking `voom` with no subcommand is a
             // malformed call from an agent's perspective (no envelope on
             // stdout, no idea which command ran), so it falls through to the
             // BAD_ARGS arm below and exits 1.
-            if matches!(
-                kind,
-                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
-            ) {
-                e.print().ok();
-                return ExitCode::from(Exit::Ok as u8);
-            }
             // Everything else is a user error — emit BAD_ARGS envelope.
             let _ = voom_cli::envelope::emit_err(
                 "cli",

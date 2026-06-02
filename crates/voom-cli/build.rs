@@ -1,7 +1,7 @@
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
+#[cfg(not(test))]
+use std::{env, path::PathBuf, process::Command};
 
+#[cfg(not(test))]
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
@@ -90,15 +90,16 @@ fn main() {
 }
 
 #[derive(Debug)]
-struct GitStatus {
-    sha: Option<String>,
-    branch: Option<String>,
-    dirty: bool,
+pub(crate) struct GitStatus {
+    pub(crate) sha: Option<String>,
+    pub(crate) branch: Option<String>,
+    pub(crate) dirty: bool,
 }
 
 /// Run `git status -b --porcelain=v2` once and extract SHA, branch, and
 /// dirty-flag in a single fork. Returns `None` when git is unavailable or
 /// the cwd isn't a checkout.
+#[cfg(not(test))]
 fn read_git_status() -> Option<GitStatus> {
     let out = Command::new("git")
         .args(["status", "-b", "--porcelain=v2"])
@@ -108,26 +109,33 @@ fn read_git_status() -> Option<GitStatus> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_git_status(&stdout)
+}
 
+pub(crate) fn parse_git_status(stdout: &str) -> Option<GitStatus> {
+    let mut saw_status_line = false;
     let mut sha = None;
     let mut branch = None;
     let mut dirty = false;
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("# branch.oid ") {
+            saw_status_line = true;
             let s = rest.trim();
             // `initial` appears before the first commit; treat as no SHA.
             if s != "(initial)" {
                 sha = Some(s.to_owned());
             }
         } else if let Some(rest) = line.strip_prefix("# branch.head ") {
+            saw_status_line = true;
             let b = rest.trim();
             if b != "(detached)" {
                 branch = Some(b.to_owned());
             }
         } else if !line.is_empty() && !line.starts_with('#') {
             // Any non-comment line = a tracked or untracked entry = dirty.
+            saw_status_line = true;
             dirty = true;
         }
     }
-    Some(GitStatus { sha, branch, dirty })
+    saw_status_line.then_some(GitStatus { sha, branch, dirty })
 }

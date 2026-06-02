@@ -2,6 +2,9 @@
 # Plans are transient, specs are permanent
 docs/superpowers/plans/
 
+# Desloppify local state
+.desloppify/
+
 # Rust
 /target/
 **/*.rs.bk

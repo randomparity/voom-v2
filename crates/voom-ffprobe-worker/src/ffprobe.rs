@@ -3,12 +3,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde_json::Value;
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use voom_core::{ErrorCode, FailureClass};
+use voom_core::{ErrorCode, FailureClass, format_iso8601};
 use voom_worker_protocol::{
     OperationDispatch, OperationFuture, OperationHandler, OperationKind, OperationRequest,
     OperationResponse, ProbeFileRequest, ProbeFileResult, ProbeFileStatus, ProgressFrame,
@@ -188,7 +188,7 @@ fn handle_operation_with_config(req: OperationRequest, config: FfprobeConfig) ->
         }
 
         let lease_id = req.lease_id;
-        let accepted_at = Utc::now();
+        let accepted_at = OffsetDateTime::now_utc();
         // A malformed payload is a worker-domain result, not a transport
         // error: emit a terminal ProgressFrame::Error (MalformedWorkerResult)
         // on the HTTP 200 path so retries replay it, matching the ffmpeg
@@ -223,7 +223,7 @@ async fn probe_file(
     verify_expected_facts("pre_probe", &pre_probe, &request.expected)?;
 
     let raw = run_ffprobe_json(&path, config).await?;
-    let probed_at = Utc::now().to_rfc3339();
+    let probed_at = format_iso8601(OffsetDateTime::now_utc());
     let snapshot = normalize_ffprobe_json(raw, config.provider_version(), &probed_at)
         .map_err(FfprobeError::from)?;
 
@@ -270,27 +270,29 @@ fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
 }
 
 async fn command_output(command: &mut Command) -> io::Result<std::process::Output> {
-    for attempt in 0..3 {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
         match command.output().await {
-            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+            Err(err) if is_text_file_busy(&err) && attempts_remaining > 0 => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             result => return result,
         }
     }
-    command.output().await
 }
 
 fn spawn_with_retry(command: &mut std::process::Command) -> io::Result<std::process::Child> {
-    for attempt in 0..3 {
+    let mut attempts_remaining = 3;
+    loop {
+        attempts_remaining -= 1;
         match command.spawn() {
-            Err(err) if is_text_file_busy(&err) && attempt < 2 => {
+            Err(err) if is_text_file_busy(&err) && attempts_remaining > 0 => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             result => return result,
         }
     }
-    command.spawn()
 }
 
 fn is_text_file_busy(err: &io::Error) -> bool {
@@ -346,7 +348,7 @@ fn verify_pre_post_match(
 
 fn success_dispatch(
     lease_id: voom_core::LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     result: ProbeFileResult,
 ) -> Result<OperationDispatch, ProtocolError> {
     let progress = ProgressFrame::Progress {
@@ -363,7 +365,7 @@ fn success_dispatch(
     let result = ProgressFrame::Result {
         lease_id,
         seq: 1,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     };
     Ok(OperationDispatch::buffered(
@@ -377,13 +379,13 @@ fn success_dispatch(
 
 fn error_dispatch(
     lease_id: voom_core::LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     err: &FfprobeError,
 ) -> Result<OperationDispatch, ProtocolError> {
     let frame = ProgressFrame::Error {
         lease_id,
         seq: 0,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: err.failure_class(),
         code: err.error_code(),
         message: err.to_string(),
@@ -415,6 +417,13 @@ impl From<WorkerError> for FfprobeError {
     fn from(value: WorkerError) -> Self {
         match value {
             WorkerError::ArtifactUnavailable(message) => Self::ArtifactUnavailable {
+                payload: serde_json::json!({
+                    "stage": "observe_file",
+                    "message": message,
+                }),
+                message,
+            },
+            WorkerError::ArtifactChecksumMismatch(message) => Self::ArtifactChecksumMismatch {
                 payload: serde_json::json!({
                     "stage": "observe_file",
                     "message": message,

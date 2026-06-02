@@ -32,8 +32,8 @@ use time::Duration;
 use voom_core::{CommitId, FileLocationId};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AuthorizeOutcome, CommitGateResult, CommitTarget, DestructiveCommit, PrepareOutcome,
-    authorize_destructive_commit, prepare_destructive_commit,
+    AliasResolver, AuthorizeOutcome, CommitGateContext, CommitGateResult, CommitTarget,
+    DestructiveCommit, PrepareOutcome, authorize_destructive_commit, prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -42,9 +42,22 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
-    UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 async fn open_pool() -> (SqlitePool, NamedTempFile) {
     let tmp = NamedTempFile::new().unwrap();
@@ -152,10 +165,7 @@ async fn authorize_after_external_rename_blocks_with_closure_grew_and_reanchors_
 
     // 2. Prepare a destructive-commit targeting the prior location.
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(prior_location_id),
             accepted_evidence_ids: Vec::new(),
@@ -238,10 +248,7 @@ async fn authorize_after_external_rename_blocks_with_closure_grew_and_reanchors_
     //    longer live (retired by rename) and the new location is live
     //    (created by rename). Both deltas are non-empty → BlockedByClosureGrew.
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + Duration::seconds(3),
     )

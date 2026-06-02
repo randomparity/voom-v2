@@ -4,8 +4,8 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::Utc;
 use secrecy::SecretString;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId, WorkerId};
 use voom_worker_protocol::{
     ClientHandle, HttpServer, OperationDispatch, OperationFuture, OperationHandler, OperationKind,
@@ -50,9 +50,9 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() 
         .await
         .unwrap();
 
-    assert_eq!(worker.worker_id, worker_id);
-    assert_eq!(worker.credentials.worker_id, worker_id);
-    let handshake = worker.client.handshake(voom_core::PROTOCOL_VERSION).await;
+    assert_eq!(worker.worker_id(), worker_id);
+    assert_eq!(worker.credentials().worker_id, worker_id);
+    let handshake = worker.client().handshake(voom_core::PROTOCOL_VERSION).await;
     assert!(handshake.is_ok());
     assert_worker_rejects_different_presented_id(&worker).await;
     let result = worker
@@ -83,6 +83,7 @@ async fn worker_terminal_error_becomes_verify_worker_error() {
 
     assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
     assert_eq!(err.error_code(), ErrorCode::ArtifactChecksumMismatch);
+    assert!(!err.should_shutdown_worker());
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
@@ -120,6 +121,7 @@ async fn malformed_request_payload_is_terminal_worker_domain_error() {
 
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(!err.should_shutdown_worker());
     let _send = running.shutdown.send(());
     running.joined.await.unwrap();
 }
@@ -184,6 +186,7 @@ async fn malformed_result_payload_is_verify_worker_error() {
 
     assert_eq!(err.failure_class(), FailureClass::MalformedWorkerResult);
     assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(err.should_shutdown_worker());
     let _send = running.shutdown.send(());
     running.joined.await.unwrap();
 }
@@ -253,10 +256,10 @@ fn bundled_worker_command_from_allows_sibling_tool_env() {
 }
 
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {
-    let mut wrong_credentials = worker.credentials.clone();
-    wrong_credentials.worker_id = WorkerId(worker.worker_id.0 + 1);
+    let mut wrong_credentials = worker.credentials().clone();
+    wrong_credentials.worker_id = WorkerId(worker.worker_id().0 + 1);
     let err = worker
-        .client
+        .client()
         .dispatch(
             &wrong_credentials,
             "wrong-presented-worker-id",
@@ -279,7 +282,7 @@ async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProc
 fn malformed_request_handler() -> OperationHandler {
     Arc::new(|req: OperationRequest| {
         Box::pin(async move {
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let frame = ProgressFrame::Error {
                 lease_id: req.lease_id,
                 seq: 0,
@@ -318,7 +321,7 @@ fn unknown_operation_handler(seen: Arc<Mutex<Vec<OperationKind>>>) -> OperationH
 fn malformed_result_handler() -> OperationHandler {
     Arc::new(|req: OperationRequest| {
         Box::pin(async move {
-            let now = Utc::now();
+            let now = OffsetDateTime::now_utc();
             let frame = ProgressFrame::Result {
                 lease_id: req.lease_id,
                 seq: 0,

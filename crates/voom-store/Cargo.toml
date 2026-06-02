@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-async-trait = "0.1.89"
+async-trait = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -23,7 +23,6 @@ tracing = { workspace = true }
 voom-core = { workspace = true }
 voom-events = { workspace = true }
 voom-policy = { workspace = true }
-voom-worker-protocol = { workspace = true }
 
 [features]
 # Test-only public surface: enables init_on(pool), the test_support module
@@ -34,7 +33,7 @@ voom-worker-protocol = { workspace = true }
 # The test_support module deliberately does NOT depend on tempfile — callers
 # pass &Path in so that enabling this feature doesn't propagate tempfile's
 # transitive graph into production builds.
-test-support = []
+test = []
 
 [dev-dependencies]
 sqlx = { workspace = true }
@@ -42,15 +41,15 @@ tempfile = { workspace = true }
 tokio = { workspace = true }
 # Test-only voom-core surface: FrozenClock/ManualClock from
 # `clock_test_support` and FrozenRng/SeededRng from `rng_test_support`
-# are gated behind voom-core's `test-support` feature. Enabling it on
+# are gated behind voom-core's `test` feature. Enabling it on
 # the dev-dep arm only makes these visible to the unit + integration
 # test builds, not to the production crate graph.
-voom-core = { workspace = true, features = ["test-support"] }
+voom-core = { workspace = true, features = ["test"] }
 # Cargo permits dev-dep cycles (voom-control-plane normal-deps voom-store):
 # this dependency is only resolved for test/example builds, not for the
 # library itself, so it does not introduce a real circular build edge.
-# `test-support` re-enables the writable repo accessors that production
+# `test` re-enables the writable repo accessors that production
 # builds of voom-control-plane lock down to pub(crate); the voom-store
 # integration suite needs them to drive state changes that don't have a
 # dedicated case handler.
-voom-control-plane = { workspace = true, features = ["test-support"] }
+voom-control-plane = { workspace = true, features = ["test"] }

@@ -461,9 +461,10 @@ struct FakeRemuxDispatcher;
 
 #[async_trait]
 impl RemuxDispatcher for FakeRemuxDispatcher {
-    async fn dispatch_remux(
+    async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, voom_core::VoomError> {
         std::fs::write(&request.output.path, b"remux bytes").unwrap();
         Ok(remux_result(request))
@@ -475,9 +476,10 @@ struct WrongInputFactsRemuxDispatcher;
 
 #[async_trait]
 impl RemuxDispatcher for WrongInputFactsRemuxDispatcher {
-    async fn dispatch_remux(
+    async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, voom_core::VoomError> {
         std::fs::write(&request.output.path, b"remux bytes").unwrap();
         let mut result = remux_result(request);
@@ -492,14 +494,6 @@ struct ProgressingRemuxDispatcher;
 
 #[async_trait]
 impl RemuxDispatcher for ProgressingRemuxDispatcher {
-    async fn dispatch_remux(
-        &self,
-        request: RemuxRequest,
-    ) -> Result<RemuxResult, voom_core::VoomError> {
-        std::fs::write(&request.output.path, b"remux bytes").unwrap();
-        Ok(remux_result(request))
-    }
-
     async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
@@ -511,7 +505,8 @@ impl RemuxDispatcher for ProgressingRemuxDispatcher {
                 None,
             )
             .await?;
-        self.dispatch_remux(request).await
+        std::fs::write(&request.output.path, b"remux bytes").unwrap();
+        Ok(remux_result(request))
     }
 }
 
@@ -522,9 +517,10 @@ struct ExpectKeepStreamsRemuxDispatcher {
 
 #[async_trait]
 impl RemuxDispatcher for ExpectKeepStreamsRemuxDispatcher {
-    async fn dispatch_remux(
+    async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, voom_core::VoomError> {
         assert_eq!(
             request
@@ -564,9 +560,10 @@ impl CaptureStagingRootRemuxDispatcher {
 
 #[async_trait]
 impl RemuxDispatcher for CaptureStagingRootRemuxDispatcher {
-    async fn dispatch_remux(
+    async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, voom_core::VoomError> {
         *self.staging_root.lock().unwrap() = Some(request.output.staging_root.clone());
         std::fs::write(&request.output.path, b"remux bytes").unwrap();
@@ -576,9 +573,10 @@ impl RemuxDispatcher for CaptureStagingRootRemuxDispatcher {
 
 #[async_trait]
 impl RemuxDispatcher for CountingRemuxDispatcher {
-    async fn dispatch_remux(
+    async fn dispatch_remux_with_progress(
         &self,
         request: RemuxRequest,
+        _progress: &mut dyn dispatch::RemuxProgressSink,
     ) -> Result<RemuxResult, voom_core::VoomError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         std::fs::write(&request.output.path, b"remux bytes").unwrap();

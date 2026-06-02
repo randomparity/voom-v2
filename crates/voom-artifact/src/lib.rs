@@ -1,5 +1,7 @@
-//! Reserved for Sprint 3+ — see workspace spec for scope.
+//! Artifact domain helpers shared outside the control-plane application shell.
+//!
+//! Keep this crate focused on artifact rules with stable inputs and outputs.
+//! Filesystem promotion, worker dispatch, and use-case assembly remain in
+//! `voom-control-plane`, which owns application workflow coordination.
 
-pub mod placeholder {
-    //! Intentionally empty until the owning sprint lands.
-}
+pub mod commit_pipeline;

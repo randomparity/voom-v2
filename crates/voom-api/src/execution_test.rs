@@ -22,3 +22,24 @@ fn request_hash_includes_route_instance() {
 
     assert_ne!(a, b);
 }
+
+#[test]
+fn node_heartbeat_request_rejects_unknown_fields() {
+    let request: NodeHeartbeatRequest = match serde_json::from_value(json!({})) {
+        Ok(request) => request,
+        Err(err) => panic!("{err}"),
+    };
+    let hash = match stable_request_hash("POST", "/v1/execution/node/1/heartbeat", &request) {
+        Ok(hash) => hash,
+        Err(err) => panic!("{err}"),
+    };
+    assert!(!hash.is_empty());
+
+    let Err(err) = serde_json::from_value::<NodeHeartbeatRequest>(json!({"node_id": 1})) else {
+        panic!("node heartbeat body with fields should be rejected");
+    };
+    assert!(
+        err.to_string().contains("unknown field"),
+        "expected unknown-field error, got {err}"
+    );
+}

@@ -1,4 +1,6 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 
 use time::OffsetDateTime;
 
@@ -79,7 +81,7 @@ pub struct PlanSummary {
     pub no_op_node_count: u32,
     pub blocked_node_count: u32,
     pub target_count: u32,
-    pub operation_counts_by_kind: BTreeMap<String, u32>,
+    pub operation_counts_by_kind: BTreeMap<PlanOperationKind, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -88,7 +90,7 @@ pub struct PlanNode {
     pub phase_name: String,
     pub ordinal: u32,
     pub target: TargetRef,
-    pub operation_kind: String,
+    pub operation_kind: PlanOperationKind,
     pub operation_payload: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_state: Option<serde_json::Value>,
@@ -101,7 +103,68 @@ pub struct PlanNode {
     pub safety_hints: SafetyHints,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanOperationKind {
+    Remux,
+    SetContainer,
+    KeepTracks,
+    RemoveTracks,
+    ReorderTracks,
+    SetDefaults,
+    ClearTrackActions,
+    ClearTags,
+    SetTag,
+    DeleteTag,
+    TranscodeVideo,
+    TranscodeAudio,
+    ExtractAudio,
+    Conditional,
+    Rules,
+}
+
+impl PlanOperationKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Remux => "remux",
+            Self::SetContainer => "set_container",
+            Self::KeepTracks => "keep_tracks",
+            Self::RemoveTracks => "remove_tracks",
+            Self::ReorderTracks => "reorder_tracks",
+            Self::SetDefaults => "set_defaults",
+            Self::ClearTrackActions => "clear_track_actions",
+            Self::ClearTags => "clear_tags",
+            Self::SetTag => "set_tag",
+            Self::DeleteTag => "delete_tag",
+            Self::TranscodeVideo => "transcode_video",
+            Self::TranscodeAudio => "transcode_audio",
+            Self::ExtractAudio => "extract_audio",
+            Self::Conditional => "conditional",
+            Self::Rules => "rules",
+        }
+    }
+}
+
+impl PartialOrd for PlanOperationKind {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PlanOperationKind {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl Display for PlanOperationKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
     Planned,

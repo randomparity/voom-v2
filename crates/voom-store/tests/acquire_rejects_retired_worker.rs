@@ -4,7 +4,7 @@
 )]
 
 //! `retire_worker` is the trust/lifecycle boundary that takes a worker
-//! out of rotation. `LeaseRepo::acquire_in_tx` must reject acquires from
+//! out of rotation. `SqliteLeaseRepo::acquire_in_tx` must reject acquires from
 //! a retired worker — otherwise the FK alone (worker row exists) lets
 //! retired workers continue to lease tickets. Exercises that ticket state
 //! is preserved (`ready`) and no `leases` row is inserted on rejection.
@@ -16,9 +16,9 @@ use sqlx::Row;
 use time::Duration;
 
 use voom_control_plane::ControlPlane;
-use voom_core::{SystemClock, VoomError};
-use voom_store::repo::leases::{LeaseRepo, NewLease};
-use voom_store::repo::tickets::{NewTicket, TicketRepo, TicketState};
+use voom_core::{SystemClock, TicketOperation, VoomError};
+use voom_store::repo::leases::NewLease;
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_store::test_support::T0;
 
@@ -31,6 +31,10 @@ async fn cp() -> (ControlPlane, sqlx::SqlitePool, tempfile::NamedTempFile) {
         .await
         .unwrap();
     (cp, pool, tmp)
+}
+
+fn ticket_op(value: &str) -> TicketOperation {
+    TicketOperation::new(value).unwrap()
 }
 
 #[tokio::test]
@@ -48,7 +52,7 @@ async fn acquire_rejects_retired_worker_and_leaves_ticket_ready() {
     let ticket = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "k".to_owned(),
+            kind: ticket_op("k"),
             priority: 0,
             payload: json!({}),
             max_attempts: 3,
@@ -103,7 +107,7 @@ async fn acquire_rejects_unknown_worker() {
     let ticket = cp
         .create_ticket(NewTicket {
             job_id: None,
-            kind: "k".to_owned(),
+            kind: ticket_op("k"),
             priority: 0,
             payload: json!({}),
             max_attempts: 1,

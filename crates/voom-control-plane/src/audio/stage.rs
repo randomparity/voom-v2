@@ -87,6 +87,7 @@ async fn prepare_staging_path(
         ))
     })?;
     let ticket_parent = canonical_root.join(format!("ticket-{}", ticket_id.0));
+    reject_symlink_components(&ticket_parent, "audio staging ticket parent").await?;
     tokio::fs::create_dir_all(&ticket_parent)
         .await
         .map_err(|err| {
@@ -98,6 +99,7 @@ async fn prepare_staging_path(
     reject_symlink_dir(&ticket_parent, "audio staging ticket parent").await?;
     secure_private_dir(&ticket_parent, "audio staging ticket parent").await?;
     let parent = ticket_parent.join(format!("lease-{}", lease_id.0));
+    reject_symlink_components(&parent, "audio staging parent").await?;
     tokio::fs::create_dir_all(&parent).await.map_err(|err| {
         VoomError::Config(format!(
             "create audio staging parent {}: {err}",
@@ -266,6 +268,26 @@ async fn secure_private_dir(path: &Path, label: &str) -> Result<(), VoomError> {
     tokio::fs::set_permissions(path, permissions)
         .await
         .map_err(|err| VoomError::Config(format!("secure {label} {}: {err}", path.display())))?;
+    verify_private_dir_mode(path, label).await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn verify_private_dir_mode(path: &Path, label: &str) -> Result<(), VoomError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = tokio::fs::metadata(path)
+        .await
+        .map_err(|err| VoomError::Config(format!("inspect {label} {}: {err}", path.display())))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != 0o700 {
+        return Err(VoomError::Config(format!(
+            "{label} must be private: {} has mode {mode:o}",
+            path.display()
+        )));
+    }
     Ok(())
 }
 

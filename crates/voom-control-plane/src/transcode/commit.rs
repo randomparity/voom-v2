@@ -8,7 +8,7 @@ use voom_core::{
 };
 use voom_events::payload::ArtifactStagedPayload;
 use voom_events::{Event, SubjectType};
-use voom_store::repo::artifacts::{ArtifactRepo, NewArtifactHandle, NewArtifactLocation};
+use voom_store::repo::artifacts::{NewArtifactHandle, NewArtifactLocation};
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{
     ExpectedFileFacts, ProbeFileRequest, ProbeFileResult, TranscodeVideoObservedFacts,

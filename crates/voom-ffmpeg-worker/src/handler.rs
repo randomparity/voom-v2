@@ -2,8 +2,8 @@ use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde::{Serialize, de::DeserializeOwned};
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
     AudioExpectedFacts, AudioObservedFacts, ExtractAudioRequest, ExtractAudioResult,
@@ -120,7 +120,7 @@ fn handle_operation_with_config(
 ) -> OperationFuture {
     Box::pin(async move {
         let lease_id = req.lease_id;
-        let accepted_at = Utc::now();
+        let accepted_at = OffsetDateTime::now_utc();
         let operation = req.operation;
         if !matches!(
             operation,
@@ -209,21 +209,13 @@ pub async fn handle_transcode_video(
     validate_encoder_available(request, config)?;
     let input_path = PathBuf::from(&request.input.path);
     let output_path = PathBuf::from(&request.output.path);
-    validate_staging_path(Path::new(&request.output.staging_root), &output_path)?;
-    if tokio::fs::try_exists(&output_path)
-        .await
-        .map_err(|err| config_invalid("output_path", err.to_string()))?
-    {
-        return Err(config_invalid(
-            "output_path",
-            "output path already exists".to_owned(),
-        ));
-    }
-
-    let input_pre = observe_file_facts(&input_path)
-        .await
-        .map_err(TranscodeVideoError::from)?;
-    verify_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    let input_pre = prepare_video_operation(
+        &input_path,
+        &output_path,
+        Path::new(&request.output.staging_root),
+        &request.input.expected,
+    )
+    .await?;
 
     // Probe input to learn source dimensions and, for copy_video, to
     // revalidate the source satisfies the profile's constraints.
@@ -248,13 +240,8 @@ pub async fn handle_transcode_video(
     let probe = run_ffmpeg_transcode(config, request, input_probe.width, input_probe.height)
         .await
         .map_err(TranscodeVideoError::from)?;
-    let input_post = observe_file_facts(&input_path)
-        .await
-        .map_err(TranscodeVideoError::from)?;
-    verify_observed_match("input_post", &input_pre, &input_post)?;
-    let output = observe_file_facts(&output_path)
-        .await
-        .map_err(TranscodeVideoError::from)?;
+    let (input_post, output) =
+        finalize_video_operation(&input_path, &output_path, &input_pre).await?;
 
     Ok(TranscodeVideoResult {
         status: TranscodeVideoStatus::Transcoded,
@@ -270,6 +257,42 @@ pub async fn handle_transcode_video(
         output_pixel_format: probe.pixel_format,
         copied_video: request.copy_video,
     })
+}
+
+/// Shared pre-ffmpeg flow for video transcode: validate the output path
+/// against the staging root, require the output to not yet exist, observe the
+/// input file, and verify it matches the request's expected facts.
+async fn prepare_video_operation(
+    input_path: &Path,
+    output_path: &Path,
+    staging_root: &Path,
+    expected: &TranscodeVideoExpectedFacts,
+) -> Result<TranscodeVideoObservedFacts, TranscodeVideoError> {
+    validate_staging_path(staging_root, output_path)?;
+    validate_output_missing(output_path).await?;
+    let input_pre = observe_file_facts(input_path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    verify_expected_facts("input_pre", &input_pre, expected)?;
+    Ok(input_pre)
+}
+
+/// Shared post-ffmpeg flow for video transcode: re-observe the input and
+/// confirm it was untouched while the operation ran, then observe the output.
+/// Returns `(input_post, output)`.
+async fn finalize_video_operation(
+    input_path: &Path,
+    output_path: &Path,
+    input_pre: &TranscodeVideoObservedFacts,
+) -> Result<(TranscodeVideoObservedFacts, TranscodeVideoObservedFacts), TranscodeVideoError> {
+    let input_post = observe_file_facts(input_path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    verify_observed_match("input_post", input_pre, &input_post)?;
+    let output = observe_file_facts(output_path)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    Ok((input_post, output))
 }
 
 /// Before emitting `-c:v copy`, confirm the source satisfies all constraints
@@ -589,12 +612,13 @@ fn validate_request_contract(request: &TranscodeVideoRequest) -> Result<(), Tran
             ),
         ));
     }
-    if voom_worker_protocol::validate_profile_against_descriptor(&request.profile).is_err() {
+    if let Err(reason) = voom_worker_protocol::validate_profile_against_descriptor(&request.profile)
+    {
         return Err(config_invalid(
             "request",
             format!(
-                "transcode_video profile `{}` failed encoder descriptor validation",
-                request.profile.name
+                "transcode_video profile `{}` failed encoder descriptor validation: {reason}",
+                request.profile.name,
             ),
         ));
     }
@@ -756,7 +780,7 @@ async fn observe_audio_file_facts(path: &Path) -> Result<AudioObservedFacts, Tra
 
 fn success_dispatch<T: Serialize>(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     result: T,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -766,7 +790,7 @@ fn success_dispatch<T: Serialize>(
     let result = ProgressFrame::Result {
         lease_id,
         seq: 1,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     };
     Ok(OperationDispatch::buffered(
@@ -780,7 +804,7 @@ fn success_dispatch<T: Serialize>(
 
 fn error_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     err: &TranscodeVideoError,
     seq: u64,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -795,7 +819,7 @@ fn error_dispatch(
 
 fn error_dispatch_with_progress(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     err: &TranscodeVideoError,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -808,11 +832,7 @@ fn error_dispatch_with_progress(
     ))
 }
 
-fn progress_frame(
-    lease_id: LeaseId,
-    emitted_at: chrono::DateTime<chrono::Utc>,
-    message: &str,
-) -> ProgressFrame {
+fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime, message: &str) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
         seq: 0,
@@ -826,7 +846,7 @@ fn progress_frame(
 fn decode_payload<T: DeserializeOwned>(
     payload: serde_json::Value,
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     operation: &str,
 ) -> Result<Result<T, OperationDispatch>, ProtocolError> {
     match serde_json::from_value::<T>(payload) {
@@ -845,7 +865,7 @@ fn error_frame(lease_id: LeaseId, err: &TranscodeVideoError, seq: u64) -> Progre
     ProgressFrame::Error {
         lease_id,
         seq,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: err.failure_class(),
         code: err.error_code(),
         message: err.to_string(),

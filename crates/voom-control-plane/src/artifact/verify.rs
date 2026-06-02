@@ -12,7 +12,7 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::artifacts::{
-    ArtifactLocation, ArtifactRepo, ArtifactVerificationStatus, NewArtifactVerification,
+    ArtifactLocation, ArtifactVerificationStatus, NewArtifactVerification,
 };
 use voom_worker_protocol::{
     VerifyArtifactExpectedFacts, VerifyArtifactRequest, VerifyArtifactResult,

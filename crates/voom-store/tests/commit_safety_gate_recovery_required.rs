@@ -32,16 +32,30 @@ use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::EventKind;
 use voom_store::repo::commit_safety_gate::{
-    AffectedScopeClosure, AuthorizeOutcome, BypassKind, CommitGateResult, CommitPermit,
-    CommitTarget, DestructiveCommit, FinalizeOutcome, ForcePathToken, MutationOutcome,
-    PrepareOutcome, authorize_destructive_commit, finalize_destructive_commit,
-    prepare_destructive_commit,
+    AffectedScopeClosure, AliasResolver, AuthorizeOutcome, BypassKind, CommitGateContext,
+    CommitGateResult, CommitPermit, CommitTarget, DestructiveCommit, FinalizeOutcome,
+    ForcePathToken, MutationOutcome, PrepareOutcome, authorize_destructive_commit,
+    finalize_destructive_commit, prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
     FileLocationKind, IdentityRepo, NewFileLocation, NewFileVersion, ProducedBy, SqliteIdentityRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 async fn open_pool() -> (SqlitePool, NamedTempFile) {
     let tmp = NamedTempFile::new().unwrap();
@@ -94,10 +108,7 @@ async fn run_prepare_and_authorize(pool: &SqlitePool, location_id: FileLocationI
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = prepare_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(location_id),
             accepted_evidence_ids: Vec::new(),
@@ -114,10 +125,7 @@ async fn run_prepare_and_authorize(pool: &SqlitePool, location_id: FileLocationI
         }
     };
     let outcome = authorize_destructive_commit(
-        pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(pool, &identity, &events, &resolver),
         commit_id,
         T0 + Duration::seconds(1),
     )
@@ -193,10 +201,7 @@ async fn phase_c_closure_grew_lands_recovery_required_with_unified_payload() {
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(3),
@@ -264,10 +269,7 @@ async fn phase_c_fresh_lease_lands_recovery_required_with_unified_payload() {
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(3),
@@ -339,10 +341,7 @@ async fn phase_c_closure_grew_and_fresh_lease_lands_recovery_required_with_combi
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(3),
@@ -397,10 +396,7 @@ async fn phase_c_stale_target_epoch_lands_recovery_required_with_drift_payload()
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(3),
@@ -469,10 +465,7 @@ async fn phase_c_applied_mutation_failure_lands_recovery_required_with_reason() 
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(3),
@@ -542,10 +535,7 @@ async fn phase_c_applied_with_observed_alias_drives_recovery_required_with_merge
     let events = SqliteEventRepo::new(pool.clone());
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied {
             observed: Some(observed),
@@ -616,10 +606,7 @@ async fn phase_c_trip_wire_recompute_failure_lands_recovery_required_with_mutati
         bypass,
     };
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
@@ -637,10 +624,7 @@ async fn phase_c_trip_wire_recompute_failure_lands_recovery_required_with_mutati
     };
 
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         commit_id,
         T0 + Duration::seconds(1),
     )
@@ -654,10 +638,7 @@ async fn phase_c_trip_wire_recompute_failure_lands_recovery_required_with_mutati
     };
 
     let outcome = finalize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         permit,
         MutationOutcome::Applied { observed: None },
         T0 + Duration::seconds(2),

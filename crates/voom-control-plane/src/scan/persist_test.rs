@@ -13,7 +13,7 @@ use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, VoomError, WorkerId};
 use voom_events::EventKind;
 use voom_store::repo::identity::IdentityRepo;
-use voom_store::repo::workers::{NewWorker, WorkerKind, WorkerRepo};
+use voom_store::repo::workers::{NewWorker, WorkerKind};
 use voom_worker_protocol::ProbeFileStatus;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;

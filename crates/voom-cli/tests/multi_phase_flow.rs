@@ -23,7 +23,7 @@
     reason = "integration tests fail loudly and preserve paths for diagnosis"
 )]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -33,7 +33,9 @@ use voom_control_plane::scan::{ScanPathInput, ScanReportFileStatus};
 use voom_core::FileVersionId;
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::test_support::sqlite_url_for;
-use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, target_debug_binary};
+use voom_test_support::worker::{
+    TestWorkerConfig, TestWorkerLaunch, hide_stale_fake_ffprobe_sibling, target_debug_binary,
+};
 
 /// `compliance execute` drives a two-phase transcode policy to completion through
 /// the CLI, and `compliance report --job-id` reads the durable two-phase chain
@@ -42,13 +44,14 @@ use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, target_debug
 /// `latest_phase_index` pointing at phase 1.
 #[tokio::test]
 async fn multi_phase_execute_then_report_by_job_id() {
-    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling();
     cargo_build("voom-ffprobe-worker");
     cargo_build("voom-verify-artifact-worker");
     cargo_build("voom-ffmpeg-worker");
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("multi-phase-flow").unwrap();
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let source = tmp.path().join("Movie.mp4");
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Movie.mp4");
     generate_h264_fixture(&source);
 
     let db = NamedTempFile::new().unwrap();
@@ -77,8 +80,8 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let input_id = input.id.0;
 
     let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
-    let out_dir = tmp.path().join("out");
-    let staging_root = tmp.path().join("stage");
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
     let execute = run_voom(
         &url,
         &[
@@ -291,47 +294,6 @@ async fn produced_from(url: &str, version: FileVersionId) -> Option<i64> {
 
 fn cargo_build(package: &str) {
     voom_test_support::worker::cargo_build_package(package).unwrap();
-}
-
-/// Hide the canned test-helper `ffprobe` sibling so the bundled probe worker runs
-/// real ffprobe (see `phase_barrier_flow.rs` for the rationale). The static mutex
-/// serializes real-ffprobe cases in this binary.
-fn hide_stale_fake_ffprobe_sibling() -> FfprobeSiblingGuard {
-    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = SERIALIZE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = target_debug_binary("ffprobe");
-    let hidden = path.with_file_name("ffprobe.multi-phase-flow-hidden");
-    let is_stub = std::fs::read(&path).is_ok_and(|bytes| {
-        bytes
-            .windows(b"ffprobe version test-helper".len())
-            .any(|window| window == b"ffprobe version test-helper")
-    });
-    if is_stub {
-        std::fs::rename(&path, &hidden).unwrap();
-    }
-    FfprobeSiblingGuard {
-        path,
-        hidden,
-        restore: is_stub,
-        _lock: lock,
-    }
-}
-
-struct FfprobeSiblingGuard {
-    path: PathBuf,
-    hidden: PathBuf,
-    restore: bool,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for FfprobeSiblingGuard {
-    fn drop(&mut self) {
-        if self.restore && self.hidden.exists() && !self.path.exists() {
-            let _ = std::fs::rename(&self.hidden, &self.path);
-        }
-    }
 }
 
 fn generate_h264_fixture(path: &Path) {

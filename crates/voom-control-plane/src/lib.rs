@@ -34,31 +34,78 @@ use voom_store::repo::{
     policy_inputs::SqlitePolicyInputRepo,
     remote_idempotency::SqliteRemoteIdempotencyRepo,
     scheduler_decisions::{
-        SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionRepo,
-        SqliteSchedulerDecisionRepo,
+        SchedulerDecision, SchedulerDecisionFilter, SqliteSchedulerDecisionRepo,
     },
+    scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
-    video_profiles::{SqliteVideoProfileRepo, VideoProfile, VideoProfileRepo},
+    video_profiles::{SqliteVideoProfileRepo, VideoProfile},
     workers::SqliteWorkerRepo,
     workflow_summaries::SqliteWorkflowSummaryRepo,
 };
 use voom_store::{SchemaState, connect, probe_schema};
 
-pub mod artifact;
-pub mod audio;
-pub mod cases;
+mod artifact;
+mod audio;
+mod cases;
 mod media_snapshot;
 pub mod node_auth;
-pub mod remux;
+mod operation_source;
+mod remux;
 pub mod scan;
-pub mod transcode;
-pub mod workflow;
+mod transcode;
+pub(crate) mod worker_process;
+mod workflow;
 
-pub use cases::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+pub mod execution {
+    pub use crate::cases::execution::remote_execution::{
+        RemoteAcquireInput, RemoteAcquireOutcome, RemoteArtifactAccessPlan, RemoteCompleteInput,
+        RemoteCompleteOutcome, RemoteFailInput, RemoteFailOutcome, RemoteLeaseDispatch,
+        RemoteLeaseHeartbeatInput, RemoteLeaseHeartbeatOutcome, RemoteNodeHeartbeatInput,
+        RemoteNodeHeartbeatOutcome, RemoteRecoverReport,
+    };
+}
+
+pub mod policy {
+    pub use crate::cases::policy::compliance::{
+        ComplianceApplyData, ComplianceExecuteData, ComplianceExecuteError,
+        ComplianceExecutionOptions, ComplianceReportData, ComplianceRunReportData,
+        FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
+    };
+    pub use crate::cases::policy::policy_inputs::{
+        PolicyInputFromScanInput, PolicyInputFromScanResult,
+    };
+}
+
+pub mod workers {
+    pub use crate::cases::workers::nodes::{RegisterNodeInput, RegisteredNode};
+    pub use crate::cases::workers::{
+        NewWorkerCapabilityDraft, NewWorkerGrantDraft, RegisterWorkerForNodeInput,
+    };
+}
+
+pub use artifact::{
+    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
+    CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
+    CommitArtifactReport, CommitRecoveryReport, CommitSummary, PathFacts, PathObservation,
+    RecoverySummary, StageCopyCommandError, StageCopyInput, StageCopyReport, VerificationSummary,
+    VerifyArtifactInput, VerifyArtifactReport,
+};
+pub use audio::{
+    ExecuteExtractAudioInput, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
+    ExecuteTranscodeAudioReport, ExtractAudioDispatcher, TranscodeAudioDispatcher,
+    TranscodePostCommitRecoveryReport,
+};
+pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
+pub use transcode::{
+    ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,
+};
+pub use workflow::coordinator::{CoordinatorError, CoordinatorOutcome};
+pub use workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 /// Type alias for the boxed, shared, interior-mutable RNG passed to
-/// `LeaseRepo::fail` (and any future caller that needs full-jitter
+/// `SqliteLeaseRepo::fail` (and any future caller that needs full-jitter
 /// backoff). `RngCore::next_u32` takes `&mut self`, so the `Arc` wraps
 /// a `Mutex` to keep the `ControlPlane` itself `Clone`-able and
 /// thread-safe.
@@ -86,6 +133,7 @@ pub struct ControlPlane {
     pub(crate) policies: SqlitePolicyRepo,
     pub(crate) video_profiles: SqliteVideoProfileRepo,
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
+    pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
 }
 
@@ -116,6 +164,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("policies", &self.policies)
             .field("video_profiles", &self.video_profiles)
             .field("scheduler_decisions", &self.scheduler_decisions)
+            .field("scheduler_node_limits", &self.scheduler_node_limits)
             .field("workflow_summaries", &self.workflow_summaries)
             .finish()
     }
@@ -186,7 +235,12 @@ impl ControlPlane {
                      remove the failed row from _sqlx_migrations or restore from backup"
                 )));
             }
-            SchemaState::Uninitialized | SchemaState::Partial { .. } => {
+            SchemaState::Uninitialized => {
+                return Err(VoomError::UninitializedDatabase(
+                    "ControlPlane requires a Current schema; got Uninitialized".to_owned(),
+                ));
+            }
+            SchemaState::Partial { .. } => {
                 return Err(VoomError::Migration(format!(
                     "ControlPlane requires a Current schema; got {probe:?}"
                 )));
@@ -214,6 +268,7 @@ impl ControlPlane {
             policies: SqlitePolicyRepo::new(pool.clone()),
             video_profiles: SqliteVideoProfileRepo::new(pool.clone()),
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
+            scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             pool,
             clock,
@@ -244,7 +299,7 @@ impl ControlPlane {
     /// fixed-value RNG. The case handlers use this to thread a
     /// `&mut (dyn RngCore + Send)` into repo calls without holding the
     /// std Mutex across the awaits inside the repo (the workspace lint
-    /// `await_holding_lock` forbids that). Each `LeaseRepo::fail` call
+    /// `await_holding_lock` forbids that). Each `SqliteLeaseRepo::fail` call
     /// consumes exactly one jitter value via `default_backoff`, so a
     /// single-shot snapshot is sufficient.
     pub(crate) fn snapshot_rng(&self) -> SnapshotRng {
@@ -257,106 +312,30 @@ impl ControlPlane {
         }
     }
 
-    // Writable repo accessors: production builds hide them behind
-    // `pub(crate)` so external callers must route every durable state change
-    // through a case handler (which pairs the repo write with an
-    // `EventRepo::append_in_tx`). The `test-support` feature (also
-    // implicitly enabled under `#[cfg(test)]`) re-exports them as `pub` so
-    // the voom-store integration suite can seed state directly. Each
-    // accessor is declared twice (once per cfg arm) rather than as a single
-    // method, so the visibility shows literally at every call site and the
-    // production build cannot accidentally leak the wider surface.
-    //
-    // The production arm uses `#[expect(dead_code, …)]` because case
-    // handlers currently reach into the repo fields directly (`self.tickets
-    // .…`), not via the accessor. The methods exist so that callers can
-    // switch over without re-changing visibility; the `expect` will fire if
-    // an internal caller is ever added, which is the signal to remove the
-    // attribute.
-    #[cfg(any(test, feature = "test-support"))]
+    // Test-support accessors let integration tests seed and inspect durable
+    // state directly; production code uses the fields inside case handlers.
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn events(&self) -> &SqliteEventRepo {
         &self.events
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.events` directly today")]
-    #[must_use]
-    pub(crate) fn events(&self) -> &SqliteEventRepo {
-        &self.events
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn jobs(&self) -> &SqliteJobRepo {
-        &self.jobs
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[must_use]
-    pub(crate) fn jobs(&self) -> &SqliteJobRepo {
-        &self.jobs
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn tickets(&self) -> &SqliteTicketRepo {
         &self.tickets
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.tickets` directly today")]
-    #[must_use]
-    pub(crate) fn tickets(&self) -> &SqliteTicketRepo {
-        &self.tickets
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn workers(&self) -> &SqliteWorkerRepo {
         &self.workers
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.workers` directly today")]
-    #[must_use]
-    pub(crate) fn workers(&self) -> &SqliteWorkerRepo {
-        &self.workers
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn nodes(&self) -> &SqliteNodeRepo {
-        &self.nodes
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.nodes` directly today")]
-    #[must_use]
-    pub(crate) fn nodes(&self) -> &SqliteNodeRepo {
-        &self.nodes
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn leases(&self) -> &SqliteLeaseRepo {
         &self.leases
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.leases` directly today")]
-    #[must_use]
-    pub(crate) fn leases(&self) -> &SqliteLeaseRepo {
-        &self.leases
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
-        &self.remote_idempotency
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.remote_idempotency` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn remote_idempotency(&self) -> &SqliteRemoteIdempotencyRepo {
-        &self.remote_idempotency
     }
 
     /// Read one durable scheduler decision.
@@ -403,105 +382,40 @@ impl ControlPlane {
         self.video_profiles.get_by_name(name).await
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
         &self.artifact_access_plans
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.artifact_access_plans` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn artifact_access_plans(&self) -> &SqliteArtifactAccessPlanRepo {
-        &self.artifact_access_plans
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn artifacts(&self) -> &SqliteArtifactRepo {
         &self.artifacts
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.artifacts` directly today")]
-    #[must_use]
-    pub(crate) fn artifacts(&self) -> &SqliteArtifactRepo {
-        &self.artifacts
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn identity(&self) -> &SqliteIdentityRepo {
         &self.identity
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.identity` directly today")]
-    #[must_use]
-    pub(crate) fn identity(&self) -> &SqliteIdentityRepo {
-        &self.identity
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
         &self.workflow_summaries
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[must_use]
-    pub(crate) fn workflow_summaries(&self) -> &SqliteWorkflowSummaryRepo {
-        &self.workflow_summaries
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn bundles(&self) -> &SqliteBundleRepo {
-        &self.bundles
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.bundles` directly today")]
-    #[must_use]
-    pub(crate) fn bundles(&self) -> &SqliteBundleRepo {
-        &self.bundles
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn use_leases(&self) -> &SqliteUseLeaseRepo {
         &self.use_leases
     }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.use_leases` directly today")]
-    #[must_use]
-    pub(crate) fn use_leases(&self) -> &SqliteUseLeaseRepo {
-        &self.use_leases
-    }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test"))]
     #[must_use]
     pub fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
         &self.policy_inputs
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(
-        dead_code,
-        reason = "callers reach `self.policy_inputs` directly today"
-    )]
-    #[must_use]
-    pub(crate) fn policy_inputs(&self) -> &SqlitePolicyInputRepo {
-        &self.policy_inputs
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn policies(&self) -> &SqlitePolicyRepo {
-        &self.policies
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    #[expect(dead_code, reason = "callers reach `self.policies` directly today")]
-    #[must_use]
-    pub(crate) fn policies(&self) -> &SqlitePolicyRepo {
-        &self.policies
     }
 }
 
@@ -671,7 +585,7 @@ fn production_rng() -> SharedRng {
 /// Single-shot RNG that returns one fixed `u32` from every call. The
 /// shape lets `ControlPlane::snapshot_rng` lift one jitter value out
 /// of the shared RNG while keeping the std Mutex off the await
-/// boundary — the consumer (`LeaseRepo::fail` → `default_backoff`)
+/// boundary — the consumer (`SqliteLeaseRepo::fail` → `default_backoff`)
 /// only needs one value per call.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotRng {

@@ -203,6 +203,17 @@ fn operation_coverage_reports_missing_operation() {
     assert!(err.to_string().contains("DeleteArtifact"));
 }
 
+#[test]
+fn operation_coverage_allows_operation_without_typed_fake() {
+    let operations = OperationKind::ALL
+        .iter()
+        .copied()
+        .filter(|operation| *operation != OperationKind::TranscribeAudio)
+        .collect::<Vec<_>>();
+    let manifest = Manifest::parse_str(&manifest_with_operations(&operations)).unwrap();
+    validate_operation_coverage(&manifest).unwrap();
+}
+
 fn operation_name(operation: OperationKind) -> String {
     serde_json::to_value(operation)
         .unwrap()

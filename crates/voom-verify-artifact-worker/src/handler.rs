@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
     OperationDispatch, OperationFuture, OperationHandler, OperationKind, OperationRequest,
@@ -83,7 +83,7 @@ pub fn handle_operation(req: OperationRequest) -> OperationFuture {
         }
 
         let lease_id = req.lease_id;
-        let accepted_at = Utc::now();
+        let accepted_at = OffsetDateTime::now_utc();
         let payload = match serde_json::from_value::<VerifyArtifactRequest>(req.payload) {
             Ok(payload) => payload,
             Err(err) => {
@@ -149,7 +149,7 @@ fn verify_expected_facts(
 
 fn success_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     result: VerifyArtifactResult,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -159,7 +159,7 @@ fn success_dispatch(
     let result = ProgressFrame::Result {
         lease_id,
         seq: 1,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         payload,
     };
     Ok(OperationDispatch::buffered(
@@ -173,7 +173,7 @@ fn success_dispatch(
 
 fn error_dispatch(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     err: &VerifyArtifactError,
     seq: u64,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -189,7 +189,7 @@ fn error_dispatch(
 
 fn error_dispatch_with_progress(
     lease_id: LeaseId,
-    accepted_at: chrono::DateTime<chrono::Utc>,
+    accepted_at: OffsetDateTime,
     progress: ProgressFrame,
     err: &VerifyArtifactError,
 ) -> Result<OperationDispatch, ProtocolError> {
@@ -207,7 +207,7 @@ fn error_frame(lease_id: LeaseId, err: &VerifyArtifactError, seq: u64) -> Progre
     ProgressFrame::Error {
         lease_id,
         seq,
-        emitted_at: Utc::now(),
+        emitted_at: OffsetDateTime::now_utc(),
         class: err.failure_class(),
         code: err.error_code(),
         message: err.to_string(),
@@ -215,7 +215,7 @@ fn error_frame(lease_id: LeaseId, err: &VerifyArtifactError, seq: u64) -> Progre
     }
 }
 
-fn progress_frame(lease_id: LeaseId, emitted_at: chrono::DateTime<chrono::Utc>) -> ProgressFrame {
+fn progress_frame(lease_id: LeaseId, emitted_at: OffsetDateTime) -> ProgressFrame {
     ProgressFrame::Progress {
         lease_id,
         seq: 0,

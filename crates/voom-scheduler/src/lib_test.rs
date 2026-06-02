@@ -1,6 +1,6 @@
 use super::*;
 use voom_core::{NodeId, TicketId, WorkerId};
-use voom_worker_protocol::OperationKind;
+use voom_core::{OperationKind, TicketOperation};
 
 fn scored_candidate(
     ticket_id: u64,
@@ -11,7 +11,7 @@ fn scored_candidate(
     SchedulerCandidate {
         ticket: TicketCandidate {
             ticket_id: TicketId(ticket_id),
-            operation: operation.to_owned(),
+            operation: TicketOperation::new(operation).unwrap(),
             priority: 0,
             next_eligible_at_epoch_seconds: 0,
         },
@@ -165,7 +165,7 @@ fn scorer_reports_stable_no_eligible_reason_code() {
 fn scorer_rejects_incoherent_candidate_shapes() {
     let scorer = SchedulerScorer::default();
     let mut operation_mismatch = scored_candidate(1, 2, 3, "probe_file");
-    operation_mismatch.ticket.operation = "hash_file".to_owned();
+    operation_mismatch.ticket.operation = TicketOperation::new("hash_file").unwrap();
     let err = scorer
         .score(&[scored_candidate(4, 5, 6, "probe_file"), operation_mismatch])
         .unwrap_err();

@@ -1,15 +1,13 @@
-pub mod binding;
-pub mod coordinator;
-pub mod executor;
-pub mod expansion;
-pub mod model;
-pub mod policy_bridge;
-pub mod runtime;
-pub mod ticket_payload;
-pub mod timing;
+pub(crate) mod coordinator;
+#[cfg(test)]
+mod durable_workflow;
+pub(crate) mod execution;
+pub(crate) mod plan;
+pub(crate) mod summary;
 
-pub use executor::{WorkflowChaosOptions, WorkflowExecutor, WorkflowRunError, WorkflowRunSummary};
-pub use model::{
-    ConcurrencyPolicy, FanOutPolicy, OperationNode, TimingPolicy, WorkflowNode, WorkflowPlan,
-};
-pub use runtime::WorkerRuntimeRegistry;
+pub(crate) use execution::WorkerRuntimeRegistry;
+#[cfg(test)]
+pub(crate) use execution::{WorkflowChaosOptions, WorkflowExecutor, WorkflowExecutorOptions};
+#[cfg(test)]
+pub(crate) use plan::WorkflowPlan;
+pub(crate) use summary::WorkflowRunSummary;

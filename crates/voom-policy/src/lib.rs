@@ -9,17 +9,18 @@
 )]
 //! Policy-domain inputs for Sprint 3.
 
-pub mod ast;
-pub mod compiled;
+pub mod compile;
+pub mod data;
 pub mod diagnostic;
-pub mod fixtures;
-pub mod model;
-pub mod parser;
-pub mod pipeline;
-pub mod policy_fixtures;
-pub mod span;
-pub mod validate;
-pub mod video_profile;
+#[path = "fixtures/mod.rs"]
+mod fixture_domain;
+pub mod syntax;
+
+pub use compile::{compiled, pipeline, validate};
+pub use data::{model, video_profile};
+pub use fixture_domain::{fixtures, policy_fixtures};
+pub(crate) use syntax::text;
+pub use syntax::{ast, parser, span};
 
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{

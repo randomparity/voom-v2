@@ -1,15 +1,15 @@
 use super::*;
-use chrono::{TimeZone, Utc};
+use time::OffsetDateTime;
 use voom_core::LeaseId;
 
-use crate::envelope::{PercentBps, ProgressFrame};
+use crate::{PercentBps, ProgressFrame};
 
 #[test]
 fn frame_to_line_bytes_includes_newline() {
     let frame = ProgressFrame::Progress {
         lease_id: LeaseId(1),
         seq: 0,
-        emitted_at: Utc.with_ymd_and_hms(2026, 5, 19, 0, 0, 0).unwrap(),
+        emitted_at: OffsetDateTime::from_unix_timestamp(1_779_148_800).unwrap(),
         percent: Some(PercentBps::ZERO),
         message: None,
         payload: None,

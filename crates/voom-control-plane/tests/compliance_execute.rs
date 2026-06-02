@@ -4,9 +4,9 @@
 )]
 
 use voom_control_plane::ControlPlane;
+use voom_core::OperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_test_support::worker::{TestWorkerConfig, TestWorkerLaunch, cargo_bin_or_build};
-use voom_worker_protocol::OperationKind;
 
 /// The phase-barrier coordinator advances real file chains, so a policy whose
 /// only targets are synthetic has an empty active set: `compliance execute`

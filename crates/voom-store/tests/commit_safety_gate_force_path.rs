@@ -41,8 +41,9 @@ use time::Duration;
 use voom_core::{CommitId, FileLocationId, FileVersionId};
 use voom_events::{EventKind, SubjectType};
 use voom_store::repo::commit_safety_gate::{
-    AuthorizeOutcome, BypassKind, CommitGateResult, CommitTarget, DestructiveCommit,
-    ForcePathToken, PrepareOutcome, authorize_destructive_commit, prepare_destructive_commit,
+    AliasResolver, AuthorizeOutcome, BypassKind, CommitGateContext, CommitGateResult, CommitTarget,
+    DestructiveCommit, ForcePathToken, PrepareOutcome, authorize_destructive_commit,
+    prepare_destructive_commit,
 };
 use voom_store::repo::events::{EventFilter, EventRepo, Page, SqliteEventRepo};
 use voom_store::repo::identity::{
@@ -50,9 +51,22 @@ use voom_store::repo::identity::{
 };
 use voom_store::repo::use_leases::{
     BlockingMode, IssuerKind, LeaseScope, NewUseLease, SqliteUseLeaseRepo, UseLeaseKind,
-    UseLeaseRepo,
 };
 use voom_store::test_support::{FailingAliasResolver, T0, fresh_initialized_pool_at};
+
+fn gate<'a>(
+    pool: &'a SqlitePool,
+    identity_repo: &'a dyn IdentityRepo,
+    event_repo: &'a dyn EventRepo,
+    alias_resolver: &'a dyn AliasResolver,
+) -> CommitGateContext<'a> {
+    CommitGateContext {
+        pool,
+        identity_repo,
+        event_repo,
+        alias_resolver,
+    }
+}
 
 struct Seeded {
     version_id: FileVersionId,
@@ -161,10 +175,7 @@ async fn force_path_token_honored_through_prepare_and_authorize_against_failing_
 
     let token = closure_incomplete_token();
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
@@ -219,10 +230,7 @@ async fn force_path_token_honored_through_prepare_and_authorize_against_failing_
     // Phase B: same resolver still fails, but the persisted token's
     // bypass is re-applied. Authorize lands `authorized`.
     let outcome = authorize_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         intent.commit_id,
         T0 + Duration::seconds(1),
     )
@@ -265,10 +273,7 @@ async fn pre_commit_10_behavior_preserved_without_token() {
     let resolver = FailingAliasResolver::new([seeded.version_id]);
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
@@ -344,10 +349,7 @@ async fn force_path_bypass_does_not_silence_blocking_use_lease() {
     let resolver = FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
 
     let outcome = prepare_destructive_commit(
-        &pool,
-        &identity,
-        &events,
-        &resolver,
+        gate(&pool, &identity, &events, &resolver),
         DestructiveCommit {
             target: CommitTarget::DeleteFileLocation(seeded.location_id),
             accepted_evidence_ids: Vec::new(),
