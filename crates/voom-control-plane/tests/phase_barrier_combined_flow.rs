@@ -1,8 +1,8 @@
 //! Sprint 16 §9/§10 closeout: the combined heterogeneous multi-phase flow.
 //!
 //! A single policy runs three different real mutation operations as phase
-//! barriers over one file — `transcode video` (h264 -> hevc), then container
-//! `remux` + track selection, then `transcode audio` (aac -> opus) — each phase
+//! barriers over one file — container `remux` + track selection, then `transcode
+//! video` (h264 -> hevc), then `transcode audio` (aac -> opus) — each phase
 //! planning and committing against the artifact the prior phase produced and
 //! re-probed. This is the only test that exercises all three operation kinds in
 //! one chain; the sibling `phase_barrier_flow.rs` chains video transcode twice.
@@ -80,7 +80,7 @@ policy "sprint 16 combined" {
 }
 "#;
 
-/// The full transcode -> remux -> audio chain commits one new `FileVersion` per
+/// The full remux -> transcode -> audio chain commits one new `FileVersion` per
 /// phase, each planned against the prior phase's produced + re-probed artifact,
 /// with an append-only lineage and a re-probe snapshot keyed to each produced
 /// version — all tied together by the durable three-grain workflow summary.
@@ -144,7 +144,45 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
     let produced = assert_three_phase_commit(&outcome);
     assert_lineage_chain(&url, scanned_version, &produced).await;
     assert_reprobe_snapshots_keyed(&url, &produced).await;
+    assert_phase_mutations(&url, &produced).await;
     assert_durable_summary(&url, outcome.job_id, &produced).await;
+}
+
+/// Each phase performed its declared mutation, read back from the produced
+/// version's re-probe snapshot — not merely "a commit happened". This guards
+/// against a phase silently degrading (e.g. a remux that copies every track, or
+/// a transcode that stream-copies) yet still committing a new version:
+///
+/// * remux (`produced[0]`): the `spa` track is gone — exactly one audio stream
+///   survives, in `eng` — proving `keep audio where lang in [eng, und]` selected
+///   tracks rather than copying the source's two audio streams through.
+/// * transcode (`produced[1]`): the video stream is now `hevc`.
+/// * audio (`produced[2]`): the surviving audio stream is now `opus`.
+async fn assert_phase_mutations(url: &str, produced: &[FileVersionId]) {
+    let remux_audio = audio_streams(url, produced[0]).await;
+    assert_eq!(
+        remux_audio.len(),
+        1,
+        "remux must drop the spa track (track selection), leaving one audio: {remux_audio:?}"
+    );
+    assert_eq!(
+        remux_audio[0].1.as_deref(),
+        Some("eng"),
+        "the surviving audio after remux must be the eng track: {remux_audio:?}"
+    );
+
+    assert_eq!(
+        video_codecs(url, produced[1]).await,
+        vec!["hevc".to_owned()],
+        "the transcode phase must produce an hevc video stream"
+    );
+
+    let audio_after = audio_streams(url, produced[2]).await;
+    assert_eq!(
+        audio_after.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(),
+        vec!["opus"],
+        "the audio phase must transcode the surviving track to opus: {audio_after:?}"
+    );
 }
 
 /// Every phase completed and committed: three `Completed` phase rows named
@@ -412,6 +450,54 @@ async fn snapshots_for_version(url: &str, version: FileVersionId) -> Vec<i64> {
     .fetch_all(&pool)
     .await
     .unwrap()
+}
+
+/// The streams array of a version's chain-tip (latest) re-probe snapshot.
+async fn version_streams(url: &str, version: FileVersionId) -> Vec<serde_json::Value> {
+    let pool = voom_store::connect(url).await.unwrap();
+    let payload: String = sqlx::query_scalar(
+        "SELECT payload FROM media_snapshots WHERE file_version_id = ? ORDER BY id DESC LIMIT 1",
+    )
+    .bind(i64::try_from(version.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    payload["streams"].as_array().cloned().unwrap_or_default()
+}
+
+/// `(codec_name, language)` for each audio stream in the version's chain-tip
+/// snapshot, in stream order.
+async fn audio_streams(url: &str, version: FileVersionId) -> Vec<(String, Option<String>)> {
+    version_streams(url, version)
+        .await
+        .iter()
+        .filter(|stream| stream["kind"] == "audio")
+        .map(|stream| {
+            (
+                stream["codec_name"]
+                    .as_str()
+                    .expect("audio stream records a codec")
+                    .to_owned(),
+                stream["language"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// `codec_name` for each video stream in the version's chain-tip snapshot.
+async fn video_codecs(url: &str, version: FileVersionId) -> Vec<String> {
+    version_streams(url, version)
+        .await
+        .iter()
+        .filter(|stream| stream["kind"] == "video")
+        .map(|stream| {
+            stream["codec_name"]
+                .as_str()
+                .expect("video stream records a codec")
+                .to_owned()
+        })
+        .collect()
 }
 
 fn require_command(program: &str, args: &[&str]) {
