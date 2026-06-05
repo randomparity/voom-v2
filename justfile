@@ -35,6 +35,11 @@ lint:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
+    # Build every binary to completion before running any test. The integration
+    # tests build worker binaries on demand via `cargo_build_package`; pre-building
+    # here keeps those calls no-ops so a worker binary is never relinked while a
+    # concurrently-running test execs it (ETXTBSY). Same feature set as the test run.
+    cargo build --workspace --all-features --all-targets
     cargo test --workspace --all-features
 
 doc:
