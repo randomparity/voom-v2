@@ -79,6 +79,17 @@ phases. This is the one production change in an otherwise tests-only closeout; i
 is covered by a `normalize.rs` unit test and proven end-to-end by
 `phase_barrier_combined_flow`.
 
+**Residual strictness (not addressed here).** This fix surfaces `title` and
+`commentary` *when the source carries them*; it does not change the planner's gate
+itself. `has_transcode_preservation_facts` still requires every selected audio
+stream to have a `title` and a `commentary` disposition, so an audio-transcode
+phase will block on real media whose audio streams have no `title` tag (common —
+muxers do not synthesize one). Whether `title`/`commentary` should gate *transcode*
+planning at all is a pre-existing planner question (locked by
+`voom-plan` `selection_test::transcode_preservation_facts_require_language_title_channels_and_commentary`),
+out of scope for this tests-only closeout and tracked as follow-up. The combined
+test's fixture carries audio titles precisely so the chain commits.
+
 ## Acceptance Matrix
 
 | Acceptance criterion (spec §10) | Command | Observed result |
