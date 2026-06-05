@@ -84,6 +84,23 @@ async fn connect_or_create_creates_missing_parent_directories() {
     assert!(nested.exists(), "sqlite must have created the db file");
 }
 
+#[tokio::test]
+async fn connect_configures_busy_timeout_that_survives_cpu_starvation() {
+    // Regression: under a CPU-starved parallel test suite a lock holder can be
+    // descheduled past the lock-wait budget, so a waiting writer gets
+    // SQLITE_BUSY -> DB_UNREACHABLE. The budget must be generous enough that
+    // transient starvation does not surface as a spurious failure.
+    let pool = connect("sqlite::memory:").await.unwrap();
+    let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        busy_timeout_ms >= 30_000,
+        "busy_timeout must survive CI CPU starvation; was {busy_timeout_ms}ms"
+    );
+}
+
 #[test]
 fn url_is_memory_recognizes_canonical_forms() {
     assert!(url_is_memory(":memory:"));
