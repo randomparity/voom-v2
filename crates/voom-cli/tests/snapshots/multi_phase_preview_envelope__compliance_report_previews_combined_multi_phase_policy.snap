@@ -1,0 +1,398 @@
+---
+source: crates/voom-cli/tests/multi_phase_preview_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "compliance",
+  "status": "ok",
+  "data": {
+    "plan": {
+      "schema_version": 1,
+      "plan_id": "plan_eb7d1acac3012439",
+      "plan_hash": "blake3:eb7d1acac30124390bc0e2fbcfdf51331fc941f8cb7769fd121a601616693a4f",
+      "policy": {
+        "slug": "sprint-16-combined",
+        "source_hash": "ddba5e21e8ab362a97dd97d6a7212033a14337c11d3f565aafe24e9fc9134cb3",
+        "document_id": 1,
+        "version_id": 1
+      },
+      "input": {
+        "slug": "cli-multi-phase-preview",
+        "input_set_id": 1,
+        "fixture_labels": [
+          "scan-cli-multi-phase-preview"
+        ]
+      },
+      "summary": {
+        "total_node_count": 3,
+        "executable_node_count": 2,
+        "no_op_node_count": 1,
+        "blocked_node_count": 0,
+        "target_count": 1,
+        "operation_counts_by_kind": {
+          "remux": 1,
+          "transcode_audio": 1,
+          "transcode_video": 1
+        }
+      },
+      "nodes": [
+        {
+          "node_id": "node_a7cad66e020f76f0",
+          "phase_name": "remux",
+          "ordinal": 0,
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "operation_kind": "remux",
+          "operation_payload": {
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [
+              {
+                "type": "keep_tracks",
+                "target": "audio",
+                "filter": {
+                  "type": "language_in",
+                  "values": [
+                    "eng",
+                    "und"
+                  ]
+                }
+              }
+            ],
+            "track_order": [
+              "video",
+              "audio",
+              "subtitle"
+            ],
+            "defaults": [
+              {
+                "target": "audio",
+                "strategy": "first"
+              }
+            ],
+            "source_media_snapshot_id": 1
+          },
+          "observed_state": {
+            "container": "mkv"
+          },
+          "status": "no_op",
+          "status_reason": "container is already mkv and track selection is unchanged",
+          "capability_hints": {
+            "operation_capability": null
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "file_version:1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        },
+        {
+          "node_id": "node_24bd9fb668590f0d",
+          "phase_name": "transcode",
+          "ordinal": 1,
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "operation_kind": "transcode_video",
+          "operation_payload": {
+            "type": "transcode_video",
+            "target_codec": "hevc",
+            "container": "mkv",
+            "profile": "default-hevc",
+            "resolved_profile": {
+              "name": "default-hevc",
+              "target_codec": "hevc",
+              "encoder": "libx265",
+              "crf": 23,
+              "preset": "medium"
+            }
+          },
+          "observed_state": {
+            "container": "mkv",
+            "video_codec": "h264",
+            "video_stream_count": 1
+          },
+          "status": "planned",
+          "status_reason": "video will be transcoded to hevc in mkv",
+          "capability_hints": {
+            "operation_capability": "transcode_video"
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "file_version:1"
+          },
+          "resource_estimates": {
+            "notes": [
+              "encoder=libx265",
+              "speed=medium",
+              "cpu_cost=medium",
+              "crf=23"
+            ]
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        },
+        {
+          "node_id": "node_9f0612bab44b9308",
+          "phase_name": "audio",
+          "ordinal": 2,
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "operation_kind": "transcode_audio",
+          "operation_payload": {
+            "type": "transcode_audio",
+            "target_codec": "opus",
+            "container": "mkv",
+            "source_media_snapshot_id": 1,
+            "filter": {
+              "type": "language_in",
+              "values": [
+                "eng",
+                "und"
+              ]
+            }
+          },
+          "observed_state": {
+            "container": "mkv",
+            "selected_audio_stream_count": 1,
+            "audio_codecs": [
+              "aac"
+            ]
+          },
+          "status": "planned",
+          "status_reason": "selected audio will be transcoded to opus in mkv",
+          "capability_hints": {
+            "operation_capability": "transcode_audio"
+          },
+          "scheduling_hints": {
+            "priority_class": "normal",
+            "estimated_cpu_class": "unknown",
+            "estimated_gpu_class": "none",
+            "estimated_disk_bytes": "unknown",
+            "estimated_network_bytes": "unknown",
+            "expected_duration": "unknown",
+            "concurrency_key": "file_version:1"
+          },
+          "resource_estimates": {
+            "notes": []
+          },
+          "artifact_expectations": {
+            "outputs": []
+          },
+          "safety_hints": {
+            "requires_approval": false,
+            "destructive": false
+          }
+        }
+      ],
+      "edges": [
+        {
+          "edge_id": "edge_a36d9a648b4530e0",
+          "from_node_id": "node_a7cad66e020f76f0",
+          "to_node_id": "node_24bd9fb668590f0d",
+          "dependency_kind": "phase_depends_on"
+        },
+        {
+          "edge_id": "edge_6ec67c0006e9dd61",
+          "from_node_id": "node_24bd9fb668590f0d",
+          "to_node_id": "node_9f0612bab44b9308",
+          "dependency_kind": "phase_depends_on"
+        }
+      ],
+      "warnings": [],
+      "diagnostics": [],
+      "provenance": {
+        "planner": "voom-plan",
+        "format": "sprint5-v1"
+      }
+    },
+    "report": {
+      "schema_version": 1,
+      "report_id": "report_1bb3880148f8304f",
+      "report_hash": "blake3:31115395f1cc92aba1e172ed9e6789523e4dba600e4c28c95e5206538b4b0f3a",
+      "plan_id": "plan_eb7d1acac3012439",
+      "plan_hash": "blake3:eb7d1acac30124390bc0e2fbcfdf51331fc941f8cb7769fd121a601616693a4f",
+      "policy": {
+        "slug": "sprint-16-combined",
+        "source_hash": "ddba5e21e8ab362a97dd97d6a7212033a14337c11d3f565aafe24e9fc9134cb3",
+        "document_id": 1,
+        "version_id": 1
+      },
+      "input": {
+        "slug": "cli-multi-phase-preview",
+        "input_set_id": 1,
+        "fixture_labels": [
+          "scan-cli-multi-phase-preview"
+        ]
+      },
+      "summary": {
+        "status": "noncompliant",
+        "total_check_count": 3,
+        "compliant_check_count": 1,
+        "noncompliant_check_count": 2,
+        "blocked_check_count": 0,
+        "executable_check_count": 2,
+        "operation_counts_by_kind": {
+          "remux": 1,
+          "transcode_audio": 1,
+          "transcode_video": 1
+        }
+      },
+      "checks": [
+        {
+          "check_id": "check_b0388c428fa5df74",
+          "node_id": "node_a7cad66e020f76f0",
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "compliance_kind": "container",
+          "operation_kind": "remux",
+          "desired_state": {
+            "type": "remux",
+            "container": "mkv",
+            "track_actions": [
+              {
+                "type": "keep_tracks",
+                "target": "audio",
+                "filter": {
+                  "type": "language_in",
+                  "values": [
+                    "eng",
+                    "und"
+                  ]
+                }
+              }
+            ],
+            "track_order": [
+              "video",
+              "audio",
+              "subtitle"
+            ],
+            "defaults": [
+              {
+                "target": "audio",
+                "strategy": "first"
+              }
+            ],
+            "source_media_snapshot_id": 1
+          },
+          "observed_state": {
+            "container": "mkv"
+          },
+          "check_status": "compliant",
+          "reason": "container is already mkv and track selection is unchanged",
+          "issue_action_hint": "resolve_matching",
+          "execution_eligibility": "no_op"
+        },
+        {
+          "check_id": "check_5acc09962daf3713",
+          "node_id": "node_24bd9fb668590f0d",
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "compliance_kind": "transcode_video",
+          "operation_kind": "transcode_video",
+          "desired_state": {
+            "type": "transcode_video",
+            "target_codec": "hevc",
+            "container": "mkv",
+            "profile": "default-hevc",
+            "resolved_profile": {
+              "name": "default-hevc",
+              "target_codec": "hevc",
+              "encoder": "libx265",
+              "crf": 23,
+              "preset": "medium"
+            }
+          },
+          "observed_state": {
+            "container": "mkv",
+            "video_codec": "h264",
+            "video_stream_count": 1
+          },
+          "check_status": "noncompliant",
+          "reason": "video will be transcoded to hevc in mkv",
+          "issue_action_hint": "create_or_update_planned",
+          "execution_eligibility": "supported"
+        },
+        {
+          "check_id": "check_a4be029fc4a0ec09",
+          "node_id": "node_9f0612bab44b9308",
+          "target": {
+            "type": "file_version",
+            "id": 1
+          },
+          "compliance_kind": "transcode_audio",
+          "operation_kind": "transcode_audio",
+          "desired_state": {
+            "type": "transcode_audio",
+            "target_codec": "opus",
+            "container": "mkv",
+            "source_media_snapshot_id": 1,
+            "filter": {
+              "type": "language_in",
+              "values": [
+                "eng",
+                "und"
+              ]
+            }
+          },
+          "observed_state": {
+            "container": "mkv",
+            "selected_audio_stream_count": 1,
+            "audio_codecs": [
+              "aac"
+            ]
+          },
+          "check_status": "noncompliant",
+          "reason": "selected audio will be transcoded to opus in mkv",
+          "issue_action_hint": "create_or_update_planned",
+          "execution_eligibility": "supported"
+        }
+      ],
+      "diagnostics": [],
+      "provenance": {
+        "reporter": "voom-plan",
+        "format": "sprint6-v1"
+      }
+    }
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
