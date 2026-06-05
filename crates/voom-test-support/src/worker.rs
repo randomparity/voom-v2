@@ -329,8 +329,11 @@ fn target_root_dir() -> PathBuf {
 }
 
 pub fn cargo_build_package(package: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // `--all-features` matches how `just test` builds the workspace. Without it,
+    // this `-p` build resolves a different feature set for shared deps and relinks
+    // the worker binary, which races with a concurrent test exec'ing it (ETXTBSY).
     let status = Command::new("cargo")
-        .args(["build", "-p", package])
+        .args(["build", "-p", package, "--all-features"])
         .arg("--target-dir")
         .arg(target_root_dir())
         .current_dir(workspace_root())
@@ -351,7 +354,7 @@ pub fn cargo_bin_or_build(
         return Ok(PathBuf::from(path));
     }
     let status = Command::new("cargo")
-        .args(["build", "-p", package, "--bin", binary])
+        .args(["build", "-p", package, "--bin", binary, "--all-features"])
         .arg("--target-dir")
         .arg(target_root_dir())
         .current_dir(workspace_root())
