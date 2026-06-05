@@ -21,10 +21,7 @@ use sqlx::{ConnectOptions, SqlitePool};
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
 use voom_core::rng_test_support::FrozenRng;
 use voom_core::{ErrorCode, FailureClass, JobId, SystemClock, TicketOperation, WorkerId};
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
@@ -80,6 +77,20 @@ async fn default_ci_workflow_runs_all_branches_through_real_scheduler() -> TestR
     combine_result_and_cleanup(result, fixture.shutdown().await)
 }
 
+// Chaos / fault-injection coverage. Five tests pin the failure-class mapping the
+// executor applies to a misbehaving worker: WorkerCrash, WorkerTimeout (dispatch
+// timeout), MalformedWorkerResult, ProgressTimeout, and the missed-heartbeat
+// watchdog. WorkerCrash / MalformedResult / ProgressTimeout / missed-heartbeat run
+// the in-house `chaos-worker` fake out-of-process so the crash and stall modes have
+// real-process fidelity. The dispatch-timeout case is driven deterministically by
+// an in-process runtime whose dispatch never returns (see
+// `start_with_unreachable_runtime_override`); it previously relied on a real
+// timeout elapsing under a 120ms watchdog with out-of-process prerequisites, which
+// flaked on loaded runners.
+//
+// `third_party/chaos-librarian` is unrelated: it is a media-library *fixture*
+// generator (synthetic files/scenarios for scanner/probe tests), with no worker,
+// lease, or failure-class concept, so it does not replace the `chaos-worker` fake.
 #[tokio::test]
 async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
     let _process_provider_guard = process_provider_test_guard().await;
@@ -119,7 +130,6 @@ async fn chaos_worker_crash_maps_to_worker_crash() -> TestResult<()> {
 
 #[tokio::test]
 async fn chaos_dispatch_timeout_maps_to_worker_timeout() -> TestResult<()> {
-    let _process_provider_guard = process_provider_test_guard().await;
     let mut fixture =
         DurableWorkflowFixture::start_with_unreachable_runtime_override(OperationKind::ProbeFile)
             .await?;
@@ -426,7 +436,6 @@ struct DurableWorkflowFixture {
     _tmp: tempfile::NamedTempFile,
     registry: WorkerRuntimeRegistry,
     launches: Vec<ProviderLaunch>,
-    no_response_runtimes: Vec<NoResponseRuntime>,
     registered_workers: Vec<(WorkerId, u32)>,
     executor_options: WorkflowExecutorOptions,
     deadline_fixture: Option<DeadlineFixture>,
@@ -524,15 +533,22 @@ impl DurableWorkflowFixture {
     }
 
     async fn start_with_unreachable_runtime_override(operation: OperationKind) -> TestResult<Self> {
+        // Deterministic dispatch-timeout fixture. The healthy branches run on
+        // in-process fake providers that answer in microseconds, and the watchdog
+        // budget is generous (2s), so a CPU-loaded runner never trips a healthy
+        // branch. The branch under test runs on an in-process runtime whose
+        // dispatch never returns, so the executor's dispatch timeout always maps
+        // it to WorkerTimeout regardless of wall-clock latency. The earlier
+        // version used out-of-process workers under a 120ms watchdog, which let a
+        // loaded runner time out a prerequisite branch and flake the assertion.
         let mut fixture = Self::without_fake_providers().await?;
-        fixture.executor_options.timing.heartbeat_interval = Duration::from_millis(20);
-        fixture.executor_options.timing.heartbeat_timeout = Duration::from_millis(120);
-        fixture.executor_options.timing.progress_idle_timeout = Duration::from_millis(120);
+        fixture.executor_options.timing.heartbeat_timeout = Duration::from_secs(2);
+        fixture.executor_options.timing.progress_idle_timeout = Duration::from_secs(2);
         let setup = async {
             fixture
-                .register_process_providers_except(operation, 4)
+                .register_in_process_providers_except(operation, 4)
                 .await?;
-            fixture.register_no_response_runtime(operation).await
+            fixture.register_pending_dispatch_runtime(operation).await
         }
         .await;
         if let Err(err) = setup {
@@ -559,7 +575,6 @@ impl DurableWorkflowFixture {
             _tmp: tmp,
             registry: WorkerRuntimeRegistry::new(),
             launches: Vec::new(),
-            no_response_runtimes: Vec::new(),
             registered_workers: Vec::new(),
             executor_options: WorkflowExecutorOptions::for_tests(),
             deadline_fixture: None,
@@ -588,25 +603,55 @@ impl DurableWorkflowFixture {
         provider: ProviderSpec,
         max_parallel: u32,
     ) -> TestResult<()> {
-        let secret = format!("durable-workflow-{}-secret", provider.name);
+        self.register_in_process_provider_operations(
+            provider.name,
+            provider.operations,
+            max_parallel,
+        )
+        .await
+    }
+
+    async fn register_in_process_provider_operations(
+        &mut self,
+        name: &'static str,
+        operations: &[OperationKind],
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        let secret = format!("durable-workflow-{name}-secret");
         let worker = self
-            .register_worker_without_runtime(
-                provider.name,
-                provider.operations,
-                max_parallel,
-                &secret,
-            )
+            .register_worker_without_runtime(name, operations, max_parallel, &secret)
             .await?;
         self.registered_workers.push((worker, max_parallel));
         self.registry.register_in_process_runtime(
             worker,
-            Arc::new(InProcessFakeProvider::new(provider.name)?),
+            Arc::new(InProcessFakeProvider::new(name)?),
             WorkerCredentials {
                 worker_id: worker,
                 worker_epoch: 0,
                 secret: SecretString::from(secret),
             },
         );
+        Ok(())
+    }
+
+    async fn register_in_process_providers_except(
+        &mut self,
+        skipped: OperationKind,
+        max_parallel: u32,
+    ) -> TestResult<()> {
+        for provider in provider_specs() {
+            let operations = provider
+                .operations
+                .iter()
+                .copied()
+                .filter(|operation| *operation != skipped)
+                .collect::<Vec<_>>();
+            if operations.is_empty() {
+                continue;
+            }
+            self.register_in_process_provider_operations(provider.name, &operations, max_parallel)
+                .await?;
+        }
         Ok(())
     }
 
@@ -683,23 +728,24 @@ impl DurableWorkflowFixture {
         Ok(())
     }
 
-    async fn register_no_response_runtime(&mut self, operation: OperationKind) -> TestResult<()> {
-        let secret = "durable-workflow-no-response-secret";
+    async fn register_pending_dispatch_runtime(
+        &mut self,
+        operation: OperationKind,
+    ) -> TestResult<()> {
+        let secret = "durable-workflow-pending-secret";
         let worker = self
-            .register_worker_without_runtime("no-response-probe", &[operation], 1, secret)
+            .register_worker_without_runtime("pending-probe", &[operation], 1, secret)
             .await?;
         self.registered_workers.push((worker, 1));
-        let runtime = NoResponseRuntime::spawn().await?;
         self.registry.register_in_process_runtime(
             worker,
-            Arc::new(HttpClient::new(runtime.bound)),
+            Arc::new(UnreachableInProcessProvider),
             WorkerCredentials {
                 worker_id: worker,
                 worker_epoch: 0,
                 secret: SecretString::from(secret.to_owned()),
             },
         );
-        self.no_response_runtimes.push(runtime);
         Ok(())
     }
 
@@ -1037,17 +1083,6 @@ impl DurableWorkflowFixture {
 
     async fn shutdown(&mut self) -> TestResult<()> {
         let mut cleanup_error: Option<String> = None;
-        while let Some(runtime) = self.no_response_runtimes.pop() {
-            if let Err(err) = runtime.shutdown().await {
-                match &mut cleanup_error {
-                    Some(existing) => {
-                        existing.push_str("; ");
-                        existing.push_str(&err.to_string());
-                    }
-                    None => cleanup_error = Some(err.to_string()),
-                }
-            }
-        }
         while let Some(mut launch) = self.launches.pop() {
             if let Err(err) = launch.shutdown().await {
                 match &mut cleanup_error {
@@ -1230,12 +1265,6 @@ impl ProviderLaunch {
     }
 }
 
-struct NoResponseRuntime {
-    bound: std::net::SocketAddr,
-    shutdown: Option<oneshot::Sender<()>>,
-    joined: Option<JoinHandle<()>>,
-}
-
 #[derive(Debug)]
 struct InProcessFakeProvider {
     definition: voom_fake_support::ProviderDefinition,
@@ -1290,51 +1319,26 @@ impl ClientHandle for InProcessFakeProvider {
     }
 }
 
-impl NoResponseRuntime {
-    async fn spawn() -> TestResult<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let bound = listener.local_addr()?;
-        let (shutdown, mut shutdown_rx) = oneshot::channel();
-        let joined = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else { continue };
-                        tokio::spawn(async move {
-                            let _stream = stream;
-                            tokio::time::sleep(Duration::from_secs(30)).await;
-                        });
-                    }
-                }
-            }
-        });
-        Ok(Self {
-            bound,
-            shutdown: Some(shutdown),
-            joined: Some(joined),
-        })
+/// In-process runtime whose dispatch never returns, modelling a worker that
+/// accepted the lease but produced no response. The executor's dispatch timeout
+/// fires and maps it to `WorkerTimeout` without depending on a real socket or
+/// wall-clock latency.
+#[derive(Debug)]
+struct UnreachableInProcessProvider;
+
+#[async_trait::async_trait]
+impl ClientHandle for UnreachableInProcessProvider {
+    async fn handshake(&self, _offered: u32) -> Result<HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
     }
 
-    async fn shutdown(mut self) -> TestResult<()> {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(joined) = self.joined.take() {
-            tokio::time::timeout(Duration::from_secs(5), joined).await??;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for NoResponseRuntime {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(joined) = &self.joined {
-            joined.abort();
-        }
+    async fn dispatch(
+        &self,
+        _creds: &WorkerCredentials,
+        _idempotency_key: &str,
+        _request: OperationRequest,
+    ) -> Result<DispatchStream, ProtocolError> {
+        std::future::pending().await
     }
 }
 
