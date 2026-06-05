@@ -129,7 +129,7 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             // ffprobe may emit `level` as a JSON number (e.g. 153); normalize to string
             // for stable downstream comparison regardless of the ffprobe version.
             insert_u64_as_string(input, &mut output, "level");
-            insert_stream_language(input, &mut output);
+            insert_stream_tags(input, &mut output);
             insert_disposition(input, &mut output)?;
 
             Ok(Value::Object(output))
@@ -137,11 +137,12 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
         .collect()
 }
 
-fn insert_stream_language(input: &Map<String, Value>, output: &mut Map<String, Value>) {
+fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value>) {
     let Some(tags) = input.get("tags").and_then(Value::as_object) else {
         return;
     };
     insert_string_as(tags, output, "language", "language");
+    insert_string_as(tags, output, "title", "title");
 }
 
 fn insert_disposition(
@@ -155,9 +156,18 @@ fn insert_disposition(
         .as_object()
         .ok_or_else(|| malformed("disposition must be a JSON object"))?;
     let mut normalized = Map::new();
-    for key in ["default", "forced"] {
-        if let Some(value) = object.get(key) {
-            normalized.insert(key.to_owned(), Value::Bool(disposition_bool(value, key)?));
+    // ffprobe names the commentary flag `comment`; the downstream audio planner
+    // reads it as `commentary` (a required preservation fact for transcodes).
+    for (input_key, output_key) in [
+        ("default", "default"),
+        ("forced", "forced"),
+        ("comment", "commentary"),
+    ] {
+        if let Some(value) = object.get(input_key) {
+            normalized.insert(
+                output_key.to_owned(),
+                Value::Bool(disposition_bool(value, input_key)?),
+            );
         }
     }
     if !normalized.is_empty() {

@@ -52,6 +52,51 @@ fn normalizes_stream_language_and_disposition_for_mp4() {
     assert_eq!(snapshot["streams"][0]["language"], "und");
     assert_eq!(snapshot["streams"][0]["disposition"]["default"], true);
     assert_eq!(snapshot["streams"][0]["disposition"]["forced"], false);
+    // ffprobe reported no `title` tag and no `comment` disposition, so neither is
+    // synthesized in the normalized snapshot.
+    assert!(snapshot["streams"][0].get("title").is_none());
+    assert!(
+        snapshot["streams"][0]["disposition"]
+            .get("commentary")
+            .is_none()
+    );
+}
+
+#[test]
+fn normalizes_stream_title_and_commentary_disposition() {
+    // The audio-transcode planner requires per-stream `title` and a `commentary`
+    // disposition fact; ffprobe names them `tags.title` and `disposition.comment`,
+    // so normalization lifts the title and renames the commentary flag.
+    let raw = serde_json::json!({
+        "format": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 2,
+                "tags": { "language": "eng", "title": "Director Commentary" },
+                "disposition": { "default": 0, "forced": 0, "comment": 1 }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert_eq!(snapshot["streams"][0]["title"], "Director Commentary");
+    assert_eq!(snapshot["streams"][0]["channels"], 2);
+    assert_eq!(snapshot["streams"][0]["disposition"]["commentary"], true);
+    assert_eq!(snapshot["streams"][0]["disposition"]["default"], false);
+    // The raw ffprobe key `comment` is renamed, not passed through verbatim.
+    assert!(
+        snapshot["streams"][0]["disposition"]
+            .get("comment")
+            .is_none()
+    );
 }
 
 #[test]
