@@ -1,7 +1,7 @@
 ---
 name: voom-sprint-16-design
 description: Sprint 16 design for coherent multi-phase real-media policy execution — a phase-barrier coordinator over a multi-file input set, append-only active-version chaining, staged-result probing at phase boundaries, bounded per-phase replanning, per-phase compliance reports folded into a durable per-phase workflow summary, and a scan/plan/execute/report CLI surface.
-status: draft
+status: complete
 date: 2026-05-29
 sprint: 16
 references:
