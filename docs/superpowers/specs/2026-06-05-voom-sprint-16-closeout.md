@@ -58,7 +58,7 @@ introduced; the architecture was settled in ADRs 0005–0010 via #160–#166.
 |---|---|---|
 | A multi-phase policy combining video transcode, remux/track-selection, audio mutation, verification, and commit executes and is inspectable through CLI JSON envelopes | `cargo test -p voom-control-plane --test phase_barrier_combined_flow` and `cargo test -p voom-cli --test multi_phase_flow` | pending |
 | Each phase plans and executes against the artifact the prior phase produced and re-probed | `cargo test -p voom-control-plane --test phase_barrier_combined_flow` and `cargo test -p voom-control-plane --test phase_barrier_flow phase_barrier_chains_committed_artifact_into_the_next_phase` | pending |
-| Replanning is bounded by the declared phase count; no phase is added at runtime; an unplannable phase becomes an inspectable blocked issue | `cargo test -p voom-plan` (per-phase bounded-replan + blocked-phase tests) and `cargo test -p voom-control-plane --test phase_barrier_combined_flow` (exactly 3 phases for a 3-phase policy) | pending |
+| Replanning is bounded by the declared phase count; no phase is added at runtime; an unplannable phase becomes an inspectable blocked issue | `cargo test -p voom-control-plane coordinator` (`run_phase_barrier_drops_unplannable_file_as_blocked`) + `--test phase_barrier_combined_flow` (a 3-phase policy yields exactly 3 phase rows) + `cargo test -p voom-plan` (planner blocked-reason cases) | pending |
 | The compliance report reflects produced artifacts per phase with lineage | `cargo test -p voom-control-plane --test phase_barrier_flow assert_reprobe_and_lineage_chain` (via the chain test) and `--test phase_barrier_combined_flow` | pending |
 | A durable workflow summary ties every phase to its tickets, artifacts, re-probe snapshots, and compliance report | `cargo test -p voom-store workflow_summaries` and `cargo test -p voom-control-plane --test phase_barrier_combined_flow` (durable re-read of all three grains) | pending |
 | A partially-applied policy leaves a coherent, inspectable state (committed files recorded, no orphan/delete); job-failure-mid-barrier resume re-enters only the failed file | `cargo test -p voom-control-plane --test phase_barrier_flow phase_barrier_records_committed_sibling_when_a_file_fails phase_barrier_resumes_failed_file_without_remutating_committed_sibling` | pending |
@@ -73,9 +73,9 @@ introduced; the architecture was settled in ADRs 0005–0010 via #160–#166.
 | End-to-end workflow integration test (transcode + remux + audio + verify + commit) | new `phase_barrier_combined_flow` |
 | Artifact-chain (phase N+1 against phase N's `FileVersion`, correct `source_lineage`) | `phase_barrier_flow::assert_reprobe_and_lineage_chain` + `phase_barrier_combined_flow` |
 | Re-probe (refreshed snapshot keyed to produced version, fed forward) | `phase_barrier_flow` (`snapshots_for_version`) + `phase_barrier_combined_flow` |
-| Bounded-replan (one pass per phase, no phase beyond `phase_order`, `run_if`/`skip_if` re-eval, blocked unplannable phase) | `voom-plan` per-phase tests + `phase_barrier_combined_flow` phase count |
+| Bounded-replan (one pass per phase, no phase beyond `phase_order`, `run_if`/`skip_if` re-eval, blocked unplannable phase) | coordinator `run_phase_barrier_drops_unplannable_file_as_blocked` + `run_if`/`skip_if` coordinator/planner tests; phase count pinned by `phase_barrier_combined_flow` (3) and `phase_barrier_chains_committed_artifact_into_the_next_phase` (2) |
 | Partial-barrier-failure + resume | `phase_barrier_flow` failure + resume tests |
-| `on_error` handled per the stated rule (cannot silently regress) | existing `voom-policy` / coordinator `on_error` tests (cite exact names at fill time) |
+| `on_error` handled per the stated rule (cannot silently regress) | `voom-control-plane` coordinator tests `reject_unhandled_on_error_rejects_continue`, `…rejects_skip`, `…allows_abort_and_unset`, and `resume_phase_barrier_rejects_unhandled_on_error_before_opening_job` (non-default `on_error` is rejected at resolve time, before a job opens) |
 | Compliance-report per-phase regeneration, deterministic identity | `phase_barrier_flow` report-id assertions + `compliance_envelope` goldens |
 | Durable-summary schema + repo round-trip; half-committed barrier yields rows only for advanced files | `voom-store workflow_summaries` + `phase_barrier_flow` partial test |
 | CLI golden-output (`insta`) for scan → plan → execute → report | `multi_phase_preview_envelope` (goldens) + `multi_phase_flow` (real execute, field assertions) |
@@ -83,7 +83,11 @@ introduced; the architecture was settled in ADRs 0005–0010 via #160–#166.
 
 ## Deferred Work
 
-Per spec §11, Sprint 16 defers (cite the spec §11 list verbatim at fill time —
-e.g. non-default `on_error` semantics beyond the resolve-time rule, cross-file
-phase dependencies, and any items the design doc lists). This closeout asserts
-only the §10 acceptance set.
+Per spec §11, Sprint 16 defers: phase re-entry, adaptive re-encode loops, and
+fixpoint replanning; rollback / active-version reset after a partially-applied
+policy; per-file failure isolation and independent per-file phase cursors;
+non-default `CompiledPhase.on_error` strategies (continue-on-error, etc.); backup
+worker, sidecar ingest, and bundle/sidecar CLI views (Sprint 17); daemon loops,
+watcher, scheduler, and recovery (Sprints 18–20); web UI, plugin SDK, production
+packaging; and multi-output audio extraction (#99). This closeout asserts only the
+§10 acceptance set.
