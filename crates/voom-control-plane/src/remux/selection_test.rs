@@ -80,6 +80,37 @@ fn selection_preserves_source_default_video_without_defaults_action() {
 }
 
 #[test]
+fn selection_preserves_source_default_video_with_explicit_preserve_action() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": [
+            {
+                "target": "video",
+                "strategy": "preserve"
+            }
+        ]
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng"]);
+    snapshot.payload["container"] = json!("mp4");
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert_eq!(
+        selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-0"]
+    );
+    assert!(selection.clear_default_streams.is_empty());
+}
+
+#[test]
 fn selection_keeps_default_streams_empty_for_non_default_video() {
     let payload = json!({
         "type": "remux",
