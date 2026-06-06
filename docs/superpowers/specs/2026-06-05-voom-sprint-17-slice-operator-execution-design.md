@@ -159,8 +159,8 @@ on; the skipped count is reported in the command's JSON output.
 
 ### C. Sample policy
 
-Committed as a fixture and referenced by the runbook. A single phase carrying
-both directives, so the planner decides per file what work is actually needed:
+Committed as a fixture and referenced by the runbook, single phase with both
+directives:
 
 ```
 policy "remux to mkv and transcode to hevc" {
@@ -171,24 +171,30 @@ policy "remux to mkv and transcode to hevc" {
 }
 ```
 
-Single phase, not two: the Sprint 12 video transcode already emits H.265-in-MKV
-(`docs/specs/voom-control-plane-design.md:1985`), so a two-phase
-`remux -> transcode` form would remux a non-HEVC file to an interim MKV and then
-re-encode it anyway — a wasted remux pass per file at real-library scale. With
-one phase the planner is expected to emit, per input:
+**Observed planner behavior (verified by the Task 1 oracle test, commit
+`2490348`; this replaces the earlier assumed contract).** The planner evaluates
+`container mkv` and `transcode video to hevc` independently: a Remux is planned
+whenever the source container ≠ mkv, and a TranscodeVideo is planned whenever the
+codec ≠ hevc **or** the container ≠ mkv (the transcode step enforces the mkv
+output container). Per `(container, video_codec)` input, planned ops:
 
-- non-HEVC, non-MKV (e.g. mp4/h264): a single transcode (its output is MKV);
-- HEVC, non-MKV (e.g. mp4/hevc): a remux only (no re-encode);
-- non-HEVC, MKV: a transcode only;
-- HEVC, MKV: no operation (already compliant).
+- mp4/h264 → `[Remux, TranscodeVideo]`
+- mp4/hevc → `[Remux, TranscodeVideo]`
+- mkv/h264 → `[TranscodeVideo]`
+- mkv/hevc → `[]` (already compliant)
 
-The compliance model already treats already-MKV / already-HEVC inputs as
-compliant, so "transcode only if not already HEVC" is inherent; no `where` guard
-is needed. **The exact planned operation set for all four combinations above must
-be validated during implementation (inspect the generated plan) and captured as a
-test oracle** — it is the correctness contract for this sample. Multi-phase
-artifact chaining is already covered by existing Sprint 16 tests
-(`multi_phase_flow.rs`), so the sample need not be contrived to exercise it.
+So any non-MKV source plans **both** a remux and a transcode. This is redundant
+for `.mp4` files (the transcode already outputs MKV), and that redundancy is
+**accepted for this slice** (decision: keep both directives) — the output is
+still MKV/HEVC and the policy reads as the operator's literal intent ("make it
+MKV and HEVC"). A future policy could express the intent with a single
+`transcode video to hevc` directive to drop the redundant remux; out of scope
+here.
+
+The oracle test (`crates/voom-control-plane/tests/sample_policy_plan.rs`) pins
+this operation set so a planner change that alters it fails loudly. The
+end-to-end test (Component D) must assert against this real behavior, not the
+earlier assumption.
 
 ### D. End-to-end test and runbook
 
@@ -199,13 +205,17 @@ in-process via `TestWorkerLaunch`), then runs `compliance execute` as its own
 `voom` process against the same on-disk SQLite DB. This is what makes the test
 cover the multi-process / DB-concurrency path (see Concurrency and DB access) and
 the `run-local` lifecycle. It builds the ffmpeg/mkvtoolnix/ffprobe/verify
-workers, generates a small fixture **directory** with two files — a non-HEVC
-non-MKV input (drives a transcode, output MKV) and an already-HEVC non-MKV input
-(drives a remux only) — so a single whole-scan input set drives both the ffmpeg
-and mkvtoolnix workers, **waits for each `run-local` `ready` line** before
+workers, generates a small fixture **directory** with an `.mp4`/h264 video file
+(which — per §Component C's observed behavior — plans **both** a Remux and a
+TranscodeVideo, so a single file exercises both the mkvtoolnix and ffmpeg
+workers) plus one non-video file (e.g. `.txt`/`.srt`) that must be skipped by the
+whole-scan builder. It **waits for each `run-local` `ready` line** before
 proceeding, then runs `voom init` -> `scan <dir>` -> `policy create` ->
-`policy input create-from-scan --scan <id>` -> `compliance execute`, and asserts
-both committed outputs (one transcoded, one remuxed) and the compliance report.
+`policy input create-from-scan --scan <id>` -> `compliance execute`. It asserts
+the input set reports `skipped_count == 1`, that execution drives both workers
+and commits MKV/HEVC output, and that the report passes. Execution is the oracle
+(as in Task 1): the test asserts the *actually committed* artifacts for the
+`[Remux, TranscodeVideo]` file rather than a pre-assumed count.
 Using a directory (not a single file) is deliberate: it also covers the
 whole-scan input-set builder, and the fixture directory includes one non-video
 file (e.g. a `.txt`/`.srt`) to assert the builder skips it and reports the skip.
