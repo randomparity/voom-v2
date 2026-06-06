@@ -1,6 +1,6 @@
 # Issue #187 — Guard against pairing `tokio::time::pause()` with the real SQLite pool in tests
 
-- **Status:** Reviewed
+- **Status:** Accepted
 - **Date:** 2026-06-05
 - **Issue:** #187
 - **ADR:** [0012 — Guard paused-time + real SQLite pool in tests](../../adr/0012-paused-time-db-pool-guard.md)
