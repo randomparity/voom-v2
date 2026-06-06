@@ -1,12 +1,13 @@
 use std::path::Path;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{ConnectOptions, SqlitePool};
 use voom_core::VoomError;
 
-/// Open a `SQLite` pool against an existing database. **Never creates files or
-/// directories.** Used by every read-side path; the explicit `connect_or_create`
-/// is reserved for `init()`.
+/// Open a `SQLite` pool against an existing database. **Never creates the main
+/// database file or parent directories.** On-disk pools may create normal `SQLite`
+/// WAL sidecars (`-wal`/`-shm`). Used by every read-side path; the explicit
+/// `connect_or_create` is reserved for `init()`.
 pub async fn connect(url: &str) -> Result<SqlitePool, VoomError> {
     connect_inner(url, /* create = */ false).await
 }
@@ -41,13 +42,14 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
 
     if is_memory {
         options = options.shared_cache(true);
+    } else {
+        options = options.journal_mode(SqliteJournalMode::Wal);
     }
 
-    // Sprint 0 uses rollback-journal mode for all on-disk DBs. WAL would
-    // create -wal/-shm sidecars that are visible even to readers, which
-    // breaks the read-side no-filesystem-side-effects contract once a DB
-    // has been initialized with WAL. Revisit when concurrent access pressure
-    // is real (Sprint 6 daemon).
+    // On-disk pools use WAL so operator processes can read committed snapshots
+    // while another process is writing. This may create normal SQLite -wal/-shm
+    // sidecars for existing DB files; connect() still never creates the main DB
+    // file, parent directories, migration rows, or schema.
 
     let pool_size = if is_memory { 1 } else { 8 };
 
