@@ -159,6 +159,22 @@ fn default_refs(
             DefaultStrategy::Preserve | DefaultStrategy::Best => {}
         }
     }
+    for target in [
+        TrackTarget::Video,
+        TrackTarget::Audio,
+        TrackTarget::Subtitle,
+    ] {
+        if defaults.iter().any(|action| action.target == target) {
+            continue;
+        }
+        for stream in facts.iter().filter(|stream| {
+            stream.kind == target
+                && stream.is_default
+                && keep_ids.contains(&stream.snapshot_stream_id)
+        }) {
+            default_streams.push(stream_ref(stream));
+        }
+    }
     Ok((
         dedupe_refs(default_streams),
         dedupe_refs(clear_default_streams),
