@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -676,6 +676,26 @@ async fn resolve_promotion_dirs(plan: &PromotionPlan) -> ResolvedPromotionDirs {
     ResolvedPromotionDirs { working_to_output }
 }
 
+/// The longest directory path shared by every input, compared component-wise
+/// (purely lexical — no filesystem access). Empty when the inputs share no
+/// leading component or the slice is empty.
+fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
+    let mut iter = dirs.iter();
+    let Some(first) = iter.next() else {
+        return PathBuf::new();
+    };
+    let mut common: Vec<Component> = first.components().collect();
+    for dir in iter {
+        let shared = common
+            .iter()
+            .zip(dir.components())
+            .take_while(|(a, b)| *a == b)
+            .count();
+        common.truncate(shared);
+    }
+    common.iter().collect()
+}
+
 fn sqlite_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
@@ -1102,6 +1122,14 @@ impl ControlPlane {
         if dirs.is_empty() {
             return Ok(());
         }
+        // Pass 1: collect the terminal artifacts that will promote, each with the
+        // directory of its asset's original scanned source. The longest common
+        // ancestor of those source dirs anchors a subtree-mirroring layout under
+        // the output dir, so two sources sharing a basename across different
+        // subdirectories (issue #197) promote to distinct destinations instead of
+        // colliding after their transcodes already ran.
+        let mut candidates = Vec::new();
+        let mut source_dirs = Vec::new();
         for artifact in self.working_dir_artifacts().await? {
             // `resolve_promotion_dirs` canonicalizes each working dir, so the
             // candidate must be canonicalized too or a symlinked path component
@@ -1123,10 +1151,49 @@ impl ControlPlane {
                 // same chain: it stays in the working dir.
                 continue;
             }
-            self.promote_artifact(&artifact, &current, output_dir)
+            let source_dir = self
+                .asset_source_path(artifact.asset_id)
+                .await?
+                .and_then(|path| path.parent().map(Path::to_path_buf));
+            if let Some(dir) = &source_dir {
+                source_dirs.push(dir.clone());
+            }
+            candidates.push((artifact, current, output_dir.to_path_buf(), source_dir));
+        }
+        let common_root = longest_common_dir(&source_dirs);
+        // Pass 2: move each terminal artifact under its mirrored subtree. A
+        // source dir under the common root contributes the relative subtree; an
+        // unknown source (no local-path location) falls back to a flat promotion.
+        for (artifact, current, output_dir, source_dir) in candidates {
+            let relative = source_dir
+                .as_deref()
+                .and_then(|dir| dir.strip_prefix(&common_root).ok())
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let dest_dir = output_dir.join(&relative);
+            self.promote_artifact(&artifact, &current, &dest_dir)
                 .await?;
         }
         Ok(())
+    }
+
+    /// The directory of an asset's original scanned source: the earliest
+    /// `file_version`'s first local-path location. `None` when the asset has no
+    /// such location (it then promotes flat). Add-only commits keep the earliest
+    /// version pointing at the scanned source even after later versions chain on.
+    async fn asset_source_path(&self, asset_id: FileAssetId) -> Result<Option<PathBuf>, VoomError> {
+        let versions = self.identity.list_file_versions_by_asset(asset_id).await?;
+        let Some(first) = versions.first() else {
+            return Ok(None);
+        };
+        let locations = self
+            .identity
+            .list_file_locations_by_version(first.id)
+            .await?;
+        Ok(locations
+            .into_iter()
+            .find(|location| location.kind == FileLocationKind::LocalPath)
+            .map(|location| PathBuf::from(location.value)))
     }
 
     /// Every live local-path file location, paired with its owning asset. The
@@ -1167,12 +1234,12 @@ impl ControlPlane {
         Ok(newer == 0)
     }
 
-    /// Move a terminal artifact into `output_dir` and repoint its location.
+    /// Move a terminal artifact into `dest_dir` and repoint its location.
     async fn promote_artifact(
         &self,
         artifact: &WorkingDirArtifact,
         current: &Path,
-        output_dir: &Path,
+        dest_dir: &Path,
     ) -> Result<(), VoomError> {
         let file_name = current.file_name().ok_or_else(|| {
             VoomError::Internal(format!(
@@ -1180,7 +1247,7 @@ impl ControlPlane {
                 current.display()
             ))
         })?;
-        let dest_dir = ensure_output_dir(output_dir).await?;
+        let dest_dir = ensure_output_dir(dest_dir).await?;
         let dest = dest_dir.join(file_name);
         let dest = move_terminal_artifact(current, &dest).await?;
         let mut tx = begin_tx(&self.pool).await?;
