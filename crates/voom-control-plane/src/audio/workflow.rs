@@ -11,6 +11,7 @@ use crate::audio::{
     TranscodeAudioDispatcher, execute_extract_audio_with_dispatchers,
     execute_transcode_audio_with_dispatchers,
 };
+use crate::cases::policy::compliance::committed_source_dir;
 use crate::workflow::execution::leases::{
     fail_lease_and_return, failure_class_for_error, release_lease_with_retry,
 };
@@ -107,15 +108,19 @@ fn transcode_audio_input_for_workflow_ticket(
     context: OperationAdapterContext<'_>,
 ) -> Result<ExecuteTranscodeAudioInput, VoomError> {
     let operation_payload = audio_payload(context.payload, "transcode audio")?;
+    let source_file_version_id = context.source_file_version_id()?;
     Ok(ExecuteTranscodeAudioInput {
         job_id: context.job_id("transcode audio")?,
         ticket_id: context.ticket.id,
         lease_id: context.lease_id,
-        source_file_version_id: context.source_file_version_id()?,
+        source_file_version_id,
         source_location_id: context.source_location_id(),
         operation_payload,
         staging_root: context.artifact_roots.staging_root.clone(),
-        target_dir: context.artifact_roots.target_dir.clone(),
+        target_dir: committed_source_dir(
+            &context.artifact_roots.target_dir,
+            source_file_version_id,
+        ),
     })
 }
 
@@ -134,7 +139,10 @@ async fn extract_audio_input_for_workflow_ticket(
             .await?,
         operation_payload,
         staging_root: context.artifact_roots.staging_root.clone(),
-        target_dir: context.artifact_roots.target_dir.clone(),
+        target_dir: committed_source_dir(
+            &context.artifact_roots.target_dir,
+            source_file_version_id,
+        ),
     })
 }
 

@@ -2,6 +2,7 @@ use serde_json::Value;
 use voom_core::{OperationKind, VoomError};
 use voom_worker_protocol::{TranscodeVideoRequest, TranscodeVideoResult};
 
+use crate::cases::policy::compliance::committed_source_dir;
 use crate::transcode::{
     ExecuteTranscodeVideoInput, TranscodeVideoDispatcher, execute_transcode_video_with_dispatchers,
 };
@@ -46,14 +47,18 @@ pub(crate) async fn dispatch_control_plane_transcode(
             ))
         })?
         .to_owned();
+    let source_file_version_id = context.source_file_version_id()?;
     let input = ExecuteTranscodeVideoInput {
         job_id: context.job_id("transcode")?,
         ticket_id: context.ticket.id,
         lease_id: context.lease_id,
-        source_file_version_id: context.source_file_version_id()?,
+        source_file_version_id,
         source_location_id: context.source_location_id(),
         staging_root: context.artifact_roots.staging_root.clone(),
-        target_dir: context.artifact_roots.target_dir.clone(),
+        target_dir: committed_source_dir(
+            &context.artifact_roots.target_dir,
+            source_file_version_id,
+        ),
         resolved: crate::transcode::resolve::ResolvedProfile {
             profile: resolved_profile,
             output_container,

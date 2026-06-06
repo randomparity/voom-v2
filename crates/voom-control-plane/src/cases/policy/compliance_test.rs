@@ -118,6 +118,22 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
 }
 
 #[test]
+fn committed_source_dir_namespaces_per_source_under_the_working_dir() {
+    use voom_core::FileVersionId;
+
+    let working = super::committed_working_dir(&PathBuf::from("/srv/staging"), "remux");
+    let a = super::committed_source_dir(&working, FileVersionId(7));
+    let b = super::committed_source_dir(&working, FileVersionId(8));
+
+    // Distinct sources get distinct commit dirs (no flat collision), and each
+    // stays under the operation working dir so promotion's prefix match holds.
+    assert_eq!(a, working.join("v7"));
+    assert_ne!(a, b);
+    assert!(a.starts_with(&working));
+    assert!(b.starts_with(&working));
+}
+
+#[test]
 fn apply_staging_root_sets_every_family_without_touching_target_dirs() {
     let mut options = super::ComplianceExecutionOptions::default();
     let defaults = super::ComplianceExecutionOptions::default();

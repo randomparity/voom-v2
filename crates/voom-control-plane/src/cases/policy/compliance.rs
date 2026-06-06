@@ -8,7 +8,8 @@ use secrecy::SecretString;
 use serde_json::json;
 use sqlx::Row;
 use voom_core::{
-    OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, VoomError, WorkerId,
+    FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, VoomError,
+    WorkerId,
 };
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
 use voom_plan::PlanOperationKind;
@@ -253,6 +254,19 @@ const COMMITTED_SUBDIR: &str = ".committed";
 /// stay here, and only each file's terminal artifact is promoted out.
 pub(crate) fn committed_working_dir(staging_root: &Path, operation: &str) -> PathBuf {
     staging_root.join(COMMITTED_SUBDIR).join(operation)
+}
+
+/// The per-source commit directory under an operation's working dir. Two sources
+/// that share a basename across different subdirectories would otherwise commit
+/// to the same flat path in the shared working dir and collide (issue #197);
+/// namespacing the commit by the source file-version id keeps them distinct.
+/// Promotion still matches by working-dir prefix and later mirrors each terminal
+/// artifact's source subtree into `--output-dir`.
+pub(crate) fn committed_source_dir(
+    working_dir: &Path,
+    source_file_version_id: FileVersionId,
+) -> PathBuf {
+    working_dir.join(format!("v{}", source_file_version_id.0))
 }
 
 /// One operation family's commit working dir paired with the operator output

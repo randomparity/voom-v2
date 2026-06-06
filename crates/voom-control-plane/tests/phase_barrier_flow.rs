@@ -296,9 +296,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     // terminal (phase 1) artifact lands in --output-dir.
     let transcode_working = root.join("stage").join(".committed").join("transcode");
     assert!(
-        transcode_working
-            .join("Chain.default-hevc.hevc.mkv")
-            .is_file(),
+        file_exists_under(&transcode_working, "Chain.default-hevc.hevc.mkv"),
         "phase 0's intermediate stays in the working dir"
     );
     assert!(
@@ -521,9 +519,7 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     // that succeeds would promote it.
     let transcode_working = root.join("stage").join(".committed").join("transcode");
     assert!(
-        transcode_working
-            .join("Good.default-hevc.hevc.mkv")
-            .is_file(),
+        file_exists_under(&transcode_working, "Good.default-hevc.hevc.mkv"),
         "the committed sibling's artifact stays in the working dir on a failed run"
     );
     assert!(
@@ -726,7 +722,7 @@ async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
     // promoted to --output-dir.
     let remux_working = staging_root.join(".committed").join("remux");
     assert!(
-        remux_working.join("Movie.remux.mkv").is_file(),
+        file_exists_under(&remux_working, "Movie.remux.mkv"),
         "the phase 0 remux intermediate stays in the working dir"
     );
     assert!(
@@ -846,6 +842,27 @@ async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
 }
 
 /// The names of the `.mkv` files directly in `dir`, sorted.
+/// Whether a file named `name` exists anywhere under `dir` (recursively). The
+/// commit layout nests each artifact in a per-source `v{id}` subdir of the
+/// working dir (issue #197), so a test that only cares an intermediate stayed in
+/// the working dir matches by name regardless of the nesting.
+fn file_exists_under(dir: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            if file_exists_under(&path, name) {
+                return true;
+            }
+        } else if entry.file_name().to_string_lossy() == name {
+            return true;
+        }
+    }
+    false
+}
+
 fn mkvs_in(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
