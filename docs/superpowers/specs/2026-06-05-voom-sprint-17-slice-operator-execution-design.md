@@ -169,42 +169,50 @@ on; the skipped count is reported in the command's JSON output.
 
 ### C. Sample policy
 
-Committed as a fixture and referenced by the runbook, single phase with both
-directives:
+Committed as a fixture and referenced by the runbook, two sequential phases —
+remux first, then transcode the remuxed result:
 
 ```
 policy "remux to mkv and transcode to hevc" {
-  phase normalize {
+  phase remux {
     container mkv
+  }
+  phase transcode {
+    depends_on: [remux]
     transcode video to hevc
   }
 }
 ```
 
-**Observed planner behavior (verified by the Task 1 oracle test, commit
-`2490348`; this replaces the earlier assumed contract).** The planner evaluates
-`container mkv` and `transcode video to hevc` independently: a Remux is planned
-whenever the source container ≠ mkv, and a TranscodeVideo is planned whenever the
-codec ≠ hevc **or** the container ≠ mkv (the transcode step enforces the mkv
-output container). Per `(container, video_codec)` input, planned ops:
+Phases are barriers across files and chain sequentially (ADR-0007): the transcode
+phase operates on the remux phase's committed output, not the original source.
+Within a single phase operations are independent, which is why the earlier
+single-phase form ran remux and transcode both against the source.
 
-- mp4/h264 → `[Remux, TranscodeVideo]`
-- mp4/hevc → `[Remux, TranscodeVideo]`
-- mkv/h264 → `[TranscodeVideo]`
-- mkv/hevc → `[]` (already compliant)
+**Observed planner behavior, per phase (verified by the Task 1 oracle test,
+`crates/voom-control-plane/tests/sample_policy_plan.rs`; this replaces the earlier
+single-phase contract).** The oracle validates per-phase **planning** from a
+single `generate_compliance_report` call. That call produces one whole-policy plan
+over the input set's *declared* facts; it does NOT run the phase-barrier chain-tip
+progression, so the transcode phase is planned against the original source facts,
+not against the remux phase's committed mkv output. The runtime chain-tip behavior
+(transcode operating on the remuxed output) is covered by the end-to-end test
+(Component D), not the oracle. Per `(container, video_codec)` input, planned ops
+by phase:
 
-So any non-MKV source plans **both** a remux and a transcode. This is redundant
-for `.mp4` files (the transcode already outputs MKV), and that redundancy is
-**accepted for this slice** (decision: keep both directives) — the output is
-still MKV/HEVC and the policy reads as the operator's literal intent ("make it
-MKV and HEVC"). A future policy could express the intent with a single
-`transcode video to hevc` directive to drop the redundant remux; out of scope
-here.
+- mp4/h264 → remux `[Remux]`, transcode `[TranscodeVideo]`
+- mp4/hevc → remux `[Remux]`, transcode `[TranscodeVideo]`
+- mkv/h264 → remux `[]` (already mkv), transcode `[TranscodeVideo]`
+- mkv/hevc → remux `[]`, transcode `[]` (already compliant)
 
-The oracle test (`crates/voom-control-plane/tests/sample_policy_plan.rs`) pins
-this operation set so a planner change that alters it fails loudly. The
-end-to-end test (Component D) must assert against this real behavior, not the
-earlier assumption.
+Note mp4/hevc still plans a TranscodeVideo even though the source codec is already
+hevc, while mkv/hevc does not: because the report plans over declared source
+facts, the non-mkv-container input drives a transcode in the same whole-policy
+plan, whereas the fully-compliant mkv/hevc input is a complete no-op.
+
+The oracle test pins this per-phase operation set so a planner change that alters
+it fails loudly. The end-to-end test (Component D) must assert against this real
+behavior, not the earlier assumption.
 
 ### D. End-to-end test and runbook
 

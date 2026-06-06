@@ -35,22 +35,38 @@ async fn sample_policy_plans_expected_operations_per_input() {
         .await
         .unwrap();
 
-    let cases: [(&str, &str, &[PlanOperationKind]); 4] = [
+    // Per-phase planned operations. The policy has two sequential phases:
+    // `remux` (container mkv) then `transcode` (transcode video to hevc,
+    // depends_on [remux]).
+    //
+    // SURPRISE / IMPORTANT: `generate_compliance_report` produces a single
+    // whole-policy plan over the input set's *declared* facts. It does NOT run
+    // the phase-barrier chain-tip progression, so the transcode phase is planned
+    // against the original source facts, not against the remux phase's committed
+    // mkv output. That is why mp4/hevc still shows a planned TranscodeVideo even
+    // though the source is already hevc: in that input the source container is
+    // mp4, and the planner emits a transcode for the video op alongside the
+    // remux in the same report. mkv/hevc (already mkv, already hevc) is a
+    // complete no-op. The runtime chain-tip behavior (transcode operating on the
+    // remuxed output) is exercised by the operator-execution e2e, not here.
+    let cases: [(&str, &str, &[PlanOperationKind], &[PlanOperationKind]); 4] = [
         (
             "mp4",
             "h264",
-            &[PlanOperationKind::Remux, PlanOperationKind::TranscodeVideo],
+            &[PlanOperationKind::Remux],
+            &[PlanOperationKind::TranscodeVideo],
         ),
         (
             "mp4",
             "hevc",
-            &[PlanOperationKind::Remux, PlanOperationKind::TranscodeVideo],
+            &[PlanOperationKind::Remux],
+            &[PlanOperationKind::TranscodeVideo],
         ),
-        ("mkv", "h264", &[PlanOperationKind::TranscodeVideo]),
-        ("mkv", "hevc", &[]),
+        ("mkv", "h264", &[], &[PlanOperationKind::TranscodeVideo]),
+        ("mkv", "hevc", &[], &[]),
     ];
 
-    for (container, video_codec, expected) in cases {
+    for (container, video_codec, expected_remux, expected_transcode) in cases {
         let slug = format!("sample-{container}-{video_codec}");
         let input = cp
             .create_policy_input_set(input_for(&slug, container, video_codec))
@@ -60,18 +76,26 @@ async fn sample_policy_plans_expected_operations_per_input() {
             .generate_compliance_report(policy.version.id, input.id)
             .await
             .unwrap();
-        let planned = planned_operation_kinds(&report.plan);
+        let remux = planned_operation_kinds(&report.plan, "remux");
+        let transcode = planned_operation_kinds(&report.plan, "transcode");
         assert_eq!(
-            planned, expected,
-            "planned operations for container={container} video_codec={video_codec}"
+            remux, expected_remux,
+            "remux-phase planned operations for container={container} video_codec={video_codec}"
+        );
+        assert_eq!(
+            transcode, expected_transcode,
+            "transcode-phase planned operations for container={container} video_codec={video_codec}"
         );
     }
 }
 
-fn planned_operation_kinds(plan: &voom_plan::ExecutionPlan) -> Vec<PlanOperationKind> {
+fn planned_operation_kinds(
+    plan: &voom_plan::ExecutionPlan,
+    phase_name: &str,
+) -> Vec<PlanOperationKind> {
     plan.nodes
         .iter()
-        .filter(|node| node.status == NodeStatus::Planned)
+        .filter(|node| node.status == NodeStatus::Planned && node.phase_name == phase_name)
         .map(|node| node.operation_kind)
         .collect()
 }
