@@ -21,7 +21,7 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint check-test-layout test doc deny audit
+ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -62,6 +62,14 @@ coverage-html:
 # Enforce the sibling-test layout: no inline tests in src/, every *_test.rs is linked
 check-test-layout:
     ./scripts/check-test-layout.sh
+
+# Guard: no test pairs tokio paused time with a real SqlitePool
+check-paused-time-db:
+    ./scripts/check-paused-time-db.sh
+
+# Self-test for the paused-time guard (keeps its ast-grep patterns honest)
+check-paused-time-db-selftest:
+    ./scripts/check-paused-time-db-selftest.sh
 
 # Run the CLI binary
 run *ARGS:
