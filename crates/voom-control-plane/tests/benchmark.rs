@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use secrecy::SecretString;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin};
+use voom_test_support::worker::cargo_bin_or_build;
 use voom_worker_protocol::{
     ClientHandle, DispatchStream, HttpClient, NdjsonOutcome, OperationKind, OperationRequest,
     ProgressFrame, WorkerCredentials,
@@ -430,54 +431,8 @@ fn benchmark_worker_bin() -> TestResult<PathBuf> {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_benchmark-worker") {
         return Ok(PathBuf::from(path));
     }
-    build_benchmark_worker()?;
-    let target_dir =
-        std::env::var_os("CARGO_TARGET_DIR").map_or_else(default_target_dir, target_dir_from_env);
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    Ok(benchmark_worker_debug_dir(&target_dir).join(format!("benchmark-worker{suffix}")))
-}
-
-fn build_benchmark_worker() -> TestResult<()> {
-    let status = std::process::Command::new("cargo")
-        .args(["build", "-p", "voom-fakes", "--bin", "benchmark-worker"])
-        .current_dir(workspace_root())
-        .status()
-        .map_err(|e| TestFailure(format!("benchmark-worker build failed to start: {e}")))?;
-    if !status.success() {
-        return Err(TestFailure(format!(
-            "benchmark-worker build exited with {status}"
-        )));
-    }
-    Ok(())
-}
-
-fn target_dir_from_env(path: std::ffi::OsString) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        workspace_root().join(path)
-    }
-}
-
-fn benchmark_worker_debug_dir(target_dir: &std::path::Path) -> PathBuf {
-    if let Some(target) = std::env::var_os("CARGO_BUILD_TARGET").filter(|target| !target.is_empty())
-    {
-        target_dir.join(target).join("debug")
-    } else {
-        target_dir.join("debug")
-    }
-}
-
-fn default_target_dir() -> PathBuf {
-    workspace_root().join("target")
-}
-
-fn workspace_root() -> PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    cargo_bin_or_build("voom-fakes", "benchmark-worker")
+        .map_err(|e| TestFailure(format!("benchmark-worker build lookup failed: {e}")))
 }
 
 #[derive(Debug)]

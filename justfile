@@ -40,7 +40,7 @@ test:
     # here keeps those calls no-ops so a worker binary is never relinked while a
     # concurrently-running test execs it (ETXTBSY). Same feature set as the test run.
     cargo build --workspace --all-features --all-targets
-    cargo test --workspace --all-features
+    VOOM_TEST_PREBUILT_WORKERS=1 cargo test --workspace --all-features
 
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items

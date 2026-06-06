@@ -10,6 +10,7 @@ use voom_core::TicketOperation;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 const FFPROBE_TEST_HELPER_MARKER: &[u8] = b"ffprobe version test-helper";
+const PREBUILT_WORKERS_ENV: &str = "VOOM_TEST_PREBUILT_WORKERS";
 static NEXT_FFPROBE_GUARD_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
@@ -311,6 +312,10 @@ fn make_executable(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "worker_test.rs"]
+mod tests;
+
 /// Returns the cargo target root that owns the active profile directory.
 ///
 /// The nested `cargo build` invocations below must emit binaries into the same
@@ -329,6 +334,11 @@ fn target_root_dir() -> PathBuf {
 }
 
 pub fn cargo_build_package(package: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if use_prebuilt_worker_binaries() {
+        prebuilt_worker_binary(package)?;
+        return Ok(());
+    }
+
     // `--all-features` matches how `just test` builds the workspace. Without it,
     // this `-p` build resolves a different feature set for shared deps and relinks
     // the worker binary, which races with a concurrent test exec'ing it (ETXTBSY).
@@ -353,6 +363,10 @@ pub fn cargo_bin_or_build(
     if let Some(path) = std::env::var_os(env_name) {
         return Ok(PathBuf::from(path));
     }
+    if use_prebuilt_worker_binaries() {
+        return prebuilt_worker_binary(binary);
+    }
+
     let status = Command::new("cargo")
         .args(["build", "-p", package, "--bin", binary, "--all-features"])
         .arg("--target-dir")
@@ -365,6 +379,26 @@ pub fn cargo_bin_or_build(
         );
     }
     Ok(target_debug_binary(binary))
+}
+
+fn use_prebuilt_worker_binaries() -> bool {
+    std::env::var_os(PREBUILT_WORKERS_ENV).is_some()
+}
+
+fn prebuilt_worker_binary(binary: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = target_debug_binary(binary);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "prebuilt worker binary missing at {}; run `cargo build --workspace \
+             --all-features --all-targets` or unset {PREBUILT_WORKERS_ENV}",
+            path.display()
+        ),
+    )
+    .into())
 }
 
 fn read_bound_addr(
