@@ -12,6 +12,7 @@ use serde_json::Value;
 use tempfile::{NamedTempFile, TempDir};
 use voom_policy::load_policy_fixture;
 use voom_store::test_support::sqlite_url_for;
+use voom_test_support::worker::cargo_bin_or_build;
 
 const BASIC_FFPROBE_JSON: &str =
     include_str!("../../voom-ffprobe-worker/fixtures/ffprobe/basic-mp4.json");
@@ -525,81 +526,7 @@ fn policy_input_whole_scan_command(url: &str, slug: &str) -> Command {
 
 fn built_worker_binary() -> &'static PathBuf {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let mut command = Command::new("cargo");
-        command.args([
-            "build",
-            "-p",
-            "voom-ffprobe-worker",
-            "--bin",
-            "voom-ffprobe-worker",
-        ]);
-        if let Some(target) = cargo_build_target() {
-            command.args(["--target", &target]);
-        }
-        let status = command.current_dir(workspace_root()).status().unwrap();
-        assert!(status.success(), "cargo build for ffprobe worker failed");
-
-        let binary = target_debug_dir().join(format!(
-            "voom-ffprobe-worker{}",
-            std::env::consts::EXE_SUFFIX
-        ));
-        assert!(
-            binary.is_file(),
-            "built ffprobe worker binary not found at {}",
-            binary.display()
-        );
-        binary
-    })
-}
-
-fn target_debug_dir() -> PathBuf {
-    let debug_dir = if let Some(target_dir) = explicit_target_dir() {
-        target_dir
-    } else {
-        current_exe_target_dir()
-    };
-
-    if let Some(target) = cargo_build_target() {
-        return debug_dir.join(target).join("debug");
-    }
-    debug_dir.join("debug")
-}
-
-fn explicit_target_dir() -> Option<PathBuf> {
-    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
-        let target_dir = PathBuf::from(target_dir);
-        return Some(if target_dir.is_absolute() {
-            target_dir
-        } else {
-            workspace_root().join(target_dir)
-        });
-    }
-    None
-}
-
-fn current_exe_target_dir() -> PathBuf {
-    let current_exe = std::env::current_exe().unwrap();
-    let deps_dir = current_exe.parent().unwrap();
-    if deps_dir.file_name().is_some_and(|name| name == "deps") {
-        let profile_dir = deps_dir.parent().unwrap();
-        if cargo_build_target().is_some() {
-            return profile_dir.parent().and_then(Path::parent).map_or_else(
-                || profile_dir.parent().unwrap().to_path_buf(),
-                Path::to_path_buf,
-            );
-        }
-        return profile_dir.parent().unwrap().to_path_buf();
-    }
-    deps_dir
-        .parent()
-        .map_or_else(|| deps_dir.to_path_buf(), Path::to_path_buf)
-}
-
-fn cargo_build_target() -> Option<String> {
-    std::env::var("CARGO_BUILD_TARGET")
-        .ok()
-        .filter(|target| !target.is_empty())
+    BIN.get_or_init(|| cargo_bin_or_build("voom-ffprobe-worker", "voom-ffprobe-worker").unwrap())
 }
 
 fn workspace_root() -> PathBuf {
