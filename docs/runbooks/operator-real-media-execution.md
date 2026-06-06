@@ -133,6 +133,18 @@ voom compliance execute \
   output set (intermediate + final per in-flight file); transcodes are
   long-running.
 
+## Known limitations
+
+- **Duplicate source basenames collide (issue #197).** Output files are named flat
+  by source stem (`{stem}.remux.mkv`, `{stem}.…hevc.mkv`) directly in
+  `--output-dir`, with no subdirectory namespacing. A `--all` run over a library
+  containing two files that share a basename across subdirectories (e.g.
+  `S01/episode.mkv` and `S02/episode.mkv`) fails the run at promotion — *after*
+  the transcodes have run — with `promotion destination already exists`. Until
+  #197 lands (subdir-preserving output paths or pre-dispatch collision
+  detection), run `--all` only against libraries with unique basenames, or scope
+  each run to a subtree with no basename clashes.
+
 ## Teardown
 
 Ctrl-C each `run-local` (it retires its worker and prints a final envelope).
