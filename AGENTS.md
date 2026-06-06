@@ -161,4 +161,14 @@ convention: no inline `#[cfg(test)] mod tests { ... }` in `src/`, and
 every `*_test.rs` must have a matching `#[path]` declaration in its
 sibling source file. See `docs/adr/0004-sibling-unit-tests.md`.
 
+**Never pair `tokio::time::pause()`/`advance()` with a real `SqlitePool`.**
+When tokio's clock is paused it auto-advances virtual time whenever the runtime
+is idle — including while an `await` is parked on sqlx's blocking SQLite thread
+— so the paused clock jumps past the pool's `acquire_timeout` and DB calls fail
+spuriously with `DbUnreachable`. Drive DB-touching tests on real time and
+control *domain* time through the injected `Clock` (`ManualClock`).
+`just check-paused-time-db` (wired into `just ci`) enforces this: it fails when
+one test file references `SqlitePool`/`ControlPlane` and also calls
+`tokio::time::pause`/`advance`. See `docs/adr/0012-paused-time-db-pool-guard.md`.
+
 `just coverage` produces `lcov.info` consumed by SonarCloud.
