@@ -90,6 +90,34 @@ pub enum PolicyCommand {
     /// Manage policy input sets.
     #[command(subcommand)]
     Input(PolicyInputCommand),
+    /// Create a policy document (with its initial accepted version) from a .voom file.
+    Create {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Manage versions of an existing policy document.
+    #[command(subcommand)]
+    Version(PolicyVersionCommand),
+    /// List policy documents.
+    List,
+    /// Show one policy document and its versions.
+    Show {
+        #[arg(long)]
+        document_id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PolicyVersionCommand {
+    /// Add a new accepted version to an existing document from a .voom file.
+    Add {
+        #[arg(long)]
+        document_id: u64,
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

@@ -73,6 +73,7 @@ pub mod policy {
         ComplianceExecutionOptions, ComplianceReportData, ComplianceRunReportData,
         FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
+    pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
         PolicyInputFromScanInput, PolicyInputFromScanResult, WholeScanInput, WholeScanInputResult,
     };
