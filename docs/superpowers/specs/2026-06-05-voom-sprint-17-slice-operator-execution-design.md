@@ -1,7 +1,7 @@
 # Sprint 17 Slice: Operator-Runnable Real-Media Execution
 
 Date: 2026-06-05
-Status: Reviewed (5 challenge cycles addressed); one scope change pending user confirmation — see Component B
+Status: Approved (5 challenge cycles addressed; whole-scan builder scope addition confirmed)
 Branch: `feat/sprint-17-operator-execution-slice`
 
 ## Context
@@ -66,8 +66,7 @@ transcode-to-HEVC against a real directory, entirely through JSON envelopes.
 2. `voom policy create` / `voom policy version add` / `voom policy list` /
    `voom policy show` subcommands.
 3. A whole-scan input-set builder so a real directory (not just one file) can be
-   executed in a single run (see Component B — added in cycle 3 to make the
-   "real library" goal reachable; pending user confirmation).
+   executed in a single run (see Component B).
 4. A committed sample policy (remux to MKV + transcode video to HEVC).
 5. An end-to-end integration test over a small real media fixture, plus a
    documented manual runbook for running against `/mnt/pool0/test-video`.
@@ -138,8 +137,7 @@ Thin CLI wrappers over existing control-plane methods; no new domain logic.
 These extend the existing `PolicyCommand` enum, which currently has only the
 `Input` subcommand. The new subcommands sit alongside `Input`.
 
-**Whole-scan input-set builder (cycle-3 scope addition — confirm before
-planning).** The existing `voom policy input create-from-scan` builds an input
+**Whole-scan input-set builder.** The existing `voom policy input create-from-scan` builds an input
 set from a *single* `file_version_id` + `media_snapshot_id` and requires the
 operator to hand-type `--container`/`--video-codec`
 (`crates/voom-control-plane/src/cases/policy/policy_inputs.rs:13-19`). That makes
@@ -151,17 +149,13 @@ file's container/video-codec from its persisted media snapshot rather than from
 CLI args, producing one multi-file input set. This reuses the existing
 `PolicyInputSetDraft { media_snapshots: Vec<_> }` domain support
 (`policy_inputs.rs`), so it is a CLI/case-layer addition, not new domain logic.
-Single-file `create-from-scan` is retained.
+Single-file `create-from-scan` is retained alongside the new whole-scan mode.
 
 Selection rule: the whole-scan builder includes only file-versions whose latest
 media snapshot has a video stream, so non-video and unprobeable files in a real
 directory (subtitles, images, `.nfo`, anything `ffprobe` couldn't classify as
 video) are skipped rather than producing input rows the video policy can't act
 on; the skipped count is reported in the command's JSON output.
-
-**This is the one scope change beyond the originally approved slice; if you
-prefer to keep the slice single-file and narrow the Goal/runbook to "one file per
-run," say so and this deliverable drops.**
 
 ### C. Sample policy
 
