@@ -67,8 +67,10 @@ scope and stays green; no allowlist entry is created.
 - A test that reintroduces the pause-plus-pool pattern fails `just ci` (locally
   via pre-commit and in CI) with a pointer to the `AGENTS.md` rule, before it
   can flake.
-- `just ci` gains one fast shell step. The check is `ast-grep` over `*_test.rs`
-  files, comparable in cost to the existing `check-test-layout`.
+- `just ci` gains two fast shell steps: the check itself and its self-test
+  (which runs the check against temporary fixtures). Both are `ast-grep` over a
+  handful of files, comparable in cost to the existing `check-test-layout`. The
+  self-test runs in CI so the matching patterns cannot silently rot.
 - The signal set (`SqlitePool`, `ControlPlane`) covers how control-plane tests
   reach the pool today. A future test that hides the pool behind a different
   type slips past the check; the written convention remains the backstop and

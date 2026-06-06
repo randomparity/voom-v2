@@ -184,15 +184,25 @@ discussion.)
 4. ADR 0012 records the decision with Status · Context · Decision · Consequences
    · Considered & rejected, is linked from this spec, and is listed in
    `docs/adr/README.md`.
+5. The check's own self-test runs as part of `just ci` (not merely as a file
+   that exists), so a future edit that breaks the `ast-grep` patterns fails CI.
+   *Check: removing/sabotaging the check's matching logic makes `just ci` go
+   red via the self-test.* The check script also passes `shellcheck` and
+   `shfmt -d` and starts with `set -euo pipefail`, matching
+   `check-test-layout.sh`.
 
 ## Test strategy
 
-The check is a shell script; it is tested by a sibling shell harness that `cd`s
-into a per-case temporary fixture tree (`crates/<x>/src/<y>_test.rs`) and runs
-the check there, asserting exit code per case. Because the check resolves
-`crates/*/src` CWD-relative, the temp tree fully isolates fixtures from the real
-`crates/` — the harness never writes under the repo's tree and a concurrent
-real `just ci` cannot see the fixtures. Cases:
+The check is a shell script; it is tested by a sibling shell self-test
+(`scripts/check-paused-time-db-selftest.sh`, started with `set -euo pipefail`)
+that `cd`s into a per-case temporary fixture tree (`crates/<x>/src/<y>_test.rs`)
+and runs the check there, asserting exit code per case. The self-test gets its
+own `just` recipe that is added to the `ci` target, so it runs on every `just
+ci` and in GitHub Actions — guaranteeing the patterns cannot silently rot.
+Because the check resolves `crates/*/src` CWD-relative, the temp tree fully
+isolates fixtures from the real `crates/` — the self-test writes only under a
+`mktemp -d` directory it removes on exit, so a concurrent real `just ci` never
+sees the fixtures. Cases:
 
 - `tokio::time::pause()` (scoped) + `SqlitePool` → exit non-zero;
 - `tokio::time::advance(..)` (scoped) + `ControlPlane` → exit non-zero;
