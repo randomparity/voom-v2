@@ -52,15 +52,10 @@ use voom_test_support::worker::{
 /// * The transcode phase re-encodes the video to hevc; its `-c:a copy` carries the
 ///   audio stream (and its language/title/disposition tags) through untouched.
 /// * The audio phase's `transcode audio to opus where lang in [eng, und]` plans
-///   against the *re-probed* transcode output. This commits only because the
-///   audio planner's strict preservation-fact gate — per-stream language, title,
-///   channels, and a commentary disposition (`voom-plan` `selection.rs`
-///   `has_transcode_preservation_facts`) — is satisfied by the re-probe. That
-///   holds because this change taught the ffprobe worker's normalization to lift
-///   `tags.title` and `disposition.comment` into the snapshot; before that fix a
-///   re-probe carried neither, and this phase blocked with "snapshot stream facts
-///   are insufficient for audio planning" (the gap `audio_transcode_flow.rs` works
-///   around by hand-augmenting its scan snapshot).
+///   against the *re-probed* transcode output. Per ADR-0011 the planner gates
+///   transcode plannability on the source codec + container only, so this commits
+///   even though the fixture's audio tracks are title-less — the case real media
+///   hits because muxers do not synthesize a title.
 const COMBINED_POLICY: &str = r#"
 policy "sprint 16 combined" {
   phase remux {
@@ -550,20 +545,16 @@ fn generate_combined_fixture(path: &Path) {
             "yuv420p",
             "-c:a",
             "aac",
-            // The audio-transcode planner requires per-stream language, title,
-            // channels, and a commentary disposition fact (selection.rs
-            // `has_transcode_preservation_facts`); bake all of them in so they
-            // survive `-c:a copy` through the transcode phase and reach the
-            // audio phase's re-probe. `-disposition:a:N default|0` sets an
-            // explicit flag set, which clears `comment` to a concrete `false`.
+            // ADR-0011: the audio-transcode planner no longer requires a per-
+            // stream title/commentary. These tracks are deliberately title-less
+            // to prove a title-less remux -> transcode -> audio chain commits;
+            // only language + disposition are set (`-disposition:a:N default|0`
+            // sets an explicit flag set, which clears `comment` to a concrete
+            // `false`).
             "-metadata:s:a:0",
             "language=eng",
-            "-metadata:s:a:0",
-            "title=Main",
             "-metadata:s:a:1",
             "language=spa",
-            "-metadata:s:a:1",
-            "title=Castellano",
             "-disposition:a:0",
             "default",
             "-disposition:a:1",

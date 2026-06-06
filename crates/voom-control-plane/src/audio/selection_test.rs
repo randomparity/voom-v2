@@ -145,7 +145,9 @@ fn extraction_rejects_zero_multiple_or_unknown_commentary_state() {
 }
 
 #[test]
-fn missing_selected_language_title_default_facts_block_transcode_preservation() {
+fn transcode_selection_admits_streams_missing_descriptive_facts() {
+    // No per-stream descriptive fact gates runtime selection (ADR-0011):
+    // title-less, language-less, and commentary-less streams all select.
     for stream in [
         audio("a-1", 1, "aac", None, Some("Main"), Some(false)),
         audio("a-1", 1, "aac", Some("eng"), None, Some(false)),
@@ -153,14 +155,21 @@ fn missing_selected_language_title_default_facts_block_transcode_preservation() 
     ] {
         let snapshot = snapshot_with_streams(vec![stream]);
 
-        let err = transcode_selection_from_payload_and_snapshot(
+        let selection = transcode_selection_from_payload_and_snapshot(
             &transcode_payload(&Value::Null),
             &snapshot,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-        assert!(err.to_string().contains("insufficient stream facts"));
+        assert_eq!(
+            selection
+                .selection
+                .selected_streams
+                .iter()
+                .map(|stream| stream.snapshot_stream_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-1"]
+        );
     }
 }
 

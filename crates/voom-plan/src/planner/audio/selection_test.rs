@@ -3,33 +3,9 @@ use voom_policy::{MediaSnapshotInput, TargetKind, TargetRef, TrackFilter};
 use super::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    has_transcode_preservation_facts, stream_facts, transcode_audio_shape,
+    stream_facts, transcode_audio_shape,
 };
 use crate::planner::audio::AUDIO_TRANSCODE_CONTAINER;
-
-#[test]
-fn transcode_preservation_facts_require_language_title_channels_and_commentary() {
-    assert!(has_transcode_preservation_facts(&audio_fact(Some(false))));
-
-    let missing_language = SnapshotAudioStreamFact {
-        language: None,
-        ..audio_fact(Some(false))
-    };
-    let missing_title = SnapshotAudioStreamFact {
-        title: None,
-        ..audio_fact(Some(false))
-    };
-    let missing_channels = SnapshotAudioStreamFact {
-        channels: None,
-        ..audio_fact(Some(false))
-    };
-    let missing_commentary = audio_fact(None);
-
-    assert!(!has_transcode_preservation_facts(&missing_language));
-    assert!(!has_transcode_preservation_facts(&missing_title));
-    assert!(!has_transcode_preservation_facts(&missing_channels));
-    assert!(!has_transcode_preservation_facts(&missing_commentary));
-}
 
 #[test]
 fn stream_facts_parse_audio_streams_with_disposition_commentary() {
@@ -102,9 +78,36 @@ fn extraction_role_maps_known_commentary_and_blocks_unknown_commentary() {
 }
 
 #[test]
-fn transcode_audio_shape_blocks_missing_preservation_facts() {
+fn transcode_audio_shape_plans_streams_missing_descriptive_facts() {
+    // No per-stream descriptive fact is a transcode build input (ADR-0011);
+    // a stream with a known codec plans regardless of title/commentary/
+    // language/channels presence.
+    let stream = SnapshotAudioStreamFact {
+        title: None,
+        language: None,
+        channels: None,
+        disposition: AudioDispositionFact {
+            default: false,
+            forced: false,
+            commentary: None,
+        },
+        commentary: None,
+        ..audio_fact(Some(false))
+    };
+    let snapshot = snapshot_with_audio_facts(vec![stream]);
+
+    assert_eq!(
+        transcode_audio_shape(&snapshot, "opus", AUDIO_TRANSCODE_CONTAINER, None),
+        AudioPlanShape::Planned
+    );
+}
+
+#[test]
+fn transcode_audio_shape_blocks_stream_without_codec() {
+    // Codec is the real plannability floor: without it the shape cannot decide
+    // no-op vs transcode, so it blocks.
     let mut stream = audio_fact(Some(false));
-    stream.title = None;
+    stream.codec = None;
     let snapshot = snapshot_with_audio_facts(vec![stream]);
 
     assert_eq!(

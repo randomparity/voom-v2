@@ -3,7 +3,7 @@ use voom_core::VoomError;
 use voom_plan::audio::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioBundleRole,
     AudioOperationPayload, AudioOperationType, AudioPlanningBlock, SnapshotAudioStreamFact,
-    extraction_role, has_transcode_preservation_facts, selected_audio_streams,
+    extraction_role, selected_audio_streams,
 };
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{AudioStreamRef, TranscodeAudioSelection};
@@ -52,11 +52,6 @@ pub fn transcode_selection_from_payload_and_snapshot(
         .map_err(audio_block_error)?;
     if selected.is_empty() {
         return Err(audio_block_error(AudioPlanningBlock::ZeroMatches));
-    }
-    if !selected.iter().all(has_transcode_preservation_facts) {
-        return Err(audio_block_error(
-            AudioPlanningBlock::InsufficientSnapshotFacts,
-        ));
     }
     let selected_streams = selected
         .into_iter()
