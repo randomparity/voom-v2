@@ -80,9 +80,15 @@ transcode-to-HEVC against a real directory, entirely through JSON envelopes.
 
 Productizes `TestWorkerLaunch::start`. Behavior:
 
-1. Retire any prior live (registered/active) local worker with the same derived
-   name (a stable per-kind name, e.g. `local-ffmpeg`, `local-mkvtoolnix`), to
-   self-heal a previous hard kill that left a stale endpoint.
+1. Self-heal: retire any prior live (registered/active) local worker for this
+   kind, so a previous hard kill that left a stale endpoint doesn't accumulate.
+   **Implementation note (commit `6470a5f`):** `workers.name` is globally `UNIQUE`
+   (migration 0002) and retire does not free the name, so a fixed name like
+   `local-ffmpeg` cannot be re-registered. The worker is registered with a unique
+   name `"<base>-<random>"` (base `local-ffmpeg` / `local-mkvtoolnix`) and
+   self-heal matches prior live workers by the base prefix. Safe because runtime
+   discovery (`policy_runtime_registry`) selects by operation + status, never by
+   name.
 2. Register a worker (node-less; see Assumptions) via the existing
    `register_worker`.
 3. Generate a random secret. Spawn the bundled worker binary
