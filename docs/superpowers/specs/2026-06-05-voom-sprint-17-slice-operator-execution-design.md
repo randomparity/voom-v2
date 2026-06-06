@@ -312,15 +312,20 @@ Store-wide WAL is the durable fix for concurrent readers during a long `execute`
   cannot help an `execute` that starts in the window between a hard kill and the
   next `run-local`. So the durable protections are: (a) `run-local` startup
   retires same-name leftovers, and (b) `execute` performs a cheap pre-dispatch
-  liveness check on each registry endpoint and treats an unreachable worker the
-  same as a missing one — failing fast with the actionable error below *before*
-  dispatching, rather than dispatching blind to a dead endpoint at submit time.
-  The probe must be an **authenticated protocol-level ping the worker validates
-  against its stored secret/epoch**, not a bare TCP connect: workers bind an
-  ephemeral port (`127.0.0.1:0`), so a reused port could satisfy a bare connect
-  against the wrong listener and mask a stale endpoint. This liveness check is in
-  scope (it was previously listed as deferred and is now required by this failure
-  analysis).
+  liveness check on each registry endpoint and drops workers whose endpoint is
+  unreachable, *before* dispatching, rather than dispatching blind to a dead
+  endpoint at submit time. **Implemented** (commit `f3b9400`): the probe is the
+  worker-protocol `handshake` (`ClientHandle::handshake(PROTOCOL_VERSION)`) under
+  a 500 ms timeout — a protocol-aware probe, not a bare TCP connect, so a dead
+  port or a non-voom listener on a reused ephemeral port is correctly treated as
+  unreachable. Exact worker identity (secret/epoch) is still enforced by the
+  existing auth-gated `/v1/operations` dispatch, so a reused port held by a
+  *different* voom worker fails cleanly at dispatch. **Scope:** an operation whose
+  registered worker(s) all fail the probe (the stale-endpoint case) fast-fails
+  with the actionable error below, before any issue/ticket write. An operation
+  with **no registered worker at all** retains the pre-existing per-ticket
+  "no eligible candidate" partial-coverage behavior (so intentionally running a
+  subset of workers still dispatches what it can) — see Acceptance.
 - **Worker dies mid-run**, including the operator stopping a `run-local` while
   `execute` is running (Component A step 6 tears down the worker's HTTP server
   under any in-flight call). The pre-dispatch liveness check cannot prevent this:
@@ -367,15 +372,19 @@ pre-dispatch liveness check.
   produces one input set covering every scanned file-version.
 - With both `run-local` workers up as separate processes, `voom compliance
   execute` (its own process, same on-disk DB) against a scanned fixture directory
-  (one non-HEVC, one HEVC-non-MKV file) commits a transcoded MKV/HEVC output and
-  a remuxed MKV output and a passing compliance report end-to-end, and a
-  concurrent `voom worker list` issued during the run succeeds (no
-  `DbUnreachable`) within the `busy_timeout` window.
-- `compliance execute` with a required worker kind absent **or registered but
-  unreachable at submit time** fails fast before any dispatch — with an error
-  naming the missing operation and the `run-local` command to start it — so that
-  pre-submit case leaves no partial commit. (Mid-run worker death is handled by
-  Sprint 16 resume, not by this guarantee; see Error handling.)
+  (an `.mp4`/h264 file that plans both Remux and TranscodeVideo, plus a non-video
+  file) drives both the mkvtoolnix and ffmpeg workers, commits MKV/HEVC output,
+  and returns a passing compliance report end-to-end, and a concurrent
+  `voom worker list` issued during the run succeeds (no `DbUnreachable`) within
+  the `busy_timeout` window.
+- `compliance execute` with a required operation's only registered worker(s)
+  **unreachable at submit time** (the stale-endpoint case) fails fast before any
+  dispatch — with an error naming the operation and the `run-local` command to
+  start it — leaving no partial commit. An operation with **no registered worker
+  at all** retains the existing per-ticket partial-coverage behavior (dispatch
+  what you can), so intentionally running a subset of workers is unaffected.
+  (Mid-run worker death is handled by Sprint 16 resume, not by this guarantee;
+  see Error handling.)
 
 ## Verification expectations
 
