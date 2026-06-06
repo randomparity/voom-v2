@@ -218,12 +218,6 @@ pub fn transcode_audio_shape(
     if selected.iter().any(|stream| stream.codec.is_none()) {
         return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
     }
-    if selected
-        .iter()
-        .any(|stream| !has_transcode_preservation_facts(stream))
-    {
-        return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
-    }
 
     if current_container.eq_ignore_ascii_case(container)
         && selected
@@ -286,18 +280,6 @@ pub fn selected_audio_streams(
         }
     }
     Ok(selected)
-}
-
-/// Returns whether a selected audio stream carries the facts required to
-/// preserve its metadata across a transcode (language, title, channels, and a
-/// known commentary disposition). Audio transcode planning and the
-/// control-plane runtime selection share this rule.
-#[must_use]
-pub fn has_transcode_preservation_facts(stream: &SnapshotAudioStreamFact) -> bool {
-    stream.language.is_some()
-        && stream.title.is_some()
-        && stream.channels.is_some()
-        && stream.disposition.commentary.is_some()
 }
 
 fn video_stream_count(snapshot: &MediaSnapshotInput) -> Result<u64, AudioPlanningBlock> {
