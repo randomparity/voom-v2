@@ -133,17 +133,29 @@ voom compliance execute \
   output set (intermediate + final per in-flight file); transcodes are
   long-running.
 
+## Output layout
+
+Outputs mirror the source tree. Each terminal artifact lands under
+`--output-dir` at the source's path relative to the run's common source root —
+a source at `<root>/S01/episode.mkv` promotes to
+`--output-dir/S01/episode.…hevc.mkv` (issue #197). Sources sharing a basename
+across different subdirectories therefore land at distinct destinations instead
+of colliding. A single-directory run (no shared subtree) promotes flat, as
+before.
+
 ## Known limitations
 
-- **Duplicate source basenames collide (issue #197).** Output files are named flat
-  by source stem (`{stem}.remux.mkv`, `{stem}.…hevc.mkv`) directly in
-  `--output-dir`, with no subdirectory namespacing. A `--all` run over a library
-  containing two files that share a basename across subdirectories (e.g.
-  `S01/episode.mkv` and `S02/episode.mkv`) fails the run at promotion — *after*
-  the transcodes have run — with `promotion destination already exists`. Until
-  #197 lands (subdir-preserving output paths or pre-dispatch collision
-  detection), run `--all` only against libraries with unique basenames, or scope
-  each run to a subtree with no basename clashes.
+- **Duplicate source basenames still block a `--all` run (issue #199).** Even
+  with subdir-preserving output, the phase-barrier coordinator derives each
+  file's branch id from its path *stem* and rejects a stem collision across the
+  active set (`active files … both derive branch id …`), so a library with two
+  files that share a basename across subdirectories (e.g. `S01/episode.mkv` and
+  `S02/episode.mkv`) fails fast before any work runs. Until #199 lands, run
+  `--all` only against libraries with unique basenames, or scope each run to a
+  subtree with no basename clashes.
+- **Same-stem, different-extension siblings in one directory collide** (e.g.
+  `S01/episode.mkv` and `S01/episode.mov`). Both derive the same branch id and
+  the same output basename; the run fails (at the branch-id check, per #199).
 
 ## Teardown
 
