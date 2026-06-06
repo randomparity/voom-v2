@@ -1,7 +1,7 @@
 # Sprint 17 Slice: Operator-Runnable Real-Media Execution
 
 Date: 2026-06-05
-Status: Design approved, pending spec review
+Status: Reviewed (5 challenge cycles addressed); one scope change pending user confirmation — see Component B
 Branch: `feat/sprint-17-operator-execution-slice`
 
 ## Context
@@ -65,11 +65,15 @@ transcode-to-HEVC against a real directory, entirely through JSON envelopes.
 1. `voom worker run-local --kind <ffmpeg|mkvtoolnix>` foreground command.
 2. `voom policy create` / `voom policy version add` / `voom policy list` /
    `voom policy show` subcommands.
-3. A committed sample policy (remux to MKV + transcode video to HEVC).
-4. An end-to-end integration test over a small real media fixture, plus a
+3. A whole-scan input-set builder so a real directory (not just one file) can be
+   executed in a single run (see Component B — added in cycle 3 to make the
+   "real library" goal reachable; pending user confirmation).
+4. A committed sample policy (remux to MKV + transcode video to HEVC).
+5. An end-to-end integration test over a small real media fixture, plus a
    documented manual runbook for running against `/mnt/pool0/test-video`.
-5. An actionable error from `compliance execute` when a required worker kind has
-   no live registration.
+6. A pre-dispatch endpoint liveness check in `compliance execute` plus an
+   actionable error when a required worker kind has no live (registered and
+   reachable) worker.
 
 ## Components
 
@@ -92,11 +96,27 @@ Productizes `TestWorkerLaunch::start`. Behavior:
    and scheduler need. Capability operations per kind:
    - ffmpeg: `transcode_video`, `transcode_audio`, `extract_audio`
    - mkvtoolnix: `remux`
-6. Supervise the child in the foreground. On SIGINT / stdin EOF: close the
+6. Supervise the child in the foreground with an explicit async signal handler
+   (`tokio::signal` for SIGINT and SIGTERM). Ctrl-C is the normal operator exit,
+   so without an installed handler the default signal disposition would terminate
+   `run-local` *before* it can retire the worker — leaving exactly the stale
+   endpoint this step exists to prevent. On signal or stdin EOF: close the
    child's stdin (its watchdog shuts down the HTTP server), wait for exit, then
-   retire the worker so the stale endpoint is removed from the registry.
-7. Emit a single JSON envelope on a clean shutdown; log supervision events to
-   stderr.
+   retire the worker so the endpoint leaves the registry. Graceful retire is
+   best-effort (a `kill -9` still skips it); the durable guarantee is the
+   step-1 startup self-heal plus the execute-side liveness check (see Error
+   handling).
+7. Once the capability and grant are recorded (step 5), emit a JSON **readiness**
+   line on stdout (`{status:"ready", worker_id, kind, endpoint}`) so the operator
+   and the e2e harness have a deterministic safe-to-proceed signal — `execute`
+   must not be run until each worker is ready, or it races the registration and
+   hits the missing-worker path. Emit a final JSON envelope on clean shutdown.
+   Log supervision events to stderr.
+
+To keep its database lock window minimal under the multi-process topology (see
+Concurrency and DB access), `run-local` does not hold an open write transaction
+during supervision: it registers (steps 1-5), then supervises, then re-acquires
+a connection only to retire on exit.
 
 `ffprobe` (initial scan and between-phase re-probe) and `verify-artifact` are
 **not** registry workers. The control plane already spawns them as managed
@@ -118,62 +138,193 @@ Thin CLI wrappers over existing control-plane methods; no new domain logic.
 These extend the existing `PolicyCommand` enum, which currently has only the
 `Input` subcommand. The new subcommands sit alongside `Input`.
 
+**Whole-scan input-set builder (cycle-3 scope addition — confirm before
+planning).** The existing `voom policy input create-from-scan` builds an input
+set from a *single* `file_version_id` + `media_snapshot_id` and requires the
+operator to hand-type `--container`/`--video-codec`
+(`crates/voom-control-plane/src/cases/policy/policy_inputs.rs:13-19`). That makes
+the stated "run against a real directory / `/mnt/pool0/test-video`" goal
+unreachable: a library scan yields many file-versions. This slice therefore adds
+a whole-scan mode — e.g. `voom policy input create-from-scan --scan <scan-id>`
+(or `--all`) — that enumerates the scan's scanned file-versions and derives each
+file's container/video-codec from its persisted media snapshot rather than from
+CLI args, producing one multi-file input set. This reuses the existing
+`PolicyInputSetDraft { media_snapshots: Vec<_> }` domain support
+(`policy_inputs.rs`), so it is a CLI/case-layer addition, not new domain logic.
+Single-file `create-from-scan` is retained.
+
+Selection rule: the whole-scan builder includes only file-versions whose latest
+media snapshot has a video stream, so non-video and unprobeable files in a real
+directory (subtitles, images, `.nfo`, anything `ffprobe` couldn't classify as
+video) are skipped rather than producing input rows the video policy can't act
+on; the skipped count is reported in the command's JSON output.
+
+**This is the one scope change beyond the originally approved slice; if you
+prefer to keep the slice single-file and narrow the Goal/runbook to "one file per
+run," say so and this deliverable drops.**
+
 ### C. Sample policy
 
-Committed as a fixture and referenced by the runbook. Two phases, to exercise
-the Sprint 16 artifact-chaining and between-phase re-probe path:
+Committed as a fixture and referenced by the runbook. A single phase carrying
+both directives, so the planner decides per file what work is actually needed:
 
 ```
 policy "remux to mkv and transcode to hevc" {
-  phase remux     { container mkv }
-  phase transcode { depends_on: [remux]
-                    transcode video to hevc }
+  phase normalize {
+    container mkv
+    transcode video to hevc
+  }
 }
 ```
 
-The compliance model already treats files that are already MKV / already HEVC as
-compliant, so "transcode only if not already HEVC" is inherent in planning; no
-explicit `where` guard is required.
+Single phase, not two: the Sprint 12 video transcode already emits H.265-in-MKV
+(`docs/specs/voom-control-plane-design.md:1985`), so a two-phase
+`remux -> transcode` form would remux a non-HEVC file to an interim MKV and then
+re-encode it anyway — a wasted remux pass per file at real-library scale. With
+one phase the planner is expected to emit, per input:
+
+- non-HEVC, non-MKV (e.g. mp4/h264): a single transcode (its output is MKV);
+- HEVC, non-MKV (e.g. mp4/hevc): a remux only (no re-encode);
+- non-HEVC, MKV: a transcode only;
+- HEVC, MKV: no operation (already compliant).
+
+The compliance model already treats already-MKV / already-HEVC inputs as
+compliant, so "transcode only if not already HEVC" is inherent; no `where` guard
+is needed. **The exact planned operation set for all four combinations above must
+be validated during implementation (inspect the generated plan) and captured as a
+test oracle** — it is the correctness contract for this sample. Multi-phase
+artifact chaining is already covered by existing Sprint 16 tests
+(`multi_phase_flow.rs`), so the sample need not be contrived to exercise it.
 
 ### D. End-to-end test and runbook
 
-Integration test (mirrors `multi_phase_flow.rs` but exercises both remux and
-transcode): build the ffmpeg/mkvtoolnix/ffprobe/verify workers, start
-`run-local` for ffmpeg and mkvtoolnix, generate a small non-HEVC non-MKV
-fixture, then drive the real `voom` binary: `scan` -> `policy create` ->
-`policy input create-from-scan` -> `compliance execute`, and assert committed
-MKV/HEVC outputs and the compliance report.
+Integration test that exercises the **real operator topology**, not the
+in-process shortcut: it spawns the actual `voom worker run-local` binary as
+separate child processes for ffmpeg and mkvtoolnix (it does not register workers
+in-process via `TestWorkerLaunch`), then runs `compliance execute` as its own
+`voom` process against the same on-disk SQLite DB. This is what makes the test
+cover the multi-process / DB-concurrency path (see Concurrency and DB access) and
+the `run-local` lifecycle. It builds the ffmpeg/mkvtoolnix/ffprobe/verify
+workers, generates a small fixture **directory** with two files — a non-HEVC
+non-MKV input (drives a transcode, output MKV) and an already-HEVC non-MKV input
+(drives a remux only) — so a single whole-scan input set drives both the ffmpeg
+and mkvtoolnix workers, **waits for each `run-local` `ready` line** before
+proceeding, then runs `voom init` -> `scan <dir>` -> `policy create` ->
+`policy input create-from-scan --scan <id>` -> `compliance execute`, and asserts
+both committed outputs (one transcoded, one remuxed) and the compliance report.
+Using a directory (not a single file) is deliberate: it also covers the
+whole-scan input-set builder, and the fixture directory includes one non-video
+file (e.g. a `.txt`/`.srt`) to assert the builder skips it and reports the skip.
 
-A short runbook documents the same sequence for a human running against
-`/mnt/pool0/test-video`, including the requirement that `ffmpeg`, `ffprobe`, and
-`mkvtoolnix` are installed on the host and that outputs are add-only under the
-chosen `--staging-root` / `--output-dir`.
+#### Runbook (`/mnt/pool0/test-video`)
+
+For a human operator running against a real library:
+
+1. `voom init` first (`run-local` and every command below open an existing DB via
+   `connect`, which never creates or migrates it — ADR-0003).
+2. Start `voom worker run-local --kind ffmpeg` and `--kind mkvtoolnix` in their
+   own terminals; wait for each to print its `ready` line before step 3. Requires
+   `ffmpeg`, `ffprobe`, and `mkvtoolnix` on the host.
+3. `scan <dir>` -> `policy create` -> `policy input create-from-scan --scan <id>`
+   (whole-scan, multi-file) -> `compliance execute` with `--staging-root` /
+   `--output-dir`.
+
+The runbook must state:
+
+- **`policy create` is not idempotent (slug is `UNIQUE`).** `policy_documents.slug`
+  has a `UNIQUE` constraint (`migrations/0007_policy_registry.sql`), so re-running
+  `policy create --slug <s>` on an existing DB errors. On a re-run, either use
+  `policy list` to find the existing document id and add a revision with
+  `policy version add`, or pick a new slug. The id to pass to `execute` comes from
+  the `policy create` / `policy list` JSON.
+- **Add-only commit and re-runs.** Commit never overwrites; outputs land under
+  the chosen roots. A real library run will partially succeed (some files
+  committed, some failed). Re-running `compliance execute` resumes via the
+  Sprint 16 per-file-phase resume path (issue-165) rather than redoing committed
+  work; document how to read partial state through `compliance report --job-id`
+  and what the success signal is for an incremental run.
+- **Scale.** Staging needs free disk on the order of the transcoded output set;
+  real transcodes are long-running. The automated test uses only a small
+  fixture, so these expectations live in the runbook, not the test.
+- **Empty / all-non-video scan.** If the scan yields no video files, the
+  whole-scan builder produces an empty input set and `compliance execute` is a
+  no-op that exits 0 with a "0 files" report — not an error. The operator's
+  success signal for such a run is "0 planned, 0 committed."
 
 ## Data flow
 
 ```
-terminal 1: voom worker run-local --kind ffmpeg      (foreground, supervises)
-terminal 2: voom worker run-local --kind mkvtoolnix  (foreground, supervises)
+(once) voom init                                     (creates + migrates the DB)
+
+terminal 1: voom worker run-local --kind ffmpeg      (foreground; prints `ready`, then supervises)
+terminal 2: voom worker run-local --kind mkvtoolnix  (foreground; prints `ready`, then supervises)
    -> each writes a worker row with extra={endpoint,secret} into the DB
 
-terminal 3 (operator):
+terminal 3 (operator, after both `ready` lines):
    voom scan --path <dir>                  (control plane spawns ffprobe subprocess)
    voom policy create --slug ... --file sample.voom
-   voom policy input create-from-scan ...
+   voom policy input create-from-scan --scan <scan-id>   (whole-scan, video files only)
    voom compliance execute --policy-version-id ... --input-set-id ... \
         --staging-root ... --output-dir ...
        -> reads policy_runtime_registry() from DB
+       -> liveness-checks each endpoint, then
        -> dispatches remux -> mkvtoolnix, transcode -> ffmpeg over loopback HTTP
        -> spawns ffprobe/verify subprocesses for re-probe and verification
        -> add-only commit of outputs
 ```
 
+## Concurrency and DB access
+
+This slice introduces the first genuine multi-process access to one on-disk
+SQLite file: two `run-local` processes plus the operator's `execute`, all opening
+their own pool against the same DB. The store currently runs **rollback-journal
+mode, not WAL**, with a 30s `busy_timeout` (`crates/voom-store/src/pool.rs:40,
+46-49`); the code comment defers WAL "until concurrent access pressure." All
+existing tests are single-process, so this path has no coverage today.
+
+Stance for this slice (chosen to stay scoped, not to migrate the store):
+
+- `run-local` minimizes its lock window: it holds no open write transaction
+  during supervision (registers, then supervises with the pool idle/closed, then
+  reopens only to retire). After registration the operator's `execute` is
+  effectively the sole writer.
+- Implementation prerequisite to verify: `execute` must commit durable state
+  before dispatching to a worker and must not hold a write transaction across
+  worker I/O (transcodes run for seconds-to-minutes; a write lock held that long
+  would exceed `busy_timeout` and fail other processes). If the current
+  coordinator violates this, fixing it is a prerequisite of this slice.
+- The e2e test (Component D) runs the real three-process topology and asserts it
+  completes without `SQLITE_BUSY` / `DbUnreachable` errors.
+
+Store-wide WAL is the durable fix for concurrent readers during a long `execute`
+(e.g. a second `voom ... report`/`worker list` while a run is in flight) and is
+**recommended for the broader Sprint 17**, but it is a store-level change with
+`init`/migration implications and is deferred out of this slice.
+
 ## Error handling and lifecycle
 
-- **Stale endpoints** are the primary risk. Graceful `run-local` exit retires the
-  worker; `run-local` startup retires same-name leftovers. A hard `kill -9`
-  between runs can still orphan a row; this is a documented limitation, cleared
-  by re-running `run-local`. A registry health-probe in `execute` is deferred.
+- **Stale endpoints.** Graceful `run-local` exit retires the worker, but that
+  only fires if the explicit signal handler runs (Component A step 6), and it
+  cannot help an `execute` that starts in the window between a hard kill and the
+  next `run-local`. So the durable protections are: (a) `run-local` startup
+  retires same-name leftovers, and (b) `execute` performs a cheap pre-dispatch
+  liveness check on each registry endpoint and treats an unreachable worker the
+  same as a missing one — failing fast with the actionable error below *before*
+  dispatching, rather than dispatching blind to a dead endpoint at submit time.
+  The probe must be an **authenticated protocol-level ping the worker validates
+  against its stored secret/epoch**, not a bare TCP connect: workers bind an
+  ephemeral port (`127.0.0.1:0`), so a reused port could satisfy a bare connect
+  against the wrong listener and mask a stale endpoint. This liveness check is in
+  scope (it was previously listed as deferred and is now required by this failure
+  analysis).
+- **Worker dies mid-run**, including the operator stopping a `run-local` while
+  `execute` is running (Component A step 6 tears down the worker's HTTP server
+  under any in-flight call). The pre-dispatch liveness check cannot prevent this:
+  phases (remux, transcode) and files commit independently and add-only, so a
+  death after some commits leaves partial results. This is not corruption — it
+  falls back to the Sprint 16 per-file-phase resume path (issue-165); re-running
+  `execute` resumes from durable state. The "no partial commit" guarantee holds
+  only for the already-unreachable-at-submit case.
 - **Worker preflight failure** (no `ffmpeg` / `mkvtoolnix` on host): `run-local`
   exits non-zero with the worker's dependency error before registering anything.
 - **`compliance execute` with no live worker of a needed kind**: surface an
@@ -196,7 +347,9 @@ terminal 3 (operator):
 Daemon and background supervision; remote nodes; node-token auth for local
 workers; backup worker, sidecar ingest, library-root / scan-config CRUD,
 use-lease commands, issue action commands; the full Sprint 17 daemon-readiness
-matrix; registry endpoint health-probing.
+matrix; store-wide WAL migration (recommended for broader Sprint 17, see
+Concurrency and DB access); continuous registry health monitoring beyond the
+pre-dispatch liveness check.
 
 ## Acceptance criteria
 
@@ -206,20 +359,51 @@ matrix; registry endpoint health-probing.
   after).
 - `voom policy create` from a `.voom` file produces an accepted policy version
   usable by `compliance execute`; `voom policy list` / `show` report it.
-- With both `run-local` workers up, `voom compliance execute` against a scanned
-  non-MKV non-HEVC fixture commits an MKV/HEVC output and a passing compliance
-  report, end-to-end through the real `voom` binary.
-- `compliance execute` with a required worker kind absent fails with an error
-  naming the missing operation and the `run-local` command to start it.
+- `voom policy input create-from-scan --scan <id>` over a multi-file scan
+  produces one input set covering every scanned file-version.
+- With both `run-local` workers up as separate processes, `voom compliance
+  execute` (its own process, same on-disk DB) against a scanned fixture directory
+  (one non-HEVC, one HEVC-non-MKV file) commits a transcoded MKV/HEVC output and
+  a remuxed MKV output and a passing compliance report end-to-end, and a
+  concurrent `voom worker list` issued during the run succeeds (no
+  `DbUnreachable`) within the `busy_timeout` window.
+- `compliance execute` with a required worker kind absent **or registered but
+  unreachable at submit time** fails fast before any dispatch — with an error
+  naming the missing operation and the `run-local` command to start it — so that
+  pre-submit case leaves no partial commit. (Mid-run worker death is handled by
+  Sprint 16 resume, not by this guarantee; see Error handling.)
 
 ## Verification expectations
 
-- End-to-end CLI integration test (real fixture media) covering scan ->
-  policy create -> input -> execute -> committed output + report.
-- `run-local` lifecycle tests: registration on start, endpoint recorded,
-  retirement on graceful exit, same-name leftover self-heal on restart.
-- Policy CLI golden-output tests for create / version add / list / show.
-- Actionable-missing-worker error test.
+- End-to-end CLI integration test (real fixture directory) covering `voom init`
+  -> scan -> policy create -> whole-scan input -> execute -> committed outputs +
+  report, with `run-local` ffmpeg/mkvtoolnix spawned as **separate `voom`
+  processes** and `execute` run as its own process against the same on-disk DB.
+  This validates that the real multi-process topology runs without errors. Note:
+  because `run-local` holds no transaction during supervision (Component A),
+  `execute` is the steady-state sole writer, so this is not a journal-mode
+  contention stress test. To get a real concurrency signal, the test also issues
+  a concurrent reader (`voom worker list`) while `execute` runs and asserts it
+  succeeds within the `busy_timeout` window; deeper contention stress is out of
+  scope (mooted by the idle-supervision design and the deferred WAL switch).
+- Whole-scan input-set test: `policy input create-from-scan --scan <id>` over a
+  multi-file scan produces one input set covering all video file-versions with
+  container/codec derived from each snapshot (not from CLI args), and **skips
+  non-video / unprobeable files**, reporting the skipped count.
+- `run-local` lifecycle tests against the real binary: emits the `ready` line
+  after registration, endpoint recorded, retirement on graceful signal
+  (SIGINT/SIGTERM) and stdin EOF, same-name leftover self-heal on restart.
+- Planner-oracle test: the sample policy produces the expected operation set for
+  each of the four codec/container input combinations (transcode-only for
+  non-HEVC inputs, remux-only for HEVC-non-MKV, no-op for HEVC-MKV) — the
+  correctness contract from Component C.
+- Liveness tests: `execute` fails fast (no partial commit) when a registered
+  worker's endpoint is unreachable at submit time (simulate by killing the worker
+  but leaving a stale row) and when no worker of a kind is registered; and a
+  reused-port case is not mistaken for a live worker (authenticated ping rejects
+  a non-matching listener).
+- Policy CLI golden-output tests for create / version add / list / show,
+  including the uninitialized-DB error path for `run-local` and policy commands.
 - `just ci` green.
 
 ## Closeout documentation
