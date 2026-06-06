@@ -83,11 +83,12 @@ Adopt **both** layers (see [ADR 0012](../../adr/0012-paused-time-db-pool-guard.m
    time via the injected `Clock` (`ManualClock`).
 
 2. **Scoped check** — a new `scripts/check-paused-time-db.sh`, wired into
-   `just ci` (and therefore the pre-commit/CI suite), that fails when a single
-   `crates/*/src/**/*_test.rs` file contains **both** a tokio paused-time call
-   **and** a DB-pool reference. The check uses `ast-grep` for the paused-time
-   call so it inspects real Rust syntax-tree items (not comments/strings),
-   matching the precedent set by `check-test-layout.sh`.
+   `just ci` (and therefore the pre-commit/CI suite), that scans both test
+   locations (`crates/*/src/**/*_test.rs` and `crates/*/tests/**/*.rs`) and
+   fails when a single file contains **both** a tokio paused-time call **and** a
+   DB-pool reference. The check uses `ast-grep` for the paused-time call so it
+   inspects real Rust syntax-tree items (not comments/strings), matching the
+   precedent set by `check-test-layout.sh`.
 
 The convention educates; the check enforces. Neither alone is sufficient: a
 convention is silently ignorable, and a check without a written rationale leaves
@@ -210,11 +211,12 @@ discussion.)
 
 The check is a shell script; it is tested by a sibling shell self-test
 (`scripts/check-paused-time-db-selftest.sh`, started with `set -euo pipefail`)
-that `cd`s into a per-case temporary fixture tree (`crates/<x>/src/<y>_test.rs`)
-and runs the check there, asserting exit code per case. The self-test gets its
-own `just` recipe that is added to the `ci` target, so it runs on every `just
-ci` and in GitHub Actions — guaranteeing the patterns cannot silently rot.
-Because the check resolves `crates/*/src` CWD-relative, the temp tree fully
+that `cd`s into a per-case temporary fixture tree (with files under
+`crates/<x>/src/<y>_test.rs` and/or `crates/<x>/tests/<y>.rs`, depending on the
+case) and runs the check there, asserting exit code per case. The self-test gets
+its own `just` recipe that is added to the `ci` target, so it runs on every
+`just ci` and in GitHub Actions — guaranteeing the patterns cannot silently rot.
+Because the check resolves its scan globs CWD-relative, the temp tree fully
 isolates fixtures from the real `crates/` — the self-test writes only under a
 `mktemp -d` directory it removes on exit, so a concurrent real `just ci` never
 sees the fixtures. Cases:
