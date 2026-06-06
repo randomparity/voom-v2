@@ -47,10 +47,16 @@ Adopt two complementary layers:
 
 2. **Scoped check.** `scripts/check-paused-time-db.sh`, wired into `just ci`,
    fails when one `crates/*/src/**/*_test.rs` file contains **both** a tokio
-   paused-time call (`tokio::time::pause()` / `tokio::time::advance(...)`) and a
-   DB-pool reference (`SqlitePool` or `ControlPlane`). It uses `ast-grep` for
-   the paused-time call so it matches real syntax-tree items, not comments or
-   string literals — the same tooling choice as `check-test-layout.sh`.
+   paused-time call and a DB-pool reference (`SqlitePool` or `ControlPlane`,
+   matched as exact identifier nodes). The paused-time signal matches the call
+   in any idiomatic form — fully-qualified `tokio::time::pause()`/`advance(..)`,
+   `time::pause()` via `use tokio::time;`, or a bare `pause()`/`advance(..)`
+   gated on a `use tokio::time` import — because the realistic reintroduction is
+   an import, not the fully-qualified call. It excludes the injected
+   `ManualClock` (`clock.advance(..)` is an `&self` method call, a different
+   syntax node). It uses `ast-grep` so it matches real syntax-tree items, not
+   comments or string literals — the same tooling choice as
+   `check-test-layout.sh`.
 
 The check is scoped by **co-occurrence in a single file** rather than by an
 allowlist. `worker_test.rs` has the pause but no pool, so it is excluded by

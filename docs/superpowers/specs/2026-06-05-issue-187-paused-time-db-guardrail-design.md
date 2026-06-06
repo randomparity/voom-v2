@@ -1,6 +1,6 @@
 # Issue #187 — Guard against pairing `tokio::time::pause()` with the real SQLite pool in tests
 
-- **Status:** Draft
+- **Status:** Reviewed
 - **Date:** 2026-06-05
 - **Issue:** #187
 - **ADR:** [0012 — Guard paused-time + real SQLite pool in tests](../../adr/0012-paused-time-db-pool-guard.md)
@@ -90,18 +90,38 @@ a flagged author with no guidance on the fix.
 
 ## Detection design
 
-For each `crates/*/src/**/*_test.rs`:
+The check operates on a **scan root** resolved CWD-relative (the `crates/*/src`
+glob, exactly like `check-test-layout.sh`). This makes it testable: a harness
+`cd`s into a temporary fixture tree laid out as `crates/<x>/src/<y>_test.rs` and
+runs the check there, so fixtures never touch the real `crates/` tree.
 
-1. **Paused-time signal** (`ast-grep`, `--lang rust`): a call expression
-   `tokio::time::pause()` **or** `tokio::time::advance($$$)`. Using the syntax
-   tree means a commented-out or stringified mention does not trip the check.
-   Fully-qualified `tokio::time::` is required so that an injected
-   `clock.advance(...)` / `fixture.clock.advance(...)` (the domain
-   `ManualClock`) is never matched.
-2. **DB-pool signal** (`ast-grep`, identifier match): a reference to the type
-   identifier `SqlitePool` **or** `ControlPlane`. These are the two types
-   through which control-plane tests reach the pool (`ControlPlane` owns
+For each `crates/*/src/**/*_test.rs` under the scan root:
+
+1. **Paused-time signal** (`ast-grep`, `--lang rust`). Present if the file
+   contains a `tokio::time::pause` / `tokio::time::advance` call written in
+   **any** idiomatic call form, because the realistic *reintroduction* path is a
+   `use` import, not the fully-qualified call. The check matches:
+   - a scoped call `tokio::time::pause()` / `tokio::time::advance($$$)` (today's
+     form in `worker_test.rs`); **or**
+   - a scoped call `time::pause()` / `time::advance($$$)` (via `use tokio::time;`);
+     **or**
+   - a **bare** call `pause()` / `advance($$$)` **gated on** the file also
+     containing a `use tokio::time` import (via `use tokio::time::{pause, …};`).
+
+   Matching is on `ast-grep` call-expression nodes, so commented-out or
+   stringified mentions never trip the check. The injected domain clock is a
+   **method** call (`clock.advance(...)` / `fixture.clock.advance(...)`, an
+   `&self` method on `ManualClock`), which is a different syntax node
+   (field-expression callee) and is therefore never matched by any of the three
+   forms above. The bare-call form is gated on a `use tokio::time` import so a
+   hypothetical user-defined free `fn pause`/`advance` cannot trip it.
+2. **DB-pool signal** (`ast-grep`, **exact identifier-node** match): a reference
+   to the type identifier `SqlitePool` **or** `ControlPlane`. These are the two
+   types through which control-plane tests reach the pool (`ControlPlane` owns
    `.pool`; `SqlitePool` is the raw handle), and both are named in the issue.
+   Exact-node matching means near-miss identifiers (`SqlitePoolOptions`,
+   `ControlPlaneConfig`, `ControlPlaneError`) do **not** match, and — being
+   `ast-grep`, not text — neither do mentions inside comments or strings.
 3. A file is a **violation** iff signal (1) **and** signal (2) are both present.
    The check prints the file path, the offending construct, and a one-line
    pointer to the `AGENTS.md` rule, then exits non-zero.
@@ -131,6 +151,17 @@ discussion.)
   cover the real surface. New indirection (e.g. a future repo handle that hides
   both names) would slip past; the convention remains the backstop and the
   signal list is cheap to extend.
+- **False negative — paused-time call via a renaming import** (`use
+  tokio::time::pause as p; p()`). Not matched: the bare-call form keys on the
+  function name `pause`/`advance`. This is an exotic shape with no precedent in
+  the tree; the convention is the backstop. Listed for honesty, not designed
+  around.
+- **False positive — a file-local free `fn pause`/`advance` plus a `use
+  tokio::time` import plus a pool reference.** The bare-call form is gated on a
+  `use tokio::time` import precisely to make this unlikely, but a file that both
+  imports `tokio::time` *and* defines its own `pause`/`advance` *and* references
+  a pool would flag spuriously. No such file exists today; resolution is to
+  rename the local function or split the file (same as the next item).
 - **`ast-grep` missing.** `check-test-layout.sh` already requires `ast-grep`
   and exits 2 with an install hint when absent; the new check reuses that exact
   contract so behavior is consistent.
@@ -156,15 +187,25 @@ discussion.)
 
 ## Test strategy
 
-The check is a shell script; it is tested by a sibling bats-free harness — a
-small shell test (or the check run against temporary fixture files) asserting:
+The check is a shell script; it is tested by a sibling shell harness that `cd`s
+into a per-case temporary fixture tree (`crates/<x>/src/<y>_test.rs`) and runs
+the check there, asserting exit code per case. Because the check resolves
+`crates/*/src` CWD-relative, the temp tree fully isolates fixtures from the real
+`crates/` — the harness never writes under the repo's tree and a concurrent
+real `just ci` cannot see the fixtures. Cases:
 
-- pause + `SqlitePool` → exit non-zero;
-- pause + `ControlPlane` → exit non-zero;
-- pause only (no pool) → exit 0 (the `worker_test.rs` shape);
-- pool only (no pause) → exit 0;
-- `clock.advance(...)` (domain clock) + pool → exit 0 (not a tokio call).
+- `tokio::time::pause()` (scoped) + `SqlitePool` → exit non-zero;
+- `tokio::time::advance(..)` (scoped) + `ControlPlane` → exit non-zero;
+- `use tokio::time::{pause, advance};` + bare `pause()` + `SqlitePool` → exit
+  non-zero (the realistic reintroduction shape);
+- `use tokio::time;` + `time::pause()` + `ControlPlane` → exit non-zero;
+- paused-time only, no pool → exit 0 (the `worker_test.rs` shape);
+- pool only, no paused-time → exit 0;
+- `clock.advance(..)` (domain `ManualClock` method) + pool → exit 0 (method
+  call, not a tokio free call);
+- `SqlitePoolOptions` / `ControlPlaneConfig` near-miss + paused-time → exit 0
+  (exact-identifier match must not over-match);
+- a commented-out `// tokio::time::pause()` + pool → exit 0 (`ast-grep` ignores
+  comments).
 
-Fixtures live in temp dirs created by the test so they are never picked up by
-the real `just ci` invocation. The implementation plan specifies the exact
-harness.
+The implementation plan specifies the exact harness and `ast-grep` invocations.
