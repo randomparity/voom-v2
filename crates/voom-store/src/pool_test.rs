@@ -5,6 +5,7 @@ async fn connect_in_memory_succeeds() {
     let pool = connect("sqlite::memory:").await.unwrap();
     let row: (i64,) = sqlx::query_as("SELECT 1").fetch_one(&pool).await.unwrap();
     assert_eq!(row.0, 1);
+    assert_eq!(journal_mode(&pool).await, "memory");
 }
 
 #[tokio::test]
@@ -148,28 +149,95 @@ async fn connect_refuses_adversarial_memory_lookalike_path() {
 }
 
 #[tokio::test]
-async fn neither_opener_creates_wal_or_shm_sidecars() {
+async fn on_disk_openers_use_wal_journal_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("voom.db");
     let url = format!("sqlite://{}", db.display());
 
     {
         let pool = connect_or_create(&url).await.unwrap();
+        assert_eq!(journal_mode(&pool).await, "wal");
         sqlx::query("CREATE TABLE marker (id INTEGER)")
             .execute(&pool)
             .await
             .unwrap();
     }
-    let wal = db.with_extension("db-wal");
-    let shm = db.with_extension("db-shm");
-    assert!(!wal.exists(), "connect_or_create() must not produce -wal");
-    assert!(!shm.exists(), "connect_or_create() must not produce -shm");
 
     let pool = connect(&url).await.unwrap();
+    assert_eq!(journal_mode(&pool).await, "wal");
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM marker")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(!wal.exists(), "connect() must not produce -wal");
-    assert!(!shm.exists(), "connect() must not produce -shm");
+}
+
+#[tokio::test]
+async fn on_disk_wal_allows_writer_commit_while_reader_transaction_is_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("voom.db");
+    let url = format!("sqlite://{}", db.display());
+    let setup = connect_or_create(&url).await.unwrap();
+    sqlx::query("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+        .execute(&setup)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO marker (id) VALUES (1)")
+        .execute(&setup)
+        .await
+        .unwrap();
+
+    let reader = connect(&url).await.unwrap();
+    let writer = connect(&url).await.unwrap();
+    let mut reader_conn = reader.acquire().await.unwrap();
+    sqlx::query("BEGIN")
+        .execute(&mut *reader_conn)
+        .await
+        .unwrap();
+    let visible_to_reader: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM marker")
+        .fetch_one(&mut *reader_conn)
+        .await
+        .unwrap();
+    assert_eq!(visible_to_reader, 1);
+
+    let mut writer_conn = writer.acquire().await.unwrap();
+    sqlx::query("PRAGMA busy_timeout = 0")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO marker (id) VALUES (2)")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+    sqlx::query("COMMIT")
+        .execute(&mut *writer_conn)
+        .await
+        .unwrap();
+
+    let still_reader_snapshot: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM marker")
+        .fetch_one(&mut *reader_conn)
+        .await
+        .unwrap();
+    assert_eq!(still_reader_snapshot, 1);
+    sqlx::query("COMMIT")
+        .execute(&mut *reader_conn)
+        .await
+        .unwrap();
+
+    let visible_after_reader_commit: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM marker")
+        .fetch_one(&reader)
+        .await
+        .unwrap();
+    assert_eq!(visible_after_reader_commit, 2);
+}
+
+async fn journal_mode(pool: &sqlx::SqlitePool) -> String {
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    mode.to_ascii_lowercase()
 }
