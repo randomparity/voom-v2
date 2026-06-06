@@ -598,6 +598,101 @@ async fn policy_runtime_registry_loads_extract_audio_workers() {
 }
 
 #[tokio::test]
+async fn live_policy_runtime_registry_drops_unreachable_endpoint() {
+    let (cp, _tmp) = cp().await;
+    // 127.0.0.1:1 is a closed privileged port: a connection is refused fast,
+    // standing in for a stale endpoint left by a hard-killed run-local.
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-dead-endpoint",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:1",
+            "secret": "policy-dead-secret",
+        }),
+    )
+    .await;
+
+    // The worker is registered, so the unfiltered registry includes it...
+    let registered = cp.policy_runtime_registry().await.unwrap();
+    assert!(
+        registered.get(worker_id).is_ok(),
+        "unfiltered registry must include the registered worker"
+    );
+
+    // ...but the liveness-filtered registry drops the unreachable endpoint.
+    let live = cp.live_policy_runtime_registry().await.unwrap();
+    assert!(
+        live.get(worker_id).is_err(),
+        "liveness check must drop the dead endpoint"
+    );
+}
+
+#[tokio::test]
+async fn execute_reports_actionable_error_when_no_live_worker_for_remux() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created_policy = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_video(&cp).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "scan-remux-dead-worker".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    register_policy_worker_with_extra(
+        &cp,
+        OperationKind::Remux,
+        "policy-test-remux-dead",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:1",
+            "secret": "remux-dead-secret",
+        }),
+    )
+    .await;
+
+    let err = cp
+        .execute_compliance_policy(created_policy.version.id, input.input_set_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    let message = err.source.to_string();
+    assert!(
+        message.contains("no live worker for operation 'remux'"),
+        "message must name the missing operation, got: {message}"
+    );
+    assert!(
+        message.contains("voom worker run-local --kind mkvtoolnix"),
+        "message must suggest the fix, got: {message}"
+    );
+    // The check is pre-dispatch: no issues applied and no tickets created.
+    let issue_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        issue_count, 0,
+        "no issues must be committed before dispatch"
+    );
+    let ticket_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        ticket_count, 0,
+        "no tickets must be created before dispatch"
+    );
+}
+
+#[tokio::test]
 async fn report_mutates_no_durable_work_or_issue_tables() {
     let (cp, _tmp) = cp().await;
     let (policy_version_id, input_set_id, _document_id) = seed_noncompliant(&cp).await;
