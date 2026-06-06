@@ -48,6 +48,7 @@ use voom_store::{SchemaState, connect, probe_schema};
 mod artifact;
 mod audio;
 mod cases;
+mod local_worker;
 mod media_snapshot;
 pub mod node_auth;
 mod operation_source;
@@ -97,6 +98,7 @@ pub use audio::{
     TranscodePostCommitRecoveryReport,
 };
 pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
+pub use local_worker::{LocalWorkerHandle, LocalWorkerKind, RunningLocalWorker};
 pub use remux::{ExecuteRemuxInput, ExecuteRemuxReport, RemuxDispatcher};
 pub use transcode::{
     ExecuteTranscodeVideoInput, ExecuteTranscodeVideoReport, TranscodeVideoDispatcher,
