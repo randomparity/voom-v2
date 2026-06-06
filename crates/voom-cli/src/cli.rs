@@ -122,18 +122,22 @@ pub enum PolicyVersionCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum PolicyInputCommand {
-    /// Create a policy input set from existing scan-created rows.
+    /// Create a policy input set from scan-created rows. Pass `--all` to cover
+    /// every live video file, or the full single-file arg set for one file.
     CreateFromScan {
         #[arg(long)]
         slug: String,
+        /// Whole-library mode: build from all live video file-versions.
+        #[arg(long, conflicts_with_all = ["file_version_id", "media_snapshot_id", "container", "video_codec"])]
+        all: bool,
+        #[arg(long, requires_all = ["media_snapshot_id", "container", "video_codec"])]
+        file_version_id: Option<u64>,
         #[arg(long)]
-        file_version_id: u64,
+        media_snapshot_id: Option<u64>,
         #[arg(long)]
-        media_snapshot_id: u64,
+        container: Option<String>,
         #[arg(long)]
-        container: String,
-        #[arg(long)]
-        video_codec: String,
+        video_codec: Option<String>,
     },
 }
 

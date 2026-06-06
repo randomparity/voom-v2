@@ -5,7 +5,8 @@ use std::path::Path;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
-    PolicyInputFromScanInput, PolicyInputFromScanResult, PolicyMutationError,
+    PolicyInputFromScanInput, PolicyInputFromScanResult, PolicyMutationError, WholeScanInput,
+    WholeScanInputResult,
 };
 use voom_core::{FileVersionId, MediaSnapshotId, PolicyDocumentId};
 use voom_store::repo::policies::{
@@ -28,6 +29,19 @@ pub struct PolicyInputCreateFromScanSummary {
     pub source_kind: String,
     pub file_version_id: u64,
     pub media_snapshot_id: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyInputWholeScanData {
+    pub input_set: PolicyInputWholeScanSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyInputWholeScanSummary {
+    pub input_set_id: u64,
+    pub slug: String,
+    pub included_count: u32,
+    pub skipped_count: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,23 +92,34 @@ pub async fn run(database_url: &str, local: Local, command: PolicyCommand) -> io
     match command {
         PolicyCommand::Input(PolicyInputCommand::CreateFromScan {
             slug,
+            all,
             file_version_id,
             media_snapshot_id,
             container,
             video_codec,
         }) => {
-            create_from_scan(
-                &cp,
-                local,
-                PolicyInputFromScanInput {
-                    slug,
-                    file_version_id: FileVersionId(file_version_id),
-                    media_snapshot_id: MediaSnapshotId(media_snapshot_id),
-                    container,
-                    video_codec,
-                },
-            )
-            .await
+            if all {
+                return create_from_whole_scan(&cp, local, slug).await;
+            }
+            match single_file_input(
+                slug,
+                file_version_id,
+                media_snapshot_id,
+                container,
+                video_codec,
+            ) {
+                Ok(input) => create_from_scan(&cp, local, input).await,
+                Err(message) => {
+                    emit_err(
+                        "policy",
+                        voom_core::ErrorCode::BadArgs.as_str(),
+                        message,
+                        None,
+                        Some(local),
+                    )?;
+                    Ok(1)
+                }
+            }
         }
         PolicyCommand::Create { slug, file } => create_document(&cp, local, &slug, &file).await,
         PolicyCommand::Version(PolicyVersionCommand::Add { document_id, file }) => {
@@ -121,6 +146,53 @@ async fn create_from_scan(
         )
         .map(|()| 0),
         Err(err) => emit_voom_error("policy", &err, local),
+    }
+}
+
+async fn create_from_whole_scan(cp: &ControlPlane, local: Local, slug: String) -> io::Result<i32> {
+    match cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput { slug })
+        .await
+    {
+        Ok(result) => emit_ok(
+            "policy",
+            PolicyInputWholeScanData::from(result),
+            Some(local),
+            Vec::new(),
+        )
+        .map(|()| 0),
+        Err(err) => emit_voom_error("policy", &err, local),
+    }
+}
+
+/// Validate the single-file `create-from-scan` arguments.
+///
+/// clap's `requires_all` already rejects `--file-version-id` without its
+/// companions; this catches the "no mode given" case (neither `--all` nor the
+/// single-file set), returning a `BAD_ARGS` message.
+fn single_file_input(
+    slug: String,
+    file_version_id: Option<u64>,
+    media_snapshot_id: Option<u64>,
+    container: Option<String>,
+    video_codec: Option<String>,
+) -> Result<PolicyInputFromScanInput, String> {
+    match (file_version_id, media_snapshot_id, container, video_codec) {
+        (Some(file_version_id), Some(media_snapshot_id), Some(container), Some(video_codec)) => {
+            Ok(PolicyInputFromScanInput {
+                slug,
+                file_version_id: FileVersionId(file_version_id),
+                media_snapshot_id: MediaSnapshotId(media_snapshot_id),
+                container,
+                video_codec,
+            })
+        }
+        _ => Err(
+            "policy input create-from-scan requires either --all (whole library) or \
+                  --file-version-id with --media-snapshot-id, --container, and --video-codec \
+                  (single file)"
+                .to_owned(),
+        ),
     }
 }
 
@@ -276,6 +348,19 @@ impl From<PolicyInputFromScanResult> for PolicyInputCreateFromScanData {
                 source_kind: source_kind_wire(result.source_kind).to_owned(),
                 file_version_id: result.file_version_id.0,
                 media_snapshot_id: result.media_snapshot_id.0,
+            },
+        }
+    }
+}
+
+impl From<WholeScanInputResult> for PolicyInputWholeScanData {
+    fn from(result: WholeScanInputResult) -> Self {
+        Self {
+            input_set: PolicyInputWholeScanSummary {
+                input_set_id: result.input_set_id.0,
+                slug: result.slug,
+                included_count: result.included_count,
+                skipped_count: result.skipped_count,
             },
         }
     }

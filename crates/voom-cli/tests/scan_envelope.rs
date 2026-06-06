@@ -343,6 +343,87 @@ async fn policy_input_create_from_scan_can_feed_plan_show() {
 }
 
 #[tokio::test]
+async fn policy_input_create_from_scan_all_builds_whole_library() {
+    let seeded = seed().await;
+    let dir = TempDir::new().unwrap();
+    let media = dir.path().join("Movie.Name.mp4");
+    std::fs::copy(tiny_media_fixture(), &media).unwrap();
+    let sidecar = dir.path().join("Movie.Name.eng.srt");
+    std::fs::write(&sidecar, b"1\n00:00:00,000 --> 00:00:01,000\nHello\n").unwrap();
+    let scan = scan_command(&seeded.url, dir.path()).output().unwrap();
+    assert_status(&scan, Some(0));
+
+    let output = policy_input_whole_scan_command(&seeded.url, "whole")
+        .output()
+        .unwrap();
+
+    assert_status(&output, Some(0));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "policy");
+    assert_eq!(json["status"], "ok");
+    assert!(json["data"]["input_set"]["input_set_id"].as_u64().unwrap() > 0);
+    assert_eq!(json["data"]["input_set"]["slug"], "whole");
+    assert_eq!(json["data"]["input_set"]["included_count"], 1);
+    assert_eq!(json["data"]["input_set"]["skipped_count"], 1);
+}
+
+#[tokio::test]
+async fn policy_input_create_from_scan_all_conflicts_with_single_file_args() {
+    let seeded = seed().await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &seeded.url,
+            "policy",
+            "input",
+            "create-from-scan",
+            "--slug",
+            "whole",
+            "--all",
+            "--file-version-id",
+            "1",
+            "--media-snapshot-id",
+            "1",
+            "--container",
+            "mp4",
+            "--video-codec",
+            "h264",
+        ])
+        .output()
+        .unwrap();
+
+    assert_status(&output, Some(1));
+    let json = envelope(output.stdout);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[tokio::test]
+async fn policy_input_create_from_scan_without_a_mode_is_bad_args() {
+    let seeded = seed().await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_voom"))
+        .args([
+            "--database-url",
+            &seeded.url,
+            "policy",
+            "input",
+            "create-from-scan",
+            "--slug",
+            "whole",
+        ])
+        .output()
+        .unwrap();
+
+    assert_status(&output, Some(1));
+    let json = envelope(output.stdout);
+    assert_eq!(json["command"], "policy");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["error"]["code"], "BAD_ARGS");
+}
+
+#[tokio::test]
 async fn policy_input_create_from_scan_missing_rows_is_not_found() {
     let seeded = seed().await;
 
@@ -423,6 +504,21 @@ fn policy_input_from_scan_command(
         container,
         "--video-codec",
         video_codec,
+    ]);
+    command
+}
+
+fn policy_input_whole_scan_command(url: &str, slug: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_voom"));
+    command.args([
+        "--database-url",
+        url,
+        "policy",
+        "input",
+        "create-from-scan",
+        "--slug",
+        slug,
+        "--all",
     ]);
     command
 }
