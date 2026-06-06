@@ -143,10 +143,14 @@ operator to hand-type `--container`/`--video-codec`
 (`crates/voom-control-plane/src/cases/policy/policy_inputs.rs:13-19`). That makes
 the stated "run against a real directory / `/mnt/pool0/test-video`" goal
 unreachable: a library scan yields many file-versions. This slice therefore adds
-a whole-scan mode — e.g. `voom policy input create-from-scan --scan <scan-id>`
-(or `--all`) — that enumerates the scan's scanned file-versions and derives each
-file's container/video-codec from its persisted media snapshot rather than from
-CLI args, producing one multi-file input set. This reuses the existing
+a whole-library mode `voom policy input create-from-scan --all`. There is **no
+durable scan id** (scans return an ephemeral report; nothing persists a
+`scan_id`), so the anchor is "all live (non-retired) file-versions with a video
+media snapshot" rather than a scan id — sufficient for the functional-test flow,
+where the DB is dedicated to the scanned library. (`--under <path>` location
+filtering is a future refinement, out of scope.) The builder derives each file's
+container/video-codec from its persisted media snapshot rather than from CLI
+args, producing one multi-file input set. This reuses the existing
 `PolicyInputSetDraft { media_snapshots: Vec<_> }` domain support
 (`policy_inputs.rs`), so it is a CLI/case-layer addition, not new domain logic.
 Single-file `create-from-scan` is retained alongside the new whole-scan mode.
@@ -211,7 +215,7 @@ TranscodeVideo, so a single file exercises both the mkvtoolnix and ffmpeg
 workers) plus one non-video file (e.g. `.txt`/`.srt`) that must be skipped by the
 whole-scan builder. It **waits for each `run-local` `ready` line** before
 proceeding, then runs `voom init` -> `scan <dir>` -> `policy create` ->
-`policy input create-from-scan --scan <id>` -> `compliance execute`. It asserts
+`policy input create-from-scan --all` -> `compliance execute`. It asserts
 the input set reports `skipped_count == 1`, that execution drives both workers
 and commits MKV/HEVC output, and that the report passes. Execution is the oracle
 (as in Task 1): the test asserts the *actually committed* artifacts for the
@@ -229,7 +233,7 @@ For a human operator running against a real library:
 2. Start `voom worker run-local --kind ffmpeg` and `--kind mkvtoolnix` in their
    own terminals; wait for each to print its `ready` line before step 3. Requires
    `ffmpeg`, `ffprobe`, and `mkvtoolnix` on the host.
-3. `scan <dir>` -> `policy create` -> `policy input create-from-scan --scan <id>`
+3. `scan <dir>` -> `policy create` -> `policy input create-from-scan --all`
    (whole-scan, multi-file) -> `compliance execute` with `--staging-root` /
    `--output-dir`.
 
@@ -267,7 +271,7 @@ terminal 2: voom worker run-local --kind mkvtoolnix  (foreground; prints `ready`
 terminal 3 (operator, after both `ready` lines):
    voom scan --path <dir>                  (control plane spawns ffprobe subprocess)
    voom policy create --slug ... --file sample.voom
-   voom policy input create-from-scan --scan <scan-id>   (whole-scan, video files only)
+   voom policy input create-from-scan --all   (whole-scan, video files only)
    voom compliance execute --policy-version-id ... --input-set-id ... \
         --staging-root ... --output-dir ...
        -> reads policy_runtime_registry() from DB
@@ -368,7 +372,7 @@ pre-dispatch liveness check.
   after).
 - `voom policy create` from a `.voom` file produces an accepted policy version
   usable by `compliance execute`; `voom policy list` / `show` report it.
-- `voom policy input create-from-scan --scan <id>` over a multi-file scan
+- `voom policy input create-from-scan --all` over a multi-file scan
   produces one input set covering every scanned file-version.
 - With both `run-local` workers up as separate processes, `voom compliance
   execute` (its own process, same on-disk DB) against a scanned fixture directory
@@ -399,7 +403,7 @@ pre-dispatch liveness check.
   a concurrent reader (`voom worker list`) while `execute` runs and asserts it
   succeeds within the `busy_timeout` window; deeper contention stress is out of
   scope (mooted by the idle-supervision design and the deferred WAL switch).
-- Whole-scan input-set test: `policy input create-from-scan --scan <id>` over a
+- Whole-scan input-set test: `policy input create-from-scan --all` over a
   multi-file scan produces one input set covering all video file-versions with
   container/codec derived from each snapshot (not from CLI args), and **skips
   non-video / unprobeable files**, reporting the skipped count.
