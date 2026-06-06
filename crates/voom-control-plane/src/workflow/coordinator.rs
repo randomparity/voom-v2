@@ -635,11 +635,14 @@ impl WorkingDirArtifact {
             .try_get("epoch")
             .map_err(|e| VoomError::Database(format!("promotion location epoch: {e}")))?;
         Ok(Self {
-            location_id: FileLocationId(sqlite_u64(location_id)),
-            file_version_id: FileVersionId(sqlite_u64(file_version_id)),
-            asset_id: FileAssetId(sqlite_u64(asset_id)),
+            location_id: FileLocationId(sqlite_u64(location_id, "promotion location id")?),
+            file_version_id: FileVersionId(sqlite_u64(
+                file_version_id,
+                "promotion location file version id",
+            )?),
+            asset_id: FileAssetId(sqlite_u64(asset_id, "promotion location asset id")?),
             value,
-            epoch: sqlite_u64(epoch),
+            epoch: sqlite_u64(epoch, "promotion location epoch")?,
         })
     }
 }
@@ -696,12 +699,14 @@ fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
     common.iter().collect()
 }
 
-fn sqlite_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
+fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
+    u64::try_from(value)
+        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit u64: {e}")))
 }
 
-fn sqlite_i64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
+    i64::try_from(value)
+        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit SQLite i64: {e}")))
 }
 
 /// Create and canonicalize an output directory ahead of a promotion move.
@@ -1226,8 +1231,8 @@ impl ControlPlane {
             "SELECT COUNT(*) FROM file_versions \
              WHERE file_asset_id = ? AND retired_at IS NULL AND id > ?",
         )
-        .bind(sqlite_i64(asset_id.0))
-        .bind(sqlite_i64(version_id.0))
+        .bind(sqlite_i64(asset_id.0, "promotion asset id")?)
+        .bind(sqlite_i64(version_id.0, "promotion file version id")?)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("promotion chain-tip check: {e}")))?;

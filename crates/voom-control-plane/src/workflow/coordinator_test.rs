@@ -915,6 +915,69 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
     );
 }
 
+#[tokio::test]
+async fn promote_terminal_artifacts_rejects_negative_location_id() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let working = root.join(".committed").join("remux");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&working).unwrap();
+
+    let artifact_path = working.join("Movie.mkv");
+    std::fs::write(&artifact_path, b"terminal-bytes").unwrap();
+    let version = seed_version(
+        &cp,
+        &artifact_path.display().to_string(),
+        "hash-negative-location",
+        reprobe_payload("hevc"),
+    )
+    .await;
+    sqlx::query("UPDATE file_locations SET id = -7 WHERE file_version_id = ?")
+        .bind(i64::try_from(version.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: working,
+            output_dir: out_dir,
+        }],
+    };
+
+    let err = cp.promote_terminal_artifacts(&plan).await.unwrap_err();
+
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+    assert!(
+        err.to_string().contains("promotion location id"),
+        "error should identify the corrupted column: {err}"
+    );
+    assert!(
+        err.to_string().contains("-7"),
+        "error should include the invalid persisted value: {err}"
+    );
+}
+
+#[test]
+fn promotion_sqlite_conversions_reject_out_of_range_values() {
+    let read_err = super::sqlite_u64(-1, "promotion location id").unwrap_err();
+    assert_eq!(read_err.code(), "DB_UNREACHABLE");
+    assert!(
+        read_err.to_string().contains("promotion location id -1"),
+        "read error should identify the invalid value: {read_err}"
+    );
+
+    let bind_err = super::sqlite_i64(u64::MAX, "promotion asset id").unwrap_err();
+    assert_eq!(bind_err.code(), "DB_UNREACHABLE");
+    assert!(
+        bind_err.to_string().contains("does not fit SQLite i64"),
+        "bind error should identify SQLite's integer boundary: {bind_err}"
+    );
+}
+
 /// A whole-library run over two sources that share a basename across
 /// subdirectories must not collide at promotion (issue #197): each terminal
 /// artifact lands under `--output-dir` mirroring its source's path relative to
