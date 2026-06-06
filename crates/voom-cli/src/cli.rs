@@ -255,6 +255,28 @@ pub enum WorkerCommand {
         #[arg(long)]
         worker_id: u64,
     },
+    /// Launch a bundled mutation worker locally, register it, and supervise it (foreground).
+    RunLocal {
+        #[arg(long)]
+        kind: LocalWorkerKindArg,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum LocalWorkerKindArg {
+    Ffmpeg,
+    Mkvtoolnix,
+}
+
+impl LocalWorkerKindArg {
+    #[must_use]
+    pub const fn to_control_plane(self) -> voom_control_plane::LocalWorkerKind {
+        match self {
+            Self::Ffmpeg => voom_control_plane::LocalWorkerKind::Ffmpeg,
+            Self::Mkvtoolnix => voom_control_plane::LocalWorkerKind::Mkvtoolnix,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
