@@ -14,6 +14,7 @@ references:
   - docs/adr/0008-per-phase-report-regenerated-against-refreshed-facts.md
   - docs/adr/0009-resume-opens-new-job-reconciles-prior-rows.md
   - docs/adr/0010-compliance-report-job-read-mode.md
+  - docs/adr/0011-audio-transcode-plannability-vs-preservation.md
 ---
 
 # VOOM Sprint 16 Closeout
@@ -89,6 +90,12 @@ planning at all is a pre-existing planner question (locked by
 `voom-plan` `selection_test::transcode_preservation_facts_require_language_title_channels_and_commentary`),
 out of scope for this tests-only closeout and tracked as follow-up. The combined
 test's fixture carries audio titles precisely so the chain commits.
+
+> **Resolved by #184 / ADR-0011.** The follow-up landed: the gate now requires
+> only `language` + `channels` (the plannability facts); `title` and `commentary`
+> are preservation-only passthrough, so title-less media plans and commits. The
+> combined-flow fixture no longer bakes audio titles. See
+> `docs/adr/0011-audio-transcode-plannability-vs-preservation.md`.
 
 ## Acceptance Matrix
 
