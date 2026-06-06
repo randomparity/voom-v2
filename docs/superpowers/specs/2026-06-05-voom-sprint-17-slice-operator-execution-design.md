@@ -323,6 +323,34 @@ Store-wide WAL is the durable fix for concurrent readers during a long `execute`
 **recommended for the broader Sprint 17**, but it is a store-level change with
 `init`/migration implications and is deferred out of this slice.
 
+## Output routing (terminal-phase promotion)
+
+Discovered during implementation (the e2e found it): the commit `target_dir` is
+keyed by operation *type* and fixed per run, so a multi-phase policy committed
+*every* phase's artifact to `--output-dir` — leaving an intermediate
+`Movie.remux.mkv` next to the final `Movie.*.hevc.mkv`. Phases chain only across
+phase boundaries (ADR-0007); within a phase, operations are independent, so the
+remux+transcode sequence requires two phases (the sample policy was corrected to
+two phases, commit `9e1a0a0`).
+
+Decision (commit `6b3c494`): every phase commits to an internal working area
+under the staging root; after a successful run the coordinator promotes each
+file's **terminal chain-tip artifact** into `--output-dir` (move + repoint the
+location record in place) so only finals land there. The promotion is
+**chain-tip-driven**, not phase-position-driven, so a file whose terminal artifact
+is produced by an earlier phase (e.g. an already-HEVC source whose final phase is
+a no-op) is still promoted correctly — the case a position-based router would
+misplace. Promotion is resume-idempotent (an already-promoted location is no
+longer under a working dir) and add-only (a destination collision fails the run,
+no overwrite).
+
+A related correctness fix landed alongside (commit `d545f03`): remux now
+preserves the source's default track when a policy has no explicit `defaults`
+action, so a plain `container mkv` of an MP4 (whose video track mkvmerge marks
+default) no longer fails the worker's exact-match default-stream validation.
+Existing MKV-source remux tests were unaffected (MKV sources have no default
+video track).
+
 ## Error handling and lifecycle
 
 - **Stale endpoints.** Graceful `run-local` exit retires the worker, but that
