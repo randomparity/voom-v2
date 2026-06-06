@@ -750,6 +750,91 @@ async fn reconcile_resume_zero_rows_backfills_advanced_tip() {
 }
 
 #[tokio::test]
+async fn zero_phase_promotion_failure_preserves_seed_file_phases() {
+    use crate::cases::policy::compliance::ComplianceExecutionOptions;
+    use crate::workflow::execution::WorkerRuntimeRegistry;
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let staging_root = root.join("stage");
+    let working = staging_root.join(".committed").join("transcode");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&working).unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let artifact_path = working.join("Movie.default-hevc.hevc.mkv");
+    std::fs::write(&artifact_path, b"terminal-bytes").unwrap();
+    std::fs::write(out_dir.join("Movie.default-hevc.hevc.mkv"), b"existing").unwrap();
+    let version = seed_version(
+        &cp,
+        &artifact_path.display().to_string(),
+        "hash-zero-phase",
+        reprobe_payload("hevc"),
+    )
+    .await;
+    let seed_job = open_workflow_job(&cp).await;
+    record_file_phase(
+        &cp,
+        seed_job,
+        0,
+        "Movie",
+        FilePhaseOutcome::Committed,
+        Some(version),
+    )
+    .await;
+    let seed_file_phases = cp
+        .workflow_summaries()
+        .file_phases_for_job(seed_job)
+        .await
+        .unwrap();
+    let policy = policy_with_on_error(None);
+    let context = voom_plan::PlanningContext::default();
+    let base_draft = file_draft("zero-phase-promotion", &[]);
+    let options = ComplianceExecutionOptions {
+        transcode_staging_root: staging_root,
+        transcode_target_dir: out_dir,
+        ..ComplianceExecutionOptions::default()
+    };
+    let runner = cp.clone();
+
+    let err = cp
+        .with_phase_barrier_job(move |job_id| {
+            Box::pin(async move {
+                runner
+                    .drive_phase_loop(super::PhaseLoopInputs {
+                        job_id,
+                        policy,
+                        context,
+                        base_draft,
+                        files: Vec::new(),
+                        seed_file_phases,
+                        options,
+                        runtimes: WorkerRuntimeRegistry::new(),
+                    })
+                    .await
+            })
+        })
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.source
+            .to_string()
+            .contains("promotion destination already exists"),
+        "unexpected error: {}",
+        err.source
+    );
+    let Some(partial) = err.partial else {
+        panic!("promotion failure should preserve zero-phase seed rows");
+    };
+    assert_eq!(partial.file_phases.len(), 1);
+    assert_eq!(partial.file_phases[0].branch_id, "Movie");
+    assert_eq!(partial.file_phases[0].outcome, FilePhaseOutcome::Committed);
+    assert_eq!(job_state(&cp, partial.job_id).await, "failed");
+}
+
+#[tokio::test]
 async fn reconcile_resume_resumes_after_skipped_phase() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
