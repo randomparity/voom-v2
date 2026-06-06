@@ -25,7 +25,13 @@ if ! command -v ast-grep >/dev/null; then
 	exit 2
 fi
 
-mapfile -t test_files < <(find crates -type f \
+# Collect test files with a read loop (not `mapfile`) so the script runs on the
+# bash 3.2 that ships on macOS CI runners, matching check-test-layout.sh.
+test_files=()
+while IFS= read -r test_file; do
+	[[ -z "$test_file" ]] && continue
+	test_files+=("$test_file")
+done < <(find crates -type f \
 	\( -path '*/src/*_test.rs' -o -path '*/tests/*.rs' \) 2>/dev/null | sort)
 
 if [[ "${#test_files[@]}" -eq 0 ]]; then
