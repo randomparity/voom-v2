@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 use sqlx::{Sqlite, Transaction};
@@ -53,19 +53,17 @@ pub(crate) async fn expand_scanner_completion(
     scanner_ticket: &Ticket,
 ) -> Result<Vec<Ticket>, VoomError> {
     let files = scanner_files(scanner_ticket)?;
-    let files = files.into_iter().take(ctx.plan.fan_out.max_files);
+    let files = files
+        .into_iter()
+        .take(ctx.plan.fan_out.max_files)
+        .collect::<Vec<_>>();
+    let paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let branch_ids = branch_ids_from_paths(&paths)?;
     let mut specs = Vec::new();
-    let mut paths_by_branch = HashMap::new();
-    for file in files {
-        let branch_id = branch_id_from_path(&file.path)?;
-        if let Some(existing_path) = paths_by_branch.insert(branch_id.clone(), file.path.clone())
-            && existing_path != file.path
-        {
-            return Err(VoomError::Config(format!(
-                "scanner paths `{existing_path}` and `{}` both derive branch id `{branch_id}`",
-                file.path
-            )));
-        }
+    for (file, branch_id) in files.into_iter().zip(branch_ids) {
         for node_id in ["probe", "hash", "identity"] {
             specs.push(spec_for_branch(
                 ctx,
@@ -441,6 +439,116 @@ pub(crate) fn branch_id_from_path(path: &str) -> Result<String, VoomError> {
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| VoomError::Config(format!("cannot derive branch id from `{path}`")))?;
     Ok(stem.to_owned())
+}
+
+pub(crate) fn branch_ids_from_paths(paths: &[String]) -> Result<Vec<String>, VoomError> {
+    let mut branch_ids = Vec::with_capacity(paths.len());
+    let mut indexes_by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, path) in paths.iter().enumerate() {
+        let branch_id = branch_id_from_path(path)?;
+        indexes_by_stem
+            .entry(branch_id.clone())
+            .or_default()
+            .push(index);
+        branch_ids.push(branch_id);
+    }
+
+    for indexes in indexes_by_stem.values() {
+        if !has_distinct_paths(paths, indexes) {
+            continue;
+        }
+        let disambiguated = branch_ids_for_colliding_paths(paths, indexes)?;
+        for (index, branch_id) in indexes.iter().copied().zip(disambiguated) {
+            branch_ids[index] = branch_id;
+        }
+    }
+
+    ensure_unique_branch_ids_for_distinct_paths(paths, &branch_ids)?;
+    Ok(branch_ids)
+}
+
+fn has_distinct_paths(paths: &[String], indexes: &[usize]) -> bool {
+    let Some(first) = indexes.first().map(|index| paths[*index].as_str()) else {
+        return false;
+    };
+    indexes.iter().any(|index| paths[*index] != first)
+}
+
+fn branch_ids_for_colliding_paths(
+    paths: &[String],
+    indexes: &[usize],
+) -> Result<Vec<String>, VoomError> {
+    let parents = indexes
+        .iter()
+        .map(|index| {
+            Path::new(&paths[*index])
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf()
+        })
+        .collect::<Vec<_>>();
+    let common = longest_common_dir(&parents);
+    indexes
+        .iter()
+        .map(|index| branch_id_from_relative_path(&paths[*index], &common))
+        .collect()
+}
+
+fn branch_id_from_relative_path(path: &str, common_dir: &Path) -> Result<String, VoomError> {
+    let path = Path::new(path);
+    let relative = path.strip_prefix(common_dir).unwrap_or(path);
+    let branch_id = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if branch_id.is_empty() {
+        return Err(VoomError::Config(format!(
+            "cannot derive disambiguated branch id from `{}`",
+            path.display()
+        )));
+    }
+    Ok(branch_id)
+}
+
+fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
+    let mut iter = dirs.iter();
+    let Some(first) = iter.next() else {
+        return PathBuf::new();
+    };
+    let mut common: Vec<Component> = first.components().collect();
+    for dir in iter {
+        let shared = common
+            .iter()
+            .zip(dir.components())
+            .take_while(|(a, b)| *a == b)
+            .count();
+        common.truncate(shared);
+    }
+    common.iter().collect()
+}
+
+fn ensure_unique_branch_ids_for_distinct_paths(
+    paths: &[String],
+    branch_ids: &[String],
+) -> Result<(), VoomError> {
+    let mut paths_by_branch = HashMap::new();
+    for (path, branch_id) in paths.iter().zip(branch_ids) {
+        if let Some(existing_path) = paths_by_branch.insert(branch_id.as_str(), path.as_str())
+            && existing_path != path
+        {
+            return Err(VoomError::Config(format!(
+                "paths `{existing_path}` and `{path}` both derive branch id `{branch_id}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn operation_for_node(plan: &WorkflowPlan, node_id: &str) -> Result<OperationKind, VoomError> {

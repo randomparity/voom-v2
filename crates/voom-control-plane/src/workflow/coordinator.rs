@@ -40,7 +40,7 @@ use crate::cases::{begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
-use super::plan::expansion::branch_id_from_path;
+use super::plan::expansion::branch_ids_from_paths;
 use super::plan::policy_bridge::{
     WorkflowExecutionShape, policy_workflow_node_id, workflow_plan_from_compliance,
 };
@@ -703,6 +703,27 @@ fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
     common.iter().collect()
 }
 
+fn ensure_unique_active_branch_ids(
+    branch_ids: &[(FileVersionId, String)],
+) -> Result<(), VoomError> {
+    let mut seen = HashMap::with_capacity(branch_ids.len());
+    for &(file_version_id, ref branch_id) in branch_ids {
+        if let Some(previous) = seen.insert(branch_id.as_str(), file_version_id) {
+            if previous == file_version_id {
+                return Err(VoomError::Config(format!(
+                    "active file {file_version_id} appears more than once with branch id \
+                     `{branch_id}`; phase-barrier summaries require one row per active file"
+                )));
+            }
+            return Err(VoomError::Config(format!(
+                "active files {previous} and {file_version_id} both derive branch id \
+                 `{branch_id}`; phase-barrier summaries require a unique branch id per file"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
         .map_err(|e| VoomError::Database(format!("{field} {value} does not fit u64: {e}")))
@@ -948,10 +969,9 @@ impl ControlPlane {
             ..PlanningContext::default()
         };
 
-        // Derive each active file's branch id and fail fast on a collision
-        // *before* opening the job: the per-`(file, phase)` upsert is
-        // `ON CONFLICT DO NOTHING` and would silently drop a colliding file's
-        // row, losing it from the durable summary.
+        // Derive each active file's branch id before opening the job. The per-
+        // `(file, phase)` upsert is `ON CONFLICT DO NOTHING`, so the batch
+        // derivation disambiguates colliding stems before rows are persisted.
         let branch_ids = self.active_branch_ids(&active).await?;
         Ok(PhaseBarrierRunInputs {
             policy,
@@ -996,30 +1016,34 @@ impl ControlPlane {
         }
     }
 
-    /// Derive a stable branch id (the file's location path stem) for every
-    /// active file, rejecting a stem collision across the set.
+    /// Derive stable branch ids for active files, disambiguating colliding path
+    /// stems while preserving stem-only ids for non-colliding paths.
     async fn active_branch_ids(
         &self,
         active: &[FileVersionId],
     ) -> Result<Vec<(FileVersionId, String)>, VoomError> {
-        let mut branch_ids = Vec::with_capacity(active.len());
-        let mut seen: HashMap<String, FileVersionId> = HashMap::with_capacity(active.len());
+        let mut paths = Vec::with_capacity(active.len());
         for &file_version_id in active {
-            let branch_id = self.file_branch_id(file_version_id).await?;
-            if let Some(previous) = seen.insert(branch_id.clone(), file_version_id) {
-                return Err(VoomError::Config(format!(
-                    "active files {previous} and {file_version_id} both derive branch id \
-                     `{branch_id}`; phase-barrier summaries require a unique branch id per file"
-                )));
-            }
-            branch_ids.push((file_version_id, branch_id));
+            paths.push((
+                file_version_id,
+                self.file_branch_path(file_version_id).await?,
+            ));
         }
+        let path_values = paths
+            .iter()
+            .map(|(_, path)| path.clone())
+            .collect::<Vec<_>>();
+        let branch_ids = branch_ids_from_paths(&path_values)?;
+        let branch_ids = paths
+            .into_iter()
+            .zip(branch_ids)
+            .map(|((file_version_id, _), branch_id)| (file_version_id, branch_id))
+            .collect::<Vec<_>>();
+        ensure_unique_active_branch_ids(&branch_ids)?;
         Ok(branch_ids)
     }
 
-    /// A file's branch id is the stem of its live location path, matching the
-    /// scanner-completion binding (`expansion::branch_id_from_path`).
-    async fn file_branch_id(&self, file_version_id: FileVersionId) -> Result<String, VoomError> {
+    async fn file_branch_path(&self, file_version_id: FileVersionId) -> Result<String, VoomError> {
         let locations = self
             .identity
             .list_live_file_locations_by_version(file_version_id)
@@ -1034,7 +1058,7 @@ impl ControlPlane {
                     "file version {file_version_id} has no live location to derive a branch id"
                 ))
             })?;
-        branch_id_from_path(&path)
+        Ok(path)
     }
 
     async fn run_phase_barrier_in_job(

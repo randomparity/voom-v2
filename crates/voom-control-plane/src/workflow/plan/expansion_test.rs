@@ -14,8 +14,8 @@ use crate::workflow::plan::binding::{
     render_default_payload_with_fan_out,
 };
 use crate::workflow::plan::expansion::{
-    ExpansionContext, expand_backup_completion, expand_probe_completion, expand_quality_completion,
-    expand_scanner_completion, expand_transform_completion,
+    ExpansionContext, branch_ids_from_paths, expand_backup_completion, expand_probe_completion,
+    expand_quality_completion, expand_scanner_completion, expand_transform_completion,
 };
 use crate::workflow::plan::model::WorkflowPlan;
 use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
@@ -340,7 +340,7 @@ async fn scanner_completion_dedupes_duplicate_file_outputs() {
 }
 
 #[tokio::test]
-async fn scanner_completion_rejects_branch_id_path_collisions() {
+async fn scanner_completion_disambiguates_branch_id_path_collisions() {
     let fixture = WorkflowExpansionFixture::new().await;
     let scanner = fixture
         .seed_succeeded_ticket(
@@ -356,11 +356,37 @@ async fn scanner_completion_rejects_branch_id_path_collisions() {
         )
         .await;
 
-    let err = expand_scanner_completion(&fixture.ctx(), &scanner)
+    let created = expand_scanner_completion(&fixture.ctx(), &scanner)
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert!(err.to_string().contains("both derive branch id"));
+    assert_eq!(created.len(), 6);
+    assert!(
+        fixture
+            .find_ticket("probe", "library/file-000.mkv")
+            .await
+            .is_some()
+    );
+    assert!(
+        fixture
+            .find_ticket("probe", "other/file-000.mp4")
+            .await
+            .is_some()
+    );
+    fixture.assert_ticket_count(7).await;
+    fixture.assert_dependency_count(6).await;
+}
+
+#[test]
+fn colliding_branch_ids_keep_full_relative_file_names() {
+    let paths = vec![
+        "/library/movie.mkv".to_owned(),
+        "/library/movie.mp4".to_owned(),
+    ];
+
+    let branch_ids = branch_ids_from_paths(&paths).unwrap();
+
+    assert_eq!(branch_ids, vec!["movie.mkv", "movie.mp4"]);
 }
 
 struct WorkflowExpansionFixture {
