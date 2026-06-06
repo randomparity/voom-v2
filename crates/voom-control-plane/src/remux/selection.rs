@@ -156,7 +156,15 @@ fn default_refs(
             DefaultStrategy::None => {
                 clear_default_streams.extend(kept_target.into_iter().map(stream_ref));
             }
-            DefaultStrategy::Preserve | DefaultStrategy::Best => {}
+            DefaultStrategy::Preserve => {
+                default_streams.extend(
+                    kept_target
+                        .into_iter()
+                        .filter(|stream| stream.is_default)
+                        .map(stream_ref),
+                );
+            }
+            DefaultStrategy::Best => {}
         }
     }
     for target in [
