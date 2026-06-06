@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Iso8601;
-use voom_core::{FileVersionId, JobId};
+use voom_core::{FileLocationId, FileVersionId, JobId, TicketOperation};
 use voom_policy::{FixtureName, TargetRef, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::NewFileLocation;
 use voom_store::repo::identity::{
@@ -11,6 +11,7 @@ use voom_store::repo::identity::{
     ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
+use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, NewFilePhaseSummary, NewWorkflowSummary,
 };
@@ -802,6 +803,7 @@ async fn zero_phase_promotion_failure_preserves_seed_file_phases() {
                 runner
                     .drive_phase_loop(super::PhaseLoopInputs {
                         job_id,
+                        promotion_job_ids: vec![job_id],
                         policy,
                         context,
                         base_draft,
@@ -972,7 +974,10 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
         }],
     };
 
-    cp.promote_terminal_artifacts(&plan).await.unwrap();
+    let location_id = live_location_id(&cp, version).await;
+    cp.promote_terminal_artifacts(&plan, &[location_id])
+        .await
+        .unwrap();
 
     let promoted = out_dir.join("Movie.mkv");
     assert!(
@@ -999,43 +1004,44 @@ async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
 }
 
 #[tokio::test]
-async fn promote_terminal_artifacts_rejects_negative_location_id() {
-    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
-
+async fn promotion_location_ids_rejects_negative_ticket_result_location_id() {
     let (cp, _db) = cp().await;
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let working = root.join(".committed").join("remux");
-    let out_dir = root.join("out");
-    std::fs::create_dir_all(&working).unwrap();
-
-    let artifact_path = working.join("Movie.mkv");
-    std::fs::write(&artifact_path, b"terminal-bytes").unwrap();
-    let version = seed_version(
-        &cp,
-        &artifact_path.display().to_string(),
-        "hash-negative-location",
-        reprobe_payload("hevc"),
-    )
-    .await;
-    sqlx::query("UPDATE file_locations SET id = -7 WHERE file_version_id = ?")
-        .bind(i64::try_from(version.0).unwrap())
-        .execute(&cp.pool)
+    let job = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
         .await
         .unwrap();
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.test").unwrap(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
+         epoch = epoch + 1 WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&json!({"result_file_location_id": -7})).unwrap())
+    .bind(T0.format(&Iso8601::DEFAULT).unwrap())
+    .bind(i64::try_from(ticket.id.0).unwrap())
+    .execute(&cp.pool)
+    .await
+    .unwrap();
 
-    let plan = PromotionPlan {
-        pairs: vec![PromotionPair {
-            working_dir: working,
-            output_dir: out_dir,
-        }],
-    };
-
-    let err = cp.promote_terminal_artifacts(&plan).await.unwrap_err();
+    let err = cp.promotion_location_ids(&[job.id], &[]).await.unwrap_err();
 
     assert_eq!(err.code(), "DB_UNREACHABLE");
     assert!(
-        err.to_string().contains("promotion location id"),
+        err.to_string()
+            .contains("promotion ticket result location id"),
         "error should identify the corrupted column: {err}"
     );
     assert!(
@@ -1131,7 +1137,13 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
         }],
     };
 
-    cp.promote_terminal_artifacts(&plan).await.unwrap();
+    let mut location_ids = Vec::new();
+    for (_, vid) in &tips {
+        location_ids.push(live_location_id(&cp, *vid).await);
+    }
+    cp.promote_terminal_artifacts(&plan, &location_ids)
+        .await
+        .unwrap();
 
     for (season, vid) in tips {
         let promoted = out_dir.join(season).join("episode.remux.mkv");
@@ -1154,4 +1166,245 @@ async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenam
             "the {season} chain tip must repoint to the mirrored promoted path"
         );
     }
+}
+
+#[tokio::test]
+async fn promote_terminal_artifacts_ignores_unscoped_working_dir_artifacts() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let working = root.join(".committed").join("remux");
+    let out_dir = root.join("out");
+
+    let first_path = working.join("run-a").join("Movie.remux.mkv");
+    let second_path = working.join("run-b").join("Other.remux.mkv");
+    let first =
+        seed_terminal_artifact(&cp, "/library/run-a/Movie.mkv", "hash-run-a", &first_path).await;
+    let second =
+        seed_terminal_artifact(&cp, "/library/run-b/Other.mkv", "hash-run-b", &second_path).await;
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: working,
+            output_dir: out_dir.clone(),
+        }],
+    };
+
+    cp.promote_terminal_artifacts(&plan, &[first.location_id])
+        .await
+        .unwrap();
+
+    assert!(
+        out_dir.join("Movie.remux.mkv").is_file(),
+        "scoped location should promote"
+    );
+    assert!(
+        second_path.is_file(),
+        "unscoped location {} must stay in the working dir",
+        second_path.display()
+    );
+    let second_location = cp
+        .identity()
+        .list_live_file_locations_by_version(second.version_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|location| location.id == second.location_id)
+        .unwrap();
+    assert_eq!(second_location.value, second_path.display().to_string());
+}
+
+#[tokio::test]
+async fn promote_terminal_artifacts_skips_non_tip_scoped_locations() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let working = root.join(".committed").join("remux");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&working).unwrap();
+    let old_path = working.join("old.mkv");
+    std::fs::write(&old_path, b"old-bytes").unwrap();
+    let old_version = seed_version(
+        &cp,
+        &old_path.display().to_string(),
+        "hash-old-tip",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let old_location_id = live_location_id(&cp, old_version).await;
+
+    let asset_id = cp
+        .identity()
+        .get_file_version(old_version)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id;
+    let new_version = cp
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: "hash-new-tip".to_owned(),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Remux,
+            produced_from_version_id: Some(old_version),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let new_path = working.join("new.mkv");
+    std::fs::write(&new_path, b"new-bytes").unwrap();
+    let new_location = cp
+        .create_file_location(NewFileLocation {
+            file_version_id: new_version.id,
+            kind: FileLocationKind::LocalPath,
+            value: new_path.display().to_string(),
+            proof: None,
+            observed_at: T0,
+        })
+        .await
+        .unwrap();
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: working,
+            output_dir: out_dir.clone(),
+        }],
+    };
+
+    cp.promote_terminal_artifacts(&plan, &[old_location_id, new_location.id])
+        .await
+        .unwrap();
+
+    assert!(
+        old_path.is_file(),
+        "non-tip scoped location should stay in the working dir"
+    );
+    assert!(
+        out_dir.join("new.mkv").is_file(),
+        "chain-tip scoped location should promote"
+    );
+}
+
+#[tokio::test]
+async fn promotion_location_ids_include_prior_job_ticket_results() {
+    let (cp, _db) = cp().await;
+    let current = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let prior = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    seed_succeeded_result_ticket(&cp, prior.id, FileLocationId(101)).await;
+    seed_succeeded_result_ticket(&cp, current.id, FileLocationId(202)).await;
+
+    let location_ids = cp
+        .promotion_location_ids(&[current.id, prior.id], &[])
+        .await
+        .unwrap();
+
+    assert_eq!(location_ids, vec![FileLocationId(202), FileLocationId(101)]);
+}
+
+struct TerminalArtifact {
+    version_id: FileVersionId,
+    location_id: FileLocationId,
+}
+
+async fn seed_terminal_artifact(
+    cp: &crate::ControlPlane,
+    source_path: &str,
+    hash: &str,
+    artifact_path: &std::path::Path,
+) -> TerminalArtifact {
+    let source = seed_version(cp, source_path, hash, reprobe_payload("h264")).await;
+    let asset_id = cp
+        .identity()
+        .get_file_version(source)
+        .await
+        .unwrap()
+        .unwrap()
+        .file_asset_id;
+    let version = cp
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset_id,
+            content_hash: format!("{hash}-remux"),
+            size_bytes: 2048,
+            produced_by: ProducedBy::Remux,
+            produced_from_version_id: Some(source),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    std::fs::write(artifact_path, format!("{hash}-bytes")).unwrap();
+    let location = cp
+        .create_file_location(NewFileLocation {
+            file_version_id: version.id,
+            kind: FileLocationKind::LocalPath,
+            value: artifact_path.display().to_string(),
+            proof: None,
+            observed_at: T0,
+        })
+        .await
+        .unwrap();
+    TerminalArtifact {
+        version_id: version.id,
+        location_id: location.id,
+    }
+}
+
+async fn live_location_id(cp: &crate::ControlPlane, version: FileVersionId) -> FileLocationId {
+    cp.identity()
+        .list_live_file_locations_by_version(version)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id
+}
+
+async fn seed_succeeded_result_ticket(
+    cp: &crate::ControlPlane,
+    job_id: JobId,
+    result_file_location_id: FileLocationId,
+) {
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job_id),
+            kind: TicketOperation::new("synthetic.workflow.operation.test").unwrap(),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ?, \
+         epoch = epoch + 1 WHERE id = ?",
+    )
+    .bind(
+        serde_json::to_string(&json!({
+            "result_file_location_id": result_file_location_id.0
+        }))
+        .unwrap(),
+    )
+    .bind(T0.format(&Iso8601::DEFAULT).unwrap())
+    .bind(i64::try_from(ticket.id.0).unwrap())
+    .execute(&cp.pool)
+    .await
+    .unwrap();
 }

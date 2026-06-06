@@ -10,7 +10,7 @@
 //! (`active_version_with_snapshot`). It persists a durable per-phase /
 //! per-`(file, phase)` workflow summary as it goes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -328,6 +328,7 @@ struct PhaseBarrierRunInputs {
 /// Everything the phase-loop runner owns once an in-job run starts.
 struct PhaseLoopInputs {
     job_id: JobId,
+    promotion_job_ids: Vec<JobId>,
     policy: voom_policy::CompiledPolicy,
     context: PlanningContext,
     base_draft: PolicyInputSetDraft,
@@ -368,6 +369,7 @@ struct PhaseLoop<'a> {
     executor: WorkflowExecutor,
     files: Vec<PhaseFile>,
     promotion: PromotionPlan,
+    promotion_job_ids: Vec<JobId>,
     phases: Vec<PhaseSummary>,
     file_phases: Vec<FilePhaseSummary>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
@@ -392,6 +394,7 @@ impl<'a> PhaseLoop<'a> {
             executor,
             files: inputs.files,
             promotion,
+            promotion_job_ids: inputs.promotion_job_ids,
             phases: Vec::new(),
             file_phases: inputs.seed_file_phases,
             last_run: None,
@@ -570,6 +573,7 @@ impl<'a> PhaseLoop<'a> {
             control_plane,
             job_id,
             promotion,
+            promotion_job_ids,
             phases,
             file_phases,
             last_run,
@@ -581,7 +585,18 @@ impl<'a> PhaseLoop<'a> {
         // failure here happens after every phase already committed, so carry the
         // accumulated phase/file rows in the error's partial outcome rather than
         // discarding the operator's execution diagnostics.
-        if let Err(source) = control_plane.promote_terminal_artifacts(&promotion).await {
+        let promotion_result = match control_plane
+            .promotion_location_ids(&promotion_job_ids, &file_phases)
+            .await
+        {
+            Ok(ids) => {
+                control_plane
+                    .promote_terminal_artifacts(&promotion, &ids)
+                    .await
+            }
+            Err(source) => Err(source),
+        };
+        if let Err(source) = promotion_result {
             let summary = control_plane
                 .workflow_summaries
                 .insert_summary(
@@ -615,7 +630,6 @@ fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
 /// it belongs to (to test whether it is the chain tip).
 struct WorkingDirArtifact {
     location_id: FileLocationId,
-    file_version_id: FileVersionId,
     asset_id: FileAssetId,
     value: String,
     epoch: u64,
@@ -626,9 +640,6 @@ impl WorkingDirArtifact {
         let location_id: i64 = row
             .try_get("id")
             .map_err(|e| VoomError::Database(format!("promotion location id: {e}")))?;
-        let file_version_id: i64 = row
-            .try_get("file_version_id")
-            .map_err(|e| VoomError::Database(format!("promotion location version: {e}")))?;
         let asset_id: i64 = row
             .try_get("file_asset_id")
             .map_err(|e| VoomError::Database(format!("promotion location asset: {e}")))?;
@@ -640,10 +651,6 @@ impl WorkingDirArtifact {
             .map_err(|e| VoomError::Database(format!("promotion location epoch: {e}")))?;
         Ok(Self {
             location_id: FileLocationId(sqlite_u64(location_id, "promotion location id")?),
-            file_version_id: FileVersionId(sqlite_u64(
-                file_version_id,
-                "promotion location file version id",
-            )?),
             asset_id: FileAssetId(sqlite_u64(asset_id, "promotion location asset id")?),
             value,
             epoch: sqlite_u64(epoch, "promotion location epoch")?,
@@ -931,6 +938,7 @@ impl ControlPlane {
             base_draft,
             files,
             seed_file_phases: backfilled,
+            promotion_job_ids: vec![job_id, prior_job_id],
             options,
             runtimes,
         })
@@ -1085,6 +1093,7 @@ impl ControlPlane {
             base_draft,
             files,
             seed_file_phases: Vec::new(),
+            promotion_job_ids: vec![job_id],
             options,
             runtimes,
         })
@@ -1104,6 +1113,7 @@ impl ControlPlane {
             let PhaseLoopInputs {
                 job_id,
                 seed_file_phases,
+                promotion_job_ids,
                 options,
                 ..
             } = inputs;
@@ -1112,7 +1122,14 @@ impl ControlPlane {
             // promoted, so promote any terminal artifacts still in a working dir
             // now, before the job succeeds.
             let promotion = options.promotion_plan();
-            if let Err(source) = self.promote_terminal_artifacts(&promotion).await {
+            let promotion_result = match self
+                .promotion_location_ids(&promotion_job_ids, &seed_file_phases)
+                .await
+            {
+                Ok(ids) => self.promote_terminal_artifacts(&promotion, &ids).await,
+                Err(source) => Err(source),
+            };
+            if let Err(source) = promotion_result {
                 let summary = self
                     .workflow_summaries
                     .insert_summary(zero_phase_summary(job_id), self.clock().now())
@@ -1158,22 +1175,23 @@ impl ControlPlane {
         })
     }
 
-    /// Promote each file's terminal (chain-tip) artifact out of its working dir
-    /// into the operator's `--output-dir`, repointing the artifact's durable
+    /// Promote scoped terminal (chain-tip) artifacts out of their working dirs
+    /// into the operator's `--output-dir`, repointing each artifact's durable
     /// location at the promoted path so the chain tip resolves there.
     ///
-    /// Driven by the durable file locations that currently live under a working
-    /// dir, NOT by this job's rows, so it also promotes: artifacts committed in a
-    /// prior failed job that a resume completed, and sibling-asset artifacts an
-    /// operation produces off the input chain (e.g. `extract_audio`). Only a
-    /// version that is its asset's chain tip is promoted — intermediate artifacts
-    /// (superseded by a later version in the same chain) stay in the working dir.
-    /// Idempotent: once promoted, a location no longer lives under a working dir,
-    /// so a re-run or resume skips it. Mirrors the commit's add-only contract —
-    /// a destination collision fails the run.
-    async fn promote_terminal_artifacts(&self, plan: &PromotionPlan) -> Result<(), VoomError> {
+    /// `location_ids` is the run/resume scope: file-phase produced locations plus
+    /// succeeded ticket result locations for sidecar outputs. Only a version that
+    /// is its asset's chain tip is promoted; intermediate artifacts stay in the
+    /// working dir. Idempotent: once promoted, a location no longer lives under a
+    /// working dir, so a re-run or resume skips it. Mirrors the commit's add-only
+    /// contract — a destination collision fails the run.
+    async fn promote_terminal_artifacts(
+        &self,
+        plan: &PromotionPlan,
+        location_ids: &[FileLocationId],
+    ) -> Result<(), VoomError> {
         let dirs = resolve_promotion_dirs(plan).await;
-        if dirs.is_empty() {
+        if dirs.is_empty() || location_ids.is_empty() {
             return Ok(());
         }
         // Pass 1: collect the terminal artifacts that will promote, each with the
@@ -1184,7 +1202,7 @@ impl ControlPlane {
         // colliding after their transcodes already ran.
         let mut candidates = Vec::new();
         let mut source_dirs = Vec::new();
-        for artifact in self.working_dir_artifacts().await? {
+        for artifact in self.working_dir_artifacts(location_ids).await? {
             // `resolve_promotion_dirs` canonicalizes each working dir, so the
             // candidate must be canonicalized too or a symlinked path component
             // (e.g. macOS `/tmp` -> `/private/tmp`) breaks the prefix match and
@@ -1197,14 +1215,6 @@ impl ControlPlane {
             let Some(output_dir) = dirs.output_for(&current) else {
                 continue;
             };
-            if !self
-                .is_chain_tip(artifact.asset_id, artifact.file_version_id)
-                .await?
-            {
-                // An intermediate artifact superseded by a later version in the
-                // same chain: it stays in the working dir.
-                continue;
-            }
             let source_dir = self
                 .asset_source_path(artifact.asset_id)
                 .await?
@@ -1231,6 +1241,54 @@ impl ControlPlane {
         Ok(())
     }
 
+    async fn promotion_location_ids(
+        &self,
+        job_ids: &[JobId],
+        file_phases: &[FilePhaseSummary],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let mut seen = HashSet::new();
+        let mut location_ids = Vec::new();
+        for row in file_phases {
+            let Some(location_id) = row.produced_file_location_id else {
+                continue;
+            };
+            if seen.insert(location_id) {
+                location_ids.push(location_id);
+            }
+        }
+        for &job_id in job_ids {
+            for location_id in self.ticket_result_location_ids(job_id).await? {
+                if seen.insert(location_id) {
+                    location_ids.push(location_id);
+                }
+            }
+        }
+        Ok(location_ids)
+    }
+
+    async fn ticket_result_location_ids(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT json_extract(result, '$.result_file_location_id') \
+             FROM tickets \
+             WHERE job_id = ? \
+               AND state = 'succeeded' \
+               AND result IS NOT NULL \
+               AND json_type(result, '$.result_file_location_id') = 'integer' \
+             ORDER BY id ASC",
+        )
+        .bind(sqlite_i64(job_id.0, "promotion job id")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("promotion ticket results: {e}")))?;
+        rows.into_iter()
+            .map(|(id,)| sqlite_u64(id, "promotion ticket result location id"))
+            .map(|result| result.map(FileLocationId))
+            .collect()
+    }
+
     /// The directory of an asset's original scanned source: the earliest
     /// `file_version`'s first local-path location. `None` when the asset has no
     /// such location (it then promotes flat). Add-only commits keep the earliest
@@ -1250,42 +1308,46 @@ impl ControlPlane {
             .map(|location| PathBuf::from(location.value)))
     }
 
-    /// Every live local-path file location, paired with its owning asset. The
-    /// caller filters to those under a working dir.
-    async fn working_dir_artifacts(&self) -> Result<Vec<WorkingDirArtifact>, VoomError> {
+    /// Scoped live local-path chain-tip file locations, paired with their owning
+    /// asset. The caller filters to those under a working dir after canonicalizing
+    /// both sides so symlinked staging roots still match.
+    async fn working_dir_artifacts(
+        &self,
+        location_ids: &[FileLocationId],
+    ) -> Result<Vec<WorkingDirArtifact>, VoomError> {
+        if location_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = location_ids
+            .iter()
+            .map(|id| sqlite_i64(id.0, "promotion location id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ids_json = serde_json::to_string(&ids)
+            .map_err(|e| VoomError::Internal(format!("promotion location ids encode: {e}")))?;
         let rows = sqlx::query(
-            "SELECT fl.id, fl.file_version_id, fv.file_asset_id, fl.value, fl.epoch \
+            "SELECT fl.id, fv.file_asset_id, fl.value, fl.epoch \
              FROM file_locations fl \
              JOIN file_versions fv ON fv.id = fl.file_version_id \
-             WHERE fl.retired_at IS NULL AND fl.kind = 'local_path'",
+             WHERE fl.id IN (SELECT value FROM json_each(?)) \
+               AND fl.retired_at IS NULL \
+               AND fl.kind = 'local_path' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM file_versions newer \
+                   WHERE newer.file_asset_id = fv.file_asset_id \
+                     AND newer.retired_at IS NULL \
+                     AND newer.id > fv.id \
+               ) \
+             ORDER BY fl.id ASC",
         )
+        .bind(ids_json)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("promotion live locations: {e}")))?;
+        .map_err(|e| VoomError::Database(format!("promotion scoped locations: {e}")))?;
         let mut artifacts = Vec::with_capacity(rows.len());
         for row in rows {
             artifacts.push(WorkingDirArtifact::from_row(&row)?);
         }
         Ok(artifacts)
-    }
-
-    /// Whether `version_id` is the chain tip of `asset_id` (no later non-retired
-    /// version exists on the asset).
-    async fn is_chain_tip(
-        &self,
-        asset_id: FileAssetId,
-        version_id: FileVersionId,
-    ) -> Result<bool, VoomError> {
-        let (newer,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM file_versions \
-             WHERE file_asset_id = ? AND retired_at IS NULL AND id > ?",
-        )
-        .bind(sqlite_i64(asset_id.0, "promotion asset id")?)
-        .bind(sqlite_i64(version_id.0, "promotion file version id")?)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| VoomError::Database(format!("promotion chain-tip check: {e}")))?;
-        Ok(newer == 0)
     }
 
     /// Move a terminal artifact into `dest_dir` and repoint its location.
