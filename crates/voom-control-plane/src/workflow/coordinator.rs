@@ -573,8 +573,29 @@ impl<'a> PhaseLoop<'a> {
         } = self;
         // Promote each file's terminal artifact into --output-dir before the job
         // succeeds: a promotion conflict must fail the run, not leave a job
-        // marked succeeded with finals stranded in the working dir.
-        control_plane.promote_terminal_artifacts(&promotion).await?;
+        // marked succeeded with finals stranded in the working dir. A promotion
+        // failure here happens after every phase already committed, so carry the
+        // accumulated phase/file rows in the error's partial outcome rather than
+        // discarding the operator's execution diagnostics.
+        if let Err(source) = control_plane.promote_terminal_artifacts(&promotion).await {
+            let summary = control_plane
+                .workflow_summaries
+                .insert_summary(
+                    job_grain_summary(job_id, last_run.as_ref()),
+                    control_plane.clock().now(),
+                )
+                .await
+                .map_err(CoordinatorError::from)?;
+            return Err(CoordinatorError {
+                source,
+                partial: Some(CoordinatorOutcome {
+                    job_id,
+                    summary,
+                    phases,
+                    file_phases,
+                }),
+            });
+        }
         control_plane
             .finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
             .await
@@ -1082,7 +1103,15 @@ impl ControlPlane {
             return Ok(());
         }
         for artifact in self.working_dir_artifacts().await? {
-            let current = PathBuf::from(&artifact.value);
+            // `resolve_promotion_dirs` canonicalizes each working dir, so the
+            // candidate must be canonicalized too or a symlinked path component
+            // (e.g. macOS `/tmp` -> `/private/tmp`) breaks the prefix match and
+            // the terminal artifact is silently left in the working dir. The
+            // artifact exists at promotion time; fall back to the raw value if it
+            // does not so a vanished-but-still-live location still fails loudly in
+            // the move rather than being silently skipped.
+            let raw = PathBuf::from(&artifact.value);
+            let current = tokio::fs::canonicalize(&raw).await.unwrap_or(raw);
             let Some(output_dir) = dirs.output_for(&current) else {
                 continue;
             };

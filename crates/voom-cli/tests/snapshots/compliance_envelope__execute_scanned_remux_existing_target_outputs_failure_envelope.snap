@@ -7,7 +7,218 @@ expression: json
   "command": "compliance",
   "status": "error",
   "data": {
-    "file_phases": null
+    "issues": {
+      "created_count": 1,
+      "updated_count": 0,
+      "resolved_count": 0,
+      "skipped_count": 3
+    },
+    "summary": {
+      "job_id": "[job-id]",
+      "branch_count": 1,
+      "ticket_count": 1,
+      "dispatch_count": 1,
+      "retry_count": 0,
+      "failure_count": 0,
+      "peak_active_workflow_leases": 1,
+      "per_operation": {
+        "remux": {
+          "ticket_count": 1,
+          "dispatch_count": 1,
+          "success_count": 1,
+          "retry_count": 0,
+          "failure_count": 0
+        }
+      }
+    },
+    "phases": [
+      {
+        "phase_ordinal": 0,
+        "phase_name": "normalize",
+        "outcome": "completed",
+        "report_id": "report_e4b2821af4314231",
+        "report": {
+          "schema_version": 1,
+          "report_id": "report_e4b2821af4314231",
+          "report_hash": "blake3:09ded0f81db6f5028287e7dfe199b8ec881b4d60a770df7a221afb36c5c55a3a",
+          "plan_id": "plan_26a3c00101d7024f",
+          "plan_hash": "blake3:26a3c00101d7024f8671fe5f821c05f18942a4bbe73d7e6701d1c4609905410a",
+          "policy": {
+            "slug": "container-metadata",
+            "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+            "version_id": 1
+          },
+          "input": {
+            "slug": "cli-scan-remux",
+            "input_set_id": 1,
+            "fixture_labels": [
+              "scan-cli-scan-remux"
+            ]
+          },
+          "summary": {
+            "status": "mixed",
+            "total_check_count": 4,
+            "compliant_check_count": 0,
+            "noncompliant_check_count": 1,
+            "blocked_check_count": 3,
+            "executable_check_count": 1,
+            "operation_counts_by_kind": {
+              "clear_tags": 1,
+              "delete_tag": 1,
+              "remux": 1,
+              "set_tag": 1
+            }
+          },
+          "checks": [
+            {
+              "check_id": "check_dbabb3ebf97d8a1a",
+              "node_id": "node_d9b6b0cc4caf4781",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              },
+              "compliance_kind": "container",
+              "operation_kind": "remux",
+              "desired_state": {
+                "type": "remux",
+                "container": "mkv",
+                "track_actions": [],
+                "track_order": [
+                  "video",
+                  "audio",
+                  "subtitle"
+                ],
+                "defaults": [],
+                "source_media_snapshot_id": 2
+              },
+              "observed_state": {
+                "container": "mov,mp4,m4a,3gp,3g2,mj2"
+              },
+              "check_status": "noncompliant",
+              "reason": "container mov,mp4,m4a,3gp,3g2,mj2 will be changed to mkv",
+              "issue_action_hint": "create_or_update_planned",
+              "execution_eligibility": "supported"
+            },
+            {
+              "check_id": "check_4bc9525cb63646aa",
+              "node_id": "node_c520b9e0e0a4da73",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              },
+              "compliance_kind": "unsupported",
+              "operation_kind": "clear_tags",
+              "desired_state": {
+                "type": "clear_tags"
+              },
+              "check_status": "blocked",
+              "reason": "operation is not supported by Sprint 5 planner",
+              "issue_action_hint": "none",
+              "execution_eligibility": "unsupported"
+            },
+            {
+              "check_id": "check_7f67c8f1da9fabc8",
+              "node_id": "node_2cb1f04bb88984c6",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              },
+              "compliance_kind": "unsupported",
+              "operation_kind": "set_tag",
+              "desired_state": {
+                "type": "set_tag",
+                "key": "title",
+                "value": {
+                  "type": "field_path",
+                  "path": [
+                    "identity",
+                    "title"
+                  ]
+                }
+              },
+              "check_status": "blocked",
+              "reason": "operation is not supported by Sprint 5 planner",
+              "issue_action_hint": "none",
+              "execution_eligibility": "unsupported"
+            },
+            {
+              "check_id": "check_b858982717e7ae74",
+              "node_id": "node_7e472d6411e7638f",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              },
+              "compliance_kind": "unsupported",
+              "operation_kind": "delete_tag",
+              "desired_state": {
+                "type": "delete_tag",
+                "key": "encoder"
+              },
+              "check_status": "blocked",
+              "reason": "operation is not supported by Sprint 5 planner",
+              "issue_action_hint": "none",
+              "execution_eligibility": "unsupported"
+            }
+          ],
+          "diagnostics": [
+            {
+              "severity": "warning",
+              "code": "unsupported_compliance_operation",
+              "message": "operation clear_tags is not supported by compliance reports",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_c520b9e0e0a4da73",
+              "check_id": "check_4bc9525cb63646aa",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              }
+            },
+            {
+              "severity": "warning",
+              "code": "unsupported_compliance_operation",
+              "message": "operation set_tag is not supported by compliance reports",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_2cb1f04bb88984c6",
+              "check_id": "check_7f67c8f1da9fabc8",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              }
+            },
+            {
+              "severity": "warning",
+              "code": "unsupported_compliance_operation",
+              "message": "operation delete_tag is not supported by compliance reports",
+              "plan_id": "plan_26a3c00101d7024f",
+              "node_id": "node_7e472d6411e7638f",
+              "check_id": "check_b858982717e7ae74",
+              "target": {
+                "type": "file_version",
+                "id": 2
+              }
+            }
+          ],
+          "provenance": {
+            "reporter": "voom-plan",
+            "format": "sprint6-v1"
+          }
+        }
+      }
+    ],
+    "file_phases": [
+      {
+        "phase_ordinal": 0,
+        "branch_id": "Movie",
+        "outcome": "committed",
+        "ticket_ids": [
+          "[ticket-id]"
+        ],
+        "produced_file_version_id": "[produced_file_version_id]",
+        "produced_file_location_id": "[produced_file_location_id]",
+        "reprobe_snapshot_id": "[reprobe_snapshot_id]"
+      }
+    ],
+    "latest_phase_index": 0
   },
   "local": {
     "db_url": "[db-url]",

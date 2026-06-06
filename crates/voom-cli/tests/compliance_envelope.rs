@@ -134,6 +134,13 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
         serde_json::to_string_pretty(&json).unwrap(),
         String::from_utf8_lossy(&output.stderr)
     );
+    // The promotion failure happens after the remux already committed, so the
+    // partial outcome must preserve the run's execution diagnostics rather than
+    // discarding them: the committed `(file, phase)` row survives in the error
+    // envelope's data.
+    let file_phases = json["data"]["file_phases"].as_array().unwrap();
+    assert_eq!(file_phases.len(), 1, "the committed remux row must survive");
+    assert_eq!(file_phases[0]["outcome"], "committed");
     redact_local(&mut json);
     redact_execute_ids(&mut json);
     redact_temp_path_values(&mut json, &remux_root);

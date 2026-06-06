@@ -162,8 +162,10 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
     worker.shutdown().unwrap();
 
     // The audio transcode now commits to the working dir; the add-only conflict
-    // with an existing --output-dir file surfaces at post-run promotion. The run
-    // fails with no partial outcome (the job is failed before its summary lands).
+    // with an existing --output-dir file surfaces at post-run promotion. The
+    // promotion failure happens after the transcode already committed, so the
+    // partial outcome preserves the run's execution diagnostics (the committed
+    // `(file, phase)` row) rather than discarding them.
     assert!(
         err.source
             .to_string()
@@ -171,7 +173,10 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
         "unexpected error: {}",
         err.source
     );
-    assert!(err.partial.is_none());
+    // A post-compute promotion failure must preserve the committed file phases.
+    let partial = err.partial.unwrap();
+    assert_eq!(partial.file_phases.len(), 1);
+    assert_eq!(partial.file_phases[0].outcome, "committed");
 }
 
 fn tempdir_in_repo() -> tempfile::TempDir {
