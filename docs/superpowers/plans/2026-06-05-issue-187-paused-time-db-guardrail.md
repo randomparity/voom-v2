@@ -264,6 +264,31 @@ Expected: `check-paused-time-db-selftest: OK` (exit 0).
 Run: `./scripts/check-paused-time-db.sh`
 Expected: `check-paused-time-db: OK` (exit 0). In particular `crates/voom-control-plane/src/scan/worker_test.rs` (which calls `tokio::time::pause()` but references no pool) is **not** flagged.
 
+- [ ] **Step 5b: Prove the self-test catches a sabotaged check (acceptance criterion 5)**
+
+Confirm the self-test has real discriminating power — that a broken matching
+rule turns it red, not just an absent script.
+
+Temporarily mutate the pool rule's regex so it matches nothing:
+
+```bash
+sed -i.bak 's/\^(SqlitePool|ControlPlane)\$/^NoSuchType$/g' scripts/check-paused-time-db.sh
+./scripts/check-paused-time-db-selftest.sh; echo "exit=$?"
+```
+
+Expected: the self-test FAILS — the five violation cases (which need the pool
+signal) now exit 0 instead of 1, so it prints `FAIL:` lines and exits non-zero.
+
+Revert the mutation and confirm green again:
+
+```bash
+mv scripts/check-paused-time-db.sh.bak scripts/check-paused-time-db.sh
+./scripts/check-paused-time-db-selftest.sh; echo "exit=$?"
+```
+
+Expected: `check-paused-time-db-selftest: OK` (exit 0). Verify no `.bak` file
+remains: `test ! -e scripts/check-paused-time-db.sh.bak`.
+
 - [ ] **Step 6: Lint and format both scripts**
 
 Run: `shellcheck scripts/check-paused-time-db.sh scripts/check-paused-time-db-selftest.sh && shfmt -d scripts/check-paused-time-db.sh scripts/check-paused-time-db-selftest.sh`
