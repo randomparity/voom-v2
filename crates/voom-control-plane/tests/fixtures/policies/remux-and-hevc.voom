@@ -1,0 +1,6 @@
+policy "remux to mkv and transcode to hevc" {
+  phase normalize {
+    container mkv
+    transcode video to hevc
+  }
+}
