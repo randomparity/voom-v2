@@ -203,17 +203,21 @@ fn job_grain_summary(
             elapsed: run.elapsed,
             per_operation: per_operation_json(run),
         },
-        None => NewWorkflowSummary {
-            job_id,
-            branch_count: 0,
-            ticket_count: 0,
-            dispatch_count: 0,
-            retry_count: 0,
-            failure_count: 0,
-            peak_active_workflow_leases: 0,
-            elapsed: Duration::ZERO,
-            per_operation: json!({}),
-        },
+        None => zero_phase_summary(job_id),
+    }
+}
+
+fn zero_phase_summary(job_id: JobId) -> NewWorkflowSummary {
+    NewWorkflowSummary {
+        job_id,
+        branch_count: 0,
+        ticket_count: 0,
+        dispatch_count: 0,
+        retry_count: 0,
+        failure_count: 0,
+        peak_active_workflow_leases: 0,
+        elapsed: Duration::ZERO,
+        per_operation: json!({}),
     }
 }
 
@@ -1073,14 +1077,35 @@ impl ControlPlane {
         inputs: PhaseLoopInputs,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if inputs.files.is_empty() || inputs.policy.phase_order.is_empty() {
+            let PhaseLoopInputs {
+                job_id,
+                seed_file_phases,
+                options,
+                ..
+            } = inputs;
             // No phase loop runs (e.g. a resume where every file already
             // completed). Files that committed in a prior, failed job were never
             // promoted, so promote any terminal artifacts still in a working dir
             // now, before the job succeeds.
-            let promotion = inputs.options.promotion_plan();
-            self.promote_terminal_artifacts(&promotion).await?;
+            let promotion = options.promotion_plan();
+            if let Err(source) = self.promote_terminal_artifacts(&promotion).await {
+                let summary = self
+                    .workflow_summaries
+                    .insert_summary(zero_phase_summary(job_id), self.clock().now())
+                    .await
+                    .map_err(CoordinatorError::from)?;
+                return Err(CoordinatorError {
+                    source,
+                    partial: Some(CoordinatorOutcome {
+                        job_id,
+                        summary,
+                        phases: Vec::new(),
+                        file_phases: seed_file_phases,
+                    }),
+                });
+            }
             return Ok(self
-                .finalize_zero_phase_run(inputs.job_id, inputs.seed_file_phases)
+                .finalize_zero_phase_run(job_id, seed_file_phases)
                 .await?);
         }
         PhaseLoop::new(self, inputs).run().await
@@ -1680,20 +1705,7 @@ impl ControlPlane {
         self.succeed_job(job_id, now).await?;
         let summary = self
             .workflow_summaries
-            .insert_summary(
-                NewWorkflowSummary {
-                    job_id,
-                    branch_count: 0,
-                    ticket_count: 0,
-                    dispatch_count: 0,
-                    retry_count: 0,
-                    failure_count: 0,
-                    peak_active_workflow_leases: 0,
-                    elapsed: Duration::ZERO,
-                    per_operation: json!({}),
-                },
-                now,
-            )
+            .insert_summary(zero_phase_summary(job_id), now)
             .await?;
         Ok(CoordinatorOutcome {
             job_id,
