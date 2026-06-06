@@ -73,7 +73,7 @@ pub mod policy {
         FilePhaseSummaryView, IssueApplicationSummary, PhaseSummaryView, WorkflowSummaryView,
     };
     pub use crate::cases::policy::policy_inputs::{
-        PolicyInputFromScanInput, PolicyInputFromScanResult,
+        PolicyInputFromScanInput, PolicyInputFromScanResult, WholeScanInput, WholeScanInputResult,
     };
 }
 

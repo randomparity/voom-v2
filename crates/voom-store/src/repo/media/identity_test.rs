@@ -1094,6 +1094,44 @@ async fn retire_file_version_stale_epoch_on_live_row_is_conflict() {
     assert_eq!(still.epoch, 1);
 }
 
+#[tokio::test]
+async fn list_live_file_versions_returns_only_non_retired_in_id_order() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3u8 {
+        let version = repo
+            .create_file_version(NewFileVersion {
+                file_asset_id: asset.id,
+                content_hash: format!("hash-{i}"),
+                size_bytes: 100 + u64::from(i),
+                produced_by: ProducedBy::Ingest,
+                produced_from_version_id: None,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        ids.push(version.id);
+    }
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(&mut tx, ids[1], T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let live = repo.list_live_file_versions().await.unwrap();
+    let live_ids: Vec<_> = live.iter().map(|v| v.id).collect();
+    assert_eq!(live_ids, vec![ids[0], ids[2]]);
+    assert!(live.iter().all(|v| v.retired_at.is_none()));
+}
+
+#[tokio::test]
+async fn list_live_file_versions_empty_on_clean_db() {
+    let (repo, _tmp) = fresh().await;
+    assert!(repo.list_live_file_versions().await.unwrap().is_empty());
+}
+
 // ---- replace_file_location_in_tx (new) ----------------------------------
 
 #[tokio::test]

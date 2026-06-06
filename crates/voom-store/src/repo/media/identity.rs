@@ -590,6 +590,11 @@ pub trait IdentityRepo: Repository {
         &self,
         asset_id: FileAssetId,
     ) -> Result<Vec<FileVersion>, VoomError>;
+    /// List every live (non-retired) `file_versions` row in id order.
+    ///
+    /// Anchors whole-library operations that have no durable scan id:
+    /// the live file-versions are the set of "currently-scanned" files.
+    async fn list_live_file_versions(&self) -> Result<Vec<FileVersion>, VoomError>;
     async fn retire_file_version_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -1232,6 +1237,18 @@ impl IdentityRepo for SqliteIdentityRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("file_versions list: {e}")))?;
+        rows.iter().map(row_to_file_version).collect()
+    }
+
+    async fn list_live_file_versions(&self) -> Result<Vec<FileVersion>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, file_asset_id, content_hash, size_bytes, produced_by, \
+                    produced_from_version_id, created_at, retired_at, epoch \
+             FROM file_versions WHERE retired_at IS NULL ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_versions list live: {e}")))?;
         rows.iter().map(row_to_file_version).collect()
     }
 
