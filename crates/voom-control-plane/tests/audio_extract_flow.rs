@@ -380,19 +380,28 @@ async fn assert_extract_execution_result(
     let commit_record_id = result["commit_record_id"].as_u64().unwrap();
     let result_file_version_id = FileVersionId(result["result_file_version_id"].as_u64().unwrap());
     let result_file_location_id = result["result_file_location_id"].as_u64().unwrap();
-    let target_path = PathBuf::from(result["target_path"].as_str().unwrap());
+    let committed_target = PathBuf::from(result["target_path"].as_str().unwrap());
 
     assert!(staged_artifact_handle_id > 0);
     assert!(verification_id > 0);
     assert!(commit_record_id > 0);
     assert!(result_file_version_id.0 > 0);
     assert!(result_file_location_id > 0);
-    assert!(target_path.is_file());
-    assert!(target_path.starts_with(out_dir.canonicalize().unwrap()));
+    // The worker committed into the per-operation working dir; post-run promotion
+    // moved the terminal artifact into --output-dir, keeping its file name.
     assert!(
-        target_path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
+        committed_target
+            .to_str()
+            .is_some_and(|target| target.contains("/.committed/audio/")),
+        "commit must target the working dir, got {}",
+        committed_target.display()
+    );
+    let file_name = committed_target.file_name().unwrap();
+    let promoted = out_dir.canonicalize().unwrap().join(file_name);
+    assert!(promoted.is_file(), "{} must exist", promoted.display());
+    assert!(
+        file_name
+            .to_str()
             .is_some_and(|file_name| file_name.ends_with(".opus.ogg"))
     );
 

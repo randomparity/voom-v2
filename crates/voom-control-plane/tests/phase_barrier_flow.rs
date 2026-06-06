@@ -291,7 +291,26 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let produced_version = phase0_commit
         .produced_file_version_id
         .expect("committed row records the produced version");
-    assert!(out_dir.join("Chain.default-hevc.hevc.mkv").is_file());
+    // Phase 0's artifact is now an intermediate (phase 1 re-transcodes it), so it
+    // commits to the working dir and is NOT promoted to --output-dir. Only the
+    // terminal (phase 1) artifact lands in --output-dir.
+    let transcode_working = root.join("stage").join(".committed").join("transcode");
+    assert!(
+        transcode_working
+            .join("Chain.default-hevc.hevc.mkv")
+            .is_file(),
+        "phase 0's intermediate stays in the working dir"
+    );
+    assert!(
+        !out_dir.join("Chain.default-hevc.hevc.mkv").exists(),
+        "phase 0's intermediate must not pollute --output-dir"
+    );
+    assert!(
+        out_dir
+            .join("Chain.default-hevc.hevc.default-hevc.hevc.mkv")
+            .is_file(),
+        "the terminal (phase 1) artifact is promoted to --output-dir"
+    );
 
     // Issue #164: the report recorded for a phase reflects that phase's own
     // produced artifact, regenerated after commit + re-probe — not the facts
@@ -497,7 +516,20 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     assert_eq!(committed.outcome, FilePhaseOutcome::Committed);
     assert!(committed.produced_file_version_id.is_some());
     assert!(committed.reprobe_snapshot_id.is_some());
-    assert!(out_dir.join("Good.default-hevc.hevc.mkv").is_file());
+    // The run failed, so promotion never ran: the committed sibling's artifact
+    // stays in the working dir and never reaches --output-dir. A later resume
+    // that succeeds would promote it.
+    let transcode_working = root.join("stage").join(".committed").join("transcode");
+    assert!(
+        transcode_working
+            .join("Good.default-hevc.hevc.mkv")
+            .is_file(),
+        "the committed sibling's artifact stays in the working dir on a failed run"
+    );
+    assert!(
+        !out_dir.join("Good.default-hevc.hevc.mkv").exists(),
+        "a failed run promotes nothing to --output-dir"
+    );
 
     // The committed row is durable and the job is failed.
     let repo = SqliteWorkflowSummaryRepo::new(voom_store::connect(&url).await.unwrap());
@@ -621,6 +653,311 @@ async fn phase_barrier_resumes_failed_file_without_remutating_committed_sibling(
         .expect("Doomed commits on resume");
     assert!(doomed_committed.produced_file_version_id.is_some());
     assert!(out_dir.join("Doomed.default-hevc.hevc.mkv").is_file());
+}
+
+/// Post-run promotion: in a two-phase `remux -> transcode` run only the file's
+/// terminal (chain-tip) artifact lands in `--output-dir`. Phase 0 remuxes the
+/// mp4 to mkv (an intermediate), phase 1 transcodes that to hevc (the terminal).
+/// The intermediate stays in the per-operation working dir; only the hevc final
+/// is promoted, and the durable chain tip's location resolves to the promoted
+/// `--output-dir` path.
+#[tokio::test]
+async fn phase_barrier_promotes_only_terminal_artifact_across_phases() {
+    require_command("mkvmerge", &["--version"]);
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+    cargo_build_package("voom-mkvtoolnix-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Movie.mp4");
+    generate_h264_fixture(&source);
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let file = scan_one(&cp, &source).await;
+    let scanned_version = file.file_version_id;
+    let policy = cp
+        .create_policy_document(
+            "remux-then-transcode",
+            "policy \"remux then transcode\" {\n  \
+               phase normalize { container mkv }\n  \
+               phase transcode { depends_on: [normalize] transcode video to hevc }\n}",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[("movie", file)]))
+        .await
+        .unwrap();
+
+    let mut workers = RemuxTranscodeWorkers::start(&cp).await;
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
+    let outcome = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                transcode_staging_root: staging_root.clone(),
+                transcode_target_dir: out_dir.clone(),
+                remux_staging_root: staging_root.clone(),
+                remux_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await;
+    workers.shutdown();
+    let outcome = outcome.unwrap();
+
+    assert_eq!(outcome.phases.len(), 2);
+    assert_eq!(outcome.phases[0].outcome, PhaseOutcome::Completed);
+    assert_eq!(outcome.phases[1].outcome, PhaseOutcome::Completed);
+
+    // The intermediate remux artifact stays in the remux working dir and is NOT
+    // promoted to --output-dir.
+    let remux_working = staging_root.join(".committed").join("remux");
+    assert!(
+        remux_working.join("Movie.remux.mkv").is_file(),
+        "the phase 0 remux intermediate stays in the working dir"
+    );
+    assert!(
+        !out_dir.join("Movie.remux.mkv").exists(),
+        "the intermediate must not land in --output-dir"
+    );
+
+    // Only the terminal (phase 1) hevc artifact is promoted to --output-dir.
+    let terminal = "Movie.remux.default-hevc.hevc.mkv";
+    let mkvs = mkvs_in(&out_dir);
+    assert_eq!(
+        mkvs,
+        vec![terminal.to_owned()],
+        "exactly the terminal artifact lands in --output-dir"
+    );
+
+    // The durable chain tip's location resolves to the promoted --output-dir path.
+    assert_eq!(
+        tip_location_value(&url, scanned_version).await,
+        out_dir.join(terminal).display().to_string(),
+        "the chain tip location must point at the promoted output path"
+    );
+}
+
+/// Post-run promotion is driven by each file's durable chain tip, NOT the last
+/// positional phase, so a file whose terminal artifact is produced by an EARLIER
+/// phase is still promoted. A no-audio file is remuxed in phase 0 (its terminal)
+/// and then blocks the final `transcode audio` phase (no audio to transcode), so
+/// its terminal is phase 0's remux output — exactly the case a position-based
+/// router would misplace. It is promoted to `--output-dir` regardless.
+#[tokio::test]
+async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
+    require_command("mkvmerge", &["--version"]);
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-mkvtoolnix-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let source = root.join("Movie.mp4");
+    generate_h264_fixture(&source); // testsrc has no audio stream
+
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+
+    let file = scan_one(&cp, &source).await;
+    let scanned_version = file.file_version_id;
+    let policy = cp
+        .create_policy_document(
+            "remux-then-audio",
+            "policy \"remux then audio\" {\n  \
+               phase normalize { container mkv }\n  \
+               phase audio { depends_on: [normalize] transcode audio to opus where lang in [eng, und] }\n}",
+        )
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[("movie", file)]))
+        .await
+        .unwrap();
+
+    // Only the remux worker is needed: the final audio phase blocks at plan time
+    // (no audio stream), so nothing dispatches to a transcode-audio worker.
+    let mut worker = MkvtoolnixWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = root.join("out");
+    let staging_root = root.join("stage");
+    let outcome = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                remux_staging_root: staging_root.clone(),
+                remux_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await;
+    worker.shutdown().unwrap();
+    let outcome = outcome.unwrap();
+
+    // Phase 0 remux commits; the final audio phase blocks the only file.
+    assert_eq!(outcome.phases.len(), 2);
+    assert_eq!(outcome.phases[0].outcome, PhaseOutcome::Completed);
+    assert_eq!(outcome.phases[1].outcome, PhaseOutcome::Blocked);
+    let phase0 = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.phase_ordinal == 0)
+        .expect("phase 0 records a row");
+    assert_eq!(phase0.outcome, FilePhaseOutcome::Committed);
+    let phase1 = outcome
+        .file_phases
+        .iter()
+        .find(|row| row.phase_ordinal == 1)
+        .expect("phase 1 records a row");
+    assert_eq!(phase1.outcome, FilePhaseOutcome::Blocked);
+
+    // The terminal artifact (phase 0's remux output) is promoted to --output-dir
+    // even though the final phase produced nothing.
+    let mkvs = mkvs_in(&out_dir);
+    assert_eq!(
+        mkvs,
+        vec!["Movie.remux.mkv".to_owned()],
+        "the earlier-phase terminal artifact is promoted to --output-dir"
+    );
+    assert_eq!(
+        tip_location_value(&url, scanned_version).await,
+        out_dir.join("Movie.remux.mkv").display().to_string(),
+        "the chain tip location must point at the promoted output path"
+    );
+}
+
+/// The names of the `.mkv` files directly in `dir`, sorted.
+fn mkvs_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv"))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The live local-path location value of the chain tip (latest non-retired
+/// version) of the asset that `start_version` belongs to — read directly so the
+/// test pins the durable promoted path, not an in-memory projection.
+async fn tip_location_value(url: &str, start_version: FileVersionId) -> String {
+    let pool = voom_store::connect(url).await.unwrap();
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM file_locations \
+         WHERE retired_at IS NULL AND file_version_id = ( \
+             SELECT id FROM file_versions \
+             WHERE file_asset_id = (SELECT file_asset_id FROM file_versions WHERE id = ?) \
+               AND retired_at IS NULL \
+             ORDER BY id DESC LIMIT 1 \
+         ) \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(i64::try_from(start_version.0).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+}
+
+fn require_command(program: &str, args: &[&str]) {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .expect("required media tool must be available for this test");
+    assert!(
+        output.status.success(),
+        "required media tool `{program}` failed setup check with {}",
+        output.status
+    );
+}
+
+/// The remux + transcode-video worker pair for the cross-phase promotion test.
+struct RemuxTranscodeWorkers {
+    remux: TestWorkerLaunch,
+    transcode: TestWorkerLaunch,
+}
+
+impl RemuxTranscodeWorkers {
+    async fn start(cp: &ControlPlane) -> Self {
+        let remux = TestWorkerLaunch::start(
+            cp,
+            TestWorkerConfig::synthetic(
+                target_debug_binary("voom-mkvtoolnix-worker"),
+                "e2e-promote-remux",
+                "control-plane-promote-remux-secret",
+                "remux",
+            ),
+        )
+        .await
+        .unwrap();
+        let transcode = TestWorkerLaunch::start(
+            cp,
+            TestWorkerConfig::synthetic(
+                target_debug_binary("voom-ffmpeg-worker"),
+                "e2e-promote-transcode",
+                "control-plane-promote-transcode-secret",
+                "transcode_video",
+            ),
+        )
+        .await
+        .unwrap();
+        Self { remux, transcode }
+    }
+
+    fn shutdown(&mut self) {
+        self.remux.shutdown().unwrap();
+        self.transcode.shutdown().unwrap();
+    }
+}
+
+struct MkvtoolnixWorkerLaunch {
+    inner: TestWorkerLaunch,
+}
+
+impl MkvtoolnixWorkerLaunch {
+    async fn start(cp: &ControlPlane) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            inner: TestWorkerLaunch::start(
+                cp,
+                TestWorkerConfig::synthetic(
+                    target_debug_binary("voom-mkvtoolnix-worker"),
+                    "e2e-earlier-terminal-remux",
+                    "control-plane-earlier-terminal-secret",
+                    "remux",
+                ),
+            )
+            .await?,
+        })
+    }
+
+    fn shutdown(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.inner.shutdown()
+    }
 }
 
 async fn job_state(url: &str, job_id: voom_core::JobId) -> String {

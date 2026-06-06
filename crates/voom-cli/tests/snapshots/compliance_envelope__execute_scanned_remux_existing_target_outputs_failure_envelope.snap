@@ -7,32 +7,7 @@ expression: json
   "command": "compliance",
   "status": "error",
   "data": {
-    "issues": {
-      "created_count": 1,
-      "updated_count": 0,
-      "resolved_count": 0,
-      "skipped_count": 3
-    },
-    "summary": {
-      "job_id": "[job-id]",
-      "branch_count": 1,
-      "ticket_count": 1,
-      "dispatch_count": 1,
-      "retry_count": 0,
-      "failure_count": 1,
-      "peak_active_workflow_leases": 1,
-      "per_operation": {
-        "remux": {
-          "ticket_count": 1,
-          "dispatch_count": 1,
-          "success_count": 0,
-          "retry_count": 0,
-          "failure_count": 1
-        }
-      }
-    },
-    "phases": [],
-    "file_phases": []
+    "file_phases": null
   },
   "local": {
     "db_url": "[db-url]",
@@ -41,6 +16,6 @@ expression: json
   "warnings": [],
   "error": {
     "code": "CONFIG_INVALID",
-    "message": "config error: remux target path already exists: [tmp-dir]/out/Movie.remux.mkv"
+    "message": "config error: promotion destination already exists: [tmp-dir]/out/Movie.remux.mkv"
   }
 }

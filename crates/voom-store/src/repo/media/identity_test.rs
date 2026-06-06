@@ -1015,6 +1015,87 @@ async fn retire_file_location_stale_epoch_on_live_row_is_conflict() {
     assert_eq!(still.epoch, 1);
 }
 
+// ---- update_file_location_value_in_tx (post-run promotion repoint) ------
+
+#[tokio::test]
+async fn update_file_location_value_happy_path_sets_value_and_bumps_epoch() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+    assert_eq!(loc.epoch, 0);
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let updated = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(3),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        updated.id, loc.id,
+        "the location id is stable across a repoint"
+    );
+    assert_eq!(updated.value, "/srv/output/a.mkv");
+    assert_eq!(updated.epoch, 1);
+    assert!(updated.retired_at.is_none());
+}
+
+#[tokio::test]
+async fn update_file_location_value_stale_epoch_is_conflict_and_no_write() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
+        .bind(i64::try_from(loc.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(3),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // The value is unchanged — no partial write.
+    let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert_eq!(still.value, "/srv/media/a.mkv");
+}
+
+#[tokio::test]
+async fn update_file_location_value_on_retired_row_is_conflict() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            1,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(2),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
 // ---- retire_file_version_in_tx (M2 method; sibling-test gap plug) -------
 
 async fn fresh_with_one_live_version() -> (SqliteIdentityRepo, FileVersion, tempfile::NamedTempFile)

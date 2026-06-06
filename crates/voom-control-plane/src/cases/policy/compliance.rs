@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -215,6 +215,58 @@ impl ComplianceExecutionOptions {
         self.remux_target_dir.clone_from(&dir);
         self.audio_target_dir = dir;
     }
+
+    /// Per-operation `(working dir, --output-dir)` pairs the phase-barrier
+    /// coordinator uses for post-run promotion. Every phase commits its artifact
+    /// into the working dir (see [`committed_working_dir`]); after the run each
+    /// file's terminal artifact is moved from its working dir into the matching
+    /// `output_dir`. The `*_target_dir` fields carry the operator's intended
+    /// `--output-dir`, NOT the commit target.
+    pub(crate) fn promotion_plan(&self) -> PromotionPlan {
+        PromotionPlan {
+            pairs: vec![
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.transcode_staging_root, "transcode"),
+                    output_dir: self.transcode_target_dir.clone(),
+                },
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.remux_staging_root, "remux"),
+                    output_dir: self.remux_target_dir.clone(),
+                },
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.audio_staging_root, "audio"),
+                    output_dir: self.audio_target_dir.clone(),
+                },
+            ],
+        }
+    }
+}
+
+/// Subdirectory of a staging root that holds committed-but-not-yet-promoted
+/// artifacts, partitioned per operation so each family's working dir is a
+/// distinct prefix (promotion matches a terminal artifact to its output dir by
+/// working-dir prefix).
+const COMMITTED_SUBDIR: &str = ".committed";
+
+/// The directory a given operation family commits its artifacts into. Distinct
+/// from the operator's `--output-dir`: intermediate (non-terminal) artifacts
+/// stay here, and only each file's terminal artifact is promoted out.
+pub(crate) fn committed_working_dir(staging_root: &Path, operation: &str) -> PathBuf {
+    staging_root.join(COMMITTED_SUBDIR).join(operation)
+}
+
+/// One operation family's commit working dir paired with the operator output
+/// dir its terminal artifacts promote into.
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionPair {
+    pub(crate) working_dir: PathBuf,
+    pub(crate) output_dir: PathBuf,
+}
+
+/// Per-operation promotion pairs for a run, derived from the execution options.
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionPlan {
+    pub(crate) pairs: Vec<PromotionPair>,
 }
 
 impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
@@ -229,14 +281,26 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             audio_staging_root,
             audio_target_dir,
         } = options;
+        // Each operation commits into a per-family working dir under its staging
+        // root (the `OperationArtifactRoots::target_dir`), NOT the operator's
+        // `--output-dir` (the `*_target_dir` fields here). Post-run promotion
+        // moves each file's terminal artifact out to the output dir;
+        // intermediates stay in the working dir.
+        let _ = (&transcode_target_dir, &remux_target_dir, &audio_target_dir);
         Self {
             artifact_roots: WorkflowArtifactRoots {
                 transcode: OperationArtifactRoots::new(
-                    transcode_staging_root,
-                    transcode_target_dir,
+                    transcode_staging_root.clone(),
+                    committed_working_dir(&transcode_staging_root, "transcode"),
                 ),
-                remux: OperationArtifactRoots::new(remux_staging_root, remux_target_dir),
-                audio: OperationArtifactRoots::new(audio_staging_root, audio_target_dir),
+                remux: OperationArtifactRoots::new(
+                    remux_staging_root.clone(),
+                    committed_working_dir(&remux_staging_root, "remux"),
+                ),
+                audio: OperationArtifactRoots::new(
+                    audio_staging_root.clone(),
+                    committed_working_dir(&audio_staging_root, "audio"),
+                ),
             },
             ..WorkflowExecutorOptions::default()
         }

@@ -74,29 +74,36 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
 
     let converted = WorkflowExecutorOptions::from(options.clone());
 
+    // Staging roots pass through unchanged.
     assert_eq!(
         converted.artifact_roots.transcode.staging_root,
         options.transcode_staging_root
-    );
-    assert_eq!(
-        converted.artifact_roots.transcode.target_dir,
-        options.transcode_target_dir
     );
     assert_eq!(
         converted.artifact_roots.remux.staging_root,
         options.remux_staging_root
     );
     assert_eq!(
-        converted.artifact_roots.remux.target_dir,
-        options.remux_target_dir
-    );
-    assert_eq!(
         converted.artifact_roots.audio.staging_root,
         options.audio_staging_root
     );
+    // Commit target dirs route to per-operation working dirs, NOT the operator
+    // output dirs (`*_target_dir`); post-run promotion moves finals out.
+    assert_eq!(
+        converted.artifact_roots.transcode.target_dir,
+        super::committed_working_dir(&options.transcode_staging_root, "transcode")
+    );
+    assert_eq!(
+        converted.artifact_roots.remux.target_dir,
+        super::committed_working_dir(&options.remux_staging_root, "remux")
+    );
     assert_eq!(
         converted.artifact_roots.audio.target_dir,
-        options.audio_target_dir
+        super::committed_working_dir(&options.audio_staging_root, "audio")
+    );
+    assert_ne!(
+        converted.artifact_roots.transcode.target_dir,
+        options.transcode_target_dir
     );
     // Non-path fields stay at workflow defaults: the facade carries paths only.
     let workflow_defaults = WorkflowExecutorOptions::default();
@@ -460,9 +467,11 @@ async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
         workflow_payload.rendered_payload["staging_root"],
         "/custom/remux/staging"
     );
+    // Commits route to a per-operation working dir; promotion later moves the
+    // terminal artifact to `/custom/remux/output`.
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
-        "/custom/remux/output"
+        "/custom/remux/staging/.committed/remux"
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
@@ -523,9 +532,11 @@ async fn compliance_execute_options_reach_policy_audio_ticket_payload() {
         workflow_payload.rendered_payload["staging_root"],
         "/custom/audio/staging"
     );
+    // Commits route to a per-operation working dir; promotion later moves the
+    // terminal artifact to `/custom/audio/output`.
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
-        "/custom/audio/output"
+        "/custom/audio/staging/.committed/audio"
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],

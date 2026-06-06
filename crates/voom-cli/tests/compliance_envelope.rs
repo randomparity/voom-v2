@@ -123,16 +123,17 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     assert_eq!(json["command"], "compliance");
     assert_eq!(json["status"], "error");
     assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+    // The remux now commits to the working dir; the add-only conflict with an
+    // existing --output-dir file surfaces at post-run promotion instead of at
+    // commit time. The run fails (job failed, no terminal artifact promoted).
     assert!(
         json["error"]["message"]
             .as_str()
-            .is_some_and(|message| { message.contains("remux target path already exists") }),
+            .is_some_and(|message| { message.contains("promotion destination already exists") }),
         "stdout={} stderr={}",
         serde_json::to_string_pretty(&json).unwrap(),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(json["data"]["summary"]["dispatch_count"], 1);
-    assert_eq!(json["data"]["summary"]["failure_count"], 1);
     redact_local(&mut json);
     redact_execute_ids(&mut json);
     redact_temp_path_values(&mut json, &remux_root);
@@ -201,9 +202,16 @@ async fn execute_audio_uses_cli_staging_and_output_overrides() {
         workflow_payload.rendered_payload["staging_root"],
         staging_root.display().to_string()
     );
+    // Commits route to a per-operation working dir under the staging root, not
+    // the operator `--output-dir`; post-run promotion moves the terminal
+    // artifact out to `--output-dir`.
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
-        output_dir.display().to_string()
+        staging_root
+            .join(".committed")
+            .join("audio")
+            .display()
+            .to_string()
     );
 }
 

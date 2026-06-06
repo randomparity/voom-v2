@@ -679,6 +679,23 @@ pub trait IdentityRepo: Repository {
         retired_at: OffsetDateTime,
     ) -> Result<FileLocationId, VoomError>;
 
+    /// Update a live file location's `value` (path) in place under an epoch
+    /// guard, bumping its epoch and `observed_at`. Post-run artifact promotion
+    /// uses this to repoint a committed chain-tip artifact's durable location at
+    /// its promoted output path *without* changing the location id, so the
+    /// per-`(file, phase)` summary rows that reference it stay valid.
+    ///
+    /// Returns `Conflict` when the row is missing, already retired, or its
+    /// `expected_epoch` is stale.
+    async fn update_file_location_value_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: FileLocationId,
+        expected_epoch: u64,
+        value: String,
+        observed_at: OffsetDateTime,
+    ) -> Result<FileLocation, VoomError>;
+
     // identity_evidence CRUD.
     async fn record_identity_evidence_in_tx<'tx>(
         &self,
@@ -1472,6 +1489,36 @@ impl IdentityRepo for SqliteIdentityRepo {
             VoomError::Database(format!("file_locations replace savepoint release: {e}"))
         })?;
         Ok(new_id)
+    }
+
+    async fn update_file_location_value_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        id: FileLocationId,
+        expected_epoch: u64,
+        value: String,
+        observed_at: OffsetDateTime,
+    ) -> Result<FileLocation, VoomError> {
+        let ts = iso8601(observed_at)?;
+        let res = sqlx::query(
+            "UPDATE file_locations SET value = ?, observed_at = ?, epoch = epoch + 1 \
+             WHERE id = ? AND epoch = ? AND retired_at IS NULL",
+        )
+        .bind(&value)
+        .bind(&ts)
+        .bind(i64_from_u64(id.0))
+        .bind(i64_from_u64(expected_epoch))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("file_locations value update: {e}")))?;
+        if res.rows_affected() != 1 {
+            return Err(VoomError::Conflict(format!(
+                "file_locations value update: id={id} expected_epoch={expected_epoch} or already retired"
+            )));
+        }
+        get_file_location_in_tx(tx, id).await?.ok_or_else(|| {
+            VoomError::Internal(format!("file_locations post-update get vanished: {id}"))
+        })
     }
 
     async fn record_identity_evidence_in_tx<'tx>(
