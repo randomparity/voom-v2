@@ -46,8 +46,10 @@ Adopt two complementary layers:
    `Clock` (`ManualClock`).
 
 2. **Scoped check.** `scripts/check-paused-time-db.sh`, wired into `just ci`,
-   fails when one `crates/*/src/**/*_test.rs` file contains **both** a tokio
-   paused-time call and a DB-pool reference (`SqlitePool` or `ControlPlane`,
+   scans both sibling unit tests (`crates/*/src/**/*_test.rs`) and integration
+   tests (`crates/*/tests/**/*.rs`) — the trap is reachable in either — and
+   fails when one file contains **both** a tokio paused-time call and a DB-pool
+   reference (`SqlitePool` or `ControlPlane`,
    matched as exact identifier nodes). The paused-time signal matches the call
    in any idiomatic form — fully-qualified `tokio::time::pause()`/`advance(..)`,
    `time::pause()` via `use tokio::time;`, or a bare `pause()`/`advance(..)`

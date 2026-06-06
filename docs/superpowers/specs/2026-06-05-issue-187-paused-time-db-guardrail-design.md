@@ -63,10 +63,15 @@ one test file:
 (`executor_test.rs`, `registry_test.rs`, `clock_test_support_test.rs`) are the
 **domain** `ManualClock`, not tokio, and are unrelated to the trap.
 
-Implication: a check scoped to the **co-occurrence** of (a) a tokio paused-time
-call and (b) a DB-pool reference *in the same `*_test.rs` file* flags **nothing
-today** — `worker_test.rs` has the pause but no pool, so it is excluded by
-scope, not by an allowlist. CI stays green on adoption.
+Integration tests under `crates/*/tests/` build real pools but none use
+`tokio::time::pause`/`advance` today (verified: `rg` over `crates/*/tests`
+returns nothing), so widening the scan to cover them (see Detection design) adds
+no current hits.
+
+Implication: a check keyed on the **co-occurrence** of (a) a tokio paused-time
+call and (b) a DB-pool reference *in one file* flags **nothing today** —
+`worker_test.rs` has the pause but no pool, so it is excluded by scope, not by
+an allowlist. CI stays green on adoption.
 
 ## Decision summary
 
@@ -90,12 +95,22 @@ a flagged author with no guidance on the fix.
 
 ## Detection design
 
-The check operates on a **scan root** resolved CWD-relative (the `crates/*/src`
-glob, exactly like `check-test-layout.sh`). This makes it testable: a harness
-`cd`s into a temporary fixture tree laid out as `crates/<x>/src/<y>_test.rs` and
-runs the check there, so fixtures never touch the real `crates/` tree.
+The check operates on a **scan root** resolved CWD-relative (like
+`check-test-layout.sh`). This makes it testable: a harness `cd`s into a
+temporary fixture tree and runs the check there, so fixtures never touch the
+real `crates/` tree.
 
-For each `crates/*/src/**/*_test.rs` under the scan root:
+The pause+pool trap is reachable in **any** test, so the check scans both test
+locations — unlike `check-test-layout.sh`, whose sibling-layout concern is
+specific to `src/`:
+
+- sibling unit tests: `crates/*/src/**/*_test.rs`;
+- integration tests: `crates/*/tests/**/*.rs` (these routinely build a real
+  pool — e.g. `crates/voom-control-plane/tests/audio_extract_flow.rs` calls
+  `open_with_pool(pool.clone(), …)` — and could equally pair it with
+  `tokio::time::pause`).
+
+For each test file under the scan root:
 
 1. **Paused-time signal** (`ast-grep`, `--lang rust`). Present if the file
    contains a `tokio::time::pause` / `tokio::time::advance` call written in
@@ -209,6 +224,9 @@ sees the fixtures. Cases:
 - `use tokio::time::{pause, advance};` + bare `pause()` + `SqlitePool` → exit
   non-zero (the realistic reintroduction shape);
 - `use tokio::time;` + `time::pause()` + `ControlPlane` → exit non-zero;
+- an **integration-test fixture** (`crates/<x>/tests/<y>.rs`, no `_test.rs`
+  suffix) with `tokio::time::pause()` + `SqlitePool` → exit non-zero (proves the
+  `tests/` location is in scope);
 - paused-time only, no pool → exit 0 (the `worker_test.rs` shape);
 - pool only, no paused-time → exit 0;
 - `clock.advance(..)` (domain `ManualClock` method) + pool → exit 0 (method
