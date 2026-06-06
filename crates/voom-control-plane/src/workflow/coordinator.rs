@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -32,9 +33,10 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::ControlPlane;
-use crate::cases::policy::compliance::ComplianceExecutionOptions;
+use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
 use crate::cases::policy::plans::input_set_to_draft;
 use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
+use crate::cases::{begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
@@ -361,6 +363,7 @@ struct PhaseLoop<'a> {
     base_draft: PolicyInputSetDraft,
     executor: WorkflowExecutor,
     files: Vec<PhaseFile>,
+    promotion: PromotionPlan,
     phases: Vec<PhaseSummary>,
     file_phases: Vec<FilePhaseSummary>,
     last_run: Option<crate::workflow::WorkflowRunSummary>,
@@ -368,6 +371,9 @@ struct PhaseLoop<'a> {
 
 impl<'a> PhaseLoop<'a> {
     fn new(control_plane: &'a ControlPlane, inputs: PhaseLoopInputs) -> Self {
+        // Derive promotion pairs from the operator output dirs before the options
+        // are converted (the conversion repoints commit targets to working dirs).
+        let promotion = inputs.options.promotion_plan();
         let executor = WorkflowExecutor::with_options(
             control_plane.clone(),
             inputs.runtimes,
@@ -381,6 +387,7 @@ impl<'a> PhaseLoop<'a> {
             base_draft: inputs.base_draft,
             executor,
             files: inputs.files,
+            promotion,
             phases: Vec::new(),
             file_phases: inputs.seed_file_phases,
             last_run: None,
@@ -558,11 +565,37 @@ impl<'a> PhaseLoop<'a> {
         let Self {
             control_plane,
             job_id,
+            promotion,
             phases,
             file_phases,
             last_run,
             ..
         } = self;
+        // Promote each file's terminal artifact into --output-dir before the job
+        // succeeds: a promotion conflict must fail the run, not leave a job
+        // marked succeeded with finals stranded in the working dir. A promotion
+        // failure here happens after every phase already committed, so carry the
+        // accumulated phase/file rows in the error's partial outcome rather than
+        // discarding the operator's execution diagnostics.
+        if let Err(source) = control_plane.promote_terminal_artifacts(&promotion).await {
+            let summary = control_plane
+                .workflow_summaries
+                .insert_summary(
+                    job_grain_summary(job_id, last_run.as_ref()),
+                    control_plane.clock().now(),
+                )
+                .await
+                .map_err(CoordinatorError::from)?;
+            return Err(CoordinatorError {
+                source,
+                partial: Some(CoordinatorOutcome {
+                    job_id,
+                    summary,
+                    phases,
+                    file_phases,
+                }),
+            });
+        }
         control_plane
             .finalize_succeeded_run(job_id, last_run.as_ref(), phases, file_phases)
             .await
@@ -572,6 +605,161 @@ impl<'a> PhaseLoop<'a> {
 
 fn phase_ordinal(index: usize) -> Result<u32, VoomError> {
     u32::try_from(index).map_err(|e| VoomError::Internal(format!("phase ordinal overflow: {e}")))
+}
+
+/// A live local-path artifact location considered for promotion, with the asset
+/// it belongs to (to test whether it is the chain tip).
+struct WorkingDirArtifact {
+    location_id: FileLocationId,
+    file_version_id: FileVersionId,
+    asset_id: FileAssetId,
+    value: String,
+    epoch: u64,
+}
+
+impl WorkingDirArtifact {
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, VoomError> {
+        let location_id: i64 = row
+            .try_get("id")
+            .map_err(|e| VoomError::Database(format!("promotion location id: {e}")))?;
+        let file_version_id: i64 = row
+            .try_get("file_version_id")
+            .map_err(|e| VoomError::Database(format!("promotion location version: {e}")))?;
+        let asset_id: i64 = row
+            .try_get("file_asset_id")
+            .map_err(|e| VoomError::Database(format!("promotion location asset: {e}")))?;
+        let value: String = row
+            .try_get("value")
+            .map_err(|e| VoomError::Database(format!("promotion location value: {e}")))?;
+        let epoch: i64 = row
+            .try_get("epoch")
+            .map_err(|e| VoomError::Database(format!("promotion location epoch: {e}")))?;
+        Ok(Self {
+            location_id: FileLocationId(sqlite_u64(location_id)),
+            file_version_id: FileVersionId(sqlite_u64(file_version_id)),
+            asset_id: FileAssetId(sqlite_u64(asset_id)),
+            value,
+            epoch: sqlite_u64(epoch),
+        })
+    }
+}
+
+/// Canonicalized `(working dir, output dir)` pairs for a run. A working dir is
+/// absent when its operation produced nothing this run, so it is dropped.
+struct ResolvedPromotionDirs {
+    working_to_output: Vec<(PathBuf, PathBuf)>,
+}
+
+impl ResolvedPromotionDirs {
+    fn is_empty(&self) -> bool {
+        self.working_to_output.is_empty()
+    }
+
+    /// The output dir for an artifact path, by longest working-dir prefix match.
+    fn output_for(&self, path: &Path) -> Option<&Path> {
+        self.working_to_output
+            .iter()
+            .filter(|(working, _)| path.starts_with(working))
+            .max_by_key(|(working, _)| working.as_os_str().len())
+            .map(|(_, output)| output.as_path())
+    }
+}
+
+/// Canonicalize the promotion plan's working dirs that exist on disk.
+async fn resolve_promotion_dirs(plan: &PromotionPlan) -> ResolvedPromotionDirs {
+    let mut working_to_output = Vec::new();
+    for pair in &plan.pairs {
+        if let Ok(canonical) = tokio::fs::canonicalize(&pair.working_dir).await {
+            working_to_output.push((canonical, pair.output_dir.clone()));
+        }
+    }
+    ResolvedPromotionDirs { working_to_output }
+}
+
+/// The longest directory path shared by every input, compared component-wise
+/// (purely lexical — no filesystem access). Empty when the inputs share no
+/// leading component or the slice is empty.
+fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
+    let mut iter = dirs.iter();
+    let Some(first) = iter.next() else {
+        return PathBuf::new();
+    };
+    let mut common: Vec<Component> = first.components().collect();
+    for dir in iter {
+        let shared = common
+            .iter()
+            .zip(dir.components())
+            .take_while(|(a, b)| *a == b)
+            .count();
+        common.truncate(shared);
+    }
+    common.iter().collect()
+}
+
+fn sqlite_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn sqlite_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// Create and canonicalize an output directory ahead of a promotion move.
+async fn ensure_output_dir(output_dir: &Path) -> Result<PathBuf, VoomError> {
+    tokio::fs::create_dir_all(output_dir).await.map_err(|err| {
+        VoomError::Config(format!("create output dir {}: {err}", output_dir.display()))
+    })?;
+    tokio::fs::canonicalize(output_dir).await.map_err(|err| {
+        VoomError::Config(format!(
+            "canonicalize output dir {}: {err}",
+            output_dir.display()
+        ))
+    })
+}
+
+/// Move a terminal artifact into its promoted destination, add-only.
+///
+/// Fails on a live destination collision (mirrors the commit's no-replace
+/// contract). If the destination already exists but the source is gone, an
+/// earlier run promoted the bytes and crashed before repointing the location;
+/// that is treated as already-moved so a resume completes the repoint.
+async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, VoomError> {
+    match tokio::fs::symlink_metadata(dest).await {
+        Ok(_) => {
+            if tokio::fs::symlink_metadata(current).await.is_err() {
+                return Ok(dest.to_path_buf());
+            }
+            return Err(VoomError::Config(format!(
+                "promotion destination already exists: {}",
+                dest.display()
+            )));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(VoomError::Config(format!(
+                "stat promotion destination {}: {err}",
+                dest.display()
+            )));
+        }
+    }
+    if tokio::fs::rename(current, dest).await.is_ok() {
+        return Ok(dest.to_path_buf());
+    }
+    // Cross-filesystem rename fails; fall back to copy + remove.
+    tokio::fs::copy(current, dest).await.map_err(|err| {
+        VoomError::Config(format!(
+            "copy terminal artifact {} -> {}: {err}",
+            current.display(),
+            dest.display()
+        ))
+    })?;
+    tokio::fs::remove_file(current).await.map_err(|err| {
+        VoomError::Config(format!(
+            "remove promoted source {}: {err}",
+            current.display()
+        ))
+    })?;
+    Ok(dest.to_path_buf())
 }
 
 impl ControlPlane {
@@ -880,6 +1068,12 @@ impl ControlPlane {
         inputs: PhaseLoopInputs,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         if inputs.files.is_empty() || inputs.policy.phase_order.is_empty() {
+            // No phase loop runs (e.g. a resume where every file already
+            // completed). Files that committed in a prior, failed job were never
+            // promoted, so promote any terminal artifacts still in a working dir
+            // now, before the job succeeds.
+            let promotion = inputs.options.promotion_plan();
+            self.promote_terminal_artifacts(&promotion).await?;
             return Ok(self
                 .finalize_zero_phase_run(inputs.job_id, inputs.seed_file_phases)
                 .await?);
@@ -908,6 +1102,166 @@ impl ControlPlane {
             phases,
             file_phases,
         })
+    }
+
+    /// Promote each file's terminal (chain-tip) artifact out of its working dir
+    /// into the operator's `--output-dir`, repointing the artifact's durable
+    /// location at the promoted path so the chain tip resolves there.
+    ///
+    /// Driven by the durable file locations that currently live under a working
+    /// dir, NOT by this job's rows, so it also promotes: artifacts committed in a
+    /// prior failed job that a resume completed, and sibling-asset artifacts an
+    /// operation produces off the input chain (e.g. `extract_audio`). Only a
+    /// version that is its asset's chain tip is promoted — intermediate artifacts
+    /// (superseded by a later version in the same chain) stay in the working dir.
+    /// Idempotent: once promoted, a location no longer lives under a working dir,
+    /// so a re-run or resume skips it. Mirrors the commit's add-only contract —
+    /// a destination collision fails the run.
+    async fn promote_terminal_artifacts(&self, plan: &PromotionPlan) -> Result<(), VoomError> {
+        let dirs = resolve_promotion_dirs(plan).await;
+        if dirs.is_empty() {
+            return Ok(());
+        }
+        // Pass 1: collect the terminal artifacts that will promote, each with the
+        // directory of its asset's original scanned source. The longest common
+        // ancestor of those source dirs anchors a subtree-mirroring layout under
+        // the output dir, so two sources sharing a basename across different
+        // subdirectories (issue #197) promote to distinct destinations instead of
+        // colliding after their transcodes already ran.
+        let mut candidates = Vec::new();
+        let mut source_dirs = Vec::new();
+        for artifact in self.working_dir_artifacts().await? {
+            // `resolve_promotion_dirs` canonicalizes each working dir, so the
+            // candidate must be canonicalized too or a symlinked path component
+            // (e.g. macOS `/tmp` -> `/private/tmp`) breaks the prefix match and
+            // the terminal artifact is silently left in the working dir. The
+            // artifact exists at promotion time; fall back to the raw value if it
+            // does not so a vanished-but-still-live location still fails loudly in
+            // the move rather than being silently skipped.
+            let raw = PathBuf::from(&artifact.value);
+            let current = tokio::fs::canonicalize(&raw).await.unwrap_or(raw);
+            let Some(output_dir) = dirs.output_for(&current) else {
+                continue;
+            };
+            if !self
+                .is_chain_tip(artifact.asset_id, artifact.file_version_id)
+                .await?
+            {
+                // An intermediate artifact superseded by a later version in the
+                // same chain: it stays in the working dir.
+                continue;
+            }
+            let source_dir = self
+                .asset_source_path(artifact.asset_id)
+                .await?
+                .and_then(|path| path.parent().map(Path::to_path_buf));
+            if let Some(dir) = &source_dir {
+                source_dirs.push(dir.clone());
+            }
+            candidates.push((artifact, current, output_dir.to_path_buf(), source_dir));
+        }
+        let common_root = longest_common_dir(&source_dirs);
+        // Pass 2: move each terminal artifact under its mirrored subtree. A
+        // source dir under the common root contributes the relative subtree; an
+        // unknown source (no local-path location) falls back to a flat promotion.
+        for (artifact, current, output_dir, source_dir) in candidates {
+            let relative = source_dir
+                .as_deref()
+                .and_then(|dir| dir.strip_prefix(&common_root).ok())
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
+            let dest_dir = output_dir.join(&relative);
+            self.promote_artifact(&artifact, &current, &dest_dir)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The directory of an asset's original scanned source: the earliest
+    /// `file_version`'s first local-path location. `None` when the asset has no
+    /// such location (it then promotes flat). Add-only commits keep the earliest
+    /// version pointing at the scanned source even after later versions chain on.
+    async fn asset_source_path(&self, asset_id: FileAssetId) -> Result<Option<PathBuf>, VoomError> {
+        let versions = self.identity.list_file_versions_by_asset(asset_id).await?;
+        let Some(first) = versions.first() else {
+            return Ok(None);
+        };
+        let locations = self
+            .identity
+            .list_file_locations_by_version(first.id)
+            .await?;
+        Ok(locations
+            .into_iter()
+            .find(|location| location.kind == FileLocationKind::LocalPath)
+            .map(|location| PathBuf::from(location.value)))
+    }
+
+    /// Every live local-path file location, paired with its owning asset. The
+    /// caller filters to those under a working dir.
+    async fn working_dir_artifacts(&self) -> Result<Vec<WorkingDirArtifact>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT fl.id, fl.file_version_id, fv.file_asset_id, fl.value, fl.epoch \
+             FROM file_locations fl \
+             JOIN file_versions fv ON fv.id = fl.file_version_id \
+             WHERE fl.retired_at IS NULL AND fl.kind = 'local_path'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("promotion live locations: {e}")))?;
+        let mut artifacts = Vec::with_capacity(rows.len());
+        for row in rows {
+            artifacts.push(WorkingDirArtifact::from_row(&row)?);
+        }
+        Ok(artifacts)
+    }
+
+    /// Whether `version_id` is the chain tip of `asset_id` (no later non-retired
+    /// version exists on the asset).
+    async fn is_chain_tip(
+        &self,
+        asset_id: FileAssetId,
+        version_id: FileVersionId,
+    ) -> Result<bool, VoomError> {
+        let (newer,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM file_versions \
+             WHERE file_asset_id = ? AND retired_at IS NULL AND id > ?",
+        )
+        .bind(sqlite_i64(asset_id.0))
+        .bind(sqlite_i64(version_id.0))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("promotion chain-tip check: {e}")))?;
+        Ok(newer == 0)
+    }
+
+    /// Move a terminal artifact into `dest_dir` and repoint its location.
+    async fn promote_artifact(
+        &self,
+        artifact: &WorkingDirArtifact,
+        current: &Path,
+        dest_dir: &Path,
+    ) -> Result<(), VoomError> {
+        let file_name = current.file_name().ok_or_else(|| {
+            VoomError::Internal(format!(
+                "terminal artifact path has no file name: {}",
+                current.display()
+            ))
+        })?;
+        let dest_dir = ensure_output_dir(dest_dir).await?;
+        let dest = dest_dir.join(file_name);
+        let dest = move_terminal_artifact(current, &dest).await?;
+        let mut tx = begin_tx(&self.pool).await?;
+        self.identity
+            .update_file_location_value_in_tx(
+                &mut tx,
+                artifact.location_id,
+                artifact.epoch,
+                dest.display().to_string(),
+                self.clock().now(),
+            )
+            .await?;
+        commit_tx(tx).await?;
+        Ok(())
     }
 
     /// Resolve every active file's current chain tip (and its latest snapshot)

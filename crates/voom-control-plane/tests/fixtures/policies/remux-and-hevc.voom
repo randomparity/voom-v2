@@ -1,0 +1,9 @@
+policy "remux to mkv and transcode to hevc" {
+  phase remux {
+    container mkv
+  }
+  phase transcode {
+    depends_on: [remux]
+    transcode video to hevc
+  }
+}

@@ -65,6 +65,28 @@ async fn create_document_rejects_source_for_different_policy_slug() {
 }
 
 #[tokio::test]
+async fn create_document_with_duplicate_slug_is_conflict() {
+    let (repo, _tmp) = repo().await;
+    repo.create_document_with_version(draft(
+        "production-normalize",
+        "policy \"production-normalize\" { phase a {} }",
+    ))
+    .await
+    .unwrap();
+
+    let err = repo
+        .create_document_with_version(draft(
+            "production-normalize",
+            "policy \"production-normalize\" { phase a {} }",
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), "CONFLICT");
+    assert_eq!(repo.list_documents().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn list_documents_orders_by_slug() {
     let (repo, _tmp) = repo().await;
     let b = repo

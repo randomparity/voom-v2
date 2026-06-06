@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -46,6 +46,26 @@ use crate::workflow::{WorkflowExecutor, WorkflowRunSummary};
 use voom_plan::TargetRef;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+/// Whether a file named `name` exists anywhere under `dir` (recursively).
+/// Commits nest each artifact in a per-source `v{id}` subdir of the target dir
+/// (issue #197), so callers match the committed artifact by name.
+fn file_exists_under(dir: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            if file_exists_under(&path, name) {
+                return true;
+            }
+        } else if entry.file_name().to_string_lossy() == name {
+            return true;
+        }
+    }
+    false
+}
 
 #[tokio::test]
 async fn retry_on_database_locked_retries_locked_errors_until_success() {
@@ -1110,7 +1130,8 @@ async fn policy_remux_post_commit_snapshot_failure_fails_lease_retriable() {
     assert!(message.contains("commit_record_id"));
     assert!(message.contains("result_file_version_id=2"));
     assert!(message.contains("result_file_location_id"));
-    assert!(dir.path().join("out/Movie.remux.mkv").exists());
+    // Commits nest under a per-source `v{id}` subdir of the target dir (#197).
+    assert!(file_exists_under(&root.join("out"), "Movie.remux.mkv"));
     // The post-commit snapshot write is a local DB write, not a remux-operation
     // failure, so no artifact.remux_failed event is recorded. Because it surfaces
     // as a retriable external-system error (not a graceful recovery completion),

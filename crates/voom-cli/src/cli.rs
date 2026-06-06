@@ -90,22 +90,54 @@ pub enum PolicyCommand {
     /// Manage policy input sets.
     #[command(subcommand)]
     Input(PolicyInputCommand),
+    /// Create a policy document (with its initial accepted version) from a .voom file.
+    Create {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Manage versions of an existing policy document.
+    #[command(subcommand)]
+    Version(PolicyVersionCommand),
+    /// List policy documents.
+    List,
+    /// Show one policy document and its versions.
+    Show {
+        #[arg(long)]
+        document_id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PolicyVersionCommand {
+    /// Add a new accepted version to an existing document from a .voom file.
+    Add {
+        #[arg(long)]
+        document_id: u64,
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum PolicyInputCommand {
-    /// Create a policy input set from existing scan-created rows.
+    /// Create a policy input set from scan-created rows. Pass `--all` to cover
+    /// every live video file, or the full single-file arg set for one file.
     CreateFromScan {
         #[arg(long)]
         slug: String,
+        /// Whole-library mode: build from all live video file-versions.
+        #[arg(long, conflicts_with_all = ["file_version_id", "media_snapshot_id", "container", "video_codec"])]
+        all: bool,
+        #[arg(long, requires_all = ["media_snapshot_id", "container", "video_codec"])]
+        file_version_id: Option<u64>,
         #[arg(long)]
-        file_version_id: u64,
+        media_snapshot_id: Option<u64>,
         #[arg(long)]
-        media_snapshot_id: u64,
+        container: Option<String>,
         #[arg(long)]
-        container: String,
-        #[arg(long)]
-        video_codec: String,
+        video_codec: Option<String>,
     },
 }
 
@@ -223,6 +255,28 @@ pub enum WorkerCommand {
         #[arg(long)]
         worker_id: u64,
     },
+    /// Launch a bundled mutation worker locally, register it, and supervise it (foreground).
+    RunLocal {
+        #[arg(long)]
+        kind: LocalWorkerKindArg,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum LocalWorkerKindArg {
+    Ffmpeg,
+    Mkvtoolnix,
+}
+
+impl LocalWorkerKindArg {
+    #[must_use]
+    pub const fn to_control_plane(self) -> voom_control_plane::LocalWorkerKind {
+        match self {
+            Self::Ffmpeg => voom_control_plane::LocalWorkerKind::Ffmpeg,
+            Self::Mkvtoolnix => voom_control_plane::LocalWorkerKind::Mkvtoolnix,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

@@ -1015,6 +1015,87 @@ async fn retire_file_location_stale_epoch_on_live_row_is_conflict() {
     assert_eq!(still.epoch, 1);
 }
 
+// ---- update_file_location_value_in_tx (post-run promotion repoint) ------
+
+#[tokio::test]
+async fn update_file_location_value_happy_path_sets_value_and_bumps_epoch() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+    assert_eq!(loc.epoch, 0);
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let updated = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(3),
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        updated.id, loc.id,
+        "the location id is stable across a repoint"
+    );
+    assert_eq!(updated.value, "/srv/output/a.mkv");
+    assert_eq!(updated.epoch, 1);
+    assert!(updated.retired_at.is_none());
+}
+
+#[tokio::test]
+async fn update_file_location_value_stale_epoch_is_conflict_and_no_write() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    sqlx::query("UPDATE file_locations SET epoch = epoch + 1 WHERE id = ?")
+        .bind(i64::try_from(loc.id.0).unwrap())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            0,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(3),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+
+    // The value is unchanged — no partial write.
+    let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
+    assert_eq!(still.value, "/srv/media/a.mkv");
+}
+
+#[tokio::test]
+async fn update_file_location_value_on_retired_row_is_conflict() {
+    let (repo, loc, _tmp) = fresh_with_one_live_location().await;
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_location_in_tx(&mut tx, loc.id, T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    let err = repo
+        .update_file_location_value_in_tx(
+            &mut tx,
+            loc.id,
+            1,
+            "/srv/output/a.mkv".to_owned(),
+            T0 + Duration::seconds(2),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}
+
 // ---- retire_file_version_in_tx (M2 method; sibling-test gap plug) -------
 
 async fn fresh_with_one_live_version() -> (SqliteIdentityRepo, FileVersion, tempfile::NamedTempFile)
@@ -1092,6 +1173,44 @@ async fn retire_file_version_stale_epoch_on_live_row_is_conflict() {
     let still = repo.get_file_version(version.id).await.unwrap().unwrap();
     assert!(still.retired_at.is_none());
     assert_eq!(still.epoch, 1);
+}
+
+#[tokio::test]
+async fn list_live_file_versions_returns_only_non_retired_in_id_order() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let mut ids = Vec::new();
+    for i in 0..3u8 {
+        let version = repo
+            .create_file_version(NewFileVersion {
+                file_asset_id: asset.id,
+                content_hash: format!("hash-{i}"),
+                size_bytes: 100 + u64::from(i),
+                produced_by: ProducedBy::Ingest,
+                produced_from_version_id: None,
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        ids.push(version.id);
+    }
+
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.retire_file_version_in_tx(&mut tx, ids[1], T0 + Duration::seconds(1), 0)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let live = repo.list_live_file_versions().await.unwrap();
+    let live_ids: Vec<_> = live.iter().map(|v| v.id).collect();
+    assert_eq!(live_ids, vec![ids[0], ids[2]]);
+    assert!(live.iter().all(|v| v.retired_at.is_none()));
+}
+
+#[tokio::test]
+async fn list_live_file_versions_empty_on_clean_db() {
+    let (repo, _tmp) = fresh().await;
+    assert!(repo.list_live_file_versions().await.unwrap().is_empty());
 }
 
 // ---- replace_file_location_in_tx (new) ----------------------------------

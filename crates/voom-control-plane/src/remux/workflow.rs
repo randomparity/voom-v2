@@ -2,6 +2,7 @@ use serde_json::Value;
 use voom_core::{OperationKind, VoomError};
 use voom_worker_protocol::{RemuxRequest, RemuxResult};
 
+use crate::cases::policy::compliance::committed_source_dir;
 use crate::cases::{begin_tx, commit_tx};
 use crate::remux::commit::BundledRemuxResultProbeDispatcher;
 use crate::remux::{
@@ -106,15 +107,19 @@ fn remux_input_for_workflow_ticket(
         context.payload.get("remux").cloned().ok_or_else(|| {
             VoomError::Config("remux workflow payload missing `remux`".to_owned())
         })?;
+    let source_file_version_id = context.source_file_version_id()?;
     Ok(ExecuteRemuxInput {
         job_id: context.job_id("remux")?,
         ticket_id: context.ticket.id,
         lease_id: context.lease_id,
-        source_file_version_id: context.source_file_version_id()?,
+        source_file_version_id,
         source_location_id: context.source_location_id(),
         operation_payload,
         staging_root: context.artifact_roots.staging_root.clone(),
-        target_dir: context.artifact_roots.target_dir.clone(),
+        target_dir: committed_source_dir(
+            &context.artifact_roots.target_dir,
+            source_file_version_id,
+        ),
     })
 }
 

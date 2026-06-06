@@ -59,6 +59,17 @@ impl WorkerRuntimeRegistry {
             .cloned()
             .ok_or_else(|| VoomError::Config(format!("missing runtime for worker {worker_id}")))
     }
+
+    /// Iterate the registered `(worker_id, runtime)` pairs, e.g. to probe each
+    /// worker's endpoint before dispatch.
+    pub fn entries(&self) -> impl Iterator<Item = (WorkerId, &WorkerRuntime)> {
+        self.runtimes.iter().map(|(id, runtime)| (*id, runtime))
+    }
+
+    /// Drop a worker's runtime, e.g. after its endpoint fails a liveness probe.
+    pub fn remove(&mut self, worker_id: WorkerId) {
+        self.runtimes.remove(&worker_id);
+    }
 }
 
 #[cfg(test)]

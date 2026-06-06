@@ -161,16 +161,22 @@ async fn audio_transcode_existing_target_path_fails_before_success_reporting() {
         .unwrap_err();
     worker.shutdown().unwrap();
 
+    // The audio transcode now commits to the working dir; the add-only conflict
+    // with an existing --output-dir file surfaces at post-run promotion. The
+    // promotion failure happens after the transcode already committed, so the
+    // partial outcome preserves the run's execution diagnostics (the committed
+    // `(file, phase)` row) rather than discarding them.
     assert!(
         err.source
             .to_string()
-            .contains("audio target path already exists")
+            .contains("promotion destination already exists"),
+        "unexpected error: {}",
+        err.source
     );
+    // A post-compute promotion failure must preserve the committed file phases.
     let partial = err.partial.unwrap();
-    assert_eq!(partial.summary.failure_count, 1);
-    // The audio transcode failed before committing, so no file advanced: the
-    // partial carries no committed per-(file, phase) row.
-    assert!(partial.file_phases.is_empty());
+    assert_eq!(partial.file_phases.len(), 1);
+    assert_eq!(partial.file_phases[0].outcome, "committed");
 }
 
 fn tempdir_in_repo() -> tempfile::TempDir {
@@ -329,10 +335,18 @@ async fn assert_audio_transcode_execution_result(
     assert!(staged_artifact_handle_id > 0);
     assert!(verification_id > 0);
     assert!(commit_record_id > 0);
+    // Post-run promotion moved the terminal artifact into --output-dir, keeping
+    // its file name.
     assert!(out_dir.join("Movie.audio-opus.mkv").is_file());
-    assert_eq!(
-        result["target_path"].as_str(),
-        Some(out_dir.join("Movie.audio-opus.mkv").to_str().unwrap())
+    // The worker committed into the per-operation working dir, not --output-dir.
+    let committed = result["target_path"].as_str().unwrap();
+    assert!(
+        committed.contains("/.committed/audio/") && committed.ends_with("Movie.audio-opus.mkv"),
+        "commit must target the working dir, got {committed}"
+    );
+    assert!(
+        !committed.starts_with(out_dir.to_str().unwrap()),
+        "commit must not target --output-dir directly: {committed}"
     );
 
     let pool = voom_store::connect(url).await.unwrap();

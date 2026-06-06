@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::BTreeSet;
+
 use serde_json::json;
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
@@ -41,7 +43,62 @@ fn selection_preserves_video_and_applies_audio_keep() {
             .collect::<Vec<_>>(),
         vec!["stream-0", "stream-1"]
     );
-    assert_eq!(selection.default_streams[0].snapshot_stream_id, "stream-1");
+    assert_eq!(
+        selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["stream-0", "stream-1"]),
+        "explicit audio default and preserved source-default video"
+    );
+}
+
+#[test]
+fn selection_preserves_source_default_video_without_defaults_action() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": []
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng"]);
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert_eq!(
+        selection
+            .default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stream-0"]
+    );
+    assert!(selection.clear_default_streams.is_empty());
+}
+
+#[test]
+fn selection_keeps_default_streams_empty_for_non_default_video() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": []
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng"]);
+    snapshot.payload["streams"][0]["disposition"]["default"] = json!(false);
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert!(
+        selection.default_streams.is_empty(),
+        "a non-default source video must not be forced default (MKV-source behavior)"
+    );
+    assert!(selection.clear_default_streams.is_empty());
 }
 
 #[test]

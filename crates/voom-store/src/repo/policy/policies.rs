@@ -92,7 +92,16 @@ impl SqlitePolicyRepo {
         .bind(&created_at)
         .execute(&mut *tx)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_documents insert: {e}")))?;
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                VoomError::Conflict(format!(
+                    "policy document slug {:?} already exists",
+                    draft.slug
+                ))
+            } else {
+                VoomError::Database(format!("policy_documents insert: {e}"))
+            }
+        })?;
         let document_id = PolicyDocumentId(u64_from_i64(document_res.last_insert_rowid()));
 
         let version_res = insert_version(

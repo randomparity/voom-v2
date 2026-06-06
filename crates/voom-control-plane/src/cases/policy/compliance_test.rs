@@ -74,29 +74,36 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
 
     let converted = WorkflowExecutorOptions::from(options.clone());
 
+    // Staging roots pass through unchanged.
     assert_eq!(
         converted.artifact_roots.transcode.staging_root,
         options.transcode_staging_root
-    );
-    assert_eq!(
-        converted.artifact_roots.transcode.target_dir,
-        options.transcode_target_dir
     );
     assert_eq!(
         converted.artifact_roots.remux.staging_root,
         options.remux_staging_root
     );
     assert_eq!(
-        converted.artifact_roots.remux.target_dir,
-        options.remux_target_dir
-    );
-    assert_eq!(
         converted.artifact_roots.audio.staging_root,
         options.audio_staging_root
     );
+    // Commit target dirs route to per-operation working dirs, NOT the operator
+    // output dirs (`*_target_dir`); post-run promotion moves finals out.
+    assert_eq!(
+        converted.artifact_roots.transcode.target_dir,
+        super::committed_working_dir(&options.transcode_staging_root, "transcode")
+    );
+    assert_eq!(
+        converted.artifact_roots.remux.target_dir,
+        super::committed_working_dir(&options.remux_staging_root, "remux")
+    );
     assert_eq!(
         converted.artifact_roots.audio.target_dir,
-        options.audio_target_dir
+        super::committed_working_dir(&options.audio_staging_root, "audio")
+    );
+    assert_ne!(
+        converted.artifact_roots.transcode.target_dir,
+        options.transcode_target_dir
     );
     // Non-path fields stay at workflow defaults: the facade carries paths only.
     let workflow_defaults = WorkflowExecutorOptions::default();
@@ -108,6 +115,22 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
         converted.timing.lease_ttl,
         workflow_defaults.timing.lease_ttl
     );
+}
+
+#[test]
+fn committed_source_dir_namespaces_per_source_under_the_working_dir() {
+    use voom_core::FileVersionId;
+
+    let working = super::committed_working_dir(&PathBuf::from("/srv/staging"), "remux");
+    let a = super::committed_source_dir(&working, FileVersionId(7));
+    let b = super::committed_source_dir(&working, FileVersionId(8));
+
+    // Distinct sources get distinct commit dirs (no flat collision), and each
+    // stays under the operation working dir so promotion's prefix match holds.
+    assert_eq!(a, working.join("v7"));
+    assert_ne!(a, b);
+    assert!(a.starts_with(&working));
+    assert!(b.starts_with(&working));
 }
 
 #[test]
@@ -460,9 +483,11 @@ async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
         workflow_payload.rendered_payload["staging_root"],
         "/custom/remux/staging"
     );
+    // Commits route to a per-operation working dir; promotion later moves the
+    // terminal artifact to `/custom/remux/output`.
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
-        "/custom/remux/output"
+        "/custom/remux/staging/.committed/remux"
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
@@ -523,9 +548,11 @@ async fn compliance_execute_options_reach_policy_audio_ticket_payload() {
         workflow_payload.rendered_payload["staging_root"],
         "/custom/audio/staging"
     );
+    // Commits route to a per-operation working dir; promotion later moves the
+    // terminal artifact to `/custom/audio/output`.
     assert_eq!(
         workflow_payload.rendered_payload["target_dir"],
-        "/custom/audio/output"
+        "/custom/audio/staging/.committed/audio"
     );
     assert_eq!(
         workflow_payload.rendered_payload["source_file_version_id"],
@@ -595,6 +622,101 @@ async fn policy_runtime_registry_loads_extract_audio_workers() {
 
     let runtime = registry.get(worker_id).unwrap();
     assert_eq!(runtime.credentials.worker_id, worker_id);
+}
+
+#[tokio::test]
+async fn live_policy_runtime_registry_drops_unreachable_endpoint() {
+    let (cp, _tmp) = cp().await;
+    // 127.0.0.1:1 is a closed privileged port: a connection is refused fast,
+    // standing in for a stale endpoint left by a hard-killed run-local.
+    let worker_id = register_policy_worker_with_extra(
+        &cp,
+        OperationKind::TranscodeVideo,
+        "policy-test-dead-endpoint",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:1",
+            "secret": "policy-dead-secret",
+        }),
+    )
+    .await;
+
+    // The worker is registered, so the unfiltered registry includes it...
+    let registered = cp.policy_runtime_registry().await.unwrap();
+    assert!(
+        registered.get(worker_id).is_ok(),
+        "unfiltered registry must include the registered worker"
+    );
+
+    // ...but the liveness-filtered registry drops the unreachable endpoint.
+    let live = cp.live_policy_runtime_registry().await.unwrap();
+    assert!(
+        live.get(worker_id).is_err(),
+        "liveness check must drop the dead endpoint"
+    );
+}
+
+#[tokio::test]
+async fn execute_reports_actionable_error_when_no_live_worker_for_remux() {
+    let (cp, _tmp) = cp().await;
+    let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
+    let created_policy = cp
+        .create_policy_document("container-metadata", &source)
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_video(&cp).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "scan-remux-dead-worker".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    register_policy_worker_with_extra(
+        &cp,
+        OperationKind::Remux,
+        "policy-test-remux-dead",
+        serde_json::json!({
+            "endpoint": "127.0.0.1:1",
+            "secret": "remux-dead-secret",
+        }),
+    )
+    .await;
+
+    let err = cp
+        .execute_compliance_policy(created_policy.version.id, input.input_set_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "CONFIG_INVALID");
+    let message = err.source.to_string();
+    assert!(
+        message.contains("no live worker for operation 'remux'"),
+        "message must name the missing operation, got: {message}"
+    );
+    assert!(
+        message.contains("voom worker run-local --kind mkvtoolnix"),
+        "message must suggest the fix, got: {message}"
+    );
+    // The check is pre-dispatch: no issues applied and no tickets created.
+    let issue_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        issue_count, 0,
+        "no issues must be committed before dispatch"
+    );
+    let ticket_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    assert_eq!(
+        ticket_count, 0,
+        "no tickets must be created before dispatch"
+    );
 }
 
 #[tokio::test]

@@ -1,13 +1,18 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use serde_json::json;
 use sqlx::Row;
-use voom_core::{OperationKind, PolicyInputSetId, PolicyVersionId, VoomError, WorkerId};
+use voom_core::{
+    FileVersionId, OperationKind, PROTOCOL_VERSION, PolicyInputSetId, PolicyVersionId, VoomError,
+    WorkerId,
+};
 use voom_events::{Event, SubjectType, payload::IssueLifecyclePayload};
+use voom_plan::PlanOperationKind;
 use voom_store::repo::{
     PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueStatus,
 };
@@ -211,6 +216,71 @@ impl ComplianceExecutionOptions {
         self.remux_target_dir.clone_from(&dir);
         self.audio_target_dir = dir;
     }
+
+    /// Per-operation `(working dir, --output-dir)` pairs the phase-barrier
+    /// coordinator uses for post-run promotion. Every phase commits its artifact
+    /// into the working dir (see [`committed_working_dir`]); after the run each
+    /// file's terminal artifact is moved from its working dir into the matching
+    /// `output_dir`. The `*_target_dir` fields carry the operator's intended
+    /// `--output-dir`, NOT the commit target.
+    pub(crate) fn promotion_plan(&self) -> PromotionPlan {
+        PromotionPlan {
+            pairs: vec![
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.transcode_staging_root, "transcode"),
+                    output_dir: self.transcode_target_dir.clone(),
+                },
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.remux_staging_root, "remux"),
+                    output_dir: self.remux_target_dir.clone(),
+                },
+                PromotionPair {
+                    working_dir: committed_working_dir(&self.audio_staging_root, "audio"),
+                    output_dir: self.audio_target_dir.clone(),
+                },
+            ],
+        }
+    }
+}
+
+/// Subdirectory of a staging root that holds committed-but-not-yet-promoted
+/// artifacts, partitioned per operation so each family's working dir is a
+/// distinct prefix (promotion matches a terminal artifact to its output dir by
+/// working-dir prefix).
+const COMMITTED_SUBDIR: &str = ".committed";
+
+/// The directory a given operation family commits its artifacts into. Distinct
+/// from the operator's `--output-dir`: intermediate (non-terminal) artifacts
+/// stay here, and only each file's terminal artifact is promoted out.
+pub(crate) fn committed_working_dir(staging_root: &Path, operation: &str) -> PathBuf {
+    staging_root.join(COMMITTED_SUBDIR).join(operation)
+}
+
+/// The per-source commit directory under an operation's working dir. Two sources
+/// that share a basename across different subdirectories would otherwise commit
+/// to the same flat path in the shared working dir and collide (issue #197);
+/// namespacing the commit by the source file-version id keeps them distinct.
+/// Promotion still matches by working-dir prefix and later mirrors each terminal
+/// artifact's source subtree into `--output-dir`.
+pub(crate) fn committed_source_dir(
+    working_dir: &Path,
+    source_file_version_id: FileVersionId,
+) -> PathBuf {
+    working_dir.join(format!("v{}", source_file_version_id.0))
+}
+
+/// One operation family's commit working dir paired with the operator output
+/// dir its terminal artifacts promote into.
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionPair {
+    pub(crate) working_dir: PathBuf,
+    pub(crate) output_dir: PathBuf,
+}
+
+/// Per-operation promotion pairs for a run, derived from the execution options.
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionPlan {
+    pub(crate) pairs: Vec<PromotionPair>,
 }
 
 impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
@@ -225,14 +295,26 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             audio_staging_root,
             audio_target_dir,
         } = options;
+        // Each operation commits into a per-family working dir under its staging
+        // root (the `OperationArtifactRoots::target_dir`), NOT the operator's
+        // `--output-dir` (the `*_target_dir` fields here). Post-run promotion
+        // moves each file's terminal artifact out to the output dir;
+        // intermediates stay in the working dir.
+        let _ = (&transcode_target_dir, &remux_target_dir, &audio_target_dir);
         Self {
             artifact_roots: WorkflowArtifactRoots {
                 transcode: OperationArtifactRoots::new(
-                    transcode_staging_root,
-                    transcode_target_dir,
+                    transcode_staging_root.clone(),
+                    committed_working_dir(&transcode_staging_root, "transcode"),
                 ),
-                remux: OperationArtifactRoots::new(remux_staging_root, remux_target_dir),
-                audio: OperationArtifactRoots::new(audio_staging_root, audio_target_dir),
+                remux: OperationArtifactRoots::new(
+                    remux_staging_root.clone(),
+                    committed_working_dir(&remux_staging_root, "remux"),
+                ),
+                audio: OperationArtifactRoots::new(
+                    audio_staging_root.clone(),
+                    committed_working_dir(&audio_staging_root, "audio"),
+                ),
             },
             ..WorkflowExecutorOptions::default()
         }
@@ -457,21 +539,30 @@ impl ControlPlane {
         input_set_id: PolicyInputSetId,
         options: ComplianceExecutionOptions,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let runtimes =
-            self.policy_runtime_registry()
-                .await
-                .map_err(|source| ComplianceExecuteError {
-                    source,
-                    partial: None,
-                })?;
-        self.execute_compliance_with_runtimes(policy_version_id, input_set_id, options, runtimes)
+        let registered = self.policy_runtime_registry().await.map_err(no_partial)?;
+        let live = self.probe_live_runtimes(registered.clone()).await;
+        let report_data = self
+            .generate_compliance_report(policy_version_id, input_set_id)
             .await
+            .map_err(no_partial)?;
+        self.reject_dead_endpoint_operations(&report_data.plan, &registered, &live)
+            .await
+            .map_err(no_partial)?;
+        self.execute_compliance_with_report(
+            report_data,
+            policy_version_id,
+            input_set_id,
+            options,
+            live,
+        )
+        .await
     }
 
     /// Apply the initial report's findings to durable issues, then drive the
     /// phase-barrier coordinator with the given runtime registry. Issue
     /// application runs once up front (unchanged from Sprints 12–15); the
     /// per-phase workflow execution is the coordinator's.
+    #[cfg(test)]
     async fn execute_compliance_with_runtimes(
         &self,
         policy_version_id: PolicyVersionId,
@@ -482,17 +573,29 @@ impl ControlPlane {
         let report_data = self
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
+            .map_err(no_partial)?;
+        self.execute_compliance_with_report(
+            report_data,
+            policy_version_id,
+            input_set_id,
+            options,
+            runtimes,
+        )
+        .await
+    }
+
+    async fn execute_compliance_with_report(
+        &self,
+        report_data: ComplianceReportData,
+        policy_version_id: PolicyVersionId,
+        input_set_id: PolicyInputSetId,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let apply_data = self
             .apply_generated_compliance_report(&report_data, policy_version_id)
             .await
-            .map_err(|source| ComplianceExecuteError {
-                source,
-                partial: None,
-            })?;
+            .map_err(no_partial)?;
         let issues = apply_data.issues;
         match self
             .run_phase_barrier_with_runtimes(policy_version_id, input_set_id, options, runtimes)
@@ -564,6 +667,124 @@ impl ControlPlane {
             );
         }
         Ok(registry)
+    }
+
+    /// [`Self::policy_runtime_registry`] with each worker's recorded endpoint
+    /// probed for liveness, dropping any whose `handshake` does not succeed
+    /// within [`LIVENESS_PROBE_TIMEOUT`]. A stale endpoint left by a
+    /// hard-killed `run-local` is excluded here so `execute` fails fast before
+    /// dispatch instead of mid-workflow after partial commits.
+    ///
+    /// # Errors
+    /// Propagates database errors from [`Self::policy_runtime_registry`].
+    #[cfg(test)]
+    pub(crate) async fn live_policy_runtime_registry(
+        &self,
+    ) -> Result<WorkerRuntimeRegistry, VoomError> {
+        let registered = self.policy_runtime_registry().await?;
+        Ok(self.probe_live_runtimes(registered).await)
+    }
+
+    /// Drop every worker whose endpoint does not complete a handshake within
+    /// [`LIVENESS_PROBE_TIMEOUT`], returning only the reachable runtimes.
+    async fn probe_live_runtimes(
+        &self,
+        mut registry: WorkerRuntimeRegistry,
+    ) -> WorkerRuntimeRegistry {
+        let mut dead = Vec::new();
+        for (worker_id, runtime) in registry.entries() {
+            let probe = tokio::time::timeout(
+                LIVENESS_PROBE_TIMEOUT,
+                runtime.client.handshake(PROTOCOL_VERSION),
+            )
+            .await;
+            if !matches!(probe, Ok(Ok(_))) {
+                dead.push(worker_id);
+            }
+        }
+        for worker_id in dead {
+            registry.remove(worker_id);
+        }
+        registry
+    }
+
+    /// Reject a run whose plan has a planned operation whose only registered
+    /// worker(s) failed the liveness probe — the stale-endpoint case that would
+    /// otherwise surface as a `missing runtime for worker` crash mid-dispatch.
+    /// Operations with no registered worker at all are left to the per-ticket
+    /// no-eligible-worker path, preserving partial-coverage dispatch.
+    async fn reject_dead_endpoint_operations(
+        &self,
+        plan: &voom_plan::ExecutionPlan,
+        registered: &WorkerRuntimeRegistry,
+        live: &WorkerRuntimeRegistry,
+    ) -> Result<(), VoomError> {
+        let dead_operations = self
+            .operations_lost_to_dead_endpoints(registered, live)
+            .await?;
+        for node in &plan.nodes {
+            if node.status != voom_plan::NodeStatus::Planned {
+                continue;
+            }
+            let Some((operation, worker_kind)) = policy_worker_requirement(node.operation_kind)
+            else {
+                continue;
+            };
+            if dead_operations.contains(operation) {
+                return Err(VoomError::Config(format!(
+                    "no live worker for operation '{operation}'; start one with: \
+                     voom worker run-local --kind {worker_kind}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Policy operation names (`remux`, `transcode_video`, …) that have a
+    /// registered worker but no *live* one: every worker for the operation
+    /// failed its endpoint liveness probe.
+    async fn operations_lost_to_dead_endpoints(
+        &self,
+        registered: &WorkerRuntimeRegistry,
+        live: &WorkerRuntimeRegistry,
+    ) -> Result<HashSet<String>, VoomError> {
+        let registered_ids: HashSet<WorkerId> = registered.entries().map(|(id, _)| id).collect();
+        let live_ids: HashSet<WorkerId> = live.entries().map(|(id, _)| id).collect();
+        if registered_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let rows = sqlx::query(
+            "SELECT w.id, wc.operation \
+             FROM workers w \
+             JOIN worker_capabilities wc ON wc.worker_id = w.id \
+             WHERE w.status IN ('registered', 'active') \
+               AND wc.operation IN (?, ?, ?, ?)",
+        )
+        .bind(OperationKind::Remux.as_str())
+        .bind(OperationKind::TranscodeVideo.as_str())
+        .bind(OperationKind::TranscodeAudio.as_str())
+        .bind(OperationKind::ExtractAudio.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::Database(format!("dead endpoint operations: {e}")))?;
+
+        let mut registered_operations = HashSet::new();
+        let mut live_operations = HashSet::new();
+        for row in rows {
+            let worker_id_raw = row
+                .try_get::<i64, _>("id")
+                .map_err(|e| VoomError::Database(format!("dead endpoint worker id: {e}")))?;
+            let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
+            let operation: String = row
+                .try_get("operation")
+                .map_err(|e| VoomError::Database(format!("dead endpoint operation: {e}")))?;
+            if live_ids.contains(&worker_id) {
+                live_operations.insert(operation);
+            } else if registered_ids.contains(&worker_id) {
+                registered_operations.insert(operation);
+            }
+        }
+        Ok(&registered_operations - &live_operations)
     }
 
     pub(crate) async fn load_current_accepted_policy_and_input(
@@ -676,6 +897,42 @@ impl ControlPlane {
             file_phases,
             latest_phase_index,
         })
+    }
+}
+
+/// How long an endpoint has to complete a handshake before it is treated as
+/// dead. Short enough that a stale endpoint fails the run quickly; long enough
+/// that a busy-but-live worker is not falsely dropped.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn no_partial(source: VoomError) -> ComplianceExecuteError {
+    ComplianceExecuteError {
+        source,
+        partial: None,
+    }
+}
+
+/// Map a plan operation to the worker operation name it dispatches as and the
+/// `run-local --kind` value that starts a worker for it. Operations with no
+/// executing worker (metadata edits, container set, conditionals) return
+/// `None`: the coordinator handles them without a runtime.
+fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        PlanOperationKind::Remux => Some(("remux", "mkvtoolnix")),
+        PlanOperationKind::TranscodeVideo => Some(("transcode_video", "ffmpeg")),
+        PlanOperationKind::TranscodeAudio => Some(("transcode_audio", "ffmpeg")),
+        PlanOperationKind::ExtractAudio => Some(("extract_audio", "ffmpeg")),
+        PlanOperationKind::SetContainer
+        | PlanOperationKind::KeepTracks
+        | PlanOperationKind::RemoveTracks
+        | PlanOperationKind::ReorderTracks
+        | PlanOperationKind::SetDefaults
+        | PlanOperationKind::ClearTrackActions
+        | PlanOperationKind::ClearTags
+        | PlanOperationKind::SetTag
+        | PlanOperationKind::DeleteTag
+        | PlanOperationKind::Conditional
+        | PlanOperationKind::Rules => None,
     }
 }
 

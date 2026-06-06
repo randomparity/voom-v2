@@ -842,3 +842,170 @@ async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
         .unwrap();
     assert_eq!(jobs, 1, "resume opened no job beyond the prior one");
 }
+
+/// Post-run promotion canonicalizes the working dirs, so the candidate artifact
+/// path must be canonicalized too: a live location recorded at a path that
+/// traverses a symlink (e.g. macOS `/tmp` -> `/private/tmp`) must still match its
+/// working dir and be promoted. A non-symmetric prefix match would silently leave
+/// the terminal artifact in the working dir while the job succeeded.
+#[tokio::test]
+async fn promote_terminal_artifacts_matches_through_symlinked_working_dir() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+
+    // A real working dir + output dir, and a symlink pointing at the real root.
+    let real = root.join("real");
+    let working = real.join(".committed").join("remux");
+    std::fs::create_dir_all(&working).unwrap();
+    let out_dir = real.join("out");
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    // A committed terminal artifact on disk, recorded at its SYMLINKED path.
+    std::fs::write(working.join("Movie.mkv"), b"terminal-bytes").unwrap();
+    let symlinked_value = link
+        .join(".committed")
+        .join("remux")
+        .join("Movie.mkv")
+        .display()
+        .to_string();
+    let version = seed_version(
+        &cp,
+        &symlinked_value,
+        "hash-symlink",
+        reprobe_payload("hevc"),
+    )
+    .await;
+
+    // The working dir is supplied symlinked, exactly as it would arrive from a
+    // `--staging-root` that traverses a symlink.
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: link.join(".committed").join("remux"),
+            output_dir: out_dir.clone(),
+        }],
+    };
+
+    cp.promote_terminal_artifacts(&plan).await.unwrap();
+
+    let promoted = out_dir.join("Movie.mkv");
+    assert!(
+        promoted.is_file(),
+        "the terminal artifact must be promoted through the symlinked working dir"
+    );
+    assert!(
+        !working.join("Movie.mkv").exists(),
+        "the artifact must be moved out of the working dir"
+    );
+    let location = cp
+        .identity()
+        .list_live_file_locations_by_version(version)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        location.value,
+        promoted.display().to_string(),
+        "the chain tip location must repoint to the promoted (canonical) path"
+    );
+}
+
+/// A whole-library run over two sources that share a basename across
+/// subdirectories must not collide at promotion (issue #197): each terminal
+/// artifact lands under `--output-dir` mirroring its source's path relative to
+/// the run's common root. A flat-by-basename promotion would move both to the
+/// same destination and fail the run after the transcodes already ran.
+#[tokio::test]
+async fn promote_terminal_artifacts_mirrors_source_subtree_for_duplicate_basenames() {
+    use crate::cases::policy::compliance::{PromotionPair, PromotionPlan};
+
+    let (cp, _db) = cp().await;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let working = root.join(".committed").join("remux");
+    let out_dir = root.join("out");
+
+    // Two assets whose ORIGINAL sources live in different subdirs but share the
+    // basename `episode.mkv`.
+    let mut tips = Vec::new();
+    for season in ["S01", "S02"] {
+        let source = format!("/library/{season}/episode.mkv");
+        let v1 = seed_version(
+            &cp,
+            &source,
+            &format!("hash-{season}"),
+            reprobe_payload("h264"),
+        )
+        .await;
+        let asset_id = cp
+            .identity()
+            .get_file_version(v1)
+            .await
+            .unwrap()
+            .unwrap()
+            .file_asset_id;
+        // The terminal (chain-tip) artifact, committed into a per-source working
+        // subdir (matching the commit-uniqueness layout).
+        let v2 = cp
+            .create_file_version(NewFileVersion {
+                file_asset_id: asset_id,
+                content_hash: format!("hash-{season}-remux"),
+                size_bytes: 2048,
+                produced_by: ProducedBy::Remux,
+                produced_from_version_id: Some(v1),
+                created_at: T0,
+            })
+            .await
+            .unwrap();
+        let artifact_dir = working.join(format!("v{}", v2.id.0));
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let artifact_path = artifact_dir.join("episode.remux.mkv");
+        std::fs::write(&artifact_path, format!("{season}-bytes")).unwrap();
+        cp.create_file_location(NewFileLocation {
+            file_version_id: v2.id,
+            kind: FileLocationKind::LocalPath,
+            value: artifact_path.display().to_string(),
+            proof: None,
+            observed_at: T0,
+        })
+        .await
+        .unwrap();
+        tips.push((season, v2.id));
+    }
+
+    let plan = PromotionPlan {
+        pairs: vec![PromotionPair {
+            working_dir: working.clone(),
+            output_dir: out_dir.clone(),
+        }],
+    };
+
+    cp.promote_terminal_artifacts(&plan).await.unwrap();
+
+    for (season, vid) in tips {
+        let promoted = out_dir.join(season).join("episode.remux.mkv");
+        assert!(
+            promoted.is_file(),
+            "terminal artifact for {season} must be promoted under its source subtree at {}",
+            promoted.display()
+        );
+        let location = cp
+            .identity()
+            .list_live_file_locations_by_version(vid)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(
+            location.value,
+            promoted.display().to_string(),
+            "the {season} chain tip must repoint to the mirrored promoted path"
+        );
+    }
+}

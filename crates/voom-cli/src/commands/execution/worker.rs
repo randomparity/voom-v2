@@ -1,14 +1,15 @@
-use std::io;
+use std::future::Future;
+use std::io::{self, Write};
 
 use secrecy::SecretString;
 use serde::Serialize;
 use serde_json::json;
-use voom_control_plane::ControlPlane;
 use voom_control_plane::workers::{NewWorkerCapabilityDraft, RegisterWorkerForNodeInput};
+use voom_control_plane::{ControlPlane, LocalWorkerHandle, LocalWorkerKind};
 use voom_core::{ErrorCode, NodeId, TicketOperation, VoomError, WorkerId};
 use voom_store::repo::workers::{WorkerInspection, WorkerNodeContext};
 
-use crate::cli::WorkerCommand;
+use crate::cli::{LocalWorkerKindArg, WorkerCommand};
 use crate::commands::common::{emit_voom_error, open_control_plane};
 use crate::commands::token_source::{TokenSourceArgs, read_token};
 use crate::envelope::{Local, emit_err, emit_ok};
@@ -76,6 +77,149 @@ pub async fn run(database_url: &str, local: Local, command: WorkerCommand) -> io
         }
         WorkerCommand::List { status } => list(database_url, local, status).await,
         WorkerCommand::Show { worker_id } => show(database_url, local, worker_id).await,
+        WorkerCommand::RunLocal { kind } => run_local(database_url, local, kind).await,
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ReadyLine<'a> {
+    status: &'a str,
+    worker_id: u64,
+    kind: &'a str,
+    endpoint: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RunLocalShutdownData {
+    worker_id: u64,
+    kind: &'static str,
+    status: &'static str,
+}
+
+const fn kind_label(kind: LocalWorkerKind) -> &'static str {
+    match kind {
+        LocalWorkerKind::Ffmpeg => "ffmpeg",
+        LocalWorkerKind::Mkvtoolnix => "mkvtoolnix",
+    }
+}
+
+/// Serialize the foreground readiness signal printed on stdout once the local
+/// worker has bound its endpoint and been registered for discovery.
+fn ready_line_json(handle: &LocalWorkerHandle) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&ReadyLine {
+        status: "ready",
+        worker_id: handle.worker_id.0,
+        kind: kind_label(handle.kind),
+        endpoint: handle.endpoint.to_string(),
+    })
+}
+
+fn emit_ready_line(handle: &LocalWorkerHandle) -> io::Result<()> {
+    let line = ready_line_json(handle).map_err(io::Error::other)?;
+    let mut out = io::stdout().lock();
+    writeln!(out, "{line}")?;
+    out.flush()
+}
+
+async fn run_local(database_url: &str, local: Local, kind: LocalWorkerKindArg) -> io::Result<i32> {
+    let cp = match open_control_plane("worker", database_url, &local).await? {
+        Ok(cp) => cp,
+        Err(code) => return Ok(code),
+    };
+    run_local_supervise(&cp, kind.to_control_plane(), shutdown_signal(), local).await
+}
+
+/// Start the bundled worker, print the readiness line, then block on `shutdown`
+/// before retiring it. The shutdown future is injected so unit tests can drive
+/// teardown deterministically while the real command supplies the OS signal
+/// select in [`shutdown_signal`].
+async fn run_local_supervise(
+    cp: &ControlPlane,
+    kind: LocalWorkerKind,
+    shutdown: impl Future<Output = ()>,
+    local: Local,
+) -> io::Result<i32> {
+    let running = match cp.start_local_worker(kind).await {
+        Ok(running) => running,
+        Err(err) => {
+            tracing::warn!(kind = kind_label(kind), error = %err, "local worker preflight failed");
+            return emit_voom_error("worker", &err, local);
+        }
+    };
+    let handle = running.handle().clone();
+    tracing::info!(
+        worker_id = handle.worker_id.0,
+        kind = kind_label(handle.kind),
+        endpoint = %handle.endpoint,
+        "local worker ready"
+    );
+    emit_ready_line(&handle)?;
+
+    shutdown.await;
+    tracing::info!(
+        worker_id = handle.worker_id.0,
+        "local worker shutdown requested"
+    );
+
+    match running.shutdown_and_retire(cp).await {
+        Ok(()) => emit_ok(
+            "worker",
+            RunLocalShutdownData {
+                worker_id: handle.worker_id.0,
+                kind: kind_label(handle.kind),
+                status: "retired",
+            },
+            Some(local),
+            Vec::new(),
+        )
+        .map(|()| 0),
+        Err(err) => emit_voom_error("worker", &err, local),
+    }
+}
+
+/// Resolve when the foreground supervisor should retire: SIGINT (Ctrl-C),
+/// SIGTERM (unix), or stdin reaching EOF.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(err) => {
+                tracing::warn!(error = %err, "SIGTERM handler unavailable; using SIGINT/EOF only");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {},
+                    () = stdin_eof() => {},
+                }
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+            () = stdin_eof() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            () = stdin_eof() => {},
+        }
+    }
+}
+
+async fn stdin_eof() {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdin = tokio::io::stdin();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stdin.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
     }
 }
 

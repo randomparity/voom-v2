@@ -7,7 +7,7 @@ use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 
 use crate::cases::cp;
 
-use super::PolicyInputFromScanInput;
+use super::{PolicyInputFromScanInput, WholeScanInput};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -222,6 +222,60 @@ async fn create_policy_input_set_from_scan_rejects_snapshot_for_other_file_versi
 
     assert_eq!(err.code(), ErrorCode::Conflict.as_str());
     assert!(cp.list_policy_input_sets().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn whole_scan_includes_video_and_skips_non_video() {
+    let (cp, _tmp) = cp().await;
+    let video_payload = json!({
+        "container": "mp4",
+        "video_codec": "h264",
+        "streams": [
+            {"id": "v-0", "index": 0, "kind": "video", "codec_name": "h264"},
+            {"id": "a-0", "index": 1, "kind": "audio", "codec_name": "aac", "language": "eng"}
+        ]
+    });
+    let audio_payload = json!({
+        "container": "mp4",
+        "streams": [
+            {"id": "a-0", "index": 0, "kind": "audio", "codec_name": "aac", "language": "eng"}
+        ]
+    });
+    let (video_file_version_id, video_media_snapshot_id) =
+        scanned_snapshot_with_payload(&cp, "/srv/movie.mp4", "hash-video", video_payload).await;
+    let (_audio_file_version_id, _audio_media_snapshot_id) =
+        scanned_snapshot_with_payload(&cp, "/srv/song.m4a", "hash-audio", audio_payload).await;
+
+    let result = cp
+        .create_policy_input_set_from_whole_scan(WholeScanInput {
+            slug: "whole-library".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.slug, "whole-library");
+    assert_eq!(result.included_count, 1);
+    assert_eq!(result.skipped_count, 1);
+
+    let input_set = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input_set.media_snapshots.len(), 1);
+    let media = &input_set.media_snapshots[0];
+    assert_eq!(
+        media.target,
+        PolicyInputTargetRef::FileVersion {
+            id: video_file_version_id
+        }
+    );
+    assert_eq!(media.container.as_deref(), Some("mp4"));
+    assert_eq!(media.video_codec.as_deref(), Some("h264"));
+    assert_eq!(
+        media.existing_media_snapshot_id,
+        Some(video_media_snapshot_id)
+    );
 }
 
 async fn scanned_snapshot(
