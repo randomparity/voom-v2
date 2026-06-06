@@ -31,7 +31,13 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     options = options
         .create_if_missing(create || is_memory)
         .foreign_keys(true)
-        .busy_timeout(std::time::Duration::from_secs(5));
+        // Lock-wait budget: wait out transient write contention instead of
+        // surfacing a spurious SQLITE_BUSY -> DB_UNREACHABLE. 30s is deliberately
+        // generous because a lock holder can be descheduled for several seconds
+        // under load (first observed as flakes on a CPU-starved parallel test
+        // suite). Genuine deadlocks are reported separately and do not consume
+        // this budget, so the longer wait only affects real, transient contention.
+        .busy_timeout(std::time::Duration::from_secs(30));
 
     if is_memory {
         options = options.shared_cache(true);

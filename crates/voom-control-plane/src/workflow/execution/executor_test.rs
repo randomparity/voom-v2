@@ -1409,7 +1409,14 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
         chaos: &options.chaos,
     };
 
-    tokio::time::pause();
+    // The freshness assertion is driven by the injected ManualClock: advancing it
+    // sets last_heartbeat_at to T0+80ms independent of tokio's clock. Run the
+    // heartbeat loop in real time rather than under tokio's paused, auto-advancing
+    // clock: pausing makes the runtime auto-advance past the pool's acquire_timeout
+    // while a heartbeat write waits on the blocking DB thread, which spuriously
+    // failed the write with "pool timed out" on loaded runners. The 10ms heartbeat
+    // interval against the 80ms future keeps a wide ordering margin, so at least one
+    // heartbeat still fires before the future completes under load.
     fixture.clock.advance(time::Duration::milliseconds(80));
     let heartbeat = await_with_lease_heartbeats(context, OperationKind::HashFile, async {
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -1420,9 +1427,7 @@ async fn await_with_lease_heartbeats_refreshes_workflow_lease_while_future_runs(
         result = &mut heartbeat => panic!("heartbeat future finished early: {result:?}"),
         () = tokio::task::yield_now() => {}
     }
-    tokio::time::advance(Duration::from_millis(80)).await;
     heartbeat.await.unwrap();
-    tokio::time::resume();
 
     let (acquired_at, last_heartbeat_at) = fixture.first_lease_heartbeat_window().await;
     assert!(
