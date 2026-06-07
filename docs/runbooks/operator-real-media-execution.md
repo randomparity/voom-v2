@@ -29,7 +29,7 @@ voom init
 which never creates or migrates it (ADR-0003). Running them before `voom init`
 yields a `DB_UNREACHABLE`/schema error envelope, not a crash.
 
-### 2. Start the workers (foreground, one terminal each)
+### 2. Start the workers (foreground, stdin kept open)
 
 ```
 # terminal A
@@ -46,11 +46,15 @@ supervises it. **Wait for each to print its readiness line** before step 4:
 ```
 
 Running `compliance execute` before both workers are ready races the registration
-and hits the missing-worker path. Stop a worker with Ctrl-C (SIGINT) or SIGTERM:
-it shuts the child down and retires its registration. A hard `kill -9` skips the
-retire; the next `run-local --kind <same>` self-heals the stale row on startup,
-and `execute` liveness-checks each endpoint before dispatch and refuses to use a
-dead one (with an actionable error naming the `run-local` command to start).
+and hits the missing-worker path. `run-local` is a foreground supervisor: it
+retires the worker on Ctrl-C (SIGINT), SIGTERM, or stdin EOF. Start it in a
+terminal, PTY session, or service wrapper that keeps stdin open for as long as
+the worker should be live; a non-interactive launcher that closes stdin after
+startup will print `ready` and then immediately retire the worker. A hard
+`kill -9` skips the retire; the next `run-local --kind <same>` self-heals the
+stale row on startup, and `execute` liveness-checks each endpoint before dispatch
+and refuses to use a dead one (with an actionable error naming the `run-local`
+command to start).
 
 `ffprobe` and the artifact-verify worker are *not* started this way — the control
 plane spawns them as managed subprocesses as needed.
@@ -67,11 +71,15 @@ are excluded at scan.
 ### 4. Author and accept the policy
 
 ```
-voom policy create --slug remux-hevc --file remux-and-hevc.voom
+voom policy create \
+  --slug remux-to-mkv-and-transcode-to-hevc \
+  --file remux-and-hevc.voom
 ```
 
-Capture `version_id` from the envelope (this is the accepted version). The sample
-policy (`crates/voom-control-plane/tests/fixtures/policies/remux-and-hevc.voom`):
+Capture `version_id` from the envelope (this is the accepted version). The slug
+must match the policy identity compiled from the document; for the sample policy,
+that slug is `remux-to-mkv-and-transcode-to-hevc`. The sample policy
+(`crates/voom-control-plane/tests/fixtures/policies/remux-and-hevc.voom`):
 
 ```
 policy "remux to mkv and transcode to hevc" {
@@ -123,10 +131,16 @@ voom compliance execute \
 - **Add-only.** Promotion never overwrites. Source files are never modified. If a
   destination in `--output-dir` already exists, the run fails rather than
   overwrite.
-- **A real-library run will partially succeed** (some files committed, some
-  failed). Re-running `compliance execute` resumes via the Sprint 16 per-file-phase
-  resume path (issue-165) — already-completed files are not redone. Read partial
-  state with `voom compliance report --job-id <job_id>`.
+- **A real-library run can partially succeed** (some files committed, some
+  failed). Re-running `compliance execute` resumes via the Sprint 16
+  per-file-phase resume path (issue-165) — already-completed files are not
+  redone. Read partial state with `voom compliance report --job-id <job_id>`.
+  In that report, `file_phases[*].outcome` and produced artifact IDs are the
+  execution results. `phases[*].report` is the compliance snapshot captured for
+  that phase, and `latest_phase_index` points at the highest-ordinal phase
+  snapshot. A completed file phase can therefore carry an earlier
+  `noncompliant` check that explains why work was planned; use the file-phase
+  outcome and produced IDs to confirm what committed.
 - **Empty / all-non-video scan:** the input set is empty and `execute` is a no-op
   reporting zero planned / zero committed.
 - **Scale:** the staging working area needs free disk on the order of the produced
@@ -140,22 +154,17 @@ Outputs mirror the source tree. Each terminal artifact lands under
 a source at `<root>/S01/episode.mkv` promotes to
 `--output-dir/S01/episode.…hevc.mkv` (issue #197). Sources sharing a basename
 across different subdirectories therefore land at distinct destinations instead
-of colliding. A single-directory run (no shared subtree) promotes flat, as
-before.
+of colliding. The phase-barrier branch IDs are also disambiguated from the
+source-relative path for colliding stems (issue #199), so a whole-library run can
+include files such as `S01/episode.mkv` and `S02/episode.mkv`. A
+single-directory run (no shared subtree) promotes flat, as before.
 
 ## Known limitations
 
-- **Duplicate source basenames still block a `--all` run (issue #199).** Even
-  with subdir-preserving output, the phase-barrier coordinator derives each
-  file's branch id from its path *stem* and rejects a stem collision across the
-  active set (`active files … both derive branch id …`), so a library with two
-  files that share a basename across subdirectories (e.g. `S01/episode.mkv` and
-  `S02/episode.mkv`) fails fast before any work runs. Until #199 lands, run
-  `--all` only against libraries with unique basenames, or scope each run to a
-  subtree with no basename clashes.
-- **Same-stem, different-extension siblings in one directory collide** (e.g.
-  `S01/episode.mkv` and `S01/episode.mov`). Both derive the same branch id and
-  the same output basename; the run fails (at the branch-id check, per #199).
+- Same-stem, different-extension siblings in one directory can still collide at
+  output promotion if their final operation renders the same destination
+  basename. Scope the run to one sibling or choose an output directory that does
+  not already contain the rendered artifact name.
 
 ## Teardown
 
