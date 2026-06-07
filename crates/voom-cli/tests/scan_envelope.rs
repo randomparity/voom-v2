@@ -28,6 +28,13 @@ async fn scan_file_success_outputs_envelope_and_persists_snapshot() {
     let mut json = envelope(output.stdout);
     assert_eq!(json["command"], "scan");
     assert_eq!(json["status"], "ok");
+    assert_eq!(json["warnings"].as_array().unwrap().len(), 1);
+    assert!(
+        json["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("VOOM_FFPROBE_BIN is set; scan ffprobe binary: ")
+    );
     redact_common(&mut json);
     redact_path_set(&mut json, &[(media.as_path(), "[media]/tiny.mp4")]);
     redact_content_hashes(&mut json);
@@ -616,6 +623,10 @@ fn envelope(stdout: Vec<u8>) -> Value {
 fn redact_common(json: &mut Value) {
     json["local"]["db_url"] = Value::String("[db-url]".to_owned());
     json["local"]["config_path"] = Value::String("[config-path]".to_owned());
+    redact_path_set(
+        json,
+        &[(success_ffprobe_binary().as_path(), "[ffprobe-bin]")],
+    );
 }
 
 fn redact_path_set(value: &mut Value, paths: &[(&Path, &str)]) {

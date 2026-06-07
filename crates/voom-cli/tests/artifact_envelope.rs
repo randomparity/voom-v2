@@ -568,6 +568,10 @@ fn redact_artifact_snapshot(json: &mut Value, db_url: &str, paths: &[(&Path, &st
 
 fn redact_common(json: &mut Value, db_url: &str) {
     replace_string(json, db_url, "[db-url]");
+    redact_path_set(
+        json,
+        &[(success_ffprobe_binary().as_path(), "[ffprobe-bin]")],
+    );
     replace_key_value(
         json,
         "config_path",

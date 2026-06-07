@@ -10,7 +10,7 @@ use voom_control_plane::scan::{
 use voom_core::{ErrorCode, FailureClass};
 
 use crate::commands::common::open_control_plane;
-use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok};
+use crate::envelope::{Local, emit_err, emit_err_with_data_and_warnings, emit_ok};
 
 #[derive(Debug, Serialize)]
 pub struct ScanData {
@@ -104,21 +104,34 @@ async fn scan_with_control_plane(cp: &ControlPlane, local: Local, path: &Path) -
         })
         .await
     {
-        Ok(report) => emit_ok("scan", ScanData::from(report), Some(local), Vec::new()).map(|()| 0),
+        Ok(report) => {
+            emit_ok("scan", ScanData::from(report), Some(local), scan_warnings()).map(|()| 0)
+        }
         Err(err) => {
             let code = err.code();
             let message = err.to_string();
-            emit_err_with_data(
+            emit_err_with_data_and_warnings(
                 "scan",
                 ScanData::from(err.into_report()),
                 code.as_str(),
                 message,
                 None,
                 Some(local),
+                scan_warnings(),
             )?;
             Ok(2)
         }
     }
+}
+
+fn scan_warnings() -> Vec<String> {
+    let Some(ffprobe_bin) = std::env::var_os("VOOM_FFPROBE_BIN") else {
+        return Vec::new();
+    };
+    vec![format!(
+        "VOOM_FFPROBE_BIN is set; scan ffprobe binary: {}",
+        std::path::Path::new(&ffprobe_bin).display()
+    )]
 }
 
 async fn validate_explicit_path(path: &Path) -> Result<(), String> {

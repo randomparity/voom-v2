@@ -68,6 +68,7 @@ impl WorkerCommand {
         self
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.env

@@ -241,14 +241,7 @@ fn bundled_ffprobe_command_from(
         configured_bin,
         current_exe,
         "voom-ffprobe-worker",
-        |command, worker_dir| {
-            let ffprobe_sibling =
-                worker_dir.join(format!("ffprobe{}", std::env::consts::EXE_SUFFIX));
-            if ffprobe_sibling.is_file() {
-                return command.env("VOOM_FFPROBE_BIN", ffprobe_sibling);
-            }
-            command
-        },
+        |command, _worker_dir| command,
     )
 }
 

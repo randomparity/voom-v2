@@ -41,6 +41,8 @@ expression: json
     "db_url": "[db-url]",
     "config_path": "[config-path]"
   },
-  "warnings": [],
+  "warnings": [
+    "VOOM_FFPROBE_BIN is set; scan ffprobe binary: [ffprobe-bin]"
+  ],
   "error": null
 }
