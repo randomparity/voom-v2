@@ -89,13 +89,25 @@ pub fn emit_err_with_data<T: Serialize>(
     hint: Option<String>,
     local: Option<Local>,
 ) -> io::Result<()> {
+    emit_err_with_data_and_warnings(command, data, code, message, hint, local, Vec::new())
+}
+
+pub fn emit_err_with_data_and_warnings<T: Serialize>(
+    command: &'static str,
+    data: T,
+    code: &'static str,
+    message: String,
+    hint: Option<String>,
+    local: Option<Local>,
+    warnings: Vec<String>,
+) -> io::Result<()> {
     let env = Envelope {
         schema_version: SCHEMA_VERSION,
         command,
         status: Status::Error,
         data: Some(data),
         local,
-        warnings: Vec::new(),
+        warnings,
         error: Some(ErrorBody {
             code,
             message,

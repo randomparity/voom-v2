@@ -37,7 +37,9 @@ expression: json
     "db_url": "[db-url]",
     "config_path": "[config-path]"
   },
-  "warnings": [],
+  "warnings": [
+    "VOOM_FFPROBE_BIN is set; scan ffprobe binary: [scan-dir]/ffprobe"
+  ],
   "error": {
     "code": "ARTIFACT_CHECKSUM_MISMATCH",
     "message": "artifact checksum mismatch: post_probe: observed file facts differ from expected size/hash"
