@@ -94,6 +94,18 @@ async fn worker_terminal_error_becomes_scan_worker_error() {
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
+#[test]
+fn ffprobe_exit_terminal_error_is_continuable_probe_failure() {
+    let err = ScanWorkerError::terminal_error_for_test(
+        FailureClass::ExternalSystemUnavailable,
+        ErrorCode::ExternalSystemUnavailable,
+        "external system unavailable: ffprobe exited with status 1",
+        Some(serde_json::json!({"stage": "exit"})),
+    );
+
+    assert!(err.is_ffprobe_exit());
+}
+
 #[tokio::test]
 async fn consecutive_dispatches_use_distinct_nonzero_protocol_lease_ids() {
     let credentials = WorkerCredentials {

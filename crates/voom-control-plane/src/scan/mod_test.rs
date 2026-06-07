@@ -246,6 +246,101 @@ async fn failure_after_prior_commit_returns_success_and_failing_file() {
 }
 
 #[tokio::test]
+async fn directory_scan_continues_after_unprobeable_media_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::WorkerErrorOnPath {
+        path: beta.clone(),
+        error: ffprobe_exit_error(),
+    });
+
+    let report = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.summary.ingested, 1);
+    assert_eq!(report.summary.probed, 1);
+    assert_eq!(report.summary.snapshots_recorded, 1);
+    assert_eq!(report.summary.failed, 1);
+    assert_eq!(report.files.len(), 2);
+    assert_eq!(report.files[0].path, alpha);
+    assert_eq!(report.files[0].status, ScanReportFileStatus::Scanned);
+    assert_eq!(report.files[1].path, beta);
+    assert_eq!(report.files[1].status, ScanReportFileStatus::Failed);
+    assert_eq!(
+        report.files[1].error.as_ref().unwrap().code,
+        ErrorCode::ExternalSystemUnavailable
+    );
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(
+        launcher.shutdowns(),
+        vec![launcher.launched_worker_id.unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn explicit_file_scan_keeps_unprobeable_media_failure_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = write_file(dir.path(), "movie.mkv", b"movie");
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::WorkerErrorOnPath {
+        path: media.clone(),
+        error: ffprobe_exit_error(),
+    });
+
+    let err = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: media.clone(),
+            },
+            &mut launcher,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::ExternalSystemUnavailable);
+    assert_eq!(err.report().summary.failed, 1);
+    assert_eq!(err.report().files[0].path, media);
+    assert_eq!(err.report().files[0].status, ScanReportFileStatus::Failed);
+}
+
+#[tokio::test]
+async fn spawn_style_worker_failure_still_aborts_directory_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::WorkerErrorOnPath {
+        path: beta.clone(),
+        error: ffprobe_spawn_error(),
+    });
+
+    let err = cp
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::ExternalSystemUnavailable);
+    assert_eq!(err.report().summary.ingested, 1);
+    assert_eq!(err.report().summary.failed, 1);
+    assert_eq!(err.report().files[0].path, alpha);
+    assert_eq!(err.report().files[1].path, beta);
+}
+
+#[tokio::test]
 async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let media = write_file(dir.path(), "movie.mkv", b"movie");
@@ -323,6 +418,10 @@ async fn non_utf8_candidate_path_fails_before_worker_dispatch() {
 enum FakePlan {
     AllSuccess,
     DriftOnPath(std::path::PathBuf),
+    WorkerErrorOnPath {
+        path: std::path::PathBuf,
+        error: worker::ScanWorkerError,
+    },
 }
 
 struct FakeLauncher {
@@ -399,6 +498,11 @@ impl ProbeWorkerSession for FakeSession {
         &mut self,
         request: ProbeFileRequest,
     ) -> Result<ProbeFileResult, worker::ScanWorkerError> {
+        if let FakePlan::WorkerErrorOnPath { path, error } = &self.plan
+            && path.to_str() == Some(&request.path)
+        {
+            return Err(error.clone());
+        }
         let mut result = matching_probe_result(&request);
         if matches!(&self.plan, FakePlan::DriftOnPath(path) if path.to_str() == Some(&request.path))
         {
@@ -413,6 +517,29 @@ impl ProbeWorkerSession for FakeSession {
             .unwrap()
             .push(self.worker_id);
     }
+}
+
+fn ffprobe_exit_error() -> worker::ScanWorkerError {
+    ffprobe_terminal_error(
+        "exit",
+        "external system unavailable: ffprobe exited with status 1",
+    )
+}
+
+fn ffprobe_spawn_error() -> worker::ScanWorkerError {
+    ffprobe_terminal_error(
+        "spawn",
+        "external system unavailable: No such file or directory",
+    )
+}
+
+fn ffprobe_terminal_error(stage: &str, message: &str) -> worker::ScanWorkerError {
+    worker::ScanWorkerError::terminal_error_for_test(
+        FailureClass::ExternalSystemUnavailable,
+        ErrorCode::ExternalSystemUnavailable,
+        message,
+        Some(json!({ "stage": stage })),
+    )
 }
 
 fn matching_probe_result(request: &ProbeFileRequest) -> ProbeFileResult {
