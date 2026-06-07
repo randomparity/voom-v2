@@ -1,6 +1,7 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use voom_core::{
@@ -137,103 +138,41 @@ impl ControlPlane {
     where
         L: ScanWorkerLauncher + Send,
     {
+        self.scan_path_with_launcher_and_classifier(input, launcher, &NativeFilesystemClassifier)
+            .await
+    }
+
+    async fn scan_path_with_launcher_and_classifier<L, C>(
+        &self,
+        input: ScanPathInput,
+        launcher: &mut L,
+        classifier: &C,
+    ) -> Result<ScanReport, ScanCommandError>
+    where
+        L: ScanWorkerLauncher + Send,
+        C: ScanFilesystemClassifier,
+    {
         let discovered = discovery::discover_path(&input.path)
             .await
             .map_err(|err| discovery_error(input.path.clone(), &err))?;
-        let mut report = ScanReportBuilder::from_discovered(&discovered);
+        let report = ScanReportBuilder::from_discovered(&discovered);
         if discovered.candidates.is_empty() {
             return Ok(report.finish());
         }
-        let mut worker = self.launch_scan_worker(launcher, &report).await?;
-        let worker_id = worker.worker_id();
-
-        let result = async {
-            for candidate in discovered.candidates {
-                let candidate_facts = match hash::observe_candidate_file(&candidate.path).await {
-                    Ok(facts) => facts,
-                    Err(err) => {
-                        return Err(report.fail_observe(candidate.path, &err));
-                    }
-                };
-                let request = match probe_request(&candidate.path, &candidate_facts) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        return Err(report.fail_probe_request(
-                            candidate.path,
-                            &candidate_facts,
-                            worker_id,
-                            error,
-                        ));
-                    }
-                };
-                launcher.record_dispatch(worker_id);
-                let probe = match worker.dispatch_probe_file(request).await {
-                    Ok(probe) => {
-                        report.record_probe();
-                        probe
-                    }
-                    Err(err) => {
-                        if discovered.mode == discovery::ScanMode::Directory
-                            && err.is_ffprobe_exit()
-                        {
-                            report.push_worker_error(
-                                candidate.path,
-                                &candidate_facts,
-                                worker_id,
-                                &err,
-                            );
-                            continue;
-                        }
-                        return Err(report.fail_worker(
-                            candidate.path,
-                            &candidate_facts,
-                            worker_id,
-                            &err,
-                        ));
-                    }
-                };
-                match persist::persist_scanned_media_snapshot(
-                    self,
-                    worker.worker_id(),
-                    &candidate.path,
-                    &candidate.sidecars,
-                    &candidate_facts,
-                    &probe,
-                )
-                .await
-                {
-                    Ok(persisted) => {
-                        report.push_scanned_file(
-                            candidate.path,
-                            &candidate_facts,
-                            worker_id,
-                            &persisted,
-                        );
-                    }
-                    Err(persist::ScanPersistError::File(err)) => {
-                        return Err(report.fail_persist_file(
-                            candidate.path,
-                            &candidate_facts,
-                            worker_id,
-                            &err,
-                        ));
-                    }
-                    Err(persist::ScanPersistError::Store(err)) => {
-                        return Err(report.fail_voom(
-                            candidate.path,
-                            &candidate_facts,
-                            worker_id,
-                            &err,
-                        ));
-                    }
+        let candidate_count = discovered.candidates.len();
+        let groups = group_candidates_by_filesystem(discovered.candidates, classifier).await;
+        let mut worker_groups = Vec::with_capacity(groups.len());
+        for group in groups {
+            match self.launch_scan_worker(launcher, &report).await {
+                Ok(worker) => worker_groups.push((group, worker)),
+                Err(err) => {
+                    shutdown_worker_groups(worker_groups).await;
+                    return Err(err);
                 }
             }
-
-            Ok(report.finish())
         }
-        .await;
-        worker.shutdown().await;
-        result
+        self.scan_worker_groups(discovered.mode, candidate_count, worker_groups, report)
+            .await
     }
 
     async fn launch_scan_worker<L>(
@@ -265,6 +204,313 @@ impl ControlPlane {
             .map_err(|err| VoomError::Database(format!("scan worker bootstrap commit: {err}")))?;
         Ok(worker.id)
     }
+
+    async fn scan_worker_groups(
+        &self,
+        mode: discovery::ScanMode,
+        candidate_count: usize,
+        worker_groups: Vec<(ScanCandidateGroup, Box<dyn ProbeWorkerSession + Send>)>,
+        report: ScanReportBuilder,
+    ) -> Result<ScanReport, ScanCommandError> {
+        let channel_capacity = worker_groups.len().max(1);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(channel_capacity);
+        let mut tasks = tokio::task::JoinSet::new();
+        for (group, worker) in worker_groups {
+            let sender = sender.clone();
+            tasks.spawn(async move {
+                run_scan_group(group, worker, sender).await;
+            });
+        }
+        drop(sender);
+
+        let mut report = report;
+        let mut pending = BTreeMap::new();
+        let mut next_index = 0;
+        let mut fatal = None;
+
+        while let Some(outcome) = receiver.recv().await {
+            if fatal.is_some() {
+                continue;
+            }
+            pending.insert(outcome.index(), outcome);
+            while let Some(outcome) = pending.remove(&next_index) {
+                next_index += 1;
+                if let Err(err) = self.apply_scan_outcome(mode, &mut report, outcome).await {
+                    fatal = Some(err);
+                    pending.clear();
+                    break;
+                }
+            }
+        }
+        while let Some(joined) = tasks.join_next().await {
+            if let Err(err) = joined
+                && fatal.is_none()
+            {
+                let voom = VoomError::Internal(format!("scan worker task failed: {err}"));
+                fatal = Some(command_error_from_voom(&voom, report.report().clone()));
+            }
+        }
+        if let Some(err) = fatal {
+            return Err(err);
+        }
+        if next_index != candidate_count {
+            let voom =
+                VoomError::Internal("scan worker task ended without all outcomes".to_owned());
+            return Err(command_error_from_voom(&voom, report.finish()));
+        }
+        Ok(report.finish())
+    }
+
+    async fn apply_scan_outcome(
+        &self,
+        mode: discovery::ScanMode,
+        report: &mut ScanReportBuilder,
+        outcome: ScanCandidateOutcome,
+    ) -> Result<(), ScanCommandError> {
+        match outcome {
+            ScanCandidateOutcome::Probed {
+                candidate,
+                facts,
+                worker_id,
+                probe,
+                ..
+            } => {
+                report.record_probe();
+                match persist::persist_scanned_media_snapshot(
+                    self,
+                    worker_id,
+                    &candidate.path,
+                    &candidate.sidecars,
+                    &facts,
+                    &probe,
+                )
+                .await
+                {
+                    Ok(persisted) => {
+                        report.push_scanned_file(candidate.path, &facts, worker_id, &persisted);
+                        Ok(())
+                    }
+                    Err(persist::ScanPersistError::File(err)) => {
+                        Err(report.fail_persist_file(candidate.path, &facts, worker_id, &err))
+                    }
+                    Err(persist::ScanPersistError::Store(err)) => {
+                        Err(report.fail_voom(candidate.path, &facts, worker_id, &err))
+                    }
+                }
+            }
+            ScanCandidateOutcome::WorkerError {
+                candidate,
+                facts,
+                worker_id,
+                error,
+                ..
+            } => {
+                if mode == discovery::ScanMode::Directory && error.is_ffprobe_exit() {
+                    report.push_worker_error(candidate.path, &facts, worker_id, &error);
+                    Ok(())
+                } else {
+                    Err(report.fail_worker(candidate.path, &facts, worker_id, &error))
+                }
+            }
+            ScanCandidateOutcome::ObserveError { path, error, .. } => {
+                Err(report.fail_observe(path, &error))
+            }
+            ScanCandidateOutcome::ProbeRequestError {
+                path,
+                facts,
+                worker_id,
+                error,
+                ..
+            } => Err(report.fail_probe_request(path, &facts, worker_id, error)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ScanFilesystemIdentity(u64);
+
+#[derive(Debug, Clone, Copy)]
+struct NativeFilesystemClassifier;
+
+#[async_trait::async_trait]
+trait ScanFilesystemClassifier: Send + Sync {
+    async fn identify(&self, path: &Path) -> ScanFilesystemIdentity;
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl ScanFilesystemClassifier for NativeFilesystemClassifier {
+    async fn identify(&self, path: &Path) -> ScanFilesystemIdentity {
+        use std::os::unix::fs::MetadataExt;
+
+        tokio::fs::metadata(path)
+            .await
+            .map_or(ScanFilesystemIdentity(0), |metadata| {
+                ScanFilesystemIdentity(metadata.dev())
+            })
+    }
+}
+
+#[cfg(not(unix))]
+#[async_trait::async_trait]
+impl ScanFilesystemClassifier for NativeFilesystemClassifier {
+    async fn identify(&self, _path: &Path) -> ScanFilesystemIdentity {
+        ScanFilesystemIdentity(0)
+    }
+}
+
+struct IndexedScanCandidate {
+    index: usize,
+    candidate: discovery::ScanCandidate,
+}
+
+struct ScanCandidateGroup {
+    candidates: Vec<IndexedScanCandidate>,
+}
+
+enum ScanCandidateOutcome {
+    Probed {
+        index: usize,
+        candidate: discovery::ScanCandidate,
+        facts: hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        probe: ProbeFileResult,
+    },
+    WorkerError {
+        index: usize,
+        candidate: discovery::ScanCandidate,
+        facts: hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        error: worker::ScanWorkerError,
+    },
+    ObserveError {
+        index: usize,
+        path: PathBuf,
+        error: discovery::ScanError,
+    },
+    ProbeRequestError {
+        index: usize,
+        path: PathBuf,
+        facts: hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        error: ScanFileErrorReport,
+    },
+}
+
+impl ScanCandidateOutcome {
+    const fn index(&self) -> usize {
+        match self {
+            Self::Probed { index, .. }
+            | Self::WorkerError { index, .. }
+            | Self::ObserveError { index, .. }
+            | Self::ProbeRequestError { index, .. } => *index,
+        }
+    }
+}
+
+async fn group_candidates_by_filesystem<C>(
+    candidates: Vec<discovery::ScanCandidate>,
+    classifier: &C,
+) -> Vec<ScanCandidateGroup>
+where
+    C: ScanFilesystemClassifier,
+{
+    let mut groups = BTreeMap::<ScanFilesystemIdentity, Vec<IndexedScanCandidate>>::new();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let identity = classifier.identify(&candidate.path).await;
+        groups
+            .entry(identity)
+            .or_default()
+            .push(IndexedScanCandidate { index, candidate });
+    }
+    groups
+        .into_values()
+        .map(|candidates| ScanCandidateGroup { candidates })
+        .collect()
+}
+
+async fn shutdown_worker_groups(
+    worker_groups: Vec<(ScanCandidateGroup, Box<dyn ProbeWorkerSession + Send>)>,
+) {
+    for (_group, worker) in worker_groups {
+        worker.shutdown().await;
+    }
+}
+
+async fn run_scan_group(
+    group: ScanCandidateGroup,
+    mut worker: Box<dyn ProbeWorkerSession + Send>,
+    sender: tokio::sync::mpsc::Sender<ScanCandidateOutcome>,
+) {
+    let worker_id = worker.worker_id();
+    for indexed in group.candidates {
+        let outcome = scan_group_candidate(indexed, worker_id, worker.as_mut()).await;
+        let should_stop = outcome.is_group_terminal();
+        if sender.send(outcome).await.is_err() {
+            break;
+        }
+        if should_stop {
+            break;
+        }
+    }
+    worker.shutdown().await;
+}
+
+async fn scan_group_candidate(
+    indexed: IndexedScanCandidate,
+    worker_id: WorkerId,
+    worker: &mut (dyn ProbeWorkerSession + Send),
+) -> ScanCandidateOutcome {
+    let index = indexed.index;
+    let candidate = indexed.candidate;
+    let facts = match hash::observe_candidate_file(&candidate.path).await {
+        Ok(facts) => facts,
+        Err(error) => {
+            return ScanCandidateOutcome::ObserveError {
+                index,
+                path: candidate.path,
+                error,
+            };
+        }
+    };
+    let request = match probe_request(&candidate.path, &facts) {
+        Ok(request) => request,
+        Err(error) => {
+            return ScanCandidateOutcome::ProbeRequestError {
+                index,
+                path: candidate.path,
+                facts,
+                worker_id,
+                error,
+            };
+        }
+    };
+    match worker.dispatch_probe_file(request).await {
+        Ok(probe) => ScanCandidateOutcome::Probed {
+            index,
+            candidate,
+            facts,
+            worker_id,
+            probe,
+        },
+        Err(error) => ScanCandidateOutcome::WorkerError {
+            index,
+            candidate,
+            facts,
+            worker_id,
+            error,
+        },
+    }
+}
+
+impl ScanCandidateOutcome {
+    fn is_group_terminal(&self) -> bool {
+        match self {
+            Self::Probed { .. } => false,
+            Self::WorkerError { error, .. } => !error.is_ffprobe_exit(),
+            Self::ObserveError { .. } | Self::ProbeRequestError { .. } => true,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -273,8 +519,6 @@ trait ScanWorkerLauncher {
         &mut self,
         worker_id: WorkerId,
     ) -> Result<Box<dyn ProbeWorkerSession + Send>, worker::ScanWorkerError>;
-
-    fn record_dispatch(&mut self, _worker_id: WorkerId) {}
 }
 
 #[async_trait::async_trait]
@@ -423,7 +667,7 @@ impl ScanReportBuilder {
     }
 
     fn fail_file(
-        mut self,
+        &mut self,
         path: PathBuf,
         status: ScanReportFileStatus,
         facts: Option<&hash::ObservedFileFacts>,
@@ -431,10 +675,10 @@ impl ScanReportBuilder {
         error: ScanFileErrorReport,
     ) -> ScanCommandError {
         self.push_error(path, status, facts, worker_id, error);
-        command_error_from_report_tail(self.finish())
+        command_error_from_report_tail(self.report.clone())
     }
 
-    fn fail_observe(self, path: PathBuf, err: &discovery::ScanError) -> ScanCommandError {
+    fn fail_observe(&mut self, path: PathBuf, err: &discovery::ScanError) -> ScanCommandError {
         self.fail_file(
             path,
             ScanReportFileStatus::Failed,
@@ -445,7 +689,7 @@ impl ScanReportBuilder {
     }
 
     fn fail_probe_request(
-        self,
+        &mut self,
         path: PathBuf,
         facts: &hash::ObservedFileFacts,
         worker_id: WorkerId,
@@ -461,7 +705,7 @@ impl ScanReportBuilder {
     }
 
     fn fail_persist_file(
-        self,
+        &mut self,
         path: PathBuf,
         facts: &hash::ObservedFileFacts,
         worker_id: WorkerId,
@@ -477,7 +721,7 @@ impl ScanReportBuilder {
     }
 
     fn fail_worker(
-        mut self,
+        &mut self,
         path: PathBuf,
         facts: &hash::ObservedFileFacts,
         worker_id: WorkerId,
@@ -490,7 +734,7 @@ impl ScanReportBuilder {
             Some(worker_id),
             scan_file_error_from_worker(err),
         );
-        command_error_from_worker(err, self.finish())
+        command_error_from_worker(err, self.report.clone())
     }
 
     fn push_worker_error(
@@ -510,7 +754,7 @@ impl ScanReportBuilder {
     }
 
     fn fail_voom(
-        mut self,
+        &mut self,
         path: PathBuf,
         facts: &hash::ObservedFileFacts,
         worker_id: WorkerId,
@@ -523,7 +767,7 @@ impl ScanReportBuilder {
             Some(worker_id),
             scan_file_error_from_voom(err),
         );
-        command_error_from_voom(err, self.finish())
+        command_error_from_voom(err, self.report.clone())
     }
 
     fn scanned_file_report(

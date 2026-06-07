@@ -1,7 +1,9 @@
 use super::*;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::json;
 use time::OffsetDateTime;
@@ -56,10 +58,7 @@ async fn directory_scan_summarizes_successes_and_skips() {
         report.skipped[0].status,
         ScanReportFileStatus::SkippedUnsupportedExtension
     );
-    assert_eq!(
-        launcher.shutdowns(),
-        vec![launcher.launched_worker_id.unwrap()]
-    );
+    assert_eq!(launcher.shutdowns(), vec![launcher.launched()[0]]);
 }
 
 #[tokio::test]
@@ -193,9 +192,190 @@ async fn all_skipped_directory_does_not_launch_worker() {
     assert_eq!(report.summary.probed, 0);
     assert_eq!(report.summary.failed, 0);
     assert_eq!(report.skipped[0].path, note);
-    assert!(launcher.launched_worker_id.is_none());
-    assert!(launcher.dispatched_worker_ids.is_empty());
+    assert!(launcher.launched().is_empty());
+    assert!(launcher.dispatched().is_empty());
     assert!(launcher.shutdowns().is_empty());
+}
+
+#[tokio::test]
+async fn single_filesystem_directory_scan_uses_one_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let classifier = fake_classifier([
+        (alpha.clone(), ScanFilesystemIdentity(7)),
+        (beta.clone(), ScanFilesystemIdentity(7)),
+    ]);
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::AllSuccess);
+
+    let report = cp
+        .scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+            &classifier,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report
+            .files
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![alpha.as_path(), beta.as_path()]
+    );
+    assert_eq!(launcher.launched().len(), 1);
+    assert_eq!(
+        launcher.dispatched(),
+        vec![launcher.launched()[0], launcher.launched()[0]]
+    );
+    assert_eq!(launcher.shutdowns(), launcher.launched());
+}
+
+#[tokio::test]
+async fn multi_filesystem_directory_scan_uses_one_worker_per_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let classifier = fake_classifier([
+        (alpha.clone(), ScanFilesystemIdentity(10)),
+        (beta.clone(), ScanFilesystemIdentity(20)),
+    ]);
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::AllSuccess);
+
+    let report = cp
+        .scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+            &classifier,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(launcher.launched().len(), 2);
+    assert_eq!(launcher.dispatched().len(), 2);
+    assert_eq!(launcher.shutdowns().len(), 2);
+    assert_eq!(
+        report
+            .files
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![alpha.as_path(), beta.as_path()]
+    );
+}
+
+#[tokio::test]
+async fn multi_filesystem_directory_scan_dispatches_groups_concurrently() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let classifier = fake_classifier([
+        (alpha.clone(), ScanFilesystemIdentity(10)),
+        (beta.clone(), ScanFilesystemIdentity(20)),
+    ]);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::WaitForDispatchBarrier(barrier));
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(2),
+        cp.scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+            &classifier,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(launcher.launched().len(), 2);
+    assert_eq!(launcher.dispatched().len(), 2);
+    assert_eq!(
+        report
+            .files
+            .iter()
+            .map(|file| file.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![alpha.as_path(), beta.as_path()]
+    );
+}
+
+#[tokio::test]
+async fn multi_filesystem_fatal_probe_error_preserves_ordered_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let classifier = fake_classifier([
+        (alpha.clone(), ScanFilesystemIdentity(10)),
+        (beta.clone(), ScanFilesystemIdentity(20)),
+    ]);
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::WorkerErrorOnPath {
+        path: beta.clone(),
+        error: ffprobe_spawn_error(),
+    });
+
+    let err = cp
+        .scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+            &classifier,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::ExternalSystemUnavailable);
+    assert_eq!(err.report().summary.ingested, 1);
+    assert_eq!(err.report().summary.failed, 1);
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(err.report().files.len(), 2);
+    assert_eq!(err.report().files[0].path, alpha);
+    assert_eq!(err.report().files[0].status, ScanReportFileStatus::Scanned);
+    assert_eq!(err.report().files[1].path, beta);
+    assert_eq!(err.report().files[1].status, ScanReportFileStatus::Failed);
+    assert_eq!(launcher.launched().len(), 2);
+    assert_eq!(launcher.shutdowns().len(), 2);
+}
+
+#[tokio::test]
+async fn launch_failure_after_prior_group_shuts_down_started_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = write_file(dir.path(), "alpha.mkv", b"alpha");
+    let beta = write_file(dir.path(), "beta.mkv", b"beta");
+    let classifier = fake_classifier([
+        (alpha, ScanFilesystemIdentity(10)),
+        (beta, ScanFilesystemIdentity(20)),
+    ]);
+    let (cp, _db) = cp_with_manual_clock(T0).await;
+    let mut launcher = FakeLauncher::new(FakePlan::LaunchErrorOnAttempt(2));
+
+    let err = cp
+        .scan_path_with_launcher_and_classifier(
+            ScanPathInput {
+                path: dir.path().to_path_buf(),
+            },
+            &mut launcher,
+            &classifier,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.code(), ErrorCode::ExternalSystemUnavailable);
+    assert_eq!(launcher.launched().len(), 1);
+    assert_eq!(launcher.shutdowns(), launcher.launched());
 }
 
 #[tokio::test]
@@ -239,10 +419,7 @@ async fn failure_after_prior_commit_returns_success_and_failing_file() {
         file_error.failure_class,
         FailureClass::ArtifactChecksumMismatch
     );
-    assert_eq!(
-        launcher.shutdowns(),
-        vec![launcher.launched_worker_id.unwrap()]
-    );
+    assert_eq!(launcher.shutdowns(), vec![launcher.launched()[0]]);
 }
 
 #[tokio::test]
@@ -280,10 +457,7 @@ async fn directory_scan_continues_after_unprobeable_media_file() {
         ErrorCode::ExternalSystemUnavailable
     );
     assert_eq!(table_count(&cp, "media_snapshots").await, 1);
-    assert_eq!(
-        launcher.shutdowns(),
-        vec![launcher.launched_worker_id.unwrap()]
-    );
+    assert_eq!(launcher.shutdowns(), vec![launcher.launched()[0]]);
 }
 
 #[tokio::test]
@@ -358,12 +532,12 @@ async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
         .await
         .unwrap();
 
-    let launched_worker_id = launcher.launched_worker_id.unwrap();
+    let launched_worker_id = launcher.launched()[0];
     assert_eq!(
         launcher.builtin_name_seen_at_launch.as_deref(),
         Some("builtin.ffprobe")
     );
-    assert_eq!(launcher.dispatched_worker_ids, vec![launched_worker_id]);
+    assert_eq!(launcher.dispatched(), vec![launched_worker_id]);
     assert_eq!(report.files[0].probe_worker_id, Some(launched_worker_id));
     assert_eq!(
         media_snapshot_worker_ids(&cp).await,
@@ -407,17 +581,16 @@ async fn non_utf8_candidate_path_fails_before_worker_dispatch() {
         report.files[0].error.as_ref().unwrap().code,
         ErrorCode::ConfigInvalid
     );
-    assert!(launcher.dispatched_worker_ids.is_empty());
-    assert_eq!(
-        launcher.shutdowns(),
-        vec![launcher.launched_worker_id.unwrap()]
-    );
+    assert!(launcher.dispatched().is_empty());
+    assert_eq!(launcher.shutdowns(), vec![launcher.launched()[0]]);
 }
 
 #[derive(Clone)]
 enum FakePlan {
     AllSuccess,
     DriftOnPath(std::path::PathBuf),
+    LaunchErrorOnAttempt(usize),
+    WaitForDispatchBarrier(Arc<tokio::sync::Barrier>),
     WorkerErrorOnPath {
         path: std::path::PathBuf,
         error: worker::ScanWorkerError,
@@ -427,9 +600,10 @@ enum FakePlan {
 struct FakeLauncher {
     plan: FakePlan,
     pool: Option<sqlx::SqlitePool>,
-    launched_worker_id: Option<WorkerId>,
+    launch_attempts: usize,
+    launched_worker_ids: Vec<WorkerId>,
     builtin_name_seen_at_launch: Option<String>,
-    dispatched_worker_ids: Vec<WorkerId>,
+    dispatched_worker_ids: Arc<Mutex<Vec<WorkerId>>>,
     shutdown_worker_ids: Arc<Mutex<Vec<WorkerId>>>,
 }
 
@@ -438,9 +612,10 @@ impl FakeLauncher {
         Self {
             plan,
             pool: None,
-            launched_worker_id: None,
+            launch_attempts: 0,
+            launched_worker_ids: Vec::new(),
             builtin_name_seen_at_launch: None,
-            dispatched_worker_ids: Vec::new(),
+            dispatched_worker_ids: Arc::new(Mutex::new(Vec::new())),
             shutdown_worker_ids: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -453,6 +628,14 @@ impl FakeLauncher {
     fn shutdowns(&self) -> Vec<WorkerId> {
         self.shutdown_worker_ids.lock().unwrap().clone()
     }
+
+    fn launched(&self) -> Vec<WorkerId> {
+        self.launched_worker_ids.clone()
+    }
+
+    fn dispatched(&self) -> Vec<WorkerId> {
+        self.dispatched_worker_ids.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -461,7 +644,12 @@ impl ScanWorkerLauncher for FakeLauncher {
         &mut self,
         worker_id: WorkerId,
     ) -> Result<Box<dyn ProbeWorkerSession + Send>, worker::ScanWorkerError> {
-        self.launched_worker_id = Some(worker_id);
+        self.launch_attempts += 1;
+        if matches!(self.plan, FakePlan::LaunchErrorOnAttempt(attempt) if attempt == self.launch_attempts)
+        {
+            return Err(ffprobe_spawn_error());
+        }
+        self.launched_worker_ids.push(worker_id);
         if let Some(pool) = &self.pool {
             self.builtin_name_seen_at_launch =
                 sqlx::query_scalar("SELECT name FROM workers WHERE id = ?")
@@ -473,19 +661,40 @@ impl ScanWorkerLauncher for FakeLauncher {
         Ok(Box::new(FakeSession {
             worker_id,
             plan: self.plan.clone(),
+            dispatched_worker_ids: self.dispatched_worker_ids.clone(),
             shutdown_worker_ids: self.shutdown_worker_ids.clone(),
         }))
-    }
-
-    fn record_dispatch(&mut self, worker_id: WorkerId) {
-        self.dispatched_worker_ids.push(worker_id);
     }
 }
 
 struct FakeSession {
     worker_id: WorkerId,
     plan: FakePlan,
+    dispatched_worker_ids: Arc<Mutex<Vec<WorkerId>>>,
     shutdown_worker_ids: Arc<Mutex<Vec<WorkerId>>>,
+}
+
+#[derive(Clone)]
+struct FakeFilesystemClassifier {
+    identities: Arc<BTreeMap<std::path::PathBuf, ScanFilesystemIdentity>>,
+}
+
+#[async_trait::async_trait]
+impl ScanFilesystemClassifier for FakeFilesystemClassifier {
+    async fn identify(&self, path: &Path) -> ScanFilesystemIdentity {
+        self.identities
+            .get(path)
+            .copied()
+            .unwrap_or(ScanFilesystemIdentity(0))
+    }
+}
+
+fn fake_classifier<const N: usize>(
+    identities: [(std::path::PathBuf, ScanFilesystemIdentity); N],
+) -> FakeFilesystemClassifier {
+    FakeFilesystemClassifier {
+        identities: Arc::new(BTreeMap::from(identities)),
+    }
 }
 
 #[async_trait::async_trait]
@@ -498,10 +707,17 @@ impl ProbeWorkerSession for FakeSession {
         &mut self,
         request: ProbeFileRequest,
     ) -> Result<ProbeFileResult, worker::ScanWorkerError> {
+        self.dispatched_worker_ids
+            .lock()
+            .unwrap()
+            .push(self.worker_id);
         if let FakePlan::WorkerErrorOnPath { path, error } = &self.plan
             && path.to_str() == Some(&request.path)
         {
             return Err(error.clone());
+        }
+        if let FakePlan::WaitForDispatchBarrier(barrier) = &self.plan {
+            barrier.wait().await;
         }
         let mut result = matching_probe_result(&request);
         if matches!(&self.plan, FakePlan::DriftOnPath(path) if path.to_str() == Some(&request.path))
