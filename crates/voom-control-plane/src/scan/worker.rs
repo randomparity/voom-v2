@@ -30,6 +30,7 @@ pub struct ScanWorkerError {
     error_code: ErrorCode,
     message: String,
     shutdown_worker: bool,
+    terminal_payload: Option<serde_json::Value>,
 }
 
 impl ScanWorkerError {
@@ -53,12 +54,14 @@ impl ScanWorkerError {
         error_code: ErrorCode,
         message: impl Into<String>,
         shutdown_worker: bool,
+        terminal_payload: Option<serde_json::Value>,
     ) -> Self {
         Self {
             failure_class,
             error_code,
             message: message.into(),
             shutdown_worker,
+            terminal_payload,
         }
     }
 
@@ -68,6 +71,7 @@ impl ScanWorkerError {
             ErrorCode::WorkerCrash,
             message,
             true,
+            None,
         )
     }
 
@@ -77,6 +81,7 @@ impl ScanWorkerError {
             ErrorCode::MalformedWorkerResult,
             message,
             true,
+            None,
         )
     }
 
@@ -86,6 +91,7 @@ impl ScanWorkerError {
             ErrorCode::WorkerTimeout,
             message,
             true,
+            None,
         )
     }
 
@@ -93,8 +99,29 @@ impl ScanWorkerError {
         failure_class: FailureClass,
         error_code: ErrorCode,
         message: impl Into<String>,
+        payload: Option<serde_json::Value>,
     ) -> Self {
-        Self::new(failure_class, error_code, message, false)
+        Self::new(failure_class, error_code, message, false, payload)
+    }
+
+    pub(crate) fn is_ffprobe_exit(&self) -> bool {
+        self.error_code == ErrorCode::ExternalSystemUnavailable
+            && self
+                .terminal_payload
+                .as_ref()
+                .and_then(|payload| payload.get("stage"))
+                .and_then(serde_json::Value::as_str)
+                == Some("exit")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_error_for_test(
+        failure_class: FailureClass,
+        error_code: ErrorCode,
+        message: impl Into<String>,
+        payload: Option<serde_json::Value>,
+    ) -> Self {
+        Self::terminal_error(failure_class, error_code, message, payload)
     }
 }
 
@@ -293,7 +320,8 @@ fn map_probe_stream_error(err: WorkerStreamError) -> ScanWorkerError {
             class,
             code,
             message,
-        } => ScanWorkerError::terminal_error(class, code, message),
+            payload,
+        } => ScanWorkerError::terminal_error(class, code, message, payload),
         WorkerStreamError::ProgressHandler { source } => ScanWorkerError::malformed_worker_result(
             format!("probe_file progress handler failed: {source}"),
         ),

@@ -173,6 +173,17 @@ impl ControlPlane {
                         probe
                     }
                     Err(err) => {
+                        if discovered.mode == discovery::ScanMode::Directory
+                            && err.is_ffprobe_exit()
+                        {
+                            report.push_worker_error(
+                                candidate.path,
+                                &candidate_facts,
+                                worker_id,
+                                &err,
+                            );
+                            continue;
+                        }
                         return Err(report.fail_worker(
                             candidate.path,
                             &candidate_facts,
@@ -480,6 +491,22 @@ impl ScanReportBuilder {
             scan_file_error_from_worker(err),
         );
         command_error_from_worker(err, self.finish())
+    }
+
+    fn push_worker_error(
+        &mut self,
+        path: PathBuf,
+        facts: &hash::ObservedFileFacts,
+        worker_id: WorkerId,
+        err: &worker::ScanWorkerError,
+    ) {
+        self.push_error(
+            path,
+            ScanReportFileStatus::Failed,
+            Some(facts),
+            Some(worker_id),
+            scan_file_error_from_worker(err),
+        );
     }
 
     fn fail_voom(

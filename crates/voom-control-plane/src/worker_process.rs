@@ -134,6 +134,7 @@ pub(crate) enum WorkerStreamError {
         class: FailureClass,
         code: ErrorCode,
         message: String,
+        payload: Option<serde_json::Value>,
     },
     ProgressHandler {
         source: VoomError,
@@ -461,12 +462,14 @@ where
                 class,
                 code,
                 message,
+                payload,
                 ..
             }) => {
                 return Err(WorkerStreamError::Terminal {
                     class,
                     code,
                     message,
+                    payload,
                 });
             }
             NdjsonOutcome::Terminated(ProgressFrame::Progress { .. }) => {
@@ -495,6 +498,7 @@ fn worker_stream_error_to_voom_error(err: WorkerStreamError) -> VoomError {
             class,
             code,
             message,
+            payload: _,
         } => worker_terminal_error(class, code, message),
         WorkerStreamError::ProgressHandler { source } => source,
     }

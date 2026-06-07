@@ -289,6 +289,7 @@ fn map_verify_stream_error(err: WorkerStreamError) -> VerifyWorkerError {
             class,
             code,
             message,
+            payload: _,
         } => VerifyWorkerError::terminal_error(class, code, message),
         WorkerStreamError::ProgressHandler { source } => {
             VerifyWorkerError::malformed_worker_result(format!(
