@@ -5,6 +5,7 @@ use voom_core::{FailureClass, IssueId, TicketOperation};
 // --- jobs -------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobOpenedPayload {
     pub job_id: u64,
     pub kind: String,
@@ -12,17 +13,20 @@ pub struct JobOpenedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobSucceededPayload {
     pub job_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobFailedPayload {
     pub job_id: u64,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobCancelledPayload {
     pub job_id: u64,
     pub reason: String,
@@ -31,6 +35,7 @@ pub struct JobCancelledPayload {
 // --- tickets ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketCreatedPayload {
     pub ticket_id: u64,
     pub job_id: Option<u64>,
@@ -40,11 +45,13 @@ pub struct TicketCreatedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketReadyPayload {
     pub ticket_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketLeasedPayload {
     pub ticket_id: u64,
     pub lease_id: u64,
@@ -53,12 +60,14 @@ pub struct TicketLeasedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketSucceededPayload {
     pub ticket_id: u64,
     pub lease_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketFailedRetriablePayload {
     pub ticket_id: u64,
     pub attempt: u32,
@@ -73,6 +82,7 @@ pub struct TicketFailedRetriablePayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketFailedTerminalPayload {
     pub ticket_id: u64,
     pub attempt: u32,
@@ -89,6 +99,7 @@ pub struct TicketFailedTerminalPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketRequeuedAfterLeaseExpiryPayload {
     pub ticket_id: u64,
     pub lease_id: u64,
@@ -99,6 +110,7 @@ pub struct TicketRequeuedAfterLeaseExpiryPayload {
 /// remaining. Carries the operator `actor` / `reason` for audit
 /// continuity even though `lease.force_released` also records them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TicketRequeuedAfterForceReleasePayload {
     pub ticket_id: u64,
     pub lease_id: u64,
@@ -109,6 +121,7 @@ pub struct TicketRequeuedAfterForceReleasePayload {
 // --- leases (worker-execution) ---------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseAcquiredPayload {
     pub lease_id: u64,
     pub ticket_id: u64,
@@ -119,6 +132,7 @@ pub struct LeaseAcquiredPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseReleasedPayload {
     pub lease_id: u64,
     pub ticket_id: u64,
@@ -126,12 +140,14 @@ pub struct LeaseReleasedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseExpiredPayload {
     pub lease_id: u64,
     pub ticket_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseForceReleasedPayload {
     pub lease_id: u64,
     pub ticket_id: u64,
