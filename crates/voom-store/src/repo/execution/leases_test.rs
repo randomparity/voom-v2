@@ -141,6 +141,40 @@ async fn heartbeat_extends_expires_at() {
 }
 
 #[tokio::test]
+async fn heartbeat_never_shortens_expires_at_but_still_records_beat() {
+    // M5 regression: a heartbeat carrying a shorter TTL than the lease's
+    // current deadline must NOT move expires_at backwards (a shortened
+    // deadline could let expire_due reap a lease whose worker just proved
+    // it is alive). The heartbeat time must still be recorded — the worker
+    // did beat, and dropping that signal is its own bug.
+    let (_pool, _trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    let l1 = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    // Heartbeat 5s in with a 10s TTL → candidate deadline T0+15, which is
+    // *earlier* than the current T0+60. The deadline must stay at T0+60.
+    let l2 = lrepo
+        .heartbeat(l1.id, Duration::seconds(10), T0 + Duration::seconds(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        l2.expires_at, l1.expires_at,
+        "shortening heartbeat must not move expires_at backwards"
+    );
+    assert_eq!(
+        l2.last_heartbeat_at,
+        T0 + Duration::seconds(5),
+        "the heartbeat must still be recorded even when the deadline is unchanged"
+    );
+}
+
+#[tokio::test]
 async fn release_transitions_lease_and_ticket_to_succeeded() {
     let (_pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let l = lrepo
