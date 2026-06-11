@@ -110,7 +110,12 @@ impl EventRepo for SqliteEventRepo {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| VoomError::Database(format!("events get: {e}")))?;
-        row.as_ref().map(row_to_event).transpose()
+        // An unknown-kind row yields Ok(None): the caller cannot represent it,
+        // which surfaces the same as "not found" rather than erroring.
+        match row {
+            Some(row) => row_to_event(&row),
+            None => Ok(None),
+        }
     }
 }
 
@@ -164,23 +169,46 @@ async fn page_query(
         .fetch_all(pool)
         .await
         .map_err(|e| VoomError::Database(format!("events list: {e}")))?;
-    let items: Vec<EventRow> = rows.iter().map(row_to_event).collect::<Result<_, _>>()?;
+
+    // Rows with an unknown `kind` (written by a newer binary) are skipped so a
+    // single unrecognized row does not poison the whole read. The cursor must
+    // still advance past skipped rows — keyed off the last RAW row id, not the
+    // last kept item — or `tail` would re-scan a trailing run of unknown rows.
+    let mut items = Vec::with_capacity(rows.len());
+    let mut last_raw_id: Option<u64> = None;
+    for row in &rows {
+        last_raw_id = Some(event_row_id(row)?);
+        if let Some(event) = row_to_event(row)? {
+            items.push(event);
+        }
+    }
 
     // Forward `list` must signal exhaustion: an empty page returns None so
     // pollers stop. `tail` (live polling) keeps the caller's cursor alive
     // across empty pages so a follower can resume when new events arrive.
     let next_cursor = if tail {
-        items.last().map(|r| r.id.0).or(page.cursor)
+        last_raw_id.or(page.cursor)
     } else {
-        items.last().map(|r| r.id.0)
+        last_raw_id
     };
     Ok(EventPage { items, next_cursor })
 }
 
-fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventRow, VoomError> {
+fn event_row_id(row: &sqlx::sqlite::SqliteRow) -> Result<u64, VoomError> {
     let id: i64 = row
         .try_get("event_id")
         .map_err(|e| VoomError::Database(format!("read event_id: {e}")))?;
+    Ok(u64_from_i64(id))
+}
+
+/// Reconstruct an `EventRow`, or `Ok(None)` if the row's `kind` is not in this
+/// build's `EventKind` vocab — i.e. an event written by a newer binary. Such a
+/// row is skipped (with a warning) rather than failing the whole read, so an
+/// older reader stays usable against a forward-migrated database. Genuine
+/// corruption (bad timestamp, malformed payload JSON, unknown `subject_type`)
+/// still returns `Err`.
+fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Option<EventRow>, VoomError> {
+    let id = event_row_id(row)?;
     let occurred: String = row
         .try_get("occurred_at")
         .map_err(|e| VoomError::Database(format!("read occurred_at: {e}")))?;
@@ -204,13 +232,22 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventRow, VoomError> {
     // Decode via the explicit string → enum parsers. Using serde derives
     // would produce snake_case strings that don't match the dotted wire
     // form `as_str()` writes; see `EventKind` rustdoc.
-    let kind = EventKind::from_str(&kind_str)?;
+    // `from_str` fails only for a kind outside the vocab; treat that as a
+    // forward-compat unknown and skip rather than erroring the read.
+    let Ok(kind) = EventKind::from_str(&kind_str) else {
+        tracing::warn!(
+            event_id = id,
+            kind = kind_str,
+            "skipping event with unknown kind (written by a newer binary?)"
+        );
+        return Ok(None);
+    };
     let subject_type = SubjectType::from_str(&subject_type_str)?;
     let payload_value: JsonValue = serde_json::from_str(&payload)
         .map_err(|e| VoomError::Database(format!("parse payload JSON: {e}")))?;
     let event = reassemble_event(kind, &payload_value)?;
-    Ok(EventRow {
-        id: EventId(u64_from_i64(id)),
+    Ok(Some(EventRow {
+        id: EventId(id),
         envelope: EventEnvelope {
             occurred_at,
             subject_type,
@@ -218,7 +255,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<EventRow, VoomError> {
             trace_id: trace_id.map(TraceId),
             payload: event,
         },
-    })
+    }))
 }
 
 fn inner_payload(event: &Event) -> JsonValue {
