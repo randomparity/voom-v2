@@ -22,14 +22,27 @@ pub fn parse_policy_source(source: &str) -> Result<PolicyAst, ParseError> {
     Parser::new(source).parse_policy()
 }
 
+/// Maximum block-statement nesting depth. Recursive descent takes one stack
+/// frame per level, so an unbounded depth lets pathological input
+/// (`when { when { … } }` thousands deep) exhaust the stack and abort the
+/// process. 64 is far above any legitimate policy.
+const MAX_NESTING_DEPTH: usize = 64;
+
 struct Parser<'a> {
     source: &'a str,
     cursor: usize,
+    /// Block-statement nesting level. Incremented for each `inner` parser
+    /// spawned to parse a block body; checked in `parse_statement`.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
     const fn new(source: &'a str) -> Self {
-        Self { source, cursor: 0 }
+        Self {
+            source,
+            cursor: 0,
+            depth: 0,
+        }
     }
 
     fn parse_policy(mut self) -> Result<PolicyAst, ParseError> {
@@ -165,6 +178,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> Result<StatementAst, ParseError> {
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.error_code_at(
+                DiagnosticCode::NestingDepthExceeded,
+                self.cursor,
+                format!("block nesting too deep (max {MAX_NESTING_DEPTH})"),
+            ));
+        }
         self.skip_ws_and_comments();
         let start = self.cursor;
         let keyword = self.parse_identifier()?;
@@ -218,6 +238,7 @@ impl<'a> Parser<'a> {
                 let mut inner = Self {
                     source: self.source,
                     cursor: open_brace + 1,
+                    depth: self.depth + 1,
                 };
                 let settings = inner.parse_setting_list()?;
                 return Ok(StatementAst::TranscodeInline {
@@ -231,6 +252,7 @@ impl<'a> Parser<'a> {
             let mut inner = Self {
                 source: self.source,
                 cursor: open_brace + 1,
+                depth: self.depth + 1,
             };
             let statements = inner.parse_statements_until(close_brace)?;
             Ok(StatementAst::Block {
@@ -513,10 +535,19 @@ impl<'a> Parser<'a> {
     }
 
     fn error_at(&self, offset: usize, message: impl Into<String>) -> ParseError {
+        self.error_code_at(DiagnosticCode::UnexpectedToken, offset, message)
+    }
+
+    fn error_code_at(
+        &self,
+        code: DiagnosticCode,
+        offset: usize,
+        message: impl Into<String>,
+    ) -> ParseError {
         let span = SourceSpan::new(offset, offset.saturating_add(1).min(self.source.len()));
         ParseError {
             diagnostics: vec![PolicyDiagnostic::error(
-                DiagnosticCode::UnexpectedToken,
+                code,
                 DiagnosticStage::Parse,
                 span,
                 line_column(self.source, offset),

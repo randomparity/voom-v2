@@ -542,3 +542,34 @@ fn rejects_invalid_skip_condition_target() {
             .contains(&"invalid_track_target".to_owned())
     );
 }
+
+#[test]
+fn rejects_comparison_numeric_literal_exceeding_u64() {
+    // u64::MAX is 18446744073709551615; this 25-digit literal overflows it.
+    // Without a guard it lowers to a Number string that the planner's
+    // parse::<u64>() silently drops, so the condition never matches — a silent
+    // wrong answer. It must be a hard compile error instead.
+    assert!(
+        codes("policy \"p\" { phase a { skip when bitrate > 9999999999999999999999999 } }")
+            .contains(&"numeric_literal_out_of_range".to_owned())
+    );
+}
+
+#[test]
+fn rejects_count_numeric_literal_exceeding_u64() {
+    assert!(
+        codes(
+            "policy \"p\" { phase a { when count audio > 9999999999999999999999999 { keep audio where lang in [eng] } } }"
+        )
+        .contains(&"numeric_literal_out_of_range".to_owned())
+    );
+}
+
+#[test]
+fn accepts_in_range_numeric_literal() {
+    // A legitimate in-range literal must not trip the overflow guard.
+    assert!(
+        !codes("policy \"p\" { phase a { skip when bitrate > 1920 } }")
+            .contains(&"numeric_literal_out_of_range".to_owned())
+    );
+}

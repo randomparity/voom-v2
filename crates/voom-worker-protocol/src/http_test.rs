@@ -741,6 +741,67 @@ fn idempotency_cache_make_room_evicts_completed_behind_active() {
     assert!(cache.entries.contains_key("c"));
 }
 
+/// Accept the connection, drain the request, then hold the socket open without
+/// ever writing a response — simulating a worker that hangs mid-request.
+async fn unresponsive_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf).await.unwrap();
+        // Hold the connection; never reply. Keep `stream` alive so the client
+        // sees a hung peer, not a closed connection.
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    (addr, server)
+}
+
+#[tokio::test]
+async fn handshake_times_out_when_worker_never_responds() {
+    let (addr, server) = unresponsive_server().await;
+    let client =
+        HttpClient::with_timeouts(addr, Duration::from_millis(100), Duration::from_millis(100));
+
+    // Outer guard: if the client fails to self-time-out, this fires first and
+    // the unwrap panics — the failure points at a client that hung.
+    let result = tokio::time::timeout(Duration::from_secs(5), client.handshake(1))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, Err(ProtocolError::Timeout { .. })),
+        "expected Timeout, got {result:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn dispatch_times_out_when_worker_never_sends_response_line() {
+    let (addr, server) = unresponsive_server().await;
+    let client =
+        HttpClient::with_timeouts(addr, Duration::from_millis(100), Duration::from_millis(100));
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.dispatch(
+            &creds(),
+            "timeout-1",
+            request(LeaseId(1), serde_json::json!({})),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        matches!(result, Err(ProtocolError::Timeout { .. })),
+        "expected Timeout, got {:?}",
+        result.as_ref().map(|_| "Ok(stream)")
+    );
+    server.abort();
+}
+
 #[test]
 fn status_code_dependency_stays_used() {
     assert_eq!(StatusCode::OK.as_u16(), 200);

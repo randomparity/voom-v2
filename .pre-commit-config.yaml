@@ -1,3 +1,8 @@
+# Local hooks delegate to `just` recipes so the command lives in exactly one
+# place (the justfile) and cannot silently drift from `just ci`.
+#
+# Deliberately CI-only (too slow for every commit): `just doc` and the full
+# `--all-features` test build (`just test`). Run `just ci` before pushing.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -10,19 +15,42 @@ repos:
   - repo: local
     hooks:
       - id: cargo-fmt
-        name: cargo fmt --check
-        entry: cargo fmt --all -- --check
+        name: just fmt-check
+        entry: just fmt-check
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-test-layout
+        name: just check-test-layout
+        entry: just check-test-layout
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-paused-time-db
+        name: just check-paused-time-db
+        entry: just check-paused-time-db
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-paused-time-db-selftest
+        name: just check-paused-time-db-selftest
+        entry: just check-paused-time-db-selftest
         language: system
         pass_filenames: false
         files: '\.rs$'
 
       - id: cargo-clippy
-        name: cargo clippy
-        entry: cargo clippy --workspace --all-targets -- -D warnings
+        name: just lint
+        entry: just lint
         language: system
         pass_filenames: false
         files: '\.rs$'
 
+      # Deliberately lighter than CI's `just test` (no --all-features prebuild)
+      # to keep commits fast; the full feature-set test run is a CI gate.
       - id: cargo-test
         name: cargo test --quiet
         entry: cargo test --workspace --quiet
@@ -30,9 +58,16 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: cargo-deny
+        name: just deny
+        entry: just deny
+        language: system
+        pass_filenames: false
+        files: '(Cargo\.(lock|toml)|deny\.toml)$'
+
       - id: cargo-audit
-        name: cargo audit
-        entry: cargo audit --deny warnings
+        name: just audit
+        entry: just audit
         language: system
         pass_filenames: false
         files: '^Cargo\.lock$'

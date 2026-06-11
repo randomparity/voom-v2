@@ -75,7 +75,7 @@ All routine actions go through `just` (see `justfile`):
 Run a single test: `cargo test -p <crate> <test_name>` (e.g. `cargo test -p voom-cli version_envelope`).
 Tests inside the `voom-cli` integration suite use `insta` snapshots — review with `cargo insta review` after a deliberate change.
 
-Pre-commit hooks (installed by `just setup` via `prek install`) run fmt-check, clippy, test, and `cargo audit` on staged Rust / `Cargo.lock` changes. Don't bypass them; fix the underlying issue.
+Pre-commit hooks (installed by `just setup` via `prek install`) delegate to `just` recipes so they cannot drift from `just ci`: `fmt-check`, `check-test-layout`, `check-paused-time-db`(+selftest), `lint`, a light `cargo test --quiet`, `deny`, and `audit` on staged Rust / `Cargo.lock` / `Cargo.toml` / `deny.toml` changes. Two checks are deliberately CI-only because they are too slow per commit: `just doc` and the full `--all-features` test build (`just test`) — run `just ci` before pushing. Don't bypass the hooks; fix the underlying issue.
 
 ## Architecture
 
