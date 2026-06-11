@@ -270,6 +270,23 @@ keep as `commit/mod_test.rs` with `mod.rs` re-importing children. Split where cl
   compile. Mitigation: move the test beside the child that owns the item
   (preferred), or add a narrow named `pub(crate) use child::item;` re-export to
   `mod.rs`. Never a `use child::*;` glob.
+- **Module-nesting depth shift breaks `super::` relative imports.** Turning
+  `dir/X.rs` into `dir/X/mod.rs` (and `dir/X_test.rs` into `dir/X/mod_test.rs`)
+  moves both files one level deeper in the module tree, so every existing
+  `super::foo` resolves to the wrong module: `super::foo` must become
+  `super::super::foo`, and `super::super::bar` becomes
+  `super::super::super::bar`. Items moved into a *child* file (not `mod.rs`)
+  shift even further. This is present in the real code — `executor.rs:18` does
+  `use super::dispatch::{...}` (the sibling `workflow/execution/dispatch.rs`),
+  `coordinator.rs` has 4 `super::` refs, `remote_execution.rs` has 1, and the
+  test files have 8 (`coordinator_test`), 4 (`executor_test`, e.g.
+  `super::super::operation_adapters`), 1 (`remote_execution_test`), and 1
+  (`commit_test`). It is the single most likely cause of a mid-refactor compile
+  break. Mitigation: when a file becomes a directory module, rewrite every
+  `super::`-relative import in the moved source and test files, preferring
+  absolute `crate::` paths (already mandated for new code by constraint 4's
+  "absolute imports only"). Each module's implementation step makes this an
+  explicit checklist item verified by `cargo build` before running tests.
 - **Private-item visibility across children.** A private free function in
   `acquire.rs` used by `complete.rs` must be `pub(super)` (or `pub(crate)`), or
   live in `mod.rs`. The plan puts genuinely shared helpers in `mod.rs`;
