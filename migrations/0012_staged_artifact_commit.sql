@@ -5,6 +5,14 @@
 -- foreign_keys is ON, so this migration explicitly exits the wrapper
 -- transaction for the table rebuild, temporarily disables FK enforcement, then
 -- starts a transaction again for sqlx migration bookkeeping.
+--
+-- Why the explicit COMMIT / PRAGMA / BEGIN pattern:
+--   SQLite session PRAGMAs (foreign_keys, legacy_alter_table) are documented
+--   as no-ops when issued inside an open transaction — the setting is silently
+--   ignored if a transaction is already active.  Because sqlx starts a
+--   transaction before running this file, we must COMMIT that transaction
+--   first, set the PRAGMAs while no transaction is open, then BEGIN a new
+--   transaction so sqlx can record the migration checksum on commit.
 COMMIT;
 PRAGMA foreign_keys = OFF;
 PRAGMA legacy_alter_table = ON;
