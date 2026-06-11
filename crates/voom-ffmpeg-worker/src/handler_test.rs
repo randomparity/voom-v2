@@ -44,6 +44,37 @@ async fn output_path_escape_is_config_invalid() {
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
 }
 
+#[tokio::test]
+async fn dash_leading_input_path_is_config_invalid_not_unavailable() {
+    // M14: a path beginning with '-' is parsed by ffmpeg as an option, not a
+    // filename. The input path is not staging-validated (only existence-checked),
+    // so without an explicit guard a leading-'-' input would slip through as a
+    // missing file (ArtifactUnavailable) rather than a rejected contract.
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request = request(dir.path(), &input).await;
+    request.input.path = "-injected.mkv".to_owned();
+
+    let err = handle_transcode_video(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+#[test]
+fn reject_option_like_path_flags_only_leading_dash() {
+    assert!(reject_option_like_path("p", Path::new("-foo.mkv")).is_err());
+    assert!(reject_option_like_path("p", Path::new("--")).is_err());
+    // An absolute staging path (the normal case) begins with '/', and a
+    // leading-'-' component *inside* an absolute path is harmless because the
+    // whole arg no longer begins with '-'.
+    assert!(reject_option_like_path("p", Path::new("/stage/-foo.mkv")).is_ok());
+    assert!(reject_option_like_path("p", Path::new("/stage/out.mkv")).is_ok());
+    assert!(reject_option_like_path("p", Path::new("out.mkv")).is_ok());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn existing_video_output_symlink_is_config_invalid() {

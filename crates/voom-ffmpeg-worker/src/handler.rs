@@ -268,6 +268,8 @@ async fn prepare_video_operation(
     staging_root: &Path,
     expected: &TranscodeVideoExpectedFacts,
 ) -> Result<TranscodeVideoObservedFacts, TranscodeVideoError> {
+    reject_option_like_path("input_path", input_path)?;
+    reject_option_like_path("output_path", output_path)?;
     validate_staging_path(staging_root, output_path)?;
     validate_output_missing(output_path).await?;
     let input_pre = observe_file_facts(input_path)
@@ -552,6 +554,8 @@ async fn prepare_audio_operation(
     staging_root: &Path,
     expected: &AudioExpectedFacts,
 ) -> Result<AudioObservedFacts, TranscodeVideoError> {
+    reject_option_like_path("input_path", input_path)?;
+    reject_option_like_path("output_path", output_path)?;
     validate_staging_path(staging_root, output_path)?;
     validate_output_missing(output_path).await?;
     let input_pre = observe_audio_file_facts(input_path).await?;
@@ -668,6 +672,23 @@ async fn validate_output_missing(output_path: &Path) -> Result<(), TranscodeVide
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(config_invalid("output_path", err.to_string())),
     }
+}
+
+/// Reject a path that ffmpeg would parse as an option rather than a filename.
+/// ffmpeg (and the probe/remux tools) treat any argument whose first character
+/// is `-` as a flag. Staging paths are absolute and so begin with `/`, but guard
+/// input and output paths explicitly so a crafted request can never smuggle an
+/// option through a path — and so this stays correct if staging validation is
+/// ever refactored. A leading-`-` component *inside* an absolute path is fine:
+/// the argument as a whole no longer starts with `-`.
+fn reject_option_like_path(field: &str, path: &Path) -> Result<(), TranscodeVideoError> {
+    if path.as_os_str().as_encoded_bytes().first() == Some(&b'-') {
+        return Err(config_invalid(
+            field,
+            "path must not begin with '-' (parsed as an option by ffmpeg)".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_staging_path(
