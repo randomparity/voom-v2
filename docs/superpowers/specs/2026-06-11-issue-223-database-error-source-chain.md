@@ -18,9 +18,10 @@ sentinels).
 
 A reviewer can verify all of:
 
-1. `VoomError::Database` carries an optional `#[source] Box<sqlx::Error>`; for a
-   value built from a real `sqlx::Error`, `std::error::Error::source()` returns
-   `Some` and downcasts to `sqlx::Error`. For a non-sqlx value it returns `None`.
+1. `VoomError::Database` carries an optional `#[source] Box<dyn Error + Send +
+   Sync>`; for a value built from a real `sqlx::Error`,
+   `std::error::Error::source()` returns `Some` and `downcast_ref::<sqlx::Error>()`
+   is `Some`. For a non-sqlx value it returns `None`.
 2. `VoomError::Database { .. }.code()` is still `"DB_UNREACHABLE"` and
    `error_code()` is still `ErrorCode::DbUnreachable`.
 3. The `Display` string is still exactly `"database error: {message}"` for both
