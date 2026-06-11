@@ -16,8 +16,10 @@ This is the operator procedure behind the Sprint 17 slice
 
 ## Procedure
 
-All commands emit a single JSON envelope on stdout (`run-local` additionally
-prints a `ready` line, see below); logs go to stderr.
+All commands emit a single JSON envelope on stdout; logs go to stderr.
+`run-local` is the documented exception — its stdout is a two-line contract
+(readiness line, then the retirement envelope on shutdown). See the
+[run-local stdout contract](#run-local-stdout-contract) note below.
 
 ### 1. Initialize the database (once)
 
@@ -170,3 +172,35 @@ single-directory run (no shared subtree) promotes flat, as before.
 
 Ctrl-C each `run-local` (it retires its worker and prints a final envelope).
 `voom worker list` should then show no live local workers.
+
+## run-local stdout contract
+
+Unlike every other `voom` command — which emits exactly one JSON envelope per
+invocation — `voom worker run-local` is a long-running foreground supervisor, so
+its stdout is a **two-line contract** over the worker's lifetime, in this order
+and with nothing else interleaved (all logs go to stderr):
+
+1. A **bare readiness line**, emitted once the bundled worker has bound its
+   endpoint and been registered for discovery. It is not wrapped in the standard
+   envelope (no `schema_version`/`command`):
+
+   ```
+   {"status":"ready","worker_id":12,"kind":"ffmpeg","endpoint":"127.0.0.1:53017"}
+   ```
+
+   Wait for this line before dispatching work; gate on `status == "ready"`.
+
+2. The **standard retirement envelope**, emitted once on shutdown (Ctrl-C,
+   SIGTERM, or stdin EOF) after the worker row is retired:
+
+   ```
+   {"schema_version":"0","command":"worker","status":"ok",
+    "data":{"worker_id":12,"kind":"ffmpeg","status":"retired"},...}
+   ```
+
+   If retirement fails, line 2 is an error envelope (`status:"error"`) instead.
+
+A consumer can therefore read stdout as: one readiness line, then exactly one
+terminating envelope. This contract is enforced end-to-end by
+`crates/voom-cli/tests/run_local_stdout_contract.rs` and specified in
+`docs/specs/run-local-stdout-contract.md`.

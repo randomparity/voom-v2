@@ -133,6 +133,8 @@ and `scripts/payload-contract-scope.txt`. Enforced by
 
 The `voom` binary is agent-facing. Every invocation MUST emit exactly one JSON envelope on stdout (`schema_version`, `command`, `status`, `data` | `error`, optional `local`, `warnings`). Logs go to stderr. Even clap parse failures route through `envelope::emit_err` so stdout is always parseable — see `crates/voom-cli/src/main.rs`. Exit codes: `0` ok, `1` BAD_ARGS, `2` runtime error.
 
+`voom worker run-local` is the one documented streaming exception: it is a long-running foreground supervisor whose stdout is a **two-line contract** — first a bare readiness line (`{"status":"ready","worker_id":…,"kind":…,"endpoint":…}`, no envelope wrapper) once the bundled worker has bound and registered, then, on shutdown, the standard single retirement envelope (`status:"ok"`, `data.status:"retired"`). Nothing else is written to stdout. See `docs/runbooks/operator-real-media-execution.md` and `docs/specs/run-local-stdout-contract.md`.
+
 Error `code` strings are public contract — defined in `voom_core::VoomError::code()` (`DB_UNREACHABLE`, `DB_PARTIAL_SCHEMA`, `DB_DIRTY_MIGRATION`, `DB_SCHEMA_TOO_NEW`, `CONFIG_INVALID`, `NOT_FOUND`, `INTERNAL`) plus CLI-layer codes (`BAD_ARGS`). Don't rename or repurpose them; add new variants instead.
 
 ### Workspace / versioning
