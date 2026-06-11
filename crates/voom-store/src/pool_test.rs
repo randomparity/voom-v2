@@ -234,6 +234,34 @@ async fn on_disk_wal_allows_writer_commit_while_reader_transaction_is_open() {
     assert_eq!(visible_after_reader_commit, 2);
 }
 
+#[tokio::test]
+async fn on_disk_openers_use_normal_synchronous() {
+    // WAL pairs safely with synchronous=NORMAL: the WAL file is fsynced at each
+    // checkpoint and on commit the WAL header is durable, so the only loss
+    // window is the last few committed transactions on an OS/power crash (never
+    // corruption). FULL (the SQLite/sqlx default) fsyncs on every commit, which
+    // is needless overhead for our durable-ticket workload. Set it explicitly so
+    // the durability/throughput tradeoff is intentional, not an unstated default.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("voom.db");
+    let url = format!("sqlite://{}", db.display());
+
+    {
+        let pool = connect_or_create(&url).await.unwrap();
+        assert_eq!(synchronous(&pool).await, 1, "create-side must be NORMAL");
+    }
+
+    let pool = connect(&url).await.unwrap();
+    assert_eq!(synchronous(&pool).await, 1, "read-side must be NORMAL");
+}
+
+async fn synchronous(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("PRAGMA synchronous")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 async fn journal_mode(pool: &sqlx::SqlitePool) -> String {
     let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
         .fetch_one(pool)
