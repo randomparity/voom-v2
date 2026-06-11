@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use voom_control_plane::{
@@ -240,9 +240,10 @@ pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> 
             )
             .await
         }
-        ArtifactCommand::Verify { artifact_handle_id } => {
-            verify(database_url, local, artifact_handle_id).await
-        }
+        ArtifactCommand::Verify {
+            artifact_handle_id,
+            staging_root,
+        } => verify(database_url, local, artifact_handle_id, staging_root).await,
         ArtifactCommand::Commit {
             artifact_handle_id,
             target_path,
@@ -308,7 +309,12 @@ async fn stage_copy(
     }
 }
 
-async fn verify(database_url: &str, local: Local, artifact_handle_id: u64) -> io::Result<i32> {
+async fn verify(
+    database_url: &str,
+    local: Local,
+    artifact_handle_id: u64,
+    staging_root: PathBuf,
+) -> io::Result<i32> {
     let cp = match open_control_plane(COMMAND_VERIFY, database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
@@ -316,6 +322,7 @@ async fn verify(database_url: &str, local: Local, artifact_handle_id: u64) -> io
     match cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: ArtifactHandleId(artifact_handle_id),
+            staging_root,
         })
         .await
     {

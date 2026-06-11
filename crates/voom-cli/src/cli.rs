@@ -301,6 +301,10 @@ pub enum ArtifactCommand {
     Verify {
         #[arg(long)]
         artifact_handle_id: u64,
+        /// Staging directory the artifact must reside within. The worker
+        /// rejects any artifact path not contained by this root.
+        #[arg(long)]
+        staging_root: PathBuf,
     },
     /// Promote a verified staged artifact to an add-only target path.
     Commit {

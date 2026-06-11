@@ -298,9 +298,7 @@ async fn execute_remux_core(
     let failure = failure.with_staged(&staged);
     let verified = match verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging_path),
         verify,
         &NoVerifyArtifactHooks,
     )

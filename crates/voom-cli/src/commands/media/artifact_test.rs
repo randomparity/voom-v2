@@ -36,7 +36,16 @@ fn artifact_command_names_and_flags_parse() {
             "/tmp/staged.bin",
         ]
         .as_slice(),
-        ["voom", "artifact", "verify", "--artifact-handle-id", "12"].as_slice(),
+        [
+            "voom",
+            "artifact",
+            "verify",
+            "--artifact-handle-id",
+            "12",
+            "--staging-root",
+            "/tmp/stage",
+        ]
+        .as_slice(),
         [
             "voom",
             "artifact",

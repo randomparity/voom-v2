@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -26,6 +26,30 @@ use crate::cases::{append_event, begin_tx, commit_tx};
 #[derive(Debug)]
 pub struct VerifyArtifactInput {
     pub artifact_handle_id: ArtifactHandleId,
+    /// Staging directory the artifact must reside within. Sent to the worker,
+    /// which rejects any artifact path not contained by this root.
+    pub staging_root: PathBuf,
+}
+
+impl VerifyArtifactInput {
+    /// Build an input whose containment root is the directory holding the
+    /// just-staged file. The workflow wrote the artifact there, so that
+    /// directory is the authoritative staging boundary — and because it is
+    /// derived from the workflow's own path rather than the DB-read location
+    /// value, it still catches a location that has been corrupted to point
+    /// elsewhere.
+    #[must_use]
+    pub(crate) fn for_staged_file(
+        artifact_handle_id: ArtifactHandleId,
+        staged_path: &Path,
+    ) -> Self {
+        Self {
+            artifact_handle_id,
+            staging_root: staged_path
+                .parent()
+                .map_or_else(|| PathBuf::from("/"), Path::to_path_buf),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -140,6 +164,7 @@ pub(crate) async fn verify_artifact_with_dispatcher(
 
     let request = VerifyArtifactRequest {
         path: path.clone(),
+        staging_root: input.staging_root.to_string_lossy().into_owned(),
         expected: VerifyArtifactExpectedFacts {
             size_bytes: expected.size_bytes,
             content_hash: expected.checksum.clone(),
