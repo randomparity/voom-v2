@@ -1,6 +1,27 @@
 use super::*;
 use crate::payload::{Event, EventKind};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use voom_core::FailureClass;
+
+/// Assert that `valid` round-trips and that injecting a top-level unknown field
+/// is rejected by `#[serde(deny_unknown_fields)]`.
+fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
+    let base = serde_json::to_value(valid).unwrap();
+    assert!(
+        serde_json::from_value::<T>(base.clone()).is_ok(),
+        "base instance should deserialize: {base}"
+    );
+    let mut tampered = base;
+    tampered
+        .as_object_mut()
+        .expect("payload struct serializes to a JSON object")
+        .insert("__unknown".to_owned(), serde_json::json!(true));
+    assert!(
+        serde_json::from_value::<T>(tampered).is_err(),
+        "unknown top-level field must be rejected"
+    );
+}
 #[test]
 fn artifact_staged_payload_round_trip() {
     let p = ArtifactStagedPayload {
@@ -825,4 +846,218 @@ fn artifact_commit_recovery_required_payload_round_trip() {
         Event::ArtifactCommitRecoveryRequired(p).kind(),
         EventKind::ArtifactCommitRecoveryRequired
     );
+}
+
+#[test]
+fn artifact_handle_created_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactHandleCreatedPayload {
+        artifact_handle_id: 1,
+        privacy_class: "internal".to_owned(),
+        durability_class: "durable".to_owned(),
+        mutability: "immutable".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_location_recorded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactLocationRecordedPayload {
+        artifact_location_id: 1,
+        artifact_handle_id: 2,
+        kind: "filesystem".to_owned(),
+        value: "/media/x".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_location_retired_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactLocationRetiredPayload {
+        artifact_location_id: 1,
+        artifact_handle_id: 2,
+    });
+}
+
+#[test]
+fn artifact_lineage_recorded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactLineageRecordedPayload {
+        artifact_lineage_id: 1,
+        parent_artifact_id: 2,
+        child_artifact_id: 3,
+        operation: "transcode".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_staged_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactStagedPayload {
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        source_file_version_id: 12,
+        source_file_location_id: Some(13),
+        staging_path: "/var/lib/voom/staging/10".to_owned(),
+        size_bytes: 4096,
+        checksum: "blake3:abc123".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_verification_started_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactVerificationStartedPayload {
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        path: "/var/lib/voom/staging/10".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_verification_succeeded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactVerificationSucceededPayload {
+        verification_id: 20,
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        observed_size_bytes: 4096,
+        observed_checksum: "blake3:abc123".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_verification_failed_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactVerificationFailedPayload {
+        verification_id: 20,
+        artifact_handle_id: 10,
+        artifact_location_id: 11,
+        worker_id: 12,
+        error_code: "ARTIFACT_CHECKSUM_MISMATCH".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_commit_started_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitStartedPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        source_file_version_id: 12,
+        verification_id: 20,
+        target_path: "/media/final.bin".to_owned(),
+        temp_path: "/media/.final.bin.tmp".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_commit_completed_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitCompletedPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        result_file_version_id: 31,
+        result_file_location_id: 32,
+        target_path: "/media/final.bin".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_commit_failed_pre_mutation_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitFailedPreMutationPayload {
+        artifact_handle_id: 10,
+        commit_record_id: None,
+        target_path: "/media/final.bin".to_owned(),
+        error_code: "ARTIFACT_NOT_VERIFIED".to_owned(),
+        message: "staged artifact has no successful verification".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_commit_recovery_required_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactCommitRecoveryRequiredPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        target_path: "/media/final.bin".to_owned(),
+        temp_path: "/media/.final.bin.tmp".to_owned(),
+        recovery_reason: "target_appeared_after_prepare".to_owned(),
+        error_code: "TARGET_EXISTS".to_owned(),
+        message: "target path appeared during promotion".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_transcode_started_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactTranscodeStartedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: "default-hevc".to_owned(),
+        encoder: "libx265".to_owned(),
+        target_codec: "hevc".to_owned(),
+        output_container: "mkv".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    });
+}
+
+#[test]
+fn artifact_transcode_progress_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactTranscodeProgressPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        staging_path: "/tmp/voom-stage/2/3/out.mkv".to_owned(),
+        profile_name: "default-hevc".to_owned(),
+        encoder: "libx265".to_owned(),
+        target_codec: "hevc".to_owned(),
+        output_container: "mkv".to_owned(),
+        percent_bps: Some(2500),
+        message: Some("encoding".to_owned()),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    });
+}
+
+#[test]
+fn artifact_transcode_succeeded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactTranscodeSucceededPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: 5,
+        artifact_handle_id: 6,
+        artifact_location_id: 7,
+        staging_path: "/tmp/voom-stage/2/3/out.mp4".to_owned(),
+        profile_name: "av1-1080p".to_owned(),
+        encoder: "libsvtav1".to_owned(),
+        target_codec: "av1".to_owned(),
+        output_container: "mp4".to_owned(),
+        output_video_codec: "av1".to_owned(),
+        copied_video: false,
+        output_width: 1920,
+        output_height: 1080,
+        output_pixel_format: "yuv420p".to_owned(),
+        provider: "ffmpeg".to_owned(),
+        provider_version: "6.1".to_owned(),
+    });
+}
+
+#[test]
+fn artifact_transcode_failed_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&ArtifactTranscodeFailedPayload {
+        job_id: 1,
+        ticket_id: 2,
+        lease_id: Some(3),
+        source_file_version_id: 4,
+        source_file_location_id: Some(5),
+        staging_path: Some("/tmp/voom-stage/2/3/out.mkv".to_owned()),
+        profile_name: "default-av1".to_owned(),
+        encoder: "libsvtav1".to_owned(),
+        target_codec: "av1".to_owned(),
+        output_container: "mkv".to_owned(),
+        failure_class: FailureClass::WorkerCrash,
+        error_code: "EXTERNAL_SYSTEM_UNAVAILABLE".to_owned(),
+        message: "ffmpeg exited 1".to_owned(),
+        provider: Some("ffmpeg".to_owned()),
+        provider_version: None,
+    });
 }
