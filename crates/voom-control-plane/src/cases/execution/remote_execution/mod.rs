@@ -3,19 +3,18 @@
 use secrecy::SecretString;
 use serde_json::Value as JsonValue;
 use sqlx::{Sqlite, Transaction};
-use time::Duration;
 use voom_core::{ErrorCode, FailureClass, LeaseId, NodeId, TicketId, VoomError, WorkerId};
-use voom_store::repo::artifact_access_plans::{ArtifactAccessMode, ArtifactAccessPlanStatus};
-use voom_store::repo::remote_idempotency::{
-    IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay,
-};
+use voom_store::repo::artifact_access_plans::ArtifactAccessMode;
+use voom_store::repo::remote_idempotency::RemoteMutationReplay;
 
 use crate::ControlPlane;
 
-use super::{begin_immediate_tx, commit_tx};
+use super::commit_tx;
 
 mod acquire;
 mod complete;
+mod fail;
+mod heartbeat;
 mod recover;
 
 #[cfg(test)]
@@ -150,86 +149,7 @@ pub struct RemoteRecoverReport {
     pub failed_tickets: Vec<TicketId>,
 }
 
-struct RemoteFailPrepared {
-    plan_id: u64,
-    status: ArtifactAccessPlanStatus,
-}
-
 impl ControlPlane {
-    /// Record a remote node heartbeat.
-    ///
-    /// # Errors
-    /// Returns authentication, idempotency, retired-node, or heartbeat errors.
-    pub async fn remote_node_heartbeat(
-        &self,
-        input: RemoteNodeHeartbeatInput,
-    ) -> Result<RemoteNodeHeartbeatOutcome, VoomError> {
-        let now = self.clock().now();
-        let route_key = route_node_heartbeat(input.node_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
-        let auth = self
-            .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
-            .await?;
-
-        match self
-            .remote_idempotency
-            .reserve_or_replay_in_tx(
-                &mut tx,
-                RemoteIdempotencyInput {
-                    node_id: input.node_id,
-                    route_key: route_key.clone(),
-                    worker_id: None,
-                    idempotency_key: input.idempotency_key.clone(),
-                    request_hash: input.request_hash.clone(),
-                    created_at: now,
-                },
-            )
-            .await?
-        {
-            IdempotencyOutcome::Reserved => {}
-            IdempotencyOutcome::Replay(replay) => {
-                return self
-                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
-                        decode_replay::<RemoteNodeHeartbeatOutcome>(data, "remote node heartbeat")
-                    })
-                    .await;
-            }
-        }
-
-        if let Err(err) = recover::validate_remote_node_live(&auth, input.node_id, now, false) {
-            self.complete_remote_error_in_tx(
-                &mut tx,
-                input.node_id,
-                &route_key,
-                None,
-                &input.idempotency_key,
-                &err,
-            )
-            .await?;
-            commit_tx(tx).await?;
-            return Err(err);
-        }
-
-        let node = self
-            .heartbeat_node_in_tx(&mut tx, input.node_id, now)
-            .await?;
-        let outcome = RemoteNodeHeartbeatOutcome {
-            node_id: node.id,
-            status: node.status.as_str().to_owned(),
-        };
-        self.complete_remote_ok_in_tx(
-            &mut tx,
-            input.node_id,
-            &route_key,
-            None,
-            &input.idempotency_key,
-            &outcome,
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(outcome)
-    }
-
     /// Finish a replay branch: commit the (read-only) reservation transaction
     /// and return the stored outcome. A stored `Error` replay is already
     /// terminal and returned as-is. An `Ok { data }` replay is decoded with
@@ -289,301 +209,21 @@ impl ControlPlane {
             },
         }
     }
-
-    /// Heartbeat a held remote lease without emitting audit events.
-    ///
-    /// # Errors
-    /// Returns authentication, idempotency, ownership, or lease heartbeat errors.
-    pub async fn remote_lease_heartbeat(
-        &self,
-        input: RemoteLeaseHeartbeatInput,
-    ) -> Result<RemoteLeaseHeartbeatOutcome, VoomError> {
-        let now = self.clock().now();
-        let route_key = route_lease_heartbeat(input.lease_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
-        let auth = self
-            .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
-            .await?;
-
-        match self
-            .remote_idempotency
-            .reserve_or_replay_in_tx(
-                &mut tx,
-                RemoteIdempotencyInput {
-                    node_id: input.node_id,
-                    route_key: route_key.clone(),
-                    worker_id: Some(input.worker_id),
-                    idempotency_key: input.idempotency_key.clone(),
-                    request_hash: input.request_hash.clone(),
-                    created_at: now,
-                },
-            )
-            .await?
-        {
-            IdempotencyOutcome::Reserved => {}
-            IdempotencyOutcome::Replay(replay) => {
-                return self
-                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
-                        decode_replay::<RemoteLeaseHeartbeatOutcome>(data, "remote lease heartbeat")
-                    })
-                    .await;
-            }
-        }
-
-        if let Err(err) = recover::validate_remote_node_live(&auth, input.node_id, now, false) {
-            self.complete_remote_error_in_tx(
-                &mut tx,
-                input.node_id,
-                &route_key,
-                Some(input.worker_id),
-                &input.idempotency_key,
-                &err,
-            )
-            .await?;
-            commit_tx(tx).await?;
-            return Err(err);
-        }
-
-        let outcome = match self
-            .remote_lease_heartbeat_preflight_in_tx(&mut tx, &input)
-            .await
-        {
-            Ok(()) => {
-                self.remote_lease_heartbeat_mutation_in_tx(&mut tx, &input, now)
-                    .await?
-            }
-            Err(err) => {
-                if !is_remote_replayable_error(&err) {
-                    return Err(err);
-                }
-                self.complete_remote_error_in_tx(
-                    &mut tx,
-                    input.node_id,
-                    &route_key,
-                    Some(input.worker_id),
-                    &input.idempotency_key,
-                    &err,
-                )
-                .await?;
-                commit_tx(tx).await?;
-                return Err(err);
-            }
-        };
-        self.complete_remote_ok_in_tx(
-            &mut tx,
-            input.node_id,
-            &route_key,
-            Some(input.worker_id),
-            &input.idempotency_key,
-            &outcome,
-        )
-        .await?;
-        commit_tx(tx).await?;
-        Ok(outcome)
-    }
-
-    async fn remote_lease_heartbeat_preflight_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        input: &RemoteLeaseHeartbeatInput,
-    ) -> Result<(), VoomError> {
-        recover::require_positive_ttl(input.lease_ttl_seconds)?;
-        let worker = self
-            .workers
-            .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
-            .await?;
-        recover::require_remote_worker(&worker)?;
-        self.leases
-            .get_held_for_worker_in_tx(tx, input.lease_id, input.worker_id)
-            .await?;
-        Ok(())
-    }
-
-    async fn remote_lease_heartbeat_mutation_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        input: &RemoteLeaseHeartbeatInput,
-        now: time::OffsetDateTime,
-    ) -> Result<RemoteLeaseHeartbeatOutcome, VoomError> {
-        let lease = self
-            .heartbeat_lease_in_tx(
-                tx,
-                input.lease_id,
-                Duration::seconds(input.lease_ttl_seconds),
-                now,
-            )
-            .await?;
-        Ok(RemoteLeaseHeartbeatOutcome {
-            lease_id: lease.id,
-            worker_id: lease.worker_id,
-            ttl_seconds: lease.ttl_seconds,
-        })
-    }
-
-    /// Fail a held remote lease and update its selected artifact plan.
-    ///
-    /// # Errors
-    /// Returns authentication, idempotency, ownership, artifact plan, or
-    /// lease-failure errors.
-    pub async fn remote_fail(
-        &self,
-        input: RemoteFailInput,
-    ) -> Result<RemoteFailOutcome, VoomError> {
-        let now = self.clock().now();
-        let route_key = route_lease_fail(input.lease_id);
-        let mut tx = begin_immediate_tx(&self.pool).await?;
-        let auth = self
-            .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
-            .await?;
-
-        match self
-            .remote_idempotency
-            .reserve_or_replay_in_tx(
-                &mut tx,
-                RemoteIdempotencyInput {
-                    node_id: input.node_id,
-                    route_key: route_key.clone(),
-                    worker_id: Some(input.worker_id),
-                    idempotency_key: input.idempotency_key.clone(),
-                    request_hash: input.request_hash.clone(),
-                    created_at: now,
-                },
-            )
-            .await?
-        {
-            IdempotencyOutcome::Reserved => {}
-            IdempotencyOutcome::Replay(replay) => {
-                return self
-                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
-                        decode_replay::<RemoteFailOutcome>(data, "remote fail")
-                    })
-                    .await;
-            }
-        }
-
-        if let Err(err) = recover::validate_remote_node_live(&auth, input.node_id, now, false) {
-            self.complete_remote_error_in_tx(
-                &mut tx,
-                input.node_id,
-                &route_key,
-                Some(input.worker_id),
-                &input.idempotency_key,
-                &err,
-            )
-            .await?;
-            commit_tx(tx).await?;
-            return Err(err);
-        }
-
-        let prepared = match self.remote_fail_preflight_in_tx(&mut tx, &input).await {
-            Ok(prepared) => prepared,
-            Err(err) => {
-                if !is_remote_replayable_error(&err) {
-                    return Err(err);
-                }
-                self.complete_remote_error_in_tx(
-                    &mut tx,
-                    input.node_id,
-                    &route_key,
-                    Some(input.worker_id),
-                    &input.idempotency_key,
-                    &err,
-                )
-                .await?;
-                commit_tx(tx).await?;
-                return Err(err);
-            }
-        };
-        let outcome = self
-            .remote_fail_mutation_in_tx(&mut tx, &input, &route_key, prepared, now)
-            .await?;
-        commit_tx(tx).await?;
-        Ok(outcome)
-    }
-
-    async fn remote_fail_preflight_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        input: &RemoteFailInput,
-    ) -> Result<RemoteFailPrepared, VoomError> {
-        let worker = self
-            .workers
-            .node_owned_worker_in_tx(tx, input.worker_id, input.node_id)
-            .await?;
-        recover::require_remote_worker(&worker)?;
-        self.leases
-            .get_held_for_worker_in_tx(tx, input.lease_id, input.worker_id)
-            .await?;
-        let plan = self
-            .artifact_access_plans
-            .get_by_lease_in_tx(tx, input.lease_id)
-            .await?
-            .ok_or_else(|| {
-                VoomError::Conflict(format!(
-                    "remote fail rejected: lease {} has no artifact access plan",
-                    input.lease_id
-                ))
-            })?;
-        Ok(RemoteFailPrepared {
-            plan_id: plan.id,
-            status: complete::artifact_failure_status(input.class, &input.reason),
-        })
-    }
-
-    async fn remote_fail_mutation_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        input: &RemoteFailInput,
-        route_key: &str,
-        prepared: RemoteFailPrepared,
-        now: time::OffsetDateTime,
-    ) -> Result<RemoteFailOutcome, VoomError> {
-        let marked = self
-            .artifact_access_plans
-            .mark_status_in_tx(
-                tx,
-                prepared.plan_id,
-                prepared.status,
-                Some(input.reason.clone()),
-                input.evidence.clone(),
-                now,
-            )
-            .await?;
-        let failed = self
-            .fail_lease_in_tx(tx, input.lease_id, input.reason.clone(), input.class, now)
-            .await?;
-        let outcome = RemoteFailOutcome {
-            lease_id: failed.id,
-            ticket_id: failed.ticket_id,
-            worker_id: failed.worker_id,
-            artifact_access_plan: acquire::remote_plan(&marked),
-        };
-        self.complete_remote_ok_in_tx(
-            tx,
-            input.node_id,
-            route_key,
-            Some(input.worker_id),
-            &input.idempotency_key,
-            &outcome,
-        )
-        .await?;
-        Ok(outcome)
-    }
 }
 
 pub(super) fn route_lease_complete(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/complete", lease_id.0)
 }
 
-fn route_node_heartbeat(node_id: NodeId) -> String {
+pub(super) fn route_node_heartbeat(node_id: NodeId) -> String {
     format!("POST /v1/execution/node/{}/heartbeat", node_id.0)
 }
 
-fn route_lease_heartbeat(lease_id: LeaseId) -> String {
+pub(super) fn route_lease_heartbeat(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/heartbeat", lease_id.0)
 }
 
-fn route_lease_fail(lease_id: LeaseId) -> String {
+pub(super) fn route_lease_fail(lease_id: LeaseId) -> String {
     format!("POST /v1/execution/lease/{}/fail", lease_id.0)
 }
 
