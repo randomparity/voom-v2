@@ -440,6 +440,62 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
     assert!(probe_key.contains("ops:probe"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_remote_acquire_does_not_spuriously_fail_on_contention() {
+    // M6 regression: worker grant defaults to max_parallel {"*": 1} and the
+    // node default limit is 1, so exactly one of N concurrent acquires should
+    // win a lease and the rest should cleanly observe "capacity full". A
+    // deferred BEGIN makes the read-then-write transactions hit SQLITE_BUSY on
+    // lease-insert contention (busy_timeout does not retry a lock upgrade), so
+    // the losers error instead. BEGIN IMMEDIATE serializes them on the write
+    // lock up front, so every acquire completes: 1 Leased + (N-1) NoCandidate,
+    // 0 errors. The safety invariant (never more than one held lease) holds
+    // either way.
+    const N: usize = 8;
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    for _ in 0..N {
+        fixture.ready_ticket(OP).await;
+    }
+
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        let input = fixture.acquire_input(&format!("concurrent-{i}"), &format!("hash-{i}"));
+        handles.push(tokio::spawn(async move { cp.remote_acquire(input).await }));
+    }
+
+    let mut leased = 0_usize;
+    let mut no_candidate = 0_usize;
+    let mut errors = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(RemoteAcquireOutcome::Leased(_)) => leased += 1,
+            Ok(_) => no_candidate += 1,
+            Err(err) => errors.push(err),
+        }
+    }
+
+    let held: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE worker_id = ? AND state = 'held'")
+            .bind(i64::try_from(fixture.worker_id.0).unwrap())
+            .fetch_one(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+
+    assert!(
+        errors.is_empty(),
+        "concurrent acquires must not fail under contention, got {} error(s): {errors:?}",
+        errors.len()
+    );
+    assert_eq!(held, 1, "exactly one held lease expected, found {held}");
+    assert_eq!(leased, 1, "exactly one acquire should win the lease");
+    assert_eq!(
+        no_candidate,
+        N - 1,
+        "every loser should cleanly observe capacity full"
+    );
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;

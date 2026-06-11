@@ -31,7 +31,7 @@ use voom_store::repo::workers::{Worker, WorkerKind, WorkerOperationEligibility};
 use crate::ControlPlane;
 use crate::node_auth::verify_node_token;
 
-use super::{begin_tx, commit_tx};
+use super::{begin_immediate_tx, commit_tx};
 
 const ROUTE_ACQUIRE: &str = "POST /v1/execution/lease/acquire";
 
@@ -211,7 +211,7 @@ impl ControlPlane {
     ) -> Result<RemoteNodeHeartbeatOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = route_node_heartbeat(input.node_id);
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
@@ -285,7 +285,7 @@ impl ControlPlane {
         input: RemoteAcquireInput,
     ) -> Result<RemoteAcquireOutcome, VoomError> {
         let now = self.clock().now();
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
@@ -799,7 +799,7 @@ impl ControlPlane {
     ) -> Result<RemoteLeaseHeartbeatOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = route_lease_heartbeat(input.lease_id);
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
@@ -930,7 +930,7 @@ impl ControlPlane {
     ) -> Result<RemoteCompleteOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = route_lease_complete(input.lease_id);
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
@@ -1082,7 +1082,7 @@ impl ControlPlane {
     ) -> Result<RemoteFailOutcome, VoomError> {
         let now = self.clock().now();
         let route_key = route_lease_fail(input.lease_id);
-        let mut tx = begin_tx(&self.pool).await?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let auth = self
             .verify_remote_node_token_in_tx(&mut tx, input.node_id, &input.token)
             .await?;
