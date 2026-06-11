@@ -345,10 +345,13 @@ pub async fn run_ffmpeg_transcode(
     }
     command.arg(output).kill_on_drop(true);
 
-    let process_output = timeout(config.process_timeout, command.output())
-        .await
-        .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
-        .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
+    let process_output = timeout(
+        config.process_timeout,
+        output_retrying_etxtbsy(&mut command),
+    )
+    .await
+    .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
+    .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
     if !process_output.status.success() {
         return Err(FfmpegError::FfmpegFailed(command_error(&process_output)));
     }
@@ -627,14 +630,44 @@ fn canonical_output_codec(codec: &str) -> &str {
     }
 }
 
+fn is_text_file_busy(err: &std::io::Error) -> bool {
+    // ETXTBSY: attempted to exec a file currently open for writing. Transient in
+    // a multithreaded process when a sibling thread's fork briefly inherited a
+    // writable fd to a freshly written executable; it clears once that child
+    // exec()s. 26 on Linux and macOS.
+    const ETXTBSY: i32 = 26;
+    err.raw_os_error() == Some(ETXTBSY)
+}
+
+/// Run `command` to completion, retrying a bounded number of times on ETXTBSY
+/// with a short backoff. See [`is_text_file_busy`] for why the condition is
+/// transient. A real ffmpeg binary is never rewritten, so this only fires in
+/// tests that stub the executable.
+async fn output_retrying_etxtbsy(command: &mut Command) -> std::io::Result<std::process::Output> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match command.output().await {
+            Err(err) if is_text_file_busy(&err) && attempt < MAX_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt))).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 async fn run_ffmpeg_command(
     config: &FfmpegConfig,
     mut command: Command,
 ) -> Result<(), FfmpegError> {
-    let process_output = timeout(config.process_timeout, command.output())
-        .await
-        .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
-        .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
+    let process_output = timeout(
+        config.process_timeout,
+        output_retrying_etxtbsy(&mut command),
+    )
+    .await
+    .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
+    .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
     if !process_output.status.success() {
         return Err(FfmpegError::FfmpegFailed(command_error(&process_output)));
     }
@@ -652,10 +685,13 @@ async fn probe_json(config: &FfmpegConfig, path: &Path) -> Result<Value, FfmpegE
         .arg("-show_streams")
         .arg(path)
         .kill_on_drop(true);
-    let output = timeout(config.process_timeout, command.output())
-        .await
-        .map_err(|_| FfmpegError::FfprobeFailed("ffprobe timed out".to_owned()))?
-        .map_err(|err| FfmpegError::FfprobeFailed(err.to_string()))?;
+    let output = timeout(
+        config.process_timeout,
+        output_retrying_etxtbsy(&mut command),
+    )
+    .await
+    .map_err(|_| FfmpegError::FfprobeFailed("ffprobe timed out".to_owned()))?
+    .map_err(|err| FfmpegError::FfprobeFailed(err.to_string()))?;
     if !output.status.success() {
         return Err(FfmpegError::FfprobeFailed(command_error(&output)));
     }

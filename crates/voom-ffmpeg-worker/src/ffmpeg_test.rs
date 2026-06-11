@@ -203,6 +203,18 @@ async fn libx265_command_uses_named_preset_and_optional_flags() {
     assert!(args.contains("-f\nmatroska\n"), "missing -f matroska");
 }
 
+#[test]
+fn text_file_busy_is_detected_for_etxtbsy_only() {
+    // ETXTBSY (os error 26) is the transient exec race we retry: another
+    // thread's fork briefly inherited a writable fd to a freshly written
+    // executable. ENOENT and other errors are real failures we must not retry.
+    assert!(is_text_file_busy(&std::io::Error::from_raw_os_error(26)));
+    assert!(!is_text_file_busy(&std::io::Error::from_raw_os_error(2)));
+    assert!(!is_text_file_busy(&std::io::Error::other(
+        "not an os error"
+    )));
+}
+
 #[tokio::test]
 async fn libsvtav1_command_uses_numeric_preset() {
     let dir = tempfile::tempdir().unwrap();
