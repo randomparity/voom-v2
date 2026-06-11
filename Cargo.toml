@@ -49,6 +49,7 @@ voom-worker-protocol = { version = "0.1.0-dev", path = "crates/voom-worker-proto
 voom-conformance = { version = "0.1.0-dev", path = "crates/voom-conformance" }
 voom-test-support = { version = "0.1.0-dev", path = "crates/voom-test-support" }
 voom-fake-support = { version = "0.1.0-dev", path = "crates/voom-fake-support" }
+voom-fakes = { version = "0.1.0-dev", path = "crates/voom-fakes" }
 voom-ffmpeg-worker = { version = "0.1.0-dev", path = "crates/voom-ffmpeg-worker" }
 voom-mkvtoolnix-worker = { version = "0.1.0-dev", path = "crates/voom-mkvtoolnix-worker" }
 
