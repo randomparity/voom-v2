@@ -1,4 +1,4 @@
-use crate::workflow::execution::timing::{branch_codec, seeded_timing};
+use crate::workflow::execution::timing::{EffectiveTiming, branch_codec, seeded_timing};
 
 #[test]
 fn default_seed_two_codec_fixture_exercises_both_transform_paths() {
@@ -17,4 +17,15 @@ fn seeded_timing_is_reproducible_and_seed_sensitive() {
     assert_ne!(first, different_seed);
     assert!((25..=35).contains(&first.duration_ms));
     assert!((1..=first.duration_ms).contains(&first.progress_interval_ms));
+}
+
+#[test]
+fn effective_timing_rejects_unknown_field() {
+    let base = serde_json::to_value(EffectiveTiming::for_test(25, 10)).unwrap();
+    assert!(serde_json::from_value::<EffectiveTiming>(base.clone()).is_ok());
+    let mut v = base;
+    v.as_object_mut()
+        .unwrap()
+        .insert("extra".into(), serde_json::json!(0));
+    assert!(serde_json::from_value::<EffectiveTiming>(v).is_err());
 }
