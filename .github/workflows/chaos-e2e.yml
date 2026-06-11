@@ -2,6 +2,10 @@ name: chaos-e2e
 
 on:
   workflow_dispatch:
+  schedule:
+    # Weekly run on the default branch so this otherwise dispatch-only job
+    # cannot silently rot (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -60,3 +64,23 @@ jobs:
 
       - name: Run Chaos Librarian E2E
         run: just chaos-e2e-ci
+
+  notify-failure:
+    name: notify failure
+    needs: chaos-e2e
+    # Only on scheduled runs: a manual dispatch already shows its result to
+    # the operator who triggered it.
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Scheduled chaos-e2e run failed" \
+            --body "The weekly scheduled chaos-e2e workflow failed. Run: $RUN_URL"
