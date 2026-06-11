@@ -440,6 +440,112 @@ fn capacity_suppression_key_includes_operation_fingerprint() {
     assert!(probe_key.contains("ops:probe"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_remote_acquire_does_not_spuriously_fail_on_contention() {
+    // M6 regression: worker grant defaults to max_parallel {"*": 1} and the
+    // node default limit is 1, so exactly one of N concurrent acquires should
+    // win a lease and the rest should cleanly observe "capacity full". A
+    // deferred BEGIN makes the read-then-write transactions hit SQLITE_BUSY on
+    // lease-insert contention (busy_timeout does not retry a lock upgrade), so
+    // the losers error instead. BEGIN IMMEDIATE serializes them on the write
+    // lock up front, so every acquire completes: 1 Leased + (N-1) NoCandidate,
+    // 0 errors. The safety invariant (never more than one held lease) holds
+    // either way.
+    const N: usize = 8;
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    for _ in 0..N {
+        fixture.ready_ticket(OP).await;
+    }
+
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        let input = fixture.acquire_input(&format!("concurrent-{i}"), &format!("hash-{i}"));
+        handles.push(tokio::spawn(async move { cp.remote_acquire(input).await }));
+    }
+
+    let mut leased = 0_usize;
+    let mut no_candidate = 0_usize;
+    let mut errors = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(RemoteAcquireOutcome::Leased(_)) => leased += 1,
+            Ok(_) => no_candidate += 1,
+            Err(err) => errors.push(err),
+        }
+    }
+
+    let held: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leases WHERE worker_id = ? AND state = 'held'")
+            .bind(i64::try_from(fixture.worker_id.0).unwrap())
+            .fetch_one(fixture.cp.pool_for_test())
+            .await
+            .unwrap();
+
+    assert!(
+        errors.is_empty(),
+        "concurrent acquires must not fail under contention, got {} error(s): {errors:?}",
+        errors.len()
+    );
+    assert_eq!(held, 1, "exactly one held lease expected, found {held}");
+    assert_eq!(leased, 1, "exactly one acquire should win the lease");
+    assert_eq!(
+        no_candidate,
+        N - 1,
+        "every loser should cleanly observe capacity full"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_node_registration_during_remote_acquire_does_not_fail() {
+    // The M6 fix converted only the remote-execution handlers to BEGIN
+    // IMMEDIATE; other writers still open a deferred BEGIN. The SQLITE_BUSY
+    // trap is specific to *read-then-write* transactions (the write upgrades a
+    // lock the busy handler won't retry). `register_node` opens a deferred
+    // BEGIN but its first statement is the node INSERT — a clean write
+    // acquisition that busy_timeout serializes — so it coexists with the
+    // BEGIN IMMEDIATE acquires without failing. This guards that interaction
+    // and documents the boundary: write-first deferred transactions are safe.
+    const N: usize = 6;
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    for _ in 0..N {
+        fixture.ready_ticket(OP).await;
+    }
+
+    let mut handles = Vec::with_capacity(N * 2);
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        let input = fixture.acquire_input(&format!("mixed-acq-{i}"), &format!("mixed-h-{i}"));
+        handles.push(tokio::spawn(async move {
+            cp.remote_acquire(input)
+                .await
+                .err()
+                .map(|err| format!("acquire-{i}: {err:?}"))
+        }));
+    }
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        handles.push(tokio::spawn(async move {
+            cp.register_node(node_input(&format!("mixed-node-{i}"), NodeKind::Remote))
+                .await
+                .err()
+                .map(|err| format!("register-{i}: {err:?}"))
+        }));
+    }
+
+    let mut errors = Vec::new();
+    for handle in handles {
+        if let Some(err) = handle.await.unwrap() {
+            errors.push(err);
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "mixed concurrent writers must not fail under contention, got {} error(s): {errors:?}",
+        errors.len()
+    );
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
@@ -555,6 +661,43 @@ async fn remote_acquire_replays_legacy_idle_without_decision_id() {
             worker_id: fixture.worker_id,
             scheduler_decision_id: 0,
         }
+    );
+}
+
+#[tokio::test]
+async fn remote_acquire_poisoned_replay_is_rewritten_terminal() {
+    // M7 regression: a completed idempotency row whose stored Ok{data} no
+    // longer decodes into RemoteAcquireOutcome (e.g. after the outcome struct
+    // changed) must be rewritten to a terminal Error replay in the same
+    // transaction that observes the decode failure. Otherwise every future
+    // call with the same key re-runs the identical decode failure forever.
+    // The original mutation already executed, so it must NOT be re-run — only
+    // the stored result is repointed.
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    seed_legacy_acquire_replay(
+        &fixture,
+        "poisoned",
+        "hash-poisoned",
+        json!({ "outcome": "unrecognized_future_variant" }),
+    )
+    .await;
+
+    let err = fixture
+        .cp
+        .remote_acquire(fixture.acquire_input("poisoned", "hash-poisoned"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, VoomError::Internal(_)),
+        "poisoned replay should surface a decode error, got: {err:?}"
+    );
+
+    // The stored row must now be a terminal Error replay, not the original
+    // un-decodable Ok{data} that would re-fail decode on every future call.
+    let stored = stored_replay(&fixture, "poisoned").await;
+    assert!(
+        matches!(stored, RemoteMutationReplay::Error { .. }),
+        "poisoned replay must be rewritten terminal, still: {stored:?}"
     );
 }
 
@@ -1217,6 +1360,17 @@ async fn seed_legacy_acquire_replay(
     .execute(fixture.cp.pool_for_test())
     .await
     .unwrap();
+}
+
+async fn stored_replay(fixture: &RemoteFixture, key: &str) -> RemoteMutationReplay {
+    let json: String = sqlx::query_scalar(
+        "SELECT response_json FROM remote_idempotency_keys WHERE idempotency_key = ?",
+    )
+    .bind(key)
+    .fetch_one(fixture.cp.pool_for_test())
+    .await
+    .unwrap();
+    serde_json::from_str(&json).unwrap()
 }
 
 async fn remote_fixture(

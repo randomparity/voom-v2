@@ -266,8 +266,16 @@ impl SqliteLeaseRepo {
     ) -> Result<Lease, VoomError> {
         let now_str = iso8601(now)?;
         let expires_str = iso8601(now + ttl)?;
+        // Clamp the deadline forward only. A heartbeat carrying a shorter TTL
+        // than the lease's current deadline must never move expires_at
+        // backwards — a shortened deadline could let expire_due reap a lease
+        // whose worker just proved it is alive. `max(expires_at, ?)` keeps the
+        // later of the two; ISO8601 timestamps sort lexicographically, the same
+        // ordering expire_due relies on. last_heartbeat_at is still recorded
+        // unconditionally so the liveness signal is never dropped.
         let res = sqlx::query(
-            "UPDATE leases SET last_heartbeat_at = ?, expires_at = ?, epoch = epoch + 1 \
+            "UPDATE leases SET last_heartbeat_at = ?, \
+                 expires_at = max(expires_at, ?), epoch = epoch + 1 \
              WHERE id = ? AND state = 'held'",
         )
         .bind(&now_str)

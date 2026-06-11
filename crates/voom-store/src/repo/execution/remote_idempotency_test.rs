@@ -420,3 +420,124 @@ async fn unscoped_key_uses_zero_scope_and_does_not_collide_with_worker_scope() {
         Some(i64::try_from(worker_id.0).unwrap())
     );
 }
+
+#[tokio::test]
+async fn repoint_completed_replay_overwrites_stored_response() {
+    let fixture = fixture().await;
+    let repo = &fixture.repo;
+    let node_id = fixture.node_id;
+    let worker_id = fixture.worker_id;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    let route = "POST /v1/execution/lease/acquire";
+
+    let mut tx = fixture.pool.begin().await.unwrap();
+    repo.reserve_or_replay_in_tx(
+        &mut tx,
+        RemoteIdempotencyInput {
+            node_id,
+            route_key: route.to_owned(),
+            worker_id: Some(worker_id),
+            idempotency_key: "poison".to_owned(),
+            request_hash: "hash-a".to_owned(),
+            created_at: now,
+        },
+    )
+    .await
+    .unwrap();
+    repo.complete_in_tx(
+        &mut tx,
+        node_id,
+        route,
+        Some(worker_id),
+        "poison",
+        RemoteMutationReplay::Ok {
+            data: json!({"unreadable": true}),
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // Repoint the completed row to a terminal Error.
+    let mut tx = fixture.pool.begin().await.unwrap();
+    repo.repoint_completed_replay_in_tx(
+        &mut tx,
+        node_id,
+        route,
+        Some(worker_id),
+        "poison",
+        RemoteMutationReplay::Error {
+            code: "INTERNAL".to_owned(),
+            message: "replay result unreadable".to_owned(),
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    // A subsequent replay returns the terminal Error, not the original Ok.
+    let mut tx = fixture.pool.begin().await.unwrap();
+    let replay = repo
+        .reserve_or_replay_in_tx(
+            &mut tx,
+            RemoteIdempotencyInput {
+                node_id,
+                route_key: route.to_owned(),
+                worker_id: Some(worker_id),
+                idempotency_key: "poison".to_owned(),
+                request_hash: "hash-a".to_owned(),
+                created_at: now,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        IdempotencyOutcome::Replay(RemoteMutationReplay::Error {
+            code: "INTERNAL".to_owned(),
+            message: "replay result unreadable".to_owned(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn repoint_completed_replay_rejects_unknown_or_in_progress_key() {
+    let fixture = fixture().await;
+    let repo = &fixture.repo;
+    let node_id = fixture.node_id;
+    let worker_id = fixture.worker_id;
+    let now = OffsetDateTime::UNIX_EPOCH;
+    let route = "POST /v1/execution/lease/acquire";
+
+    // Reserve only (status stays 'in_progress', never completed).
+    let mut tx = fixture.pool.begin().await.unwrap();
+    repo.reserve_or_replay_in_tx(
+        &mut tx,
+        RemoteIdempotencyInput {
+            node_id,
+            route_key: route.to_owned(),
+            worker_id: Some(worker_id),
+            idempotency_key: "in-progress".to_owned(),
+            request_hash: "hash-a".to_owned(),
+            created_at: now,
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = repo
+        .repoint_completed_replay_in_tx(
+            &mut tx,
+            node_id,
+            route,
+            Some(worker_id),
+            "in-progress",
+            RemoteMutationReplay::Error {
+                code: "INTERNAL".to_owned(),
+                message: "should not apply".to_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+}

@@ -58,6 +58,14 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     SqlitePoolOptions::new()
         .max_connections(pool_size)
         .min_connections(u32::from(is_memory))
+        // Bound the wait for a free pooled connection. With a single SQLite
+        // writer, write transactions can each hold their connection for up to
+        // `busy_timeout` while waiting out lock contention (more so for the
+        // `BEGIN IMMEDIATE` paths, which hold the connection across the whole
+        // lock wait). Without this, a saturated pool makes new callers block
+        // forever; this surfaces a clean error instead. Sized at `busy_timeout`
+        // plus headroom so it only fires under genuine sustained saturation.
+        .acquire_timeout(std::time::Duration::from_secs(45))
         .connect_with(options)
         .await
         .map_err(|e| {

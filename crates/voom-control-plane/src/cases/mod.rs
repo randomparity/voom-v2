@@ -29,6 +29,23 @@ pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite
         .map_err(|e| VoomError::Database(format!("begin: {e}")))
 }
 
+/// Begin a transaction that takes `SQLite`'s write lock up front (`BEGIN
+/// IMMEDIATE`) instead of lazily on the first write.
+///
+/// Use this for read-then-write transactions that run under contention. A
+/// deferred `BEGIN` acquires the write lock only when the first write executes;
+/// if another writer holds it by then, `SQLite` returns `SQLITE_BUSY` *without*
+/// invoking the busy handler (to avoid a lock-upgrade deadlock), so the caller
+/// fails instead of waiting. `BEGIN IMMEDIATE` lets `busy_timeout` serialize the
+/// writers cleanly. Mirrors `begin_immediate` in the policy registry repo.
+pub(crate) async fn begin_immediate_tx(
+    pool: &SqlitePool,
+) -> Result<Transaction<'_, Sqlite>, VoomError> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| VoomError::Database(format!("begin immediate: {e}")))
+}
+
 pub(crate) async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await

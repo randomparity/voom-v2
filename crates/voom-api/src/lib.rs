@@ -14,6 +14,10 @@ pub const SCHEMA_VERSION: &str = "0";
 
 mod execution;
 
+#[cfg(test)]
+#[path = "lib_test.rs"]
+mod tests;
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub health_plane: HealthPlane,
@@ -223,7 +227,16 @@ pub(crate) fn voom_route_error_response(
     let status = match err.error_code() {
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
         ErrorCode::Conflict => StatusCode::CONFLICT,
+        // On execution routes `ConfigInvalid` is a bad-argument signal (400),
+        // unlike the health path where it is the foreign-database guard (503).
         ErrorCode::ConfigInvalid | ErrorCode::BadArgs => StatusCode::BAD_REQUEST,
+        // A database outage during a lease op is a dependency failure, not a
+        // client error: tell callers to retry the dependency (503) rather than
+        // "your request was wrong" (500).
+        ErrorCode::DbUnreachable
+        | ErrorCode::DbPartialSchema
+        | ErrorCode::DbSchemaTooNew
+        | ErrorCode::DbDirtyMigration => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     err_response(status, command, err.code(), err.to_string(), None)

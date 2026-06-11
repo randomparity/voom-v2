@@ -162,6 +162,49 @@ impl SqliteRemoteIdempotencyRepo {
             )))
         }
     }
+
+    /// Replace a completed replay's stored response with `response`.
+    ///
+    /// Used when an `Ok { data }` replay can no longer be decoded by the
+    /// running binary (e.g. the outcome struct changed): the original
+    /// mutation already executed, so it must not re-run, but the un-decodable
+    /// result must stop re-failing on every future replay. Repointing the row
+    /// to a terminal `Error` makes subsequent replays return a deterministic
+    /// error. Matches on `status = 'completed'` so it never resurrects an
+    /// in-progress reservation.
+    pub async fn repoint_completed_replay_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        node_id: NodeId,
+        route_key: &str,
+        worker_id: Option<WorkerId>,
+        idempotency_key: &str,
+        response: RemoteMutationReplay,
+    ) -> Result<(), VoomError> {
+        let response_json = serialize_json(&response, "remote idempotency response_json")?;
+        let res = sqlx::query(
+            "UPDATE remote_idempotency_keys \
+             SET response_json = ? \
+             WHERE node_id = ? AND route_key = ? AND worker_scope_id = ? \
+               AND idempotency_key = ? AND status = 'completed'",
+        )
+        .bind(&response_json)
+        .bind(i64_from_u64(node_id.0))
+        .bind(route_key)
+        .bind(worker_scope_id(worker_id))
+        .bind(idempotency_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| VoomError::Database(format!("remote idempotency repoint: {e}")))?;
+
+        if res.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(VoomError::Conflict(format!(
+                "remote idempotency key {idempotency_key:?} is not completed"
+            )))
+        }
+    }
 }
 
 fn worker_scope_id(worker_id: Option<WorkerId>) -> i64 {
