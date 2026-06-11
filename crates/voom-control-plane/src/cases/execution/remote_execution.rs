@@ -414,6 +414,18 @@ impl ControlPlane {
                     Ok(out)
                 }
                 Err(err) => {
+                    // The stored result of an already-completed operation no
+                    // longer decodes (schema drift or corruption). Repointing it
+                    // to a terminal Error masks a success as a permanent failure,
+                    // so surface it: an operator needs to know a completed
+                    // operation became unreadable.
+                    tracing::warn!(
+                        node_id = slot.node_id.0,
+                        route_key = %slot.route_key,
+                        idempotency_key = %slot.idempotency_key,
+                        error = %err,
+                        "idempotency replay result is unreadable; repointing row to a terminal error"
+                    );
                     self.remote_idempotency
                         .repoint_completed_replay_in_tx(
                             &mut tx,

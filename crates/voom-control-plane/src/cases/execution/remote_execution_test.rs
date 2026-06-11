@@ -496,6 +496,56 @@ async fn concurrent_remote_acquire_does_not_spuriously_fail_on_contention() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_node_registration_during_remote_acquire_does_not_fail() {
+    // The M6 fix converted only the remote-execution handlers to BEGIN
+    // IMMEDIATE; other writers still open a deferred BEGIN. The SQLITE_BUSY
+    // trap is specific to *read-then-write* transactions (the write upgrades a
+    // lock the busy handler won't retry). `register_node` opens a deferred
+    // BEGIN but its first statement is the node INSERT — a clean write
+    // acquisition that busy_timeout serializes — so it coexists with the
+    // BEGIN IMMEDIATE acquires without failing. This guards that interaction
+    // and documents the boundary: write-first deferred transactions are safe.
+    const N: usize = 6;
+    let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
+    for _ in 0..N {
+        fixture.ready_ticket(OP).await;
+    }
+
+    let mut handles = Vec::with_capacity(N * 2);
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        let input = fixture.acquire_input(&format!("mixed-acq-{i}"), &format!("mixed-h-{i}"));
+        handles.push(tokio::spawn(async move {
+            cp.remote_acquire(input)
+                .await
+                .err()
+                .map(|err| format!("acquire-{i}: {err:?}"))
+        }));
+    }
+    for i in 0..N {
+        let cp = fixture.cp.clone();
+        handles.push(tokio::spawn(async move {
+            cp.register_node(node_input(&format!("mixed-node-{i}"), NodeKind::Remote))
+                .await
+                .err()
+                .map(|err| format!("register-{i}: {err:?}"))
+        }));
+    }
+
+    let mut errors = Vec::new();
+    for handle in handles {
+        if let Some(err) = handle.await.unwrap() {
+            errors.push(err);
+        }
+    }
+    assert!(
+        errors.is_empty(),
+        "mixed concurrent writers must not fail under contention, got {} error(s): {errors:?}",
+        errors.len()
+    );
+}
+
 #[tokio::test]
 async fn node_default_limit_blocks_second_concurrent_remote_acquire() {
     let fixture = remote_fixture(&[(OP, vec!["shared_mount"])], &[OP], &[]).await;
