@@ -24,7 +24,7 @@ and `crates/voom-control-plane/src/` (typed higher layer for T-upstream columns)
 | commit_intents.override_token | T | repo/media/commit_safety_gate/codecs.rs:168 `decode_force_path_token` (`from_str` → `ForcePathToken`) | `ForcePathToken` | — (`BypassKind` unit enum) | commit_safety_gate.rs | add attr (Task 3) |
 | commit_intents.target_row_epochs | T | repo/media/commit_safety_gate/finalize.rs:393 `decode_target_row_epochs` (`from_str::<Vec<TargetRowEpochTriple>>`) | `TargetRowEpochTriple` (tuple newtype, no named fields) | — | codecs.rs | safe by construction; NOT in scope |
 | commit_intents.accepted_evidence_ids | T | repo/media/commit_safety_gate/authorize.rs:362 / abort_list.rs:279 (`Vec<EvidenceId>`) | `EvidenceId` (id newtype) | — | n/a | safe by construction; NOT in scope |
-| worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`) | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
+| worker_capabilities.{codecs,hardware,artifact_access}; worker_grants.{can_execute,can_access_read,can_access_write,denies}; workflow_file_phase_summaries.ticket_ids; policy_media_snapshot_inputs.{audio_languages,subtitle_languages,health_flags} | T | executor.rs:1403 `json_string_array_contains` (`Vec<String>`); workflow_summaries.rs:622 (`Vec<u64>`); policy_inputs.rs:813–815 `json_value` → `Vec<String>` | `Vec<String>` / `Vec<u64>` | — | n/a | scalar element types, no named-field surface; NOT in scope |
 | tickets.payload | T-upstream | store: repo/execution/tickets.rs:532 (`JsonValue`); typed: ticket_payload.rs:83 `from_value` → `WorkflowTicketPayload` | `WorkflowTicketPayload` | `EffectiveTiming` (named struct); `OperationKind` (unit enum — no surface) | ticket_payload.rs, timing.rs | add attr+tests to `WorkflowTicketPayload` and `EffectiveTiming` (Task 4) |
 
 ### Transitive typed closure (named-field `Deserialize` sub-structs)
@@ -91,7 +91,15 @@ remote_idempotency_keys.response_json;
 artifact_access_plans.{input_handles,output_handles,evidence};
 policy_versions.compiled_json; workflow_summaries.per_operation;
 workflow_phase_summaries.report; scheduler_decisions.explanation_json;
-nodes.metadata; identity_evidence.provenance; media_snapshots.payload.
+nodes.metadata; identity_evidence.provenance; media_snapshots.payload;
+identity_evidence.{pinned_file_version_ids,pinned_hashes,pinned_locations}
+(read in repo/media/identity.rs via `from_str` → `Option<JsonValue>`);
+policy_media_snapshot_inputs.stream_summary;
+policy_identity_evidence_inputs.provenance;
+policy_bundle_target_inputs.artifact_expectation;
+policy_quality_profile_selections.dimension_weights;
+policy_issue_inputs.provenance
+(read in repo/policy/policy_inputs.rs via `json_value` → `JsonValue`).
 
 If a future change starts typing any Class-P column, add it to the Class-T table
 above and to `scripts/payload-contract-scope.txt`.
