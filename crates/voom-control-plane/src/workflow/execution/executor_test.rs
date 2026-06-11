@@ -75,7 +75,7 @@ async fn retry_on_database_locked_retries_locked_errors_until_success() {
         let attempt = attempts.fetch_add(1, Ordering::SeqCst);
         async move {
             if attempt < 2 {
-                Err(VoomError::Database("database is locked".to_owned()))
+                Err(VoomError::database("database is locked"))
             } else {
                 Ok("done")
             }
@@ -94,7 +94,7 @@ async fn retry_on_database_locked_stops_after_eight_locked_errors() {
 
     let err = retry_on_database_locked(|| {
         attempts.fetch_add(1, Ordering::SeqCst);
-        async { Err::<(), _>(VoomError::Database("database is locked".to_owned())) }
+        async { Err::<(), _>(VoomError::database("database is locked")) }
     })
     .await
     .unwrap_err();

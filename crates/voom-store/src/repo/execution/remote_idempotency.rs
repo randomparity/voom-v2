@@ -74,7 +74,7 @@ impl SqliteRemoteIdempotencyRepo {
         .bind(&created_at)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("remote idempotency insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("remote idempotency insert", e))?;
 
         if inserted.rows_affected() == 1 {
             return Ok(IdempotencyOutcome::Reserved);
@@ -90,10 +90,10 @@ impl SqliteRemoteIdempotencyRepo {
         .bind(&input.idempotency_key)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("remote idempotency get: {e}")))?;
+        .map_err(|e| VoomError::database_context("remote idempotency get", e))?;
 
         let Some(row) = existing else {
-            return Err(VoomError::Database(
+            return Err(VoomError::database(
                 "remote idempotency insert conflict had no existing row".to_owned(),
             ));
         };
@@ -116,14 +116,14 @@ impl SqliteRemoteIdempotencyRepo {
                     .try_get("response_json")
                     .map_err(|e| map_row_err("remote_idempotency_keys", &e))?;
                 let response = serde_json::from_str(&response_json).map_err(|e| {
-                    VoomError::Database(format!("remote idempotency response_json: {e}"))
+                    VoomError::database_context("remote idempotency response_json", e)
                 })?;
                 Ok(IdempotencyOutcome::Replay(response))
             }
             "in_progress" => Err(VoomError::Conflict(
                 "idempotency key is already in progress".to_owned(),
             )),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "remote_idempotency_keys.status {other:?} not in vocab"
             ))),
         }
@@ -152,7 +152,7 @@ impl SqliteRemoteIdempotencyRepo {
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("remote idempotency complete: {e}")))?;
+        .map_err(|e| VoomError::database_context("remote idempotency complete", e))?;
 
         if res.rows_affected() == 1 {
             Ok(())
@@ -195,7 +195,7 @@ impl SqliteRemoteIdempotencyRepo {
         .bind(idempotency_key)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("remote idempotency repoint: {e}")))?;
+        .map_err(|e| VoomError::database_context("remote idempotency repoint", e))?;
 
         if res.rows_affected() == 1 {
             Ok(())

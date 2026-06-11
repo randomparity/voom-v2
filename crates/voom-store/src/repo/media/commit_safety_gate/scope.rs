@@ -105,7 +105,7 @@ pub(super) async fn build_closure(
             }
         }
         Err(AliasResolutionError::Database(msg)) => {
-            return Err(VoomError::Database(format!("alias resolver: {msg}")));
+            return Err(VoomError::database(format!("alias resolver: {msg}")));
         }
     }
 
@@ -132,7 +132,7 @@ pub(super) async fn build_closure(
             .bind(i64_from_u64(version.file_asset_id.0))
             .fetch_all(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("asset_bundle_members lookup: {e}")))?;
+            .map_err(|e| VoomError::database_context("asset_bundle_members lookup", e))?;
     for raw in bundle_rows {
         bundles.insert(BundleId(u64_from_i64(raw)));
     }
@@ -235,32 +235,32 @@ async fn blocking_lease_rows_in_tx(
     .bind(&locations_json)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("blocking-lease overlap: {e}")))?;
+    .map_err(|e| VoomError::database_context("blocking-lease overlap", e))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let id: i64 = row
             .try_get("id")
-            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let sa: Option<i64> = row
             .try_get("scope_asset_id")
-            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let sb: Option<i64> = row
             .try_get("scope_bundle_id")
-            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let sv: Option<i64> = row
             .try_get("scope_version_id")
-            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let sl: Option<i64> = row
             .try_get("scope_location_id")
-            .map_err(|e| VoomError::Database(format!("blocking-lease row: {e}")))?;
+            .map_err(|e| VoomError::database_context("blocking-lease row", e))?;
         let scope = match (sa, sb, sv, sl) {
             (Some(v), None, None, None) => LeaseScope::Asset(FileAssetId(u64_from_i64(v))),
             (None, Some(v), None, None) => LeaseScope::Bundle(BundleId(u64_from_i64(v))),
             (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(v))),
             (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(v))),
             other => {
-                return Err(VoomError::Database(format!(
+                return Err(VoomError::database(format!(
                     "blocking-lease row: scope_*_id columns are not exactly-one: {other:?}"
                 )));
             }
@@ -353,12 +353,12 @@ async fn first_evidence_pin_drift(
 fn pinned_u64_array(value: &JsonValue, field: &str) -> Result<Vec<u64>, VoomError> {
     let arr = value
         .as_array()
-        .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array")))?;
+        .ok_or_else(|| VoomError::database(format!("{field}: expected JSON array")))?;
     let mut out = Vec::with_capacity(arr.len());
     for v in arr {
         let n = v
             .as_u64()
-            .ok_or_else(|| VoomError::Database(format!("{field}: expected u64 element")))?;
+            .ok_or_else(|| VoomError::database(format!("{field}: expected u64 element")))?;
         out.push(n);
     }
     Ok(out)
@@ -367,23 +367,23 @@ fn pinned_u64_array(value: &JsonValue, field: &str) -> Result<Vec<u64>, VoomErro
 fn pinned_hash_pairs(value: &JsonValue, field: &str) -> Result<Vec<(u64, String)>, VoomError> {
     let arr = value
         .as_array()
-        .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array")))?;
+        .ok_or_else(|| VoomError::database(format!("{field}: expected JSON array")))?;
     let mut out = Vec::with_capacity(arr.len());
     for pair in arr {
         let row = pair
             .as_array()
-            .ok_or_else(|| VoomError::Database(format!("{field}: expected JSON array element")))?;
+            .ok_or_else(|| VoomError::database(format!("{field}: expected JSON array element")))?;
         if row.len() != 2 {
-            return Err(VoomError::Database(format!(
+            return Err(VoomError::database(format!(
                 "{field}: expected 2-element [version_id, hash] arrays"
             )));
         }
         let vid = row[0]
             .as_u64()
-            .ok_or_else(|| VoomError::Database(format!("{field}: version_id not u64")))?;
+            .ok_or_else(|| VoomError::database(format!("{field}: version_id not u64")))?;
         let hash = row[1]
             .as_str()
-            .ok_or_else(|| VoomError::Database(format!("{field}: hash not str")))?
+            .ok_or_else(|| VoomError::database(format!("{field}: hash not str")))?
             .to_owned();
         out.push((vid, hash));
     }
@@ -399,7 +399,7 @@ async fn version_is_retired(
             .bind(i64_from_u64(id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("file_versions retired probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_versions retired probe", e))?;
     Ok(matches!(row, Some(Some(_))))
 }
 
@@ -412,7 +412,7 @@ async fn location_is_retired(
             .bind(i64_from_u64(id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("file_locations retired probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_locations retired probe", e))?;
     Ok(matches!(row, Some(Some(_))))
 }
 
@@ -425,7 +425,7 @@ async fn version_content_hash(
             .bind(i64_from_u64(id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("file_versions hash probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_versions hash probe", e))?;
     Ok(row)
 }
 
@@ -458,7 +458,7 @@ pub(super) async fn expand_scope_members(
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members asset insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members asset insert", e))?;
     }
     for id in &closure.bundles {
         sqlx::query(
@@ -469,7 +469,7 @@ pub(super) async fn expand_scope_members(
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members bundle insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members bundle insert", e))?;
     }
     for id in &closure.file_versions {
         sqlx::query(
@@ -480,7 +480,7 @@ pub(super) async fn expand_scope_members(
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members version insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members version insert", e))?;
     }
     for id in &closure.file_locations {
         sqlx::query(
@@ -491,7 +491,7 @@ pub(super) async fn expand_scope_members(
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members location insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members location insert", e))?;
     }
     Ok(())
 }

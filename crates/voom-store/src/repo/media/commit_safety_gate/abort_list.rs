@@ -76,7 +76,7 @@ pub async fn abort_destructive_commit(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut *tx)
     .await
-    .map_err(|e| VoomError::Database(format!("abort: UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("abort: UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "abort: UPDATE on {commit_id} affected {} rows; concurrent state mutation",
@@ -89,7 +89,7 @@ pub async fn abort_destructive_commit(
 
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("abort: commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("abort: commit", e))?;
 
     Ok(AbortOutcome::Aborted {
         commit_id,
@@ -171,7 +171,7 @@ pub async fn list_pending_commit_intents(
             .await
         }
     }
-    .map_err(|e| VoomError::Database(format!("list_pending_commit_intents: query: {e}")))?;
+    .map_err(|e| VoomError::database_context("list_pending_commit_intents: query", e))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -191,36 +191,36 @@ fn decode_pending_commit_intent_row(
 ) -> Result<PendingCommitIntent, VoomError> {
     let id_raw: i64 = row
         .try_get("id")
-        .map_err(|e| VoomError::Database(format!("list_pending_commit_intents: read id: {e}")))?;
+        .map_err(|e| VoomError::database_context("list_pending_commit_intents: read id", e))?;
     let commit_id = CommitId(u64_from_i64(id_raw));
-    let state_str: String = row.try_get("state").map_err(|e| {
-        VoomError::Database(format!("list_pending_commit_intents: read state: {e}"))
-    })?;
+    let state_str: String = row
+        .try_get("state")
+        .map_err(|e| VoomError::database_context("list_pending_commit_intents: read state", e))?;
     let state = parse_in_flight_state(&state_str, commit_id)?;
-    let target_json: String = row.try_get("target").map_err(|e| {
-        VoomError::Database(format!("list_pending_commit_intents: read target: {e}"))
-    })?;
+    let target_json: String = row
+        .try_get("target")
+        .map_err(|e| VoomError::database_context("list_pending_commit_intents: read target", e))?;
     let closure_initial_json: String = row.try_get("closure_initial").map_err(|e| {
-        VoomError::Database(format!(
+        VoomError::database(format!(
             "list_pending_commit_intents: read closure_initial: {e}"
         ))
     })?;
     let closure_authorized_json: Option<String> =
         row.try_get("closure_authorized").map_err(|e| {
-            VoomError::Database(format!(
+            VoomError::database(format!(
                 "list_pending_commit_intents: read closure_authorized: {e}"
             ))
         })?;
     let accepted_evidence_ids_json: String = row.try_get("accepted_evidence_ids").map_err(|e| {
-        VoomError::Database(format!(
+        VoomError::database(format!(
             "list_pending_commit_intents: read accepted_evidence_ids: {e}"
         ))
     })?;
     let started_at_str: String = row.try_get("started_at").map_err(|e| {
-        VoomError::Database(format!("list_pending_commit_intents: read started_at: {e}"))
+        VoomError::database_context("list_pending_commit_intents: read started_at", e)
     })?;
     let authorized_at_str: Option<String> = row.try_get("authorized_at").map_err(|e| {
-        VoomError::Database(format!(
+        VoomError::database(format!(
             "list_pending_commit_intents: read authorized_at: {e}"
         ))
     })?;
@@ -278,7 +278,7 @@ fn decode_pending_commit_intent_row(
     let closure_initial = decode_closure(&closure_initial_json)?;
     let accepted_evidence_ids: Vec<EvidenceId> = serde_json::from_str(&accepted_evidence_ids_json)
         .map_err(|e| {
-            VoomError::Database(format!(
+            VoomError::database(format!(
                 "list_pending_commit_intents: decode accepted_evidence_ids: {e}"
             ))
         })?;
@@ -311,7 +311,7 @@ fn parse_in_flight_state(s: &str, commit_id: CommitId) -> Result<CommitIntentSta
             "list_pending_commit_intents: commit_intents row {commit_id} surfaced terminal \
              state {s:?}; WHERE clause should have excluded it"
         ))),
-        other => Err(VoomError::Database(format!(
+        other => Err(VoomError::database(format!(
             "list_pending_commit_intents: commit_intents row {commit_id} has unknown state {other:?}"
         ))),
     }

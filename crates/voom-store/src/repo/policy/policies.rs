@@ -99,7 +99,7 @@ impl SqlitePolicyRepo {
                     draft.slug
                 ))
             } else {
-                VoomError::Database(format!("policy_documents insert: {e}"))
+                VoomError::database_context("policy_documents insert", e)
             }
         })?;
         let document_id = PolicyDocumentId(u64_from_i64(document_res.last_insert_rowid()));
@@ -121,7 +121,7 @@ impl SqlitePolicyRepo {
         advance_current_version(&mut tx, document_id, version_id).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("policy registry commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy registry commit", e))?;
 
         let document = self.get_document(document_id).await?.ok_or_else(|| {
             VoomError::Internal(format!("created policy document {document_id} missing"))
@@ -161,7 +161,7 @@ impl SqlitePolicyRepo {
         {
             tx.commit()
                 .await
-                .map_err(|e| VoomError::Database(format!("policy registry commit: {e}")))?;
+                .map_err(|e| VoomError::database_context("policy registry commit", e))?;
             return Ok(existing);
         }
 
@@ -196,7 +196,7 @@ impl SqlitePolicyRepo {
         advance_current_version(&mut tx, document_id, version_id).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("policy registry commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy registry commit", e))?;
 
         self.get_version(version_id).await?.ok_or_else(|| {
             VoomError::Internal(format!("created policy version {version_id} missing"))
@@ -211,7 +211,7 @@ impl SqlitePolicyRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_documents get: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_documents get", e))?;
         row.as_ref().map(row_to_document).transpose()
     }
 
@@ -222,7 +222,7 @@ impl SqlitePolicyRepo {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_documents list: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_documents list", e))?;
 
         rows.iter()
             .map(row_to_document_summary)
@@ -237,7 +237,7 @@ impl SqlitePolicyRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_versions get: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_versions get", e))?;
         row.as_ref().map(row_to_version).transpose()
     }
 
@@ -254,7 +254,7 @@ impl SqlitePolicyRepo {
         .bind(i64_from_u64(document_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_versions list: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_versions list", e))?;
 
         rows.iter()
             .map(row_to_version)
@@ -273,7 +273,7 @@ impl SqlitePolicyRepo {
             .bind(source_hash)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_versions get by hash: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_versions get by hash", e))?;
         row.as_ref().map(row_to_version).transpose()
     }
 }
@@ -293,7 +293,7 @@ async fn begin_immediate(
 ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, VoomError> {
     pool.begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|e| VoomError::Database(format!("policy registry begin IMMEDIATE: {e}")))
+        .map_err(|e| VoomError::database_context("policy registry begin IMMEDIATE", e))
 }
 
 struct NewVersionRow<'a> {
@@ -328,7 +328,7 @@ async fn insert_version(
         if is_unique_violation(&e) {
             VoomError::Conflict(format!("policy version conflict: {e}"))
         } else {
-            VoomError::Database(format!("policy_versions insert: {e}"))
+            VoomError::database_context("policy_versions insert", e)
         }
     })
 }
@@ -347,7 +347,7 @@ async fn advance_current_version(
     .bind(i64_from_u64(document_id.0))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_documents advance current version: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_documents advance current version", e))?;
     if result.rows_affected() == 0 {
         return Err(VoomError::NotFound(format!(
             "policy document {document_id} not found"
@@ -366,7 +366,7 @@ async fn next_version_number(
     .bind(i64_from_u64(document_id.0))
     .fetch_one(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_versions next version: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_versions next version", e))?;
     let next = next
         .ok_or_else(|| VoomError::NotFound(format!("policy document {document_id} not found")))?;
     Ok(u64_from_i64(next))
@@ -382,7 +382,7 @@ async fn get_version_by_document_and_hash_in_tx(
         .bind(source_hash)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_versions get by hash: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_versions get by hash", e))?;
     row.as_ref().map(row_to_version).transpose()
 }
 
@@ -481,7 +481,7 @@ fn row_to_version(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyVersion, VoomEr
         .try_get("compiled_json")
         .map_err(|e| map_row_err("policy_versions", &e))?;
     let compiled_json = serde_json::from_str(&compiled_json_text)
-        .map_err(|e| VoomError::Database(format!("policy_versions.compiled_json parse: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_versions.compiled_json parse", e))?;
     let created_at: String = row
         .try_get("created_at")
         .map_err(|e| map_row_err("policy_versions", &e))?;

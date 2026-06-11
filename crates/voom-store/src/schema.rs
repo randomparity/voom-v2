@@ -84,7 +84,7 @@ pub async fn probe_schema(pool: &SqlitePool) -> Result<SchemaState, VoomError> {
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| VoomError::Database(format!("probing sqlite_master failed: {e}")))?;
+    .map_err(|e| VoomError::database_context("probing sqlite_master failed", e))?;
 
     if migrations_table_exists == 0 {
         if let Some(name) = sample_foreign_table {

@@ -91,9 +91,7 @@ async fn insert_builtin_worker_if_missing(
     .bind(&ts)
     .execute(&mut **tx)
     .await
-    .map_err(|err| {
-        VoomError::Database(format!("workers insert built-in verify_artifact: {err}"))
-    })?;
+    .map_err(|err| VoomError::database_context("workers insert built-in verify_artifact", err))?;
     Ok(())
 }
 

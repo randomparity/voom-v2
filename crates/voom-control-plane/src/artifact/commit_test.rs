@@ -800,7 +800,7 @@ impl CommitArtifactHooks for FailBeforeFinalize {
         &self,
         _context: CommitArtifactFinalizeContext<'_>,
     ) -> Result<(), VoomError> {
-        Err(VoomError::Database(
+        Err(VoomError::database(
             "injected finalize transaction failure".to_owned(),
         ))
     }

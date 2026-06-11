@@ -117,7 +117,7 @@ pub async fn finalize_destructive_commit(
                 finalize_not_performed_in_tx(&mut tx, event_repo, &permit, &row, now).await?;
             tx.commit()
                 .await
-                .map_err(|e| VoomError::Database(format!("finalize: commit NotPerformed: {e}")))?;
+                .map_err(|e| VoomError::database_context("finalize: commit NotPerformed", e))?;
             return Ok(FinalizeOutcome::CancelledAfterAuthorize(outcome));
         }
         MutationOutcome::Applied { observed } => observed,
@@ -171,7 +171,7 @@ async fn finalize_applied_with_recovery_boundary(
 ) -> Result<FinalizeOutcome, VoomError> {
     let result = {
         let mut sp = tx.begin().await.map_err(|e| {
-            VoomError::Database(format!("finalize: applied recovery savepoint begin: {e}"))
+            VoomError::database_context("finalize: applied recovery savepoint begin", e)
         })?;
         let inner = finalize_applied_inner(
             &mut sp,
@@ -187,7 +187,7 @@ async fn finalize_applied_with_recovery_boundary(
         match inner {
             Ok(outcome) => {
                 sp.commit().await.map_err(|e| {
-                    VoomError::Database(format!(
+                    VoomError::database(format!(
                         "finalize: applied recovery savepoint release: {e}"
                     ))
                 })?;
@@ -208,7 +208,7 @@ async fn finalize_applied_with_recovery_boundary(
         Ok(outcome) => {
             tx.commit()
                 .await
-                .map_err(|e| VoomError::Database(format!("finalize: commit applied: {e}")))?;
+                .map_err(|e| VoomError::database_context("finalize: commit applied", e))?;
             Ok(outcome)
         }
         Err(inner) => {
@@ -228,7 +228,7 @@ async fn finalize_applied_with_recovery_boundary(
             )
             .await?;
             tx.commit().await.map_err(|e| {
-                VoomError::Database(format!("finalize: commit mutation_failed recovery: {e}"))
+                VoomError::database_context("finalize: commit mutation_failed recovery", e)
             })?;
             Ok(FinalizeOutcome::Blocked(outcome))
         }
@@ -323,7 +323,7 @@ async fn read_authorized_intent_in_tx(
     .bind(i64_from_u64(commit_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("finalize: read intent: {e}")))?;
+    .map_err(|e| VoomError::database_context("finalize: read intent", e))?;
     let row = row.ok_or_else(|| {
         VoomError::Conflict(format!(
             "finalize: commit_intents row {commit_id} not found"
@@ -331,7 +331,7 @@ async fn read_authorized_intent_in_tx(
     })?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| VoomError::Database(format!("finalize: read state: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read state", e))?;
     if state != "authorized" {
         return Err(VoomError::Conflict(format!(
             "finalize: commit_intents row {commit_id} is in state {state:?}, expected 'authorized'"
@@ -339,7 +339,7 @@ async fn read_authorized_intent_in_tx(
     }
     let epoch_raw: i64 = row
         .try_get("epoch")
-        .map_err(|e| VoomError::Database(format!("finalize: read epoch: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read epoch", e))?;
     let row_epoch = u64_from_i64(epoch_raw);
     if row_epoch != expected_epoch {
         return Err(VoomError::Conflict(format!(
@@ -348,16 +348,16 @@ async fn read_authorized_intent_in_tx(
     }
     let target_json: String = row
         .try_get("target")
-        .map_err(|e| VoomError::Database(format!("finalize: read target: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read target", e))?;
     let closure_initial_json: String = row
         .try_get("closure_initial")
-        .map_err(|e| VoomError::Database(format!("finalize: read closure_initial: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read closure_initial", e))?;
     let closure_authorized_json: Option<String> = row
         .try_get("closure_authorized")
-        .map_err(|e| VoomError::Database(format!("finalize: read closure_authorized: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read closure_authorized", e))?;
     let target_row_epochs_json: Option<String> = row
         .try_get("target_row_epochs")
-        .map_err(|e| VoomError::Database(format!("finalize: read target_row_epochs: {e}")))?;
+        .map_err(|e| VoomError::database_context("finalize: read target_row_epochs", e))?;
     let closure_authorized_json = closure_authorized_json.ok_or_else(|| {
         // Migration 0005's CHECK requires closure_authorized IS NOT NULL
         // for state='authorized'. Reaching this branch means the schema
@@ -425,7 +425,7 @@ async fn finalize_not_performed_in_tx(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("finalize: NotPerformed UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("finalize: NotPerformed UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "finalize: NotPerformed UPDATE on {} affected {} rows; concurrent state mutation",
@@ -722,7 +722,7 @@ async fn push_drift_if_mismatch(
         .bind(i64_from_u64(id))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("finalize: epoch probe {table}: {e}")))?;
+        .map_err(|e| VoomError::database_context(format!("finalize: epoch probe {table}"), e))?;
     // Row gone between authorize and finalize → treat as drift with
     // observed = u64::MAX sentinel. The recovery worker will surface
     // it as a deleted member; the gate's audit row carries the snapshot
@@ -775,7 +775,7 @@ async fn finalize_silent_path_in_tx(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("finalize: completed UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("finalize: completed UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "finalize: completed UPDATE on {} affected {} rows; concurrent state mutation",
@@ -833,7 +833,7 @@ async fn finalize_mutation_failed_in_tx(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("finalize: mutation_failed recovery UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("finalize: mutation_failed recovery UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "finalize: mutation_failed recovery UPDATE on {} affected {} rows; concurrent state mutation",
@@ -955,7 +955,7 @@ async fn finalize_trip_wire_in_tx(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("finalize: recovery_required UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("finalize: recovery_required UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "finalize: recovery_required UPDATE on {} affected {} rows; concurrent state mutation",

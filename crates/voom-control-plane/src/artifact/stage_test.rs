@@ -583,7 +583,7 @@ impl StageCopyHooks for FailBeforeDatabaseTransaction {
         &self,
         _context: StageCopyDatabaseContext<'_>,
     ) -> Result<(), VoomError> {
-        Err(VoomError::Database(
+        Err(VoomError::database(
             "injected stage-copy db failure".to_owned(),
         ))
     }
@@ -598,7 +598,7 @@ impl StageCopyHooks for ReplaceStagingFileWithDirectoryBeforeDatabase {
     ) -> Result<(), VoomError> {
         std::fs::remove_file(context.staging_path).unwrap();
         std::fs::create_dir(context.staging_path).unwrap();
-        Err(VoomError::Database("injected durable failure".to_owned()))
+        Err(VoomError::database("injected durable failure"))
     }
 }
 
@@ -613,6 +613,6 @@ impl StageCopyHooks for ReplaceStagingFileWithRegularFileBeforeDatabase {
     ) -> Result<(), VoomError> {
         std::fs::remove_file(context.staging_path).unwrap();
         std::fs::write(context.staging_path, self.bytes).unwrap();
-        Err(VoomError::Database("injected durable failure".to_owned()))
+        Err(VoomError::database("injected durable failure"))
     }
 }

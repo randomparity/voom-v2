@@ -91,7 +91,7 @@ impl SubjectType {
             "asset_use_lease" => Self::AssetUseLease,
             "commit_intent" => Self::CommitIntent,
             other => {
-                return Err(VoomError::Database(format!(
+                return Err(VoomError::database(format!(
                     "events.subject_type {other:?} not in SubjectType vocab"
                 )));
             }

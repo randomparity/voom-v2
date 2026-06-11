@@ -27,7 +27,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
 
     let mut options: SqliteConnectOptions = url
         .parse()
-        .map_err(|e| VoomError::Database(format!("invalid sqlite url {url:?}: {e}")))?;
+        .map_err(|e| VoomError::database_context(format!("invalid sqlite url {url:?}"), e))?;
 
     options = options
         .create_if_missing(create || is_memory)
@@ -77,7 +77,7 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
         .connect_with(options)
         .await
         .map_err(|e| {
-            VoomError::Database(format!(
+            VoomError::database(format!(
                 "pool open failed for {url:?} (create={create}): {e}"
             ))
         })
@@ -132,7 +132,7 @@ fn ensure_parent_dir(url: &str) -> Result<(), VoomError> {
         return Ok(());
     }
     std::fs::create_dir_all(parent).map_err(|e| {
-        VoomError::Database(format!(
+        VoomError::database(format!(
             "could not create database parent directory {}: {e}",
             parent.display()
         ))

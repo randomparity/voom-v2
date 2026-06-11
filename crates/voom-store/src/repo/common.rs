@@ -16,7 +16,7 @@ pub(crate) const fn u64_from_i64(v: i64) -> u64 {
 }
 
 pub(crate) fn u32_from_i64(v: i64) -> Result<u32, VoomError> {
-    u32::try_from(v).map_err(|e| VoomError::Database(format!("u32 conv from {v}: {e}")))
+    u32::try_from(v).map_err(|e| VoomError::database_context(format!("u32 conv from {v}"), e))
 }
 
 pub(crate) fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
@@ -26,7 +26,7 @@ pub(crate) fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {
 
 pub(crate) fn parse_iso8601(s: &str) -> Result<OffsetDateTime, VoomError> {
     OffsetDateTime::parse(s, &time::format_description::well_known::Iso8601::DEFAULT)
-        .map_err(|e| VoomError::Database(format!("parse iso8601 {s:?}: {e}")))
+        .map_err(|e| VoomError::database_context(format!("parse iso8601 {s:?}"), e))
 }
 
 pub(crate) fn serialize_json<T: Serialize + ?Sized>(
@@ -37,5 +37,5 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
 }
 
 pub(crate) fn map_row_err(table: &'static str, e: &sqlx::Error) -> VoomError {
-    VoomError::Database(format!("{table} row decode: {e}"))
+    VoomError::database(format!("{table} row decode: {e}"))
 }

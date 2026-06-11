@@ -341,7 +341,7 @@ async fn find_existing_ticket_id_in_tx(
     .bind(node_id)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("workflow ticket lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("workflow ticket lookup", e))?;
 
     match rows.as_slice() {
         [] => Ok(None),
@@ -368,7 +368,7 @@ async fn ensure_dependency_in_tx(
     .bind(sqlite_i64(depends_on.0, "dependency ticket id")?)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("workflow dependency lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("workflow dependency lookup", e))?;
     if exists.is_some() {
         return Ok(());
     }
@@ -377,7 +377,7 @@ async fn ensure_dependency_in_tx(
         .bind(sqlite_i64(ticket_id.0, "ticket id")?)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow ticket state lookup: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow ticket state lookup", e))?;
     match state.as_deref() {
         Some(state) if state == TicketState::Pending.as_str() => {
             tickets
@@ -646,13 +646,14 @@ fn ticket_kind(operation: OperationKind) -> Result<TicketOperation, VoomError> {
 }
 
 fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value)
-        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit SQLite i64: {e}")))
+    i64::try_from(value).map_err(|e| {
+        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
+    })
 }
 
 fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
-        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit u64: {e}")))
+        .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
 }
 
 #[cfg(test)]

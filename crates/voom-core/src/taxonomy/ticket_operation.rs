@@ -35,7 +35,7 @@ impl TicketOperation {
     pub fn from_stored(value: impl Into<String>, field: &str) -> Result<Self, VoomError> {
         let value = value.into();
         validate_operation_token(&value).map_err(|reason| {
-            VoomError::Database(format!("{field} invalid operation {value:?}: {reason}"))
+            VoomError::database(format!("{field} invalid operation {value:?}: {reason}"))
         })?;
         Ok(Self(value))
     }

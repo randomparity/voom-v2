@@ -68,7 +68,7 @@ impl AssertionKind {
             "frame_fingerprint_match" => Self::FrameFingerprintMatch,
             "audio_fingerprint_match" => Self::AudioFingerprintMatch,
             other => {
-                return Err(VoomError::Database(format!(
+                return Err(VoomError::database(format!(
                     "identity_evidence.assertion_type {other:?} not in AssertionKind vocab"
                 )));
             }

@@ -1,10 +1,43 @@
+use std::error::Error;
+
 use super::*;
 
 #[test]
 fn database_variant_has_db_unreachable_code() {
-    let err = VoomError::Database("connection refused".into());
+    let err = VoomError::database("connection refused");
     assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
     assert_eq!(err.code(), "DB_UNREACHABLE");
+}
+
+#[test]
+fn database_constructor_has_no_source() {
+    let err = VoomError::database("connection refused");
+    assert!(err.source().is_none());
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+    assert_eq!(err.to_string(), "database error: connection refused");
+}
+
+#[test]
+fn database_context_preserves_code() {
+    let err = VoomError::database_context("asset_use_leases insert", sqlx::Error::RowNotFound);
+    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+}
+
+#[test]
+fn database_context_exposes_sqlx_source() {
+    let err = VoomError::database_context("asset_use_leases insert", sqlx::Error::RowNotFound);
+    let source = err.source().unwrap();
+    let sqlx_err = source.downcast_ref::<sqlx::Error>().unwrap();
+    assert!(matches!(sqlx_err, sqlx::Error::RowNotFound));
+}
+
+#[test]
+fn database_context_message_is_byte_identical_to_old_format() {
+    let context = "video_profiles.crf";
+    let err = VoomError::database_context(context, sqlx::Error::RowNotFound);
+    let expected = format!("database error: {context}: {}", sqlx::Error::RowNotFound);
+    assert_eq!(err.to_string(), expected);
 }
 
 #[test]

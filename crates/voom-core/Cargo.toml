@@ -22,3 +22,6 @@ time = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Source-chain unit test constructs a `sqlx::Error` and downcasts to it.
+# Dev-only: `voom-core` itself stays free of any database-driver dependency.
+sqlx = { workspace = true }

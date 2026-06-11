@@ -46,7 +46,7 @@ impl TicketState {
             "leased" => Ok(Self::Leased),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "tickets.state {other:?} not in vocab"
             ))),
         }
@@ -156,7 +156,7 @@ impl SqliteTicketRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("tickets insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("tickets insert", e))?;
         let id = TicketId(u64_from_i64(res.last_insert_rowid()));
         // Re-read to return the canonical row.
         get_in_tx_inner(tx, id)
@@ -169,11 +169,11 @@ impl SqliteTicketRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -198,7 +198,7 @@ impl SqliteTicketRepo {
             .bind(i64_from_u64(ticket_id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("ticket state probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("ticket state probe", e))?;
         let Some((state,)) = row else {
             return Err(VoomError::NotFound(format!("ticket {ticket_id}")));
         };
@@ -223,7 +223,7 @@ impl SqliteTicketRepo {
         .bind(i64_from_u64(ticket_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("cycle check: {e}")))?;
+        .map_err(|e| VoomError::database_context("cycle check", e))?;
         if cyclic.is_some() {
             return Err(VoomError::DependencyCycle(format!(
                 "adding {ticket_id} -> {depends_on} would create a cycle"
@@ -237,7 +237,7 @@ impl SqliteTicketRepo {
         .bind(i64_from_u64(depends_on.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("ticket_dependencies insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("ticket_dependencies insert", e))?;
         Ok(())
     }
 
@@ -250,12 +250,12 @@ impl SqliteTicketRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         self.add_dependency_in_tx(&mut tx, ticket_id, depends_on)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(())
     }
 
@@ -273,7 +273,7 @@ impl SqliteTicketRepo {
             .bind(i64_from_u64(ticket_id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("tickets state probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("tickets state probe", e))?;
         match state.as_deref() {
             None => return Err(VoomError::NotFound(format!("ticket {ticket_id}"))),
             Some("pending") => {}
@@ -288,7 +288,7 @@ impl SqliteTicketRepo {
         .bind(i64_from_u64(ticket_id.0))
         .fetch_one(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("dependency count: {e}")))?;
+        .map_err(|e| VoomError::database_context("dependency count", e))?;
         if unsucceeded.0 > 0 {
             return Ok(Vec::new());
         }
@@ -302,7 +302,7 @@ impl SqliteTicketRepo {
         .bind(i64_from_u64(ticket_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("tickets update: {e}")))?;
+        .map_err(|e| VoomError::database_context("tickets update", e))?;
         let promoted = row
             .as_ref()
             .map(row_to_ticket)
@@ -324,13 +324,13 @@ impl SqliteTicketRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .mark_ready_if_unblocked_in_tx(&mut tx, ticket_id, now)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -339,7 +339,7 @@ impl SqliteTicketRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("tickets get: {e}")))?;
+            .map_err(|e| VoomError::database_context("tickets get", e))?;
         row.as_ref().map(row_to_ticket).transpose()
     }
 
@@ -366,7 +366,7 @@ impl SqliteTicketRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("tickets list: {e}")))?;
+        .map_err(|e| VoomError::database_context("tickets list", e))?;
         rows.iter().map(row_to_ticket).collect()
     }
 
@@ -410,10 +410,11 @@ impl SqliteTicketRepo {
         separated.push_unseparated(") ");
         query.push("ORDER BY priority DESC, next_eligible_at ASC, id ASC");
 
-        let rows =
-            query.build().fetch_all(&mut **tx).await.map_err(|e| {
-                VoomError::Database(format!("tickets next_ready_for_operations: {e}"))
-            })?;
+        let rows = query
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| VoomError::database_context("tickets next_ready_for_operations", e))?;
         rows.iter().map(row_to_ticket).collect()
     }
 
@@ -426,13 +427,13 @@ impl SqliteTicketRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .next_ready_for_operations_in_tx(&mut tx, operations, now)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -441,7 +442,7 @@ impl SqliteTicketRepo {
             .bind(i64_from_u64(depends_on.0))
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("tickets list_dependents: {e}")))?;
+            .map_err(|e| VoomError::database_context("tickets list_dependents", e))?;
         rows.iter().map(row_to_ticket).collect()
     }
 
@@ -454,7 +455,7 @@ impl SqliteTicketRepo {
             .bind(i64_from_u64(depends_on.0))
             .fetch_all(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("tickets list_dependents_in_tx: {e}")))?;
+            .map_err(|e| VoomError::database_context("tickets list_dependents_in_tx", e))?;
         rows.iter().map(row_to_ticket).collect()
     }
 }
@@ -487,7 +488,7 @@ async fn get_in_tx_inner(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("tickets get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("tickets get_in_tx", e))?;
     row.as_ref().map(row_to_ticket).transpose()
 }
 
@@ -530,11 +531,11 @@ fn row_to_ticket(row: &sqlx::sqlite::SqliteRow) -> Result<Ticket, VoomError> {
         .try_get("epoch")
         .map_err(|e| map_row_err("tickets", &e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
-        .map_err(|e| VoomError::Database(format!("parse payload: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse payload", e))?;
     let result_v = result
         .map(|s| serde_json::from_str::<JsonValue>(&s))
         .transpose()
-        .map_err(|e| VoomError::Database(format!("parse result: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse result", e))?;
     Ok(Ticket {
         id: TicketId(u64_from_i64(id)),
         job_id: job_id.map(|j| JobId(u64_from_i64(j))),

@@ -639,20 +639,20 @@ impl ControlPlane {
         .bind(OperationKind::ExtractAudio.as_str())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("policy runtime registry: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy runtime registry", e))?;
 
         for row in rows {
             let worker_id_raw = row
                 .try_get::<i64, _>("id")
-                .map_err(|e| VoomError::Database(format!("policy runtime worker id: {e}")))?;
+                .map_err(|e| VoomError::database_context("policy runtime worker id", e))?;
             let worker_epoch_raw = row
                 .try_get::<i64, _>("epoch")
-                .map_err(|e| VoomError::Database(format!("policy runtime worker epoch: {e}")))?;
+                .map_err(|e| VoomError::database_context("policy runtime worker epoch", e))?;
             let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
             let worker_epoch = sqlite_u64(worker_epoch_raw, "worker epoch")?;
             let extra: String = row
                 .try_get("extra")
-                .map_err(|e| VoomError::Database(format!("policy runtime registry extra: {e}")))?;
+                .map_err(|e| VoomError::database_context("policy runtime registry extra", e))?;
             let Some((endpoint, secret)) = runtime_metadata(&extra)? else {
                 continue;
             };
@@ -766,18 +766,18 @@ impl ControlPlane {
         .bind(OperationKind::ExtractAudio.as_str())
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("dead endpoint operations: {e}")))?;
+        .map_err(|e| VoomError::database_context("dead endpoint operations", e))?;
 
         let mut registered_operations = HashSet::new();
         let mut live_operations = HashSet::new();
         for row in rows {
             let worker_id_raw = row
                 .try_get::<i64, _>("id")
-                .map_err(|e| VoomError::Database(format!("dead endpoint worker id: {e}")))?;
+                .map_err(|e| VoomError::database_context("dead endpoint worker id", e))?;
             let worker_id = WorkerId(sqlite_u64(worker_id_raw, "worker id")?);
             let operation: String = row
                 .try_get("operation")
-                .map_err(|e| VoomError::Database(format!("dead endpoint operation: {e}")))?;
+                .map_err(|e| VoomError::database_context("dead endpoint operation", e))?;
             if live_ids.contains(&worker_id) {
                 live_operations.insert(operation);
             } else if registered_ids.contains(&worker_id) {
@@ -938,7 +938,7 @@ fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &
 
 fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, VoomError> {
     let value: serde_json::Value = serde_json::from_str(extra)
-        .map_err(|e| VoomError::Database(format!("worker capability extra JSON: {e}")))?;
+        .map_err(|e| VoomError::database_context("worker capability extra JSON", e))?;
     let endpoint = value
         .get("endpoint")
         .and_then(serde_json::Value::as_str)
@@ -954,7 +954,7 @@ fn runtime_metadata(extra: &str) -> Result<Option<(SocketAddr, SecretString)>, V
 }
 
 fn sqlite_u64(value: i64, label: &str) -> Result<u64, VoomError> {
-    u64::try_from(value).map_err(|_| VoomError::Database(format!("{label} was negative: {value}")))
+    u64::try_from(value).map_err(|_| VoomError::database(format!("{label} was negative: {value}")))
 }
 
 fn issue_draft(dedupe_key: &str, check: &voom_plan::ComplianceCheck) -> PolicyIssueDraft {

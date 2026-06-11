@@ -178,11 +178,11 @@ impl SqlitePolicyInputRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_input_set_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -208,7 +208,7 @@ impl SqlitePolicyInputRepo {
         .bind(&input.description)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_input_sets insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_input_sets insert", e))?;
         let set_id = PolicyInputSetId(u64_from_i64(res.last_insert_rowid()));
 
         for label in &input.fixture_labels {
@@ -221,7 +221,7 @@ impl SqlitePolicyInputRepo {
             .execute(&mut **tx)
             .await
             .map_err(|e| {
-                VoomError::Database(format!("policy_input_set_fixture_labels insert: {e}"))
+                VoomError::database_context("policy_input_set_fixture_labels insert", e)
             })?;
         }
 
@@ -238,9 +238,7 @@ impl SqlitePolicyInputRepo {
             .bind(&target.display_name)
             .execute(&mut **tx)
             .await
-            .map_err(|e| {
-                VoomError::Database(format!("policy_input_synthetic_targets insert: {e}"))
-            })?;
+            .map_err(|e| VoomError::database_context("policy_input_synthetic_targets insert", e))?;
             synthetic_target_ids.insert(
                 (target.synthetic_key.clone(), target.target_kind),
                 PolicySyntheticTargetId(u64_from_i64(res.last_insert_rowid())),
@@ -280,7 +278,7 @@ impl SqlitePolicyInputRepo {
             .bind(snapshot.existing_media_snapshot_id.map(|id| i64_from_u64(id.0)))
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_media_snapshot_inputs insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs insert", e))?;
         }
 
         for evidence in &input.identity_evidence {
@@ -310,7 +308,7 @@ impl SqlitePolicyInputRepo {
             .bind(evidence.existing_evidence_id.map(|id| i64_from_u64(id.0)))
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_identity_evidence_inputs insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs insert", e))?;
         }
 
         for bundle in &input.bundle_targets {
@@ -342,7 +340,7 @@ impl SqlitePolicyInputRepo {
             )?)
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_bundle_target_inputs insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_bundle_target_inputs insert", e))?;
         }
 
         for profile in &input.quality_profiles {
@@ -372,7 +370,7 @@ impl SqlitePolicyInputRepo {
             .execute(&mut **tx)
             .await
             .map_err(|e| {
-                VoomError::Database(format!("policy_quality_profile_selections insert: {e}"))
+                VoomError::database_context("policy_quality_profile_selections insert", e)
             })?;
         }
 
@@ -403,7 +401,7 @@ impl SqlitePolicyInputRepo {
             .bind(issue.existing_issue_id.map(|id| i64_from_u64(id.0)))
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_issue_inputs insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_issue_inputs insert", e))?;
         }
 
         get_input_set_in_tx(tx, set_id).await?.ok_or_else(|| {
@@ -419,7 +417,7 @@ impl SqlitePolicyInputRepo {
             .pool
             .acquire()
             .await
-            .map_err(|e| VoomError::Database(format!("acquire: {e}")))?;
+            .map_err(|e| VoomError::database_context("acquire", e))?;
         get_input_set_by_id_conn(&mut conn, id).await
     }
 
@@ -431,12 +429,12 @@ impl SqlitePolicyInputRepo {
             .pool
             .acquire()
             .await
-            .map_err(|e| VoomError::Database(format!("acquire: {e}")))?;
+            .map_err(|e| VoomError::database_context("acquire", e))?;
         let row = sqlx::query(ROOT_SELECT_SLUG)
             .bind(slug)
             .fetch_optional(&mut *conn)
             .await
-            .map_err(|e| VoomError::Database(format!("policy_input_sets get by slug: {e}")))?;
+            .map_err(|e| VoomError::database_context("policy_input_sets get by slug", e))?;
         match row.as_ref().map(row_to_root).transpose()? {
             Some(root) => hydrate_input_set(&mut conn, root).await.map(Some),
             None => Ok(None),
@@ -448,14 +446,14 @@ impl SqlitePolicyInputRepo {
             .pool
             .acquire()
             .await
-            .map_err(|e| VoomError::Database(format!("acquire: {e}")))?;
+            .map_err(|e| VoomError::database_context("acquire", e))?;
         let rows = sqlx::query(
             "SELECT id, slug, display_name, schema_version, source_kind, created_at, description, epoch \
              FROM policy_input_sets ORDER BY slug ASC, id ASC",
         )
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_input_sets list: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_input_sets list", e))?;
 
         let roots = rows
             .iter()
@@ -497,7 +495,7 @@ async fn get_input_set_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_input_sets get: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
     match row.as_ref().map(row_to_root).transpose()? {
         Some(root) => hydrate_input_set(tx, root).await.map(Some),
         None => Ok(None),
@@ -512,7 +510,7 @@ async fn get_input_set_by_id_conn(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut *conn)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_input_sets get: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_input_sets get", e))?;
     match row.as_ref().map(row_to_root).transpose()? {
         Some(root) => hydrate_input_set(conn, root).await.map(Some),
         None => Ok(None),
@@ -566,7 +564,7 @@ async fn load_fixture_labels(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_input_set_fixture_labels list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_input_set_fixture_labels list", e))?;
     rows.iter()
         .map(|row| {
             row.try_get("label")
@@ -604,7 +602,7 @@ where
     let rows = query
         .fetch_all(&mut *conn)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_input_set_fixture_labels list: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_input_set_fixture_labels list", e))?;
     let mut labels = HashMap::<PolicyInputSetId, Vec<String>>::new();
     for row in &rows {
         let set_id: i64 = row
@@ -633,7 +631,7 @@ async fn load_synthetic_targets(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_input_synthetic_targets list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_input_synthetic_targets list", e))?;
     rows.iter().map(row_to_synthetic_target).collect()
 }
 
@@ -654,7 +652,7 @@ async fn load_media_snapshots(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_media_snapshot_inputs list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_media_snapshot_inputs list", e))?;
     rows.iter().map(row_to_media_snapshot).collect()
 }
 
@@ -674,7 +672,7 @@ async fn load_identity_evidence(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_identity_evidence_inputs list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_identity_evidence_inputs list", e))?;
     rows.iter().map(row_to_identity_evidence).collect()
 }
 
@@ -693,7 +691,7 @@ async fn load_bundle_targets(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_bundle_target_inputs list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_bundle_target_inputs list", e))?;
     rows.iter().map(row_to_bundle_target).collect()
 }
 
@@ -712,7 +710,7 @@ async fn load_quality_profiles(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_quality_profile_selections list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_quality_profile_selections list", e))?;
     rows.iter().map(row_to_quality_profile).collect()
 }
 
@@ -731,7 +729,7 @@ async fn load_issues(
     .bind(i64_from_u64(set_id.0))
     .fetch_all(&mut *conn)
     .await
-    .map_err(|e| VoomError::Database(format!("policy_issue_inputs list: {e}")))?;
+    .map_err(|e| VoomError::database_context("policy_issue_inputs list", e))?;
     rows.iter().map(row_to_issue).collect()
 }
 
@@ -1036,7 +1034,7 @@ fn target_ref_from_row(
         });
     }
     let id = optional_id(row, "synthetic_target_id", table)?
-        .ok_or_else(|| VoomError::Database(format!("{table} target shape missing")))?;
+        .ok_or_else(|| VoomError::database(format!("{table} target shape missing")))?;
     let key: String = row
         .try_get("synthetic_key")
         .map_err(|e| map_row_err(table, &e))?;
@@ -1080,7 +1078,7 @@ fn json_value<T: DeserializeOwned>(
 ) -> Result<T, VoomError> {
     let raw: String = row.try_get(column).map_err(|e| map_row_err(table, &e))?;
     serde_json::from_str(&raw)
-        .map_err(|e| VoomError::Database(format!("{table}.{column} JSON: {e}")))
+        .map_err(|e| VoomError::database_context(format!("{table}.{column} JSON"), e))
 }
 
 fn json_string<T: serde::Serialize>(value: &T, field: &'static str) -> Result<String, VoomError> {
@@ -1089,7 +1087,7 @@ fn json_string<T: serde::Serialize>(value: &T, field: &'static str) -> Result<St
 
 fn parse_wire<T: DeserializeOwned>(value: &str, field: &'static str) -> Result<T, VoomError> {
     serde_json::from_value(JsonValue::String(value.to_owned()))
-        .map_err(|e| VoomError::Database(format!("{field} {value:?} not in vocab: {e}")))
+        .map_err(|e| VoomError::database_context(format!("{field} {value:?} not in vocab"), e))
 }
 
 #[cfg(test)]

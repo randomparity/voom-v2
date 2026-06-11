@@ -233,7 +233,7 @@ async fn require_no_held_lease(
             .bind(ticket_id_i)
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("pre-lease held lease probe: {e}")))?;
+            .map_err(|e| VoomError::database_context("pre-lease held lease probe", e))?;
     if held_lease.is_some() {
         return Err(VoomError::Conflict(format!(
             "pre-lease failure rejected: ticket {ticket_id} has an active lease"
@@ -262,7 +262,7 @@ async fn terminal_fail_ready_ticket(
     .bind(iso8601(now)?)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("pre-lease terminal fail: {e}")))
+    .map_err(|e| VoomError::database_context("pre-lease terminal fail", e))
 }
 
 async fn requeue_ready_ticket(
@@ -286,7 +286,7 @@ async fn requeue_ready_ticket(
     .bind(now_str)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("pre-lease requeue: {e}")))
+    .map_err(|e| VoomError::database_context("pre-lease requeue", e))
 }
 
 fn pre_lease_failure_reason(class: FailureClass) -> Result<&'static str, VoomError> {
@@ -302,8 +302,9 @@ fn pre_lease_failure_reason(class: FailureClass) -> Result<&'static str, VoomErr
 }
 
 fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value)
-        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit SQLite i64: {e}")))
+    i64::try_from(value).map_err(|e| {
+        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
+    })
 }
 
 fn iso8601(t: OffsetDateTime) -> Result<String, VoomError> {

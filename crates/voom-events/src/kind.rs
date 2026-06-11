@@ -312,7 +312,7 @@ impl EventKind {
             "commit.recovery_required" => Self::CommitRecoveryRequired,
             "commit.forced_override" => Self::CommitForcedOverride,
             other => {
-                return Err(VoomError::Database(format!(
+                return Err(VoomError::database(format!(
                     "events.kind {other:?} not in EventKind vocab"
                 )));
             }

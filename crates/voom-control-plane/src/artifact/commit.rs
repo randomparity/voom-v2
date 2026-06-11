@@ -377,7 +377,7 @@ pub(crate) async fn commit_artifact_with_hooks(
     }) {
         let report = transition_recovery(cp, &prepared, err).await?;
         return Err(CommitArtifactCommandError::committed_error(
-            &VoomError::Database("commit finalize requires recovery".to_owned()),
+            &VoomError::database("commit finalize requires recovery"),
             report,
         ));
     }
@@ -693,7 +693,7 @@ async fn read_handle_facts_in_tx(
     })?)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_handles commit lookup: {err}")))?;
+    .map_err(|err| VoomError::database_context("artifact_handles commit lookup", err))?;
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
             "artifact_handles {id} missing"
@@ -701,17 +701,17 @@ async fn read_handle_facts_in_tx(
     };
     let file_version_id: Option<i64> = row
         .try_get("file_version_id")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.file_version_id: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.file_version_id", err))?;
     let size_bytes: Option<i64> = row
         .try_get("size_bytes")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.size_bytes: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes", err))?;
     let checksum: Option<String> = row
         .try_get("checksum")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.checksum: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.checksum", err))?;
     let source_file_version_id = file_version_id
         .map(|v| {
             u64::try_from(v).map(FileVersionId).map_err(|err| {
-                VoomError::Database(format!("artifact_handles.file_version_id negative: {err}"))
+                VoomError::database_context("artifact_handles.file_version_id negative", err)
             })
         })
         .transpose()?;
@@ -720,9 +720,7 @@ async fn read_handle_facts_in_tx(
         size_bytes: u64::try_from(size_bytes.ok_or_else(|| {
             VoomError::Config(format!("artifact_handle {id} missing expected size_bytes"))
         })?)
-        .map_err(|err| {
-            VoomError::Database(format!("artifact_handles.size_bytes negative: {err}"))
-        })?,
+        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes negative", err))?,
         checksum: checksum.ok_or_else(|| {
             VoomError::Config(format!("artifact_handle {id} missing expected checksum"))
         })?,
@@ -743,7 +741,7 @@ async fn live_staging_location_in_tx(
     })?)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_locations commit live staging: {err}")))?;
+    .map_err(|err| VoomError::database_context("artifact_locations commit live staging", err))?;
     let [row] = rows.as_slice() else {
         return Err(VoomError::Config(format!(
             "artifact_handle {handle_id} must have exactly one live staging location; found {}",
@@ -752,13 +750,13 @@ async fn live_staging_location_in_tx(
     };
     let id: i64 = row
         .try_get("id")
-        .map_err(|err| VoomError::Database(format!("artifact_locations.id: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_locations.id", err))?;
     let value = row
         .try_get("value")
-        .map_err(|err| VoomError::Database(format!("artifact_locations.value: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_locations.value", err))?;
     let id = u64::try_from(id)
         .map(ArtifactLocationId)
-        .map_err(|err| VoomError::Database(format!("artifact_locations.id negative: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_locations.id negative", err))?;
     Ok(LiveStagingLocation { id, value })
 }
 
@@ -1084,9 +1082,7 @@ async fn update_commit_report_in_tx(
         })?)
         .execute(&mut **tx)
         .await
-        .map_err(|err| {
-            VoomError::Database(format!("artifact_commit_records report update: {err}"))
-        })?;
+        .map_err(|err| VoomError::database_context("artifact_commit_records report update", err))?;
     Ok(())
 }
 
@@ -1094,7 +1090,7 @@ fn recovery_reason(err: &VoomError) -> String {
     match err {
         VoomError::ArtifactChecksumMismatch(_) => "staged_bytes_drifted",
         VoomError::VerificationFailure(_) => "target_verification_failed",
-        VoomError::Database(_) => "finalize_failed",
+        VoomError::Database { .. } => "finalize_failed",
         _ => "promotion_failed",
     }
     .to_owned()

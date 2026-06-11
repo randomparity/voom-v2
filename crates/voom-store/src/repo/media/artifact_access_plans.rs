@@ -33,7 +33,7 @@ impl ArtifactAccessMode {
             "shared_mount" => Ok(Self::SharedMount),
             "control_plane_placeholder" => Ok(Self::ControlPlanePlaceholder),
             "staged_output_placeholder" => Ok(Self::StagedOutputPlaceholder),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "artifact_access_plans.selected_access_mode {other:?} not in vocab"
             ))),
         }
@@ -66,7 +66,7 @@ impl ArtifactAccessPlanStatus {
             "consumed" => Ok(Self::Consumed),
             "rejected" => Ok(Self::Rejected),
             "failed" => Ok(Self::Failed),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "artifact_access_plans.status {other:?} not in vocab"
             ))),
         }
@@ -161,11 +161,11 @@ impl SqliteArtifactAccessPlanRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let plan = self.create_selected_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(plan)
     }
 
@@ -198,7 +198,7 @@ impl SqliteArtifactAccessPlanRepo {
         .bind(i64_from_u64(id))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_access_plans status update: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_access_plans status update", e))?;
 
         if res.rows_affected() != 1 {
             return match get_optional_by_id_in_tx(tx, id).await? {
@@ -227,13 +227,13 @@ impl SqliteArtifactAccessPlanRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let plan = self
             .mark_status_in_tx(&mut tx, id, status, reason, evidence, now)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(plan)
     }
 
@@ -245,7 +245,7 @@ impl SqliteArtifactAccessPlanRepo {
             .bind(i64_from_u64(lease_id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("artifact_access_plans get_by_lease: {e}")))?;
+            .map_err(|e| VoomError::database_context("artifact_access_plans get_by_lease", e))?;
         row.as_ref().map(row_to_plan).transpose()
     }
 
@@ -259,7 +259,7 @@ impl SqliteArtifactAccessPlanRepo {
             .fetch_optional(&mut **tx)
             .await
             .map_err(|e| {
-                VoomError::Database(format!("artifact_access_plans get_by_lease_in_tx: {e}"))
+                VoomError::database_context("artifact_access_plans get_by_lease_in_tx", e)
             })?;
         row.as_ref().map(row_to_plan).transpose()
     }
@@ -314,7 +314,7 @@ impl SqliteArtifactAccessPlanRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
-                VoomError::Database(format!(
+                VoomError::database(format!(
                     "artifact_access_plans list_by_mode_and_status: {e}"
                 ))
             })?;
@@ -357,7 +357,7 @@ async fn validate_plan_coherence_in_tx(
     .bind(i64_from_u64(input.lease_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("artifact_access_plans coherence check: {e}")))?;
+    .map_err(|e| VoomError::database_context("artifact_access_plans coherence check", e))?;
 
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
@@ -434,7 +434,7 @@ async fn get_optional_by_id_in_tx(
         .bind(i64_from_u64(id))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_access_plans get_by_id: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_access_plans get_by_id", e))?;
     row.as_ref().map(row_to_plan).transpose()
 }
 
@@ -445,7 +445,7 @@ fn map_insert_err(err: &sqlx::Error, lease_id: LeaseId) -> VoomError {
             lease_id.0
         ))
     } else {
-        VoomError::Database(format!("artifact_access_plans insert: {err}"))
+        VoomError::database(format!("artifact_access_plans insert: {err}"))
     }
 }
 
@@ -466,7 +466,7 @@ async fn list_by_i64(
         .bind(value)
         .fetch_all(pool)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_access_plans {label}: {e}")))?;
+        .map_err(|e| VoomError::database_context(format!("artifact_access_plans {label}"), e))?;
     rows.iter().map(row_to_plan).collect()
 }
 
@@ -517,17 +517,15 @@ fn row_to_plan(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactAccessPlan, Voom
         ticket_id: TicketId(u64_from_i64(ticket_id)),
         worker_id: WorkerId(u64_from_i64(worker_id)),
         node_id: NodeId(u64_from_i64(node_id)),
-        input_handles: serde_json::from_str(&input_handles).map_err(|e| {
-            VoomError::Database(format!("artifact_access_plans input_handles: {e}"))
-        })?,
-        output_handles: serde_json::from_str(&output_handles).map_err(|e| {
-            VoomError::Database(format!("artifact_access_plans output_handles: {e}"))
-        })?,
+        input_handles: serde_json::from_str(&input_handles)
+            .map_err(|e| VoomError::database_context("artifact_access_plans input_handles", e))?,
+        output_handles: serde_json::from_str(&output_handles)
+            .map_err(|e| VoomError::database_context("artifact_access_plans output_handles", e))?,
         selected_access_mode: ArtifactAccessMode::parse(&mode)?,
         status: ArtifactAccessPlanStatus::parse(&status)?,
         reason,
         evidence: serde_json::from_str(&evidence)
-            .map_err(|e| VoomError::Database(format!("artifact_access_plans evidence: {e}")))?,
+            .map_err(|e| VoomError::database_context("artifact_access_plans evidence", e))?,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
     })

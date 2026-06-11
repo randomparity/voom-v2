@@ -32,7 +32,7 @@ impl JobState {
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "jobs.state {other:?} not in vocab"
             ))),
         }
@@ -88,7 +88,7 @@ impl SqliteJobRepo {
         .bind(&created)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("jobs insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("jobs insert", e))?;
         Ok(Job {
             id: JobId(u64_from_i64(res.last_insert_rowid())),
             kind: input.kind,
@@ -105,11 +105,11 @@ impl SqliteJobRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -121,7 +121,7 @@ impl SqliteJobRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("jobs get: {e}")))?;
+        .map_err(|e| VoomError::database_context("jobs get", e))?;
         row.as_ref().map(row_to_job).transpose()
     }
 
@@ -135,7 +135,7 @@ impl SqliteJobRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("jobs list: {e}")))?;
+        .map_err(|e| VoomError::database_context("jobs list", e))?;
         rows.iter().map(row_to_job).collect()
     }
 
@@ -153,11 +153,11 @@ impl SqliteJobRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.succeed_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -175,11 +175,11 @@ impl SqliteJobRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.fail_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -197,11 +197,11 @@ impl SqliteJobRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.cancel_in_tx(&mut tx, id, now).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 }
@@ -222,7 +222,7 @@ async fn transition_open_to(
     .bind(i64_from_u64(id.0))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("jobs update: {e}")))?;
+    .map_err(|e| VoomError::database_context("jobs update", e))?;
     if res.rows_affected() == 0 {
         return Err(VoomError::Conflict(format!(
             "jobs transition rejected: id={id} next={next:?} \
@@ -239,7 +239,7 @@ async fn transition_open_to(
     .bind(i64_from_u64(id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("jobs reload: {e}")))?;
+    .map_err(|e| VoomError::database_context("jobs reload", e))?;
     row.as_ref().map(row_to_job).transpose()?.ok_or_else(|| {
         VoomError::Internal(format!("jobs transition: row vanished post-update id={id}"))
     })

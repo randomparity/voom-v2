@@ -639,16 +639,16 @@ impl WorkingDirArtifact {
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, VoomError> {
         let location_id: i64 = row
             .try_get("id")
-            .map_err(|e| VoomError::Database(format!("promotion location id: {e}")))?;
+            .map_err(|e| VoomError::database_context("promotion location id", e))?;
         let asset_id: i64 = row
             .try_get("file_asset_id")
-            .map_err(|e| VoomError::Database(format!("promotion location asset: {e}")))?;
+            .map_err(|e| VoomError::database_context("promotion location asset", e))?;
         let value: String = row
             .try_get("value")
-            .map_err(|e| VoomError::Database(format!("promotion location value: {e}")))?;
+            .map_err(|e| VoomError::database_context("promotion location value", e))?;
         let epoch: i64 = row
             .try_get("epoch")
-            .map_err(|e| VoomError::Database(format!("promotion location epoch: {e}")))?;
+            .map_err(|e| VoomError::database_context("promotion location epoch", e))?;
         Ok(Self {
             location_id: FileLocationId(sqlite_u64(location_id, "promotion location id")?),
             asset_id: FileAssetId(sqlite_u64(asset_id, "promotion location asset id")?),
@@ -733,12 +733,13 @@ fn ensure_unique_active_branch_ids(
 
 fn sqlite_u64(value: i64, field: &str) -> Result<u64, VoomError> {
     u64::try_from(value)
-        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit u64: {e}")))
+        .map_err(|e| VoomError::database_context(format!("{field} {value} does not fit u64"), e))
 }
 
 fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
-    i64::try_from(value)
-        .map_err(|e| VoomError::Database(format!("{field} {value} does not fit SQLite i64: {e}")))
+    i64::try_from(value).map_err(|e| {
+        VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
+    })
 }
 
 /// Create and canonicalize an output directory ahead of a promotion move.
@@ -1282,7 +1283,7 @@ impl ControlPlane {
         .bind(sqlite_i64(job_id.0, "promotion job id")?)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("promotion ticket results: {e}")))?;
+        .map_err(|e| VoomError::database_context("promotion ticket results", e))?;
         rows.into_iter()
             .map(|(id,)| sqlite_u64(id, "promotion ticket result location id"))
             .map(|result| result.map(FileLocationId))
@@ -1342,7 +1343,7 @@ impl ControlPlane {
         .bind(ids_json)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("promotion scoped locations: {e}")))?;
+        .map_err(|e| VoomError::database_context("promotion scoped locations", e))?;
         let mut artifacts = Vec::with_capacity(rows.len());
         for row in rows {
             artifacts.push(WorkingDirArtifact::from_row(&row)?);
@@ -1767,15 +1768,15 @@ impl ControlPlane {
         .bind(workflow_node_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("phase ticket ids: {e}")))?;
+        .map_err(|e| VoomError::database_context("phase ticket ids", e))?;
         rows.into_iter()
             .map(|row| {
                 let id: i64 = row
                     .try_get("id")
-                    .map_err(|e| VoomError::Database(format!("phase ticket id: {e}")))?;
+                    .map_err(|e| VoomError::database_context("phase ticket id", e))?;
                 u64::try_from(id)
                     .map(TicketId)
-                    .map_err(|e| VoomError::Database(format!("phase ticket id negative: {e}")))
+                    .map_err(|e| VoomError::database_context("phase ticket id negative", e))
             })
             .collect()
     }

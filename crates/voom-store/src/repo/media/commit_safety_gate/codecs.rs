@@ -189,8 +189,7 @@ pub(super) fn encode_force_path_token(token: &ForcePathToken) -> Result<String, 
 /// `prepare_destructive_commit` and never mutated; a parse failure is
 /// `VoomError::Database` because that's the on-disk corruption case.
 pub(super) fn decode_force_path_token(json: &str) -> Result<ForcePathToken, VoomError> {
-    serde_json::from_str(json)
-        .map_err(|e| VoomError::Database(format!("decode override_token: {e}")))
+    serde_json::from_str(json).map_err(|e| VoomError::database_context("decode override_token", e))
 }
 
 // ----- inverse wire-format decoders -----------------------------------------
@@ -203,13 +202,13 @@ pub(super) fn decode_force_path_token(json: &str) -> Result<ForcePathToken, Voom
 
 pub(super) fn decode_target(json: &str) -> Result<CommitTarget, VoomError> {
     let wire: CommitTargetWire = serde_json::from_str(json)
-        .map_err(|e| VoomError::Database(format!("decode commit_target: {e}")))?;
+        .map_err(|e| VoomError::database_context("decode commit_target", e))?;
     commit_target_from_wire(wire)
 }
 
 pub(super) fn decode_closure(json: &str) -> Result<AffectedScopeClosure, VoomError> {
-    let wire: AffectedScopeClosureWire = serde_json::from_str(json)
-        .map_err(|e| VoomError::Database(format!("decode closure: {e}")))?;
+    let wire: AffectedScopeClosureWire =
+        serde_json::from_str(json).map_err(|e| VoomError::database_context("decode closure", e))?;
     Ok(closure_from_wire(wire))
 }
 
@@ -253,21 +252,19 @@ fn decode_proof(
         return Ok(None);
     };
     let parsed: JsonValue = serde_json::from_str(value)
-        .map_err(|e| VoomError::Database(format!("decode proof_value: {e}")))?;
+        .map_err(|e| VoomError::database_context("decode proof_value", e))?;
     match kind {
         "file_id_generation" => {
             let file_id = parsed
                 .get("file_id")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| VoomError::Database("decode proof: missing file_id".to_owned()))?
+                .ok_or_else(|| VoomError::database("decode proof: missing file_id"))?
                 .parse::<u128>()
-                .map_err(|e| VoomError::Database(format!("decode proof: file_id u128: {e}")))?;
+                .map_err(|e| VoomError::database_context("decode proof: file_id u128", e))?;
             let generation = parsed
                 .get("generation")
                 .and_then(JsonValue::as_u64)
-                .ok_or_else(|| {
-                    VoomError::Database("decode proof: missing generation".to_owned())
-                })?;
+                .ok_or_else(|| VoomError::database("decode proof: missing generation"))?;
             Ok(Some(LocationProof::LocalFileIdGeneration {
                 file_id,
                 generation,
@@ -277,17 +274,17 @@ fn decode_proof(
             let bucket = parsed
                 .get("bucket")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| VoomError::Database("decode proof: missing bucket".to_owned()))?
+                .ok_or_else(|| VoomError::database("decode proof: missing bucket"))?
                 .to_owned();
             let key = parsed
                 .get("key")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| VoomError::Database("decode proof: missing key".to_owned()))?
+                .ok_or_else(|| VoomError::database("decode proof: missing key"))?
                 .to_owned();
             let version_id = parsed
                 .get("version_id")
                 .and_then(JsonValue::as_str)
-                .ok_or_else(|| VoomError::Database("decode proof: missing version_id".to_owned()))?
+                .ok_or_else(|| VoomError::database("decode proof: missing version_id"))?
                 .to_owned();
             Ok(Some(LocationProof::ObjectStoreVersion {
                 bucket,
@@ -295,7 +292,7 @@ fn decode_proof(
                 version_id,
             }))
         }
-        other => Err(VoomError::Database(format!(
+        other => Err(VoomError::database(format!(
             "decode proof: unknown kind {other:?}"
         ))),
     }

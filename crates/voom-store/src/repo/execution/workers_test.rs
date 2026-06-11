@@ -43,7 +43,7 @@ async fn register_with_duplicate_name_fails() {
     let repo = SqliteWorkerRepo::new(pool.clone());
     let _w = repo.register(sample_new_worker("w-1")).await.unwrap();
     let err = repo.register(sample_new_worker("w-1")).await.unwrap_err();
-    assert!(matches!(err, VoomError::Database(_)));
+    assert!(matches!(err, VoomError::Database { .. }));
 }
 
 #[tokio::test]
@@ -222,7 +222,7 @@ async fn worker_inspection_rejects_missing_node_context_for_linked_worker() {
 
     let err = repo.get_inspection(missing_node_worker).await.unwrap_err();
     assert!(
-        matches!(err, VoomError::Database(message) if message.contains("missing node context"))
+        matches!(err, VoomError::Database { message, .. } if message.contains("missing node context"))
     );
 }
 

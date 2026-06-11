@@ -1606,5 +1606,5 @@ async fn record_lineage_rejects_self_edge() {
         .await
         .unwrap_err();
     // CHECK constraint rejects self-references; surfaces as Database.
-    assert!(matches!(err, voom_core::VoomError::Database(_)));
+    assert!(matches!(err, voom_core::VoomError::Database { .. }));
 }

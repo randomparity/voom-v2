@@ -169,11 +169,11 @@ async fn phase_a_gate_abort_with_event(
     .bind(abort.abort_reason_str())
     .execute(&mut *tx1)
     .await
-    .map_err(|e| VoomError::Database(format!("commit_intents abort insert: {e}")))?;
+    .map_err(|e| VoomError::database_context("commit_intents abort insert", e))?;
     let commit_id = CommitId(u64_from_i64(insert.last_insert_rowid()));
     tx1.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("phase A abort tx1 commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("phase A abort tx1 commit", e))?;
 
     // two-tx: tx 2 emits the matching event.
     let payload = phase_a_abort_event(commit_id, aborted_at, &abort);
@@ -192,7 +192,7 @@ async fn phase_a_gate_abort_with_event(
         .await?;
     tx2.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("phase A abort tx2 commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("phase A abort tx2 commit", e))?;
 
     // Reference fields once so `PhaseAAbort` does not need additional
     // accessors. The abort_reason call also pins the
@@ -354,7 +354,7 @@ pub async fn prepare_destructive_commit(
         Ok(Err(abort_outcome)) => {
             tx.rollback()
                 .await
-                .map_err(|e| VoomError::Database(format!("prepare: rollback: {e}")))?;
+                .map_err(|e| VoomError::database_context("prepare: rollback", e))?;
             let closure_initial_json = encode_closure(&abort_outcome.closure_initial)?;
             let row = CommitIntentRowBody {
                 target_json: &target_json,
@@ -404,7 +404,7 @@ pub async fn prepare_destructive_commit(
     }
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("prepare: commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("prepare: commit", e))?;
 
     Ok(PrepareOutcome::Pending(CommitIntent {
         commit_id,
@@ -585,7 +585,7 @@ async fn insert_pending_intent(
     .bind(&started_iso)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("commit_intents pending insert: {e}")))?;
+    .map_err(|e| VoomError::database_context("commit_intents pending insert", e))?;
     Ok(CommitId(u64_from_i64(res.last_insert_rowid())))
 }
 

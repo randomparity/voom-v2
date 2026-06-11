@@ -89,7 +89,7 @@ impl EventRepo for SqliteEventRepo {
         .bind(payload_json)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("events append: {e}")))?;
+        .map_err(|e| VoomError::database_context("events append", e))?;
         Ok(EventId(u64_from_i64(res.last_insert_rowid())))
     }
 
@@ -109,7 +109,7 @@ impl EventRepo for SqliteEventRepo {
         .bind(i64_from_u64(event_id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("events get: {e}")))?;
+        .map_err(|e| VoomError::database_context("events get", e))?;
         // An unknown-kind row yields Ok(None): the caller cannot represent it,
         // which surfaces the same as "not found" rather than erroring.
         match row {
@@ -168,7 +168,7 @@ async fn page_query(
     let rows = q
         .fetch_all(pool)
         .await
-        .map_err(|e| VoomError::Database(format!("events list: {e}")))?;
+        .map_err(|e| VoomError::database_context("events list", e))?;
 
     // Rows with an unknown `kind` (written by a newer binary) are skipped so a
     // single unrecognized row does not poison the whole read. The cursor must
@@ -197,7 +197,7 @@ async fn page_query(
 fn event_row_id(row: &sqlx::sqlite::SqliteRow) -> Result<u64, VoomError> {
     let id: i64 = row
         .try_get("event_id")
-        .map_err(|e| VoomError::Database(format!("read event_id: {e}")))?;
+        .map_err(|e| VoomError::database_context("read event_id", e))?;
     Ok(u64_from_i64(id))
 }
 
@@ -211,22 +211,22 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Option<EventRow>, VoomE
     let id = event_row_id(row)?;
     let occurred: String = row
         .try_get("occurred_at")
-        .map_err(|e| VoomError::Database(format!("read occurred_at: {e}")))?;
+        .map_err(|e| VoomError::database_context("read occurred_at", e))?;
     let kind_str: String = row
         .try_get("kind")
-        .map_err(|e| VoomError::Database(format!("read kind: {e}")))?;
+        .map_err(|e| VoomError::database_context("read kind", e))?;
     let subject_type_str: String = row
         .try_get("subject_type")
-        .map_err(|e| VoomError::Database(format!("read subject_type: {e}")))?;
+        .map_err(|e| VoomError::database_context("read subject_type", e))?;
     let subject_id_i64: Option<i64> = row
         .try_get("subject_id")
-        .map_err(|e| VoomError::Database(format!("read subject_id: {e}")))?;
+        .map_err(|e| VoomError::database_context("read subject_id", e))?;
     let trace_id: Option<String> = row
         .try_get("trace_id")
-        .map_err(|e| VoomError::Database(format!("read trace_id: {e}")))?;
+        .map_err(|e| VoomError::database_context("read trace_id", e))?;
     let payload: String = row
         .try_get("payload")
-        .map_err(|e| VoomError::Database(format!("read payload: {e}")))?;
+        .map_err(|e| VoomError::database_context("read payload", e))?;
 
     let occurred_at = parse_iso8601(&occurred)?;
     // Decode via the explicit string → enum parsers. Using serde derives
@@ -244,7 +244,7 @@ fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Option<EventRow>, VoomE
     };
     let subject_type = SubjectType::from_str(&subject_type_str)?;
     let payload_value: JsonValue = serde_json::from_str(&payload)
-        .map_err(|e| VoomError::Database(format!("parse payload JSON: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse payload JSON", e))?;
     let event = reassemble_event(kind, &payload_value)?;
     Ok(Some(EventRow {
         id: EventId(id),
@@ -278,7 +278,7 @@ fn reassemble_event(kind: EventKind, payload: &JsonValue) -> Result<Event, VoomE
     // value is what `Event` deserializes against.
     let tagged = serde_json::json!({ "kind": kind.as_str(), "payload": payload });
     serde_json::from_value::<Event>(tagged)
-        .map_err(|e| VoomError::Database(format!("rebuild Event for {kind:?}: {e}")))
+        .map_err(|e| VoomError::database_context(format!("rebuild Event for {kind:?}"), e))
 }
 
 #[cfg(test)]

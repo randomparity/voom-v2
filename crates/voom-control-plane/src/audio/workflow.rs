@@ -166,7 +166,7 @@ async fn source_bundle_id_for_file_version(
     .bind(i64::try_from(source_file_version_id.0).unwrap_or(i64::MAX))
     .fetch_optional(&context.control.pool)
     .await
-    .map_err(|e| VoomError::Database(format!("audio source bundle lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("audio source bundle lookup", e))?;
     let row = row.ok_or_else(|| {
         VoomError::Config(format!(
             "file_version {source_file_version_id} is not a bundle member"
@@ -174,7 +174,7 @@ async fn source_bundle_id_for_file_version(
     })?;
     let bundle_id: i64 = row
         .try_get("bundle_id")
-        .map_err(|e| VoomError::Database(format!("audio source bundle id: {e}")))?;
+        .map_err(|e| VoomError::database_context("audio source bundle id", e))?;
     Ok(BundleId(u64::try_from(bundle_id).unwrap_or(0)))
 }
 

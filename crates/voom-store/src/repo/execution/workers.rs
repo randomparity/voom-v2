@@ -121,7 +121,7 @@ impl SqliteWorkerRepo {
         .bind(input.node_id.map(|id| i64_from_u64(id.0)))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workers insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers insert", e))?;
         Ok(Worker {
             id: WorkerId(u64_from_i64(res.last_insert_rowid())),
             node_id: input.node_id,
@@ -140,11 +140,11 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.register_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -170,7 +170,7 @@ impl SqliteWorkerRepo {
         .bind(extra)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("worker_capabilities insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("worker_capabilities insert", e))?;
         Ok(Capability {
             id: u64_from_i64(res.last_insert_rowid()),
             worker_id: input.worker_id,
@@ -183,11 +183,11 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.record_capability_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -214,7 +214,7 @@ impl SqliteWorkerRepo {
         .bind(mp)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("worker_grants insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("worker_grants insert", e))?;
         Ok(Grant {
             id: u64_from_i64(res.last_insert_rowid()),
             worker_id: input.worker_id,
@@ -226,11 +226,11 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.record_grant_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -268,7 +268,7 @@ impl SqliteWorkerRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workers update: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers update", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "workers retire rejected: id={id} expected_epoch={expected_epoch} \
@@ -293,11 +293,11 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.retire_in_tx(&mut tx, id, expected_epoch, now).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -309,7 +309,7 @@ impl SqliteWorkerRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workers get: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers get", e))?;
         row.as_ref().map(row_to_worker).transpose()
     }
 
@@ -326,11 +326,11 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.get_by_name_in_tx(&mut tx, name).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -350,7 +350,7 @@ impl SqliteWorkerRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workers inspection get: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers inspection get", e))?;
         row.as_ref().map(row_to_inspection).transpose()
     }
 
@@ -368,7 +368,7 @@ impl SqliteWorkerRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workers list: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers list", e))?;
         rows.iter().map(row_to_worker).collect()
     }
 
@@ -393,7 +393,7 @@ impl SqliteWorkerRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workers inspection list: {e}")))?;
+        .map_err(|e| VoomError::database_context("workers inspection list", e))?;
         rows.iter().map(row_to_inspection).collect()
     }
 
@@ -411,7 +411,7 @@ impl SqliteWorkerRepo {
         .bind(operation.as_str())
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("worker_capabilities eligibility: {e}")))?;
+        .map_err(|e| VoomError::database_context("worker_capabilities eligibility", e))?;
 
         let mut artifact_access = Vec::new();
         for row in &capability_rows {
@@ -427,7 +427,7 @@ impl SqliteWorkerRepo {
         .bind(i64_from_u64(worker_id.0))
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("worker_grants eligibility: {e}")))?;
+        .map_err(|e| VoomError::database_context("worker_grants eligibility", e))?;
 
         let mut has_grant = false;
         let mut is_denied = false;
@@ -463,13 +463,13 @@ impl SqliteWorkerRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .operation_eligibility_in_tx(&mut tx, worker_id, operation)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -507,7 +507,7 @@ async fn get_in_tx(
     .bind(i64_from_u64(id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("workers reload: {e}")))?;
+    .map_err(|e| VoomError::database_context("workers reload", e))?;
     row.as_ref().map(row_to_worker).transpose()
 }
 
@@ -522,7 +522,7 @@ async fn get_by_name_in_tx(
     .bind(name)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("workers get by name: {e}")))?;
+    .map_err(|e| VoomError::database_context("workers get by name", e))?;
     row.as_ref().map(row_to_worker).transpose()
 }
 
@@ -571,7 +571,7 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
         .try_get("node_context_id")
         .map_err(|e| map_row_err("workers inspection", &e))?;
     if let (Some(worker_node_id), None) = (worker.node_id, node_id) {
-        return Err(VoomError::Database(format!(
+        return Err(VoomError::database(format!(
             "workers inspection missing node context: worker_id={} node_id={}",
             worker.id, worker_node_id
         )));
@@ -604,7 +604,7 @@ fn row_to_inspection(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerInspection, 
 
 fn parse_string_array_json(input: &str, field: &'static str) -> Result<Vec<String>, VoomError> {
     serde_json::from_str(input)
-        .map_err(|e| VoomError::Database(format!("parse worker {field}: {e}")))
+        .map_err(|e| VoomError::database_context(format!("parse worker {field}"), e))
 }
 
 fn parse_operation_array_json(

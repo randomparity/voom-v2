@@ -88,7 +88,7 @@ impl ArtifactVerificationStatus {
         match s {
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "artifact_verifications.status {other:?} not in vocab"
             ))),
         }
@@ -159,7 +159,7 @@ impl ArtifactCommitState {
             "committed" => Ok(Self::Committed),
             "failed" => Ok(Self::Failed),
             "recovery_required" => Ok(Self::RecoveryRequired),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "artifact_commit_records.state {other:?} not in vocab"
             ))),
         }
@@ -372,7 +372,7 @@ impl SqliteArtifactRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_handles insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_handles insert", e))?;
         Ok(ArtifactHandle {
             id: ArtifactHandleId(u64_from_i64(res.last_insert_rowid())),
             file_version_id: input.file_version_id,
@@ -391,11 +391,11 @@ impl SqliteArtifactRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_handle_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -415,7 +415,7 @@ impl SqliteArtifactRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_locations insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_locations insert", e))?;
         Ok(ArtifactLocation {
             id: ArtifactLocationId(u64_from_i64(res.last_insert_rowid())),
             artifact_handle_id: input.artifact_handle_id,
@@ -434,11 +434,11 @@ impl SqliteArtifactRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.record_location_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -457,7 +457,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(location_id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_locations retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_locations retire", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "retire rejected for location {location_id}: not live"
@@ -471,9 +471,7 @@ impl SqliteArtifactRepo {
                 .bind(i64_from_u64(location_id.0))
                 .fetch_one(&mut **tx)
                 .await
-                .map_err(|e| {
-                    VoomError::Database(format!("artifact_locations handle lookup: {e}"))
-                })?;
+                .map_err(|e| VoomError::database_context("artifact_locations handle lookup", e))?;
         Ok(ArtifactHandleId(u64_from_i64(handle_id)))
     }
 
@@ -486,13 +484,13 @@ impl SqliteArtifactRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .retire_location_in_tx(&mut tx, location_id, now)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -513,7 +511,7 @@ impl SqliteArtifactRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_lineage insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_lineage insert", e))?;
         Ok(ArtifactLineage {
             id: u64_from_i64(res.last_insert_rowid()),
         })
@@ -527,11 +525,11 @@ impl SqliteArtifactRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.record_lineage_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -546,7 +544,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_handles get: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_handles get", e))?;
         row.as_ref().map(row_to_handle).transpose()
     }
 
@@ -562,7 +560,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(handle_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_locations list: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_locations list", e))?;
         rows.iter().map(row_to_location).collect()
     }
 
@@ -576,9 +574,7 @@ impl SqliteArtifactRepo {
                 .bind(i64_from_u64(input.artifact_location_id.0))
                 .fetch_optional(&mut **tx)
                 .await
-                .map_err(|e| {
-                    VoomError::Database(format!("artifact_locations owner lookup: {e}"))
-                })?;
+                .map_err(|e| VoomError::database_context("artifact_locations owner lookup", e))?;
         let (owner_id, location_value) = owner.ok_or_else(|| {
             VoomError::NotFound(format!(
                 "artifact_locations {} missing",
@@ -626,7 +622,7 @@ impl SqliteArtifactRepo {
         .bind(&finished_at)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_verifications insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_verifications insert", e))?;
 
         Ok(ArtifactVerification {
             id: ArtifactVerificationId(u64_from_i64(res.last_insert_rowid())),
@@ -665,7 +661,7 @@ impl SqliteArtifactRepo {
             .bind(i64_from_u64(handle_id.0))
             .fetch_optional(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("artifact_verifications latest: {e}")))?;
+            .map_err(|e| VoomError::database_context("artifact_verifications latest", e))?;
         row.as_ref().map(row_to_verification).transpose()
     }
 
@@ -681,7 +677,7 @@ impl SqliteArtifactRepo {
             .bind(i64_from_u64(handle_id.0))
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("artifact_verifications list: {e}")))?;
+            .map_err(|e| VoomError::database_context("artifact_verifications list", e))?;
         rows.iter().map(row_to_verification).collect()
     }
 
@@ -760,7 +756,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_commit_records commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records commit", e))?;
         changed_commit_record(tx, id, res.rows_affected(), "commit").await
     }
 
@@ -783,7 +779,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_commit_records fail: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records fail", e))?;
         changed_commit_record(tx, id, res.rows_affected(), "fail").await
     }
 
@@ -809,9 +805,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| {
-            VoomError::Database(format!("artifact_commit_records recovery_required: {e}"))
-        })?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records recovery_required", e))?;
         changed_commit_record(tx, id, res.rows_affected(), "recovery_required").await
     }
 
@@ -825,7 +819,7 @@ impl SqliteArtifactRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("artifact_commit_records get: {e}")))?;
+            .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
         row.as_ref().map(row_to_commit_record).transpose()
     }
 
@@ -841,7 +835,7 @@ impl SqliteArtifactRepo {
             .bind(i64_from_u64(handle_id.0))
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("artifact_commit_records list: {e}")))?;
+            .map_err(|e| VoomError::database_context("artifact_commit_records list", e))?;
         rows.iter().map(row_to_commit_record).collect()
     }
 
@@ -889,7 +883,7 @@ impl SqliteArtifactRepo {
             .bind(&created_at)
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("file_assets sidecar insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_assets sidecar insert", e))?;
         let file_asset_id = FileAssetId(u64_from_i64(asset_res.last_insert_rowid()));
 
         let version_res = sqlx::query(
@@ -905,7 +899,7 @@ impl SqliteArtifactRepo {
         .bind(&created_at)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions sidecar insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions sidecar insert", e))?;
         let file_version_id = FileVersionId(u64_from_i64(version_res.last_insert_rowid()));
 
         let location_res = sqlx::query(
@@ -918,7 +912,7 @@ impl SqliteArtifactRepo {
         .bind(&created_at)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations sidecar insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations sidecar insert", e))?;
         let file_location_id = FileLocationId(u64_from_i64(location_res.last_insert_rowid()));
 
         let res = sqlx::query(
@@ -933,7 +927,7 @@ impl SqliteArtifactRepo {
         .bind(i64_from_u64(input.commit_record_id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_commit_records sidecar commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records sidecar commit", e))?;
         let commit_record = changed_commit_record(
             tx,
             input.commit_record_id,
@@ -1179,7 +1173,7 @@ async fn validate_commit_verification(
     .bind(i64_from_u64(input.verification_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("artifact_verifications commit lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("artifact_verifications commit lookup", e))?;
     let Some((
         verification_id,
         verification_handle_id,
@@ -1244,7 +1238,7 @@ async fn validate_committed_result(
     .bind(i64_from_u64(commit_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("artifact_commit_records pending lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("artifact_commit_records pending lookup", e))?;
     let (source_version_id, target_path) = pending_row.ok_or_else(|| {
         VoomError::Conflict(format!(
             "artifact_commit_records commit: id={commit_id} not pending or recovery_required"
@@ -1257,7 +1251,7 @@ async fn validate_committed_result(
     .bind(i64_from_u64(result_file_version_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("file_versions commit-result lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("file_versions commit-result lookup", e))?;
     let Some((produced_by, produced_from_version_id, result_retired_at)) = version_row else {
         return Err(VoomError::NotFound(format!(
             "file_versions {result_file_version_id} missing"
@@ -1280,7 +1274,7 @@ async fn validate_committed_result(
     .bind(i64_from_u64(result_file_location_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("file_locations commit-result lookup: {e}")))?;
+    .map_err(|e| VoomError::database_context("file_locations commit-result lookup", e))?;
     let (location_version_id, location_kind, location_value, retired_at) = location_row
         .ok_or_else(|| {
             VoomError::NotFound(format!("file_locations {result_file_location_id} missing"))
@@ -1308,7 +1302,7 @@ async fn get_pending_commit_record_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_commit_records pending get: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records pending get", e))?;
     row.as_ref()
         .map(row_to_commit_record)
         .transpose()?
@@ -1330,7 +1324,7 @@ fn map_commit_insert_err(
              {target_path:?} already has an active owner"
         ))
     } else {
-        VoomError::Database(format!("artifact_commit_records insert: {err}"))
+        VoomError::database(format!("artifact_commit_records insert: {err}"))
     }
 }
 
@@ -1435,7 +1429,7 @@ fn row_to_verification(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactVerifica
         error_code,
         message,
         report: serde_json::from_str(&report)
-            .map_err(|e| VoomError::Database(format!("artifact_verifications report: {e}")))?,
+            .map_err(|e| VoomError::database_context("artifact_verifications report", e))?,
         started_at: parse_iso8601(&started_at)?,
         finished_at: parse_iso8601(&finished_at)?,
     })
@@ -1469,7 +1463,7 @@ async fn get_commit_record_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_commit_records get: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_commit_records get", e))?;
     row.as_ref().map(row_to_commit_record).transpose()
 }
 
@@ -1541,7 +1535,7 @@ fn row_to_commit_record(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactCommitR
         recovery_reason,
         temp_path,
         report: serde_json::from_str(&report)
-            .map_err(|e| VoomError::Database(format!("artifact_commit_records report: {e}")))?,
+            .map_err(|e| VoomError::database_context("artifact_commit_records report", e))?,
         started_at: parse_iso8601(&started_at)?,
         promotion_started_at: promotion_started_at
             .map(|s| parse_iso8601(&s))

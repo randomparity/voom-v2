@@ -245,7 +245,7 @@ async fn emit_schema_initialized_if_missing(
     .bind(EventKind::SchemaInitialized.as_str())
     .execute(pool)
     .await
-    .map_err(|e| VoomError::Database(format!("schema.initialized append: {e}")))?;
+    .map_err(|e| VoomError::database_context("schema.initialized append", e))?;
     Ok(())
 }
 

@@ -671,7 +671,7 @@ pub(crate) async fn consult_pending_commit_lock_in_tx(
         .bind(bind_id)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("consult_pending_commit_lock: {e}")))?;
+        .map_err(|e| VoomError::database_context("consult_pending_commit_lock", e))?;
     Ok(row.map(|raw| (CommitId(u64_from_i64(raw)), *scope)))
 }
 
@@ -701,7 +701,7 @@ pub(crate) async fn begin_gate_tx(
 ) -> Result<Transaction<'static, Sqlite>, VoomError> {
     pool.begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|e| VoomError::Database(format!("gate tx begin IMMEDIATE: {e}")))
+        .map_err(|e| VoomError::database_context("gate tx begin IMMEDIATE", e))
 }
 
 mod abort_list;

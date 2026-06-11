@@ -224,7 +224,7 @@ async fn committed_requires_produced_lineage() {
 
     let err = repo.upsert_file_phase_summary(input, T0).await.unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "expected a Database CHECK violation, got {err:?}"
     );
 }
@@ -240,7 +240,7 @@ async fn committed_requires_reprobe_snapshot() {
 
     let err = repo.upsert_file_phase_summary(input, T0).await.unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "expected a Database CHECK violation, got {err:?}"
     );
 }
@@ -256,7 +256,7 @@ async fn produced_ids_must_reference_real_rows() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "expected a foreign-key violation, got {err:?}"
     );
 
@@ -267,7 +267,7 @@ async fn produced_ids_must_reference_real_rows() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "expected a foreign-key violation, got {err:?}"
     );
 }

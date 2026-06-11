@@ -338,7 +338,7 @@ fn from_str_rejects_unknown_kind() {
     // snake_case form must NOT decode — the on-disk wire format is dotted.
     let err = EventKind::from_str("schema_initialized").unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "got: {err:?}"
     );
     EventKind::from_str("schema.initialized").unwrap();

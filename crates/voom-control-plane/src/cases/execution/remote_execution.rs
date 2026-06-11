@@ -1367,7 +1367,7 @@ async fn worker_candidate_operations_in_tx(
     })?)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("worker candidate operations: {e}")))?;
+    .map_err(|e| VoomError::database_context("worker candidate operations", e))?;
     operations
         .into_iter()
         .map(|operation| {
@@ -1614,7 +1614,7 @@ async fn active_lease_count_for_node_in_tx(
     .bind(sqlite_id(node_id.0, "node id")?)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("node active lease count: {e}")))?;
+    .map_err(|e| VoomError::database_context("node active lease count", e))?;
     count_to_u32(count, "node active lease count")
 }
 
@@ -1633,7 +1633,7 @@ async fn active_lease_count_for_worker_operation_in_tx(
     .bind(operation.as_str())
     .fetch_one(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("worker operation active lease count: {e}")))?;
+    .map_err(|e| VoomError::database_context("worker operation active lease count", e))?;
     count_to_u32(count, "worker operation active lease count")
 }
 
@@ -1647,16 +1647,16 @@ async fn max_parallel_for_worker_operation_in_tx(
             .bind(sqlite_id(worker_id.0, "worker id")?)
             .fetch_all(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("worker max_parallel read: {e}")))?;
+            .map_err(|e| VoomError::database_context("worker max_parallel read", e))?;
 
     let mut operation_limit = None;
     let mut wildcard_limit = None;
     for row in rows {
         let raw: String = row
             .try_get("max_parallel")
-            .map_err(|e| VoomError::Database(format!("worker max_parallel row: {e}")))?;
+            .map_err(|e| VoomError::database_context("worker max_parallel row", e))?;
         let value: JsonValue = serde_json::from_str(&raw)
-            .map_err(|e| VoomError::Database(format!("parse worker max_parallel: {e}")))?;
+            .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
         operation_limit = max_optional_limit(
             operation_limit,
             json_positive_u32(value.get(operation.as_str()), "max_parallel operation")?,
@@ -1703,7 +1703,7 @@ fn sqlite_id(id: u64, label: &'static str) -> Result<i64, VoomError> {
 }
 
 fn count_to_u32(count: i64, label: &'static str) -> Result<u32, VoomError> {
-    u32::try_from(count).map_err(|_| VoomError::Database(format!("{label} does not fit u32")))
+    u32::try_from(count).map_err(|_| VoomError::database(format!("{label} does not fit u32")))
 }
 
 fn artifact_access_mode_from_scheduler(mode: &str) -> Result<ArtifactAccessMode, VoomError> {

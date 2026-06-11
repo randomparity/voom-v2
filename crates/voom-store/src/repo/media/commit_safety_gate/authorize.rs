@@ -106,7 +106,7 @@ pub async fn authorize_destructive_commit(
         Err(result) => {
             tx.commit()
                 .await
-                .map_err(|e| VoomError::Database(format!("authorize: commit abort: {e}")))?;
+                .map_err(|e| VoomError::database_context("authorize: commit abort", e))?;
             return Ok(AuthorizeOutcome::Blocked { commit_id, result });
         }
     };
@@ -123,7 +123,7 @@ pub async fn authorize_destructive_commit(
     .await?;
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("authorize: commit success: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: commit success", e))?;
     Ok(AuthorizeOutcome::Authorized(permit))
 }
 
@@ -328,7 +328,7 @@ pub(super) async fn read_pending_intent_in_tx(
     .bind(i64_from_u64(commit_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("authorize: read intent: {e}")))?;
+    .map_err(|e| VoomError::database_context("authorize: read intent", e))?;
     let row = row.ok_or_else(|| {
         VoomError::Conflict(format!(
             "authorize: commit_intents row {commit_id} not found"
@@ -336,7 +336,7 @@ pub(super) async fn read_pending_intent_in_tx(
     })?;
     let state: String = row
         .try_get("state")
-        .map_err(|e| VoomError::Database(format!("authorize: read state: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read state", e))?;
     if state != "pending" {
         return Err(VoomError::Conflict(format!(
             "authorize: commit_intents row {commit_id} is in state {state:?}, expected 'pending'"
@@ -344,25 +344,23 @@ pub(super) async fn read_pending_intent_in_tx(
     }
     let target_json: String = row
         .try_get("target")
-        .map_err(|e| VoomError::Database(format!("authorize: read target: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read target", e))?;
     let closure_initial_json: String = row
         .try_get("closure_initial")
-        .map_err(|e| VoomError::Database(format!("authorize: read closure_initial: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read closure_initial", e))?;
     let accepted_evidence_ids_json: String = row
         .try_get("accepted_evidence_ids")
-        .map_err(|e| VoomError::Database(format!("authorize: read accepted_evidence_ids: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read accepted_evidence_ids", e))?;
     let override_token_json: Option<String> = row
         .try_get("override_token")
-        .map_err(|e| VoomError::Database(format!("authorize: read override_token: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read override_token", e))?;
     let epoch_raw: i64 = row
         .try_get("epoch")
-        .map_err(|e| VoomError::Database(format!("authorize: read epoch: {e}")))?;
+        .map_err(|e| VoomError::database_context("authorize: read epoch", e))?;
     let target = decode_target(&target_json)?;
     let closure_initial = decode_closure(&closure_initial_json)?;
     let accepted_evidence_ids: Vec<EvidenceId> = serde_json::from_str(&accepted_evidence_ids_json)
-        .map_err(|e| {
-            VoomError::Database(format!("authorize: decode accepted_evidence_ids: {e}"))
-        })?;
+        .map_err(|e| VoomError::database_context("authorize: decode accepted_evidence_ids", e))?;
     let override_token = match override_token_json {
         None => None,
         Some(json) => Some(decode_force_path_token(&json)?),
@@ -459,7 +457,7 @@ async fn abort_pending_intent_in_tx(
     .bind(i64_from_u64(row.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("authorize: abort UPDATE: {e}")))?;
+    .map_err(|e| VoomError::database_context("authorize: abort UPDATE", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "authorize: abort UPDATE on {commit_id} affected {} rows; concurrent state mutation",
@@ -635,14 +633,14 @@ async fn snapshot_one_granularity_in_tx(
         .bind(&ids_json)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("snapshot {table}: {e}")))?;
+        .map_err(|e| VoomError::database_context(format!("snapshot {table}"), e))?;
     for row in &rows {
         let id: i64 = row
             .try_get("id")
-            .map_err(|e| VoomError::Database(format!("snapshot {table} row id: {e}")))?;
+            .map_err(|e| VoomError::database_context(format!("snapshot {table} row id"), e))?;
         let epoch: i64 = row
             .try_get("epoch")
-            .map_err(|e| VoomError::Database(format!("snapshot {table} row epoch: {e}")))?;
+            .map_err(|e| VoomError::database_context(format!("snapshot {table} row epoch"), e))?;
         out.push(TargetRowEpochTriple(
             kind,
             u64_from_i64(id),
@@ -676,7 +674,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(asset.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members asset delete: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members asset delete", e))?;
     }
     for bundle in initial.bundles.difference(&authorized.bundles) {
         sqlx::query(
@@ -687,7 +685,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(bundle.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members bundle delete: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members bundle delete", e))?;
     }
     for version in initial.file_versions.difference(&authorized.file_versions) {
         sqlx::query(
@@ -698,7 +696,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(version.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members version delete: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members version delete", e))?;
     }
     for location in initial
         .file_locations
@@ -712,7 +710,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(location.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members location delete: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members location delete", e))?;
     }
 
     // Added members → INSERT new rows.
@@ -725,7 +723,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(asset.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members asset insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members asset insert", e))?;
     }
     for bundle in authorized.bundles.difference(&initial.bundles) {
         sqlx::query(
@@ -736,7 +734,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(bundle.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members bundle insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members bundle insert", e))?;
     }
     for version in authorized.file_versions.difference(&initial.file_versions) {
         sqlx::query(
@@ -747,7 +745,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(version.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members version insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members version insert", e))?;
     }
     for location in authorized
         .file_locations
@@ -761,7 +759,7 @@ async fn reconcile_scope_members(
         .bind(i64_from_u64(location.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scope_members location insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scope_members location insert", e))?;
     }
     Ok(())
 }
@@ -798,7 +796,7 @@ async fn transition_pending_to_authorized_in_tx(
     .bind(i64_from_u64(expected_epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("authorize: UPDATE to authorized: {e}")))?;
+    .map_err(|e| VoomError::database_context("authorize: UPDATE to authorized", e))?;
     if res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "authorize: UPDATE to authorized on {commit_id} affected {} rows; \

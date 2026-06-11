@@ -1505,7 +1505,7 @@ async fn replace_file_location_savepoint_rolls_back_on_insert_failure() {
     // SAVEPOINT, the retire is undone before the outer commit lands.
     tx.commit().await.unwrap();
 
-    assert!(matches!(err, VoomError::Database(_)), "got: {err:?}");
+    assert!(matches!(err, VoomError::Database { .. }), "got: {err:?}");
 
     let still = repo.get_file_location(loc.id).await.unwrap().unwrap();
     assert!(

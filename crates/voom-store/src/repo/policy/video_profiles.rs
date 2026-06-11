@@ -67,7 +67,7 @@ impl SqliteVideoProfileRepo {
         let rows = sqlx::query(&sql)
             .fetch_all(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("video_profiles list: {e}")))?;
+            .map_err(|e| VoomError::database_context("video_profiles list", e))?;
         rows.iter().map(row_to_video_profile).collect()
     }
 
@@ -77,14 +77,14 @@ impl SqliteVideoProfileRepo {
             .bind(name)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("video_profiles get_by_name: {e}")))?;
+            .map_err(|e| VoomError::database_context("video_profiles get_by_name", e))?;
         row.as_ref().map(row_to_video_profile).transpose()
     }
 }
 
 fn row_to_video_profile(row: &sqlx::sqlite::SqliteRow) -> Result<VideoProfile, VoomError> {
     let map = |field: &'static str| {
-        move |e: sqlx::Error| VoomError::Database(format!("video_profiles.{field}: {e}"))
+        move |e: sqlx::Error| VoomError::database_context(format!("video_profiles.{field}"), e)
     };
     let crf: i64 = row.try_get("crf").map_err(map("crf"))?;
     let copy_compatible: i64 = row
@@ -93,16 +93,14 @@ fn row_to_video_profile(row: &sqlx::sqlite::SqliteRow) -> Result<VideoProfile, V
     let max_width: Option<i64> = row.try_get("max_width").map_err(map("max_width"))?;
     let max_height: Option<i64> = row.try_get("max_height").map_err(map("max_height"))?;
     let to_u32 = |value: i64| {
-        u32::try_from(value)
-            .map_err(|_| VoomError::Database("video_profiles dimension overflow".to_owned()))
+        u32::try_from(value).map_err(|_| VoomError::database("video_profiles dimension overflow"))
     };
     Ok(VideoProfile {
         id: row.try_get("id").map_err(map("id"))?,
         name: row.try_get("name").map_err(map("name"))?,
         target_codec: row.try_get("target_codec").map_err(map("target_codec"))?,
         encoder: row.try_get("encoder").map_err(map("encoder"))?,
-        crf: u8::try_from(crf)
-            .map_err(|_| VoomError::Database("video_profiles.crf overflow".to_owned()))?,
+        crf: u8::try_from(crf).map_err(|_| VoomError::database("video_profiles.crf overflow"))?,
         preset: row.try_get("preset").map_err(map("preset"))?,
         tune: row.try_get("tune").map_err(map("tune"))?,
         codec_profile: row.try_get("codec_profile").map_err(map("codec_profile"))?,

@@ -35,7 +35,7 @@ fn every_subject_round_trips_through_as_str_and_from_str() {
 fn from_str_rejects_unknown_subject() {
     let err = SubjectType::from_str("not_a_subject").unwrap_err();
     assert!(
-        matches!(err, voom_core::VoomError::Database(_)),
+        matches!(err, voom_core::VoomError::Database { .. }),
         "got: {err:?}"
     );
 }
