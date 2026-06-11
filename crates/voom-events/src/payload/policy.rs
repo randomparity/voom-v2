@@ -4,6 +4,7 @@ use voom_core::{IssueId, PolicyVersionId};
 // --- issues ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IssueLifecyclePayload {
     pub issue_id: IssueId,
     pub kind: String,
