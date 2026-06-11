@@ -79,6 +79,29 @@ async fn duplicate_seq_dropped() {
 }
 
 #[tokio::test]
+async fn many_consecutive_duplicates_dropped_without_recursion() {
+    // Regression for M11: dropped duplicate-seq frames must be consumed
+    // iteratively, not by re-entering `next_frame` once per dropped frame.
+    // A long run of duplicates between two real frames must still surface the
+    // next valid frame, with no per-duplicate call-chain growth.
+    let lease = LeaseId(1);
+    let mut bytes = line_for(&progress(lease, 0));
+    for _ in 0..50_000 {
+        bytes.extend_from_slice(&line_for(&progress(lease, 0))); // duplicate
+    }
+    bytes.extend_from_slice(&line_for(&result_frame(lease, 1)));
+    let mut reader = NdjsonReader::new(bytes.as_slice(), lease);
+
+    let out1 = reader.next_frame().await.unwrap();
+    assert!(matches!(out1, NdjsonOutcome::Frame(_)));
+    let out2 = reader.next_frame().await.unwrap();
+    assert!(matches!(
+        out2,
+        NdjsonOutcome::Terminated(ProgressFrame::Result { seq: 1, .. })
+    ));
+}
+
+#[tokio::test]
 async fn gap_in_seq_rejects() {
     let lease = LeaseId(1);
     let mut bytes = line_for(&progress(lease, 0));
