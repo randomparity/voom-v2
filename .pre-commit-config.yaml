@@ -42,6 +42,20 @@ repos:
         pass_filenames: false
         files: '\.rs$'
 
+      - id: check-payload-deny-unknown
+        name: just check-payload-deny-unknown
+        entry: just check-payload-deny-unknown
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
+      - id: check-payload-deny-unknown-selftest
+        name: just check-payload-deny-unknown-selftest
+        entry: just check-payload-deny-unknown-selftest
+        language: system
+        pass_filenames: false
+        files: '\.rs$'
+
       - id: cargo-clippy
         name: just lint
         entry: just lint

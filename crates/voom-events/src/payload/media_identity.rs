@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 // --- media identity --------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MediaWorkCreatedPayload {
     pub media_work_id: u64,
     pub kind: String,
@@ -12,6 +13,7 @@ pub struct MediaWorkCreatedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MediaVariantCreatedPayload {
     pub media_variant_id: u64,
     pub media_work_id: u64,
@@ -22,6 +24,7 @@ pub struct MediaVariantCreatedPayload {
 // --- asset bundles ---------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetBundleCreatedPayload {
     pub bundle_id: u64,
     pub media_variant_id: u64,
@@ -29,6 +32,7 @@ pub struct AssetBundleCreatedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetBundleMemberAddedPayload {
     pub bundle_id: u64,
     pub file_asset_id: u64,
@@ -36,6 +40,7 @@ pub struct AssetBundleMemberAddedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetBundleMemberRemovedPayload {
     pub bundle_id: u64,
     pub file_asset_id: u64,
@@ -45,11 +50,13 @@ pub struct AssetBundleMemberRemovedPayload {
 // --- file identity ---------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileAssetCreatedPayload {
     pub file_asset_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileVersionCreatedPayload {
     pub file_version_id: u64,
     pub file_asset_id: u64,
@@ -60,6 +67,7 @@ pub struct FileVersionCreatedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileLocationRecordedPayload {
     pub file_location_id: u64,
     pub file_version_id: u64,
@@ -68,6 +76,7 @@ pub struct FileLocationRecordedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileLocationAliasedPayload {
     pub file_location_id: u64,
     pub file_version_id: u64,
@@ -76,6 +85,7 @@ pub struct FileLocationAliasedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileLocationRetiredByMovePayload {
     pub file_location_id: u64,
     pub file_version_id: u64,
@@ -84,6 +94,7 @@ pub struct FileLocationRetiredByMovePayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileLocationRecordedByMovePayload {
     pub retired_file_location_id: u64,
     pub new_file_location_id: u64,
@@ -97,6 +108,7 @@ pub struct FileLocationRecordedByMovePayload {
 // --- identity evidence -----------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityEvidenceRecordedPayload {
     pub evidence_id: u64,
     pub target_type: String,
@@ -110,6 +122,7 @@ pub struct IdentityEvidenceRecordedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityEvidenceAcceptedPayload {
     pub evidence_id: u64,
     pub target_type: String,
@@ -120,6 +133,7 @@ pub struct IdentityEvidenceAcceptedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityEvidenceSupersededPayload {
     pub superseded_evidence_id: u64,
     pub superseded_by_evidence_id: u64,
@@ -132,6 +146,7 @@ pub struct IdentityEvidenceSupersededPayload {
 // --- media snapshots -------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MediaSnapshotRecordedPayload {
     pub media_snapshot_id: u64,
     pub file_version_id: u64,

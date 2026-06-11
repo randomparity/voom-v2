@@ -4,6 +4,7 @@ use voom_core::FailureClass;
 // --- artifacts -------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactHandleCreatedPayload {
     pub artifact_handle_id: u64,
     pub privacy_class: String,
@@ -12,6 +13,7 @@ pub struct ArtifactHandleCreatedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactLocationRecordedPayload {
     pub artifact_location_id: u64,
     pub artifact_handle_id: u64,
@@ -20,12 +22,14 @@ pub struct ArtifactLocationRecordedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactLocationRetiredPayload {
     pub artifact_location_id: u64,
     pub artifact_handle_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactLineageRecordedPayload {
     pub artifact_lineage_id: u64,
     pub parent_artifact_id: u64,
@@ -34,6 +38,7 @@ pub struct ArtifactLineageRecordedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactStagedPayload {
     pub artifact_handle_id: u64,
     pub artifact_location_id: u64,
@@ -45,6 +50,7 @@ pub struct ArtifactStagedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactVerificationStartedPayload {
     pub artifact_handle_id: u64,
     pub artifact_location_id: u64,
@@ -53,6 +59,7 @@ pub struct ArtifactVerificationStartedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactVerificationSucceededPayload {
     pub verification_id: u64,
     pub artifact_handle_id: u64,
@@ -63,6 +70,7 @@ pub struct ArtifactVerificationSucceededPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactVerificationFailedPayload {
     pub verification_id: u64,
     pub artifact_handle_id: u64,
@@ -72,6 +80,7 @@ pub struct ArtifactVerificationFailedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactCommitStartedPayload {
     pub commit_record_id: u64,
     pub artifact_handle_id: u64,
@@ -82,6 +91,7 @@ pub struct ArtifactCommitStartedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactCommitCompletedPayload {
     pub commit_record_id: u64,
     pub artifact_handle_id: u64,
@@ -91,6 +101,7 @@ pub struct ArtifactCommitCompletedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactCommitFailedPreMutationPayload {
     pub artifact_handle_id: u64,
     pub commit_record_id: Option<u64>,
@@ -100,6 +111,7 @@ pub struct ArtifactCommitFailedPreMutationPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactCommitRecoveryRequiredPayload {
     pub commit_record_id: u64,
     pub artifact_handle_id: u64,
@@ -111,6 +123,7 @@ pub struct ArtifactCommitRecoveryRequiredPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactTranscodeStartedPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -131,6 +144,7 @@ pub struct ArtifactTranscodeStartedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactTranscodeProgressPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -152,6 +166,7 @@ pub struct ArtifactTranscodeProgressPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactTranscodeSucceededPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -182,6 +197,7 @@ pub struct ArtifactTranscodeSucceededPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactTranscodeFailedPayload {
     pub job_id: u64,
     pub ticket_id: u64,

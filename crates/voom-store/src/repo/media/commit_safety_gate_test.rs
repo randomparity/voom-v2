@@ -419,6 +419,22 @@ fn force_path_token_allows_empty_bypass_set() {
 }
 
 #[test]
+fn force_path_token_rejects_unknown_field() {
+    let token = ForcePathToken {
+        actor: "a".into(),
+        reason: "r".into(),
+        bypass: std::collections::BTreeSet::new(),
+    };
+    let base = serde_json::to_value(&token).unwrap();
+    assert!(serde_json::from_value::<ForcePathToken>(base.clone()).is_ok());
+    let mut v = base;
+    v.as_object_mut()
+        .unwrap()
+        .insert("extra".into(), serde_json::json!(true));
+    assert!(serde_json::from_value::<ForcePathToken>(v).is_err());
+}
+
+#[test]
 fn id_member_delta_ignores_resolution_warnings() {
     // Round-3 finding: warnings are non-fatal audit annotations and
     // must not contribute to closure drift. Two closures with the

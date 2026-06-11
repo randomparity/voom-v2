@@ -16,6 +16,7 @@ use voom_core::{CommitId, EvidenceId, UseLeaseId};
 /// so an audit reader can size the closure without re-deserializing the
 /// JSON column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitIntentRecordedPayload {
     pub commit_id: CommitId,
     /// Wire-format tag identifying the `CommitTarget` variant (one of
@@ -37,6 +38,7 @@ pub struct CommitIntentRecordedPayload {
 /// the two emission points (Phase A is the two-tx pattern; Phase B
 /// commits in-tx — both pin the same payload shape).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedByUseLeasePayload {
     pub commit_id: CommitId,
     pub lease_id: UseLeaseId,
@@ -54,6 +56,7 @@ pub struct CommitAbortedByUseLeasePayload {
 /// `commit.aborted_by_stale_evidence` — Phase A or Phase B trip-wire: at
 /// least one accepted-evidence pin no longer matches current state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedByStaleEvidencePayload {
     pub commit_id: CommitId,
     pub evidence_id: EvidenceId,
@@ -71,6 +74,7 @@ pub struct CommitAbortedByStaleEvidencePayload {
 /// Sprint 1). `message` carries the resolver's diagnostic so an operator
 /// can act on the failed mount / object store / FS endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedByClosureIncompletePayload {
     pub commit_id: CommitId,
     pub phase: String,
@@ -88,6 +92,7 @@ pub struct CommitAbortedByClosureIncompletePayload {
 /// existing in-flight row that won the lock; `commit_id` is the newly
 /// landed `aborted` row that recorded the abort.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedByPendingCommitPayload {
     pub commit_id: CommitId,
     /// ID of the in-flight commit that already covers `scope_*`.
@@ -112,6 +117,7 @@ pub struct CommitAbortedByPendingCommitPayload {
 /// can size the authorized closure without re-deserializing the JSON
 /// column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAuthorizedPayload {
     pub commit_id: CommitId,
     pub closure_asset_count: u32,
@@ -131,6 +137,7 @@ pub struct CommitAuthorizedPayload {
 /// per-granularity add/remove counts so an audit reader can characterize
 /// the drift without re-deserializing the closure JSON columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedByClosureGrewPayload {
     pub commit_id: CommitId,
     pub added_asset_count: u32,
@@ -167,6 +174,7 @@ pub struct CommitAbortedByClosureGrewPayload {
 /// struct that lives in `voom-store` so the on-disk JSON shape is the
 /// single source of truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TargetEpochDriftWire {
     /// One of `"file_asset" | "file_version" | "file_location" |
     /// "bundle"` — mirrors `TargetMemberKind`'s `snake_case` serde tag.
@@ -183,6 +191,7 @@ pub struct TargetEpochDriftWire {
 /// reader can size the silent-path closure without re-deserializing
 /// the JSON column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitCompletedPayload {
     pub commit_id: CommitId,
     /// Wire-format tag identifying the `CommitTarget` variant the gate
@@ -203,6 +212,7 @@ pub struct CommitCompletedPayload {
 /// (`prior_state='pending'`) and `finalize_destructive_commit` called
 /// with `MutationOutcome::NotPerformed` (`prior_state='authorized'`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedPreMutationPayload {
     pub commit_id: CommitId,
     /// One of `"pending" | "authorized"` — the durable state the row
@@ -227,6 +237,7 @@ pub struct CommitAbortedPreMutationPayload {
 /// `reason` tag names the dominant trip-wire so audit/recovery tools
 /// can route without re-deriving from the array shapes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitAbortedPostMutationPayload {
     pub commit_id: CommitId,
     /// One of `"closure_grew" | "fresh_lease" |
@@ -264,6 +275,7 @@ pub struct CommitAbortedPostMutationPayload {
 /// `BypassKind` bit in the token's set (sorted ascending; the on-disk
 /// `BTreeSet` ordering carries over directly).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitForcedOverridePayload {
     pub commit_id: CommitId,
     pub actor: String,
@@ -283,6 +295,7 @@ pub struct CommitForcedOverridePayload {
 /// signal from a single row without joining back to the
 /// post-mutation event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitRecoveryRequiredPayload {
     pub commit_id: CommitId,
     /// Mirror of `commit_intents.recovery_reason`. Same vocabulary as

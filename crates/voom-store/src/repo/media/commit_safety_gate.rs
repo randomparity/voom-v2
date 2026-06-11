@@ -489,6 +489,7 @@ pub enum BypassKind {
 /// deduplicated bypass bits live here; canonical serde and
 /// `commit.forced_override` emission live with the force-path entry point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForcePathToken {
     pub actor: String,
     pub reason: String,

@@ -21,7 +21,7 @@ setup:
     @echo "==> Setup complete. Try: just ci"
 
 # Run the exact set of checks GitHub Actions runs
-ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest test doc deny audit
+ci: fmt-check lint check-test-layout check-paused-time-db check-paused-time-db-selftest check-payload-deny-unknown check-payload-deny-unknown-selftest test doc deny audit
     @echo "==> All CI checks passed"
 
 # Individual checks (also called by `ci`)
@@ -70,6 +70,14 @@ check-paused-time-db:
 # Self-test for the paused-time guard (keeps its ast-grep patterns honest)
 check-paused-time-db-selftest:
     ./scripts/check-paused-time-db-selftest.sh
+
+# Guard: every durable typed payload denies unknown fields (audit M4, ADR 0013)
+check-payload-deny-unknown:
+    ./scripts/check-payload-deny-unknown.sh
+
+# Self-test for the payload contract guard (keeps its ast-grep rules honest)
+check-payload-deny-unknown-selftest:
+    ./scripts/check-payload-deny-unknown-selftest.sh
 
 # Run the CLI binary
 run *ARGS:

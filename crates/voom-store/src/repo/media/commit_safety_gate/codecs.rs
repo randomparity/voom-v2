@@ -20,20 +20,35 @@ use super::{
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum CommitTargetWire {
     #[serde(rename = "delete_file_location")]
-    Delete { retired: FileLocationId },
+    Delete(DeleteFileLocationWire),
     #[serde(rename = "replace_file_location")]
-    Replace {
-        retired: FileLocationId,
-        new: FileLocationProposalWire,
-    },
+    Replace(ReplaceFileLocationWire),
     #[serde(rename = "move_file_location")]
-    Move {
-        retired: FileLocationId,
-        new: FileLocationProposalWire,
-    },
+    Move(MoveFileLocationWire),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteFileLocationWire {
+    retired: FileLocationId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceFileLocationWire {
+    retired: FileLocationId,
+    new: FileLocationProposalWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveFileLocationWire {
+    retired: FileLocationId,
+    new: FileLocationProposalWire,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileLocationProposalWire {
     kind: String,
     value: String,
@@ -94,19 +109,26 @@ fn proof_value_str(proof: &LocationProof) -> String {
 
 fn commit_target_to_wire(t: &CommitTarget) -> CommitTargetWire {
     match t {
-        CommitTarget::DeleteFileLocation(id) => CommitTargetWire::Delete { retired: *id },
-        CommitTarget::ReplaceFileLocation { retired, new } => CommitTargetWire::Replace {
-            retired: *retired,
-            new: FileLocationProposalWire::from_proposal(new),
-        },
-        CommitTarget::MoveFileLocation { retired, new } => CommitTargetWire::Move {
-            retired: *retired,
-            new: FileLocationProposalWire::from_proposal(new),
-        },
+        CommitTarget::DeleteFileLocation(id) => {
+            CommitTargetWire::Delete(DeleteFileLocationWire { retired: *id })
+        }
+        CommitTarget::ReplaceFileLocation { retired, new } => {
+            CommitTargetWire::Replace(ReplaceFileLocationWire {
+                retired: *retired,
+                new: FileLocationProposalWire::from_proposal(new),
+            })
+        }
+        CommitTarget::MoveFileLocation { retired, new } => {
+            CommitTargetWire::Move(MoveFileLocationWire {
+                retired: *retired,
+                new: FileLocationProposalWire::from_proposal(new),
+            })
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AffectedScopeClosureWire {
     file_assets: BTreeSet<FileAssetId>,
     file_versions: BTreeSet<FileVersionId>,
@@ -116,6 +138,7 @@ struct AffectedScopeClosureWire {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClosureWarningWire {
     message: String,
 }
@@ -192,15 +215,21 @@ pub(super) fn decode_closure(json: &str) -> Result<AffectedScopeClosure, VoomErr
 
 fn commit_target_from_wire(w: CommitTargetWire) -> Result<CommitTarget, VoomError> {
     Ok(match w {
-        CommitTargetWire::Delete { retired } => CommitTarget::DeleteFileLocation(retired),
-        CommitTargetWire::Replace { retired, new } => CommitTarget::ReplaceFileLocation {
-            retired,
-            new: file_location_proposal_from_wire(new)?,
-        },
-        CommitTargetWire::Move { retired, new } => CommitTarget::MoveFileLocation {
-            retired,
-            new: file_location_proposal_from_wire(new)?,
-        },
+        CommitTargetWire::Delete(DeleteFileLocationWire { retired }) => {
+            CommitTarget::DeleteFileLocation(retired)
+        }
+        CommitTargetWire::Replace(ReplaceFileLocationWire { retired, new }) => {
+            CommitTarget::ReplaceFileLocation {
+                retired,
+                new: file_location_proposal_from_wire(new)?,
+            }
+        }
+        CommitTargetWire::Move(MoveFileLocationWire { retired, new }) => {
+            CommitTarget::MoveFileLocation {
+                retired,
+                new: file_location_proposal_from_wire(new)?,
+            }
+        }
     })
 }
 
@@ -304,3 +333,7 @@ pub(super) fn encode_target_row_epochs(
     serde_json::to_string(triples)
         .map_err(|e| VoomError::Internal(format!("encode target_row_epochs: {e}")))
 }
+
+#[cfg(test)]
+#[path = "codecs_test.rs"]
+mod tests;

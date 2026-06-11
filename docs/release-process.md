@@ -50,6 +50,19 @@ SemVer suffix between releases. The release process is run from `main`.
    runtime so they reflect tree state regardless of build-script caching.
    Release binaries trust the compile-time flag captured by `build.rs` in CI.
 
+## Payload compatibility (audit M4, ADR 0013)
+
+Durable JSON payloads deny unknown fields, so cross-version reads fail loudly
+rather than silently dropping a field:
+
+- **Upgrade (binary before DB):** a new binary reading old rows tolerates absent
+  optional fields (additive evolution) and rejects nothing it added.
+- **Breaking change (rename/remove/retype a field):** roll the new binary out and
+  do not roll it back while old-shape rows may still exist.
+- **Rollback across a payload change is not transparent:** the older binary will
+  intentionally reject rows the newer binary wrote. A rollback across such a change
+  requires restoring the pre-upgrade database snapshot.
+
 ## Never
 
 - Amend tags after creation.

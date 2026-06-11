@@ -5,6 +5,7 @@ use voom_core::OperationKind;
 use crate::workflow::execution::timing::EffectiveTiming;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowTicketPayload {
     pub workflow_id: String,
     pub plan_id: String,

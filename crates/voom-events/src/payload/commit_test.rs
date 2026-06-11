@@ -1,6 +1,27 @@
 use super::*;
 use crate::payload::{Event, EventKind};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
+
+/// Assert that `valid` round-trips and that injecting a top-level unknown field
+/// is rejected by `#[serde(deny_unknown_fields)]`.
+fn assert_rejects_unknown<T: Serialize + DeserializeOwned>(valid: &T) {
+    let base = serde_json::to_value(valid).unwrap();
+    assert!(
+        serde_json::from_value::<T>(base.clone()).is_ok(),
+        "base instance should deserialize: {base}"
+    );
+    let mut tampered = base;
+    tampered
+        .as_object_mut()
+        .expect("payload struct serializes to a JSON object")
+        .insert("__unknown".to_owned(), serde_json::json!(true));
+    assert!(
+        serde_json::from_value::<T>(tampered).is_err(),
+        "unknown top-level field must be rejected"
+    );
+}
 #[test]
 fn commit_intent_recorded_round_trip() {
     let p = CommitIntentRecordedPayload {
@@ -314,4 +335,180 @@ fn commit_recovery_required_round_trip_mirrors_post_mutation_fields() {
         Event::CommitRecoveryRequired(p).kind(),
         EventKind::CommitRecoveryRequired
     );
+}
+
+#[test]
+fn commit_intent_recorded_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitIntentRecordedPayload {
+        commit_id: voom_core::CommitId(11),
+        target_kind: "delete_file_location".to_owned(),
+        closure_asset_count: 1,
+        closure_bundle_count: 0,
+        closure_version_count: 1,
+        closure_location_count: 1,
+        accepted_evidence_count: 0,
+        started_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_by_use_lease_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedByUseLeasePayload {
+        commit_id: voom_core::CommitId(12),
+        lease_id: voom_core::UseLeaseId(3),
+        lease_scope_type: "version".to_owned(),
+        lease_scope_id: 99,
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_by_stale_evidence_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedByStaleEvidencePayload {
+        commit_id: voom_core::CommitId(13),
+        evidence_id: voom_core::EvidenceId(7),
+        drift_kind: "pinned_hash_differs".to_owned(),
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_by_closure_incomplete_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedByClosureIncompletePayload {
+        commit_id: voom_core::CommitId(14),
+        phase: "prepare".to_owned(),
+        message: "mount /srv/media offline".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_by_pending_commit_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedByPendingCommitPayload {
+        commit_id: voom_core::CommitId(21),
+        pending_commit_id: voom_core::CommitId(20),
+        scope_type: "location".to_owned(),
+        scope_id: 99,
+        phase: "prepare".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_authorized_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAuthorizedPayload {
+        commit_id: voom_core::CommitId(21),
+        closure_asset_count: 1,
+        closure_bundle_count: 0,
+        closure_version_count: 1,
+        closure_location_count: 2,
+        target_row_epoch_count: 4,
+        authorized_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_by_closure_grew_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedByClosureGrewPayload {
+        commit_id: voom_core::CommitId(22),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 1,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 1,
+        phase: "authorize".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn target_epoch_drift_wire_rejects_unknown_field() {
+    assert_rejects_unknown(&TargetEpochDriftWire {
+        kind: "file_location".to_owned(),
+        id: 17,
+        expected: 4,
+        observed: 5,
+    });
+}
+
+#[test]
+fn commit_completed_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitCompletedPayload {
+        commit_id: voom_core::CommitId(31),
+        target_kind: "delete_file_location".to_owned(),
+        closure_asset_count: 1,
+        closure_bundle_count: 0,
+        closure_version_count: 1,
+        closure_location_count: 1,
+        finalized_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_pre_mutation_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedPreMutationPayload {
+        commit_id: voom_core::CommitId(32),
+        prior_state: "pending".to_owned(),
+        reason: "operator_cancel".to_owned(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_aborted_post_mutation_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitAbortedPostMutationPayload {
+        commit_id: voom_core::CommitId(34),
+        reason: "closure_grew_and_fresh_lease".to_owned(),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 1,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 0,
+        fresh_lease_ids: vec![7, 9],
+        target_epoch_drift: Vec::new(),
+        aborted_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_forced_override_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitForcedOverridePayload {
+        commit_id: voom_core::CommitId(40),
+        actor: "ops@example.com".to_owned(),
+        reason: "fs mount offline; out-of-band confirmed".to_owned(),
+        bypass: vec!["closure_incomplete".to_owned()],
+        recorded_at: OffsetDateTime::UNIX_EPOCH,
+    });
+}
+
+#[test]
+fn commit_recovery_required_payload_rejects_unknown_field() {
+    assert_rejects_unknown(&CommitRecoveryRequiredPayload {
+        commit_id: voom_core::CommitId(36),
+        recovery_reason: "stale_target_epoch".to_owned(),
+        added_asset_count: 0,
+        added_bundle_count: 0,
+        added_version_count: 0,
+        added_location_count: 0,
+        removed_asset_count: 0,
+        removed_bundle_count: 0,
+        removed_version_count: 0,
+        removed_location_count: 0,
+        fresh_lease_ids: Vec::new(),
+        target_epoch_drift: vec![TargetEpochDriftWire {
+            kind: "file_version".to_owned(),
+            id: 7,
+            expected: 1,
+            observed: 2,
+        }],
+        recorded_at: OffsetDateTime::UNIX_EPOCH,
+    });
 }

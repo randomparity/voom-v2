@@ -59,3 +59,34 @@ fn workflow_ticket_payload_accepts_transcode_audio_operation_name() {
 
     assert_eq!(parsed.operation, OperationKind::TranscodeAudio);
 }
+
+#[test]
+fn parse_ticket_rejects_unknown_field() {
+    let payload = WorkflowTicketPayload::new_for_test(
+        "wf",
+        "plan",
+        "node",
+        "branch",
+        OperationKind::ProbeFile,
+        serde_json::json!({}),
+    );
+    let base = payload.to_ticket_payload().unwrap();
+    // (1) base parses Ok — proves the rejection below is the only behavior change.
+    assert!(
+        WorkflowTicketPayload::parse_ticket(
+            "synthetic.workflow.operation.probe_file",
+            base.clone()
+        )
+        .is_ok(),
+        "base ticket payload must parse Ok",
+    );
+    // (2) base + unknown field is rejected.
+    let mut value = base;
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("rogue".into(), serde_json::json!(1));
+    let parsed =
+        WorkflowTicketPayload::parse_ticket("synthetic.workflow.operation.probe_file", value);
+    assert!(parsed.is_err(), "unknown field must fail the typed parse");
+}
