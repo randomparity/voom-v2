@@ -233,9 +233,11 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_node_heartbeat(replay);
-                commit_tx(tx).await?;
-                return out;
+                return self
+                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
+                        decode_replay::<RemoteNodeHeartbeatOutcome>(data, "remote node heartbeat")
+                    })
+                    .await;
             }
         }
 
@@ -305,9 +307,9 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_acquire(replay);
-                commit_tx(tx).await?;
-                return out;
+                return self
+                    .finish_replay_in_tx(tx, input.replay_slot(), replay, decode_acquire_replay)
+                    .await;
             }
         }
 
@@ -382,6 +384,54 @@ impl ControlPlane {
         };
         commit_tx(tx).await?;
         Ok(outcome)
+    }
+
+    /// Finish a replay branch: commit the (read-only) reservation transaction
+    /// and return the stored outcome. A stored `Error` replay is already
+    /// terminal and returned as-is. An `Ok { data }` replay is decoded with
+    /// `decode`; if that fails the stored result no longer matches the running
+    /// binary, so the row is repointed to a terminal `Error` in the same
+    /// transaction — the already-executed mutation is never re-run, and future
+    /// replays return a deterministic error instead of re-failing decode.
+    async fn finish_replay_in_tx<T, F>(
+        &self,
+        mut tx: Transaction<'_, Sqlite>,
+        slot: ReplaySlot<'_>,
+        replay: RemoteMutationReplay,
+        decode: F,
+    ) -> Result<T, VoomError>
+    where
+        F: FnOnce(JsonValue) -> Result<T, VoomError>,
+    {
+        match replay {
+            RemoteMutationReplay::Error { code, message } => {
+                commit_tx(tx).await?;
+                Err(replay_error(&code, message))
+            }
+            RemoteMutationReplay::Ok { data } => match decode(data) {
+                Ok(out) => {
+                    commit_tx(tx).await?;
+                    Ok(out)
+                }
+                Err(err) => {
+                    self.remote_idempotency
+                        .repoint_completed_replay_in_tx(
+                            &mut tx,
+                            slot.node_id,
+                            &slot.route_key,
+                            slot.worker_id,
+                            slot.idempotency_key,
+                            RemoteMutationReplay::Error {
+                                code: err.code().to_owned(),
+                                message: remote_error_message(&err),
+                            },
+                        )
+                        .await?;
+                    commit_tx(tx).await?;
+                    Err(err)
+                }
+            },
+        }
     }
 
     async fn remote_acquire_preflight_in_tx(
@@ -771,9 +821,11 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_lease_heartbeat(replay);
-                commit_tx(tx).await?;
-                return out;
+                return self
+                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
+                        decode_replay::<RemoteLeaseHeartbeatOutcome>(data, "remote lease heartbeat")
+                    })
+                    .await;
             }
         }
 
@@ -900,9 +952,11 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_complete(replay);
-                commit_tx(tx).await?;
-                return out;
+                return self
+                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
+                        decode_replay::<RemoteCompleteOutcome>(data, "remote complete")
+                    })
+                    .await;
             }
         }
 
@@ -1050,9 +1104,11 @@ impl ControlPlane {
         {
             IdempotencyOutcome::Reserved => {}
             IdempotencyOutcome::Replay(replay) => {
-                let out = replay_fail(replay);
-                commit_tx(tx).await?;
-                return out;
+                return self
+                    .finish_replay_in_tx(tx, input.replay_slot(), replay, |data| {
+                        decode_replay::<RemoteFailOutcome>(data, "remote fail")
+                    })
+                    .await;
             }
         }
 
@@ -2062,46 +2118,90 @@ fn string_array_evidence(value: &JsonValue, field: &'static str) -> Result<Vec<S
         .collect()
 }
 
-fn replay_acquire(replay: RemoteMutationReplay) -> Result<RemoteAcquireOutcome, VoomError> {
-    match replay {
-        RemoteMutationReplay::Ok { data } => {
-            let data = acquire_replay_with_legacy_decision_id(data);
-            serde_json::from_value(data)
-                .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}")))
+/// Identity of the idempotency row a replay decodes from — the tuple
+/// `repoint_completed_replay_in_tx` matches on. Owns `route_key` because some
+/// routes derive it (`route_lease_*`) rather than holding a borrowable field.
+struct ReplaySlot<'a> {
+    node_id: NodeId,
+    route_key: String,
+    worker_id: Option<WorkerId>,
+    idempotency_key: &'a str,
+}
+
+/// Maps a remote-execution input to the idempotency row it replays from, so
+/// the replay branch and any poison-repoint target the same row the
+/// reservation used.
+trait ReplayRoute {
+    fn replay_slot(&self) -> ReplaySlot<'_>;
+}
+
+impl ReplayRoute for RemoteAcquireInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: ROUTE_ACQUIRE.to_owned(),
+            worker_id: Some(self.worker_id),
+            idempotency_key: &self.idempotency_key,
         }
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
     }
 }
 
-fn replay_node_heartbeat(
-    replay: RemoteMutationReplay,
-) -> Result<RemoteNodeHeartbeatOutcome, VoomError> {
-    replay_remote(replay, "remote node heartbeat")
+impl ReplayRoute for RemoteNodeHeartbeatInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_node_heartbeat(self.node_id),
+            worker_id: None,
+            idempotency_key: &self.idempotency_key,
+        }
+    }
 }
 
-fn replay_lease_heartbeat(
-    replay: RemoteMutationReplay,
-) -> Result<RemoteLeaseHeartbeatOutcome, VoomError> {
-    replay_remote(replay, "remote lease heartbeat")
+impl ReplayRoute for RemoteLeaseHeartbeatInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_lease_heartbeat(self.lease_id),
+            worker_id: Some(self.worker_id),
+            idempotency_key: &self.idempotency_key,
+        }
+    }
 }
 
-fn replay_complete(replay: RemoteMutationReplay) -> Result<RemoteCompleteOutcome, VoomError> {
-    replay_remote(replay, "remote complete")
+impl ReplayRoute for RemoteCompleteInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_lease_complete(self.lease_id),
+            worker_id: Some(self.worker_id),
+            idempotency_key: &self.idempotency_key,
+        }
+    }
 }
 
-fn replay_fail(replay: RemoteMutationReplay) -> Result<RemoteFailOutcome, VoomError> {
-    replay_remote(replay, "remote fail")
+impl ReplayRoute for RemoteFailInput {
+    fn replay_slot(&self) -> ReplaySlot<'_> {
+        ReplaySlot {
+            node_id: self.node_id,
+            route_key: route_lease_fail(self.lease_id),
+            worker_id: Some(self.worker_id),
+            idempotency_key: &self.idempotency_key,
+        }
+    }
 }
 
-fn replay_remote<T>(replay: RemoteMutationReplay, label: &str) -> Result<T, VoomError>
+fn decode_acquire_replay(data: JsonValue) -> Result<RemoteAcquireOutcome, VoomError> {
+    let data = acquire_replay_with_legacy_decision_id(data);
+    serde_json::from_value(data)
+        .map_err(|e| VoomError::Internal(format!("remote acquire replay decode: {e}")))
+}
+
+fn decode_replay<T>(data: JsonValue, label: &str) -> Result<T, VoomError>
 where
     T: serde::de::DeserializeOwned,
 {
-    match replay {
-        RemoteMutationReplay::Ok { data } => serde_json::from_value(data)
-            .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}"))),
-        RemoteMutationReplay::Error { code, message } => Err(replay_error(&code, message)),
-    }
+    serde_json::from_value(data)
+        .map_err(|e| VoomError::Internal(format!("{label} replay decode: {e}")))
 }
 
 fn acquire_replay_with_legacy_decision_id(mut data: JsonValue) -> JsonValue {
