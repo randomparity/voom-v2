@@ -1,0 +1,16 @@
+# In-scope source files for check-payload-deny-unknown.sh.
+# Derived from docs/payload-contract-inventory.md (Class-T / T-upstream rows).
+# Add a line here when a new durable column is typed into a struct.
+crates/voom-events/src/payload/artifact.rs
+crates/voom-events/src/payload/commit.rs
+crates/voom-events/src/payload/execution.rs
+crates/voom-events/src/payload/media_identity.rs
+crates/voom-events/src/payload/policy.rs
+crates/voom-events/src/payload/system.rs
+crates/voom-events/src/payload/use_leases.rs
+crates/voom-events/src/payload/workers.rs
+crates/voom-events/src/payload/mod.rs
+crates/voom-store/src/repo/media/commit_safety_gate/codecs.rs
+crates/voom-store/src/repo/media/commit_safety_gate.rs
+crates/voom-control-plane/src/workflow/plan/ticket_payload.rs
+crates/voom-control-plane/src/workflow/execution/timing.rs
