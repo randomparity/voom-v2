@@ -18,3 +18,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0010](0010-compliance-report-job-read-mode.md) | `compliance report` gains a read-only `--job-id` post-run mode |
 | [0011](0011-audio-transcode-plannability-vs-preservation.md) | Audio-transcode plannability does not gate on per-stream preservation facts |
 | [0012](0012-paused-time-db-pool-guard.md) | Guard against pairing tokio paused time with the real SQLite pool in tests |
+| [0013](0013-payload-evolution-contract.md) | Durable JSON payloads evolve under a deny-unknown-fields contract |
