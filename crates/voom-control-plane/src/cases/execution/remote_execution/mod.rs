@@ -2251,5 +2251,5 @@ fn remote_error_message(err: &VoomError) -> String {
 }
 
 #[cfg(test)]
-#[path = "remote_execution_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;
