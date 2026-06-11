@@ -19,6 +19,7 @@ use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok};
 const COMMAND_STAGE_COPY: &str = "artifact.stage_copy";
 const COMMAND_VERIFY: &str = "artifact.verify";
 const COMMAND_COMMIT: &str = "artifact.commit";
+const COMMAND_RECOVER_COMMIT: &str = "artifact.recover_commit";
 const COMMAND_LIST: &str = "artifact.list";
 const COMMAND_SHOW: &str = "artifact.show";
 
@@ -256,6 +257,9 @@ pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> 
             )
             .await
         }
+        ArtifactCommand::RecoverCommit { artifact_handle_id } => {
+            recover_commit(database_url, local, artifact_handle_id).await
+        }
         ArtifactCommand::List { state, limit } => list(database_url, local, state, limit).await,
         ArtifactCommand::Show { artifact_handle_id } => {
             show(database_url, local, artifact_handle_id).await
@@ -394,6 +398,32 @@ async fn commit(
             }
             Ok(2)
         }
+    }
+}
+
+async fn recover_commit(
+    database_url: &str,
+    local: Local,
+    artifact_handle_id: u64,
+) -> io::Result<i32> {
+    let cp = match open_control_plane(COMMAND_RECOVER_COMMIT, database_url, &local).await? {
+        Ok(cp) => cp,
+        Err(code) => return Ok(code),
+    };
+    match cp
+        .recover_commit(ArtifactHandleId(artifact_handle_id))
+        .await
+    {
+        Ok(report) => emit_ok(
+            COMMAND_RECOVER_COMMIT,
+            ArtifactEnvelopeData {
+                artifact: CommitArtifactData::from(report),
+            },
+            Some(local),
+            Vec::new(),
+        )
+        .map(|()| 0),
+        Err(err) => emit_voom_error(COMMAND_RECOVER_COMMIT, &err, local),
     }
 }
 

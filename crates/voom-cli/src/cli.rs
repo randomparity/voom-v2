@@ -313,6 +313,11 @@ pub enum ArtifactCommand {
         #[arg(long)]
         target_path: PathBuf,
     },
+    /// Re-drive a commit left in `recovery_required` back to completion.
+    RecoverCommit {
+        #[arg(long)]
+        artifact_handle_id: u64,
+    },
     /// List artifact handles, optionally filtered by inspection state.
     List {
         #[arg(long)]

@@ -57,6 +57,14 @@ fn artifact_command_names_and_flags_parse() {
         ]
         .as_slice(),
         [
+            "voom",
+            "artifact",
+            "recover-commit",
+            "--artifact-handle-id",
+            "12",
+        ]
+        .as_slice(),
+        [
             "voom", "artifact", "list", "--state", "verified", "--limit", "5",
         ]
         .as_slice(),

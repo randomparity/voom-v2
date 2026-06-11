@@ -153,6 +153,126 @@ impl ControlPlane {
     ) -> Result<CommitArtifactReport, CommitArtifactCommandError> {
         commit_artifact_with_hooks(self, input, &NoCommitArtifactHooks).await
     }
+
+    /// Re-drive a commit left in `recovery_required` back to completion.
+    ///
+    /// A fresh `commit_artifact` cannot recover such an artifact: the
+    /// one-owner-per-artifact index reserves the slot for the stuck record. This
+    /// resumes that existing record from the still-verified staging artifact. If
+    /// the target was already installed (the original attempt failed at or after
+    /// finalize) it re-runs finalize only; otherwise it re-promotes. A target
+    /// that already exists with mismatched facts is a hard conflict and the
+    /// record stays `recovery_required`.
+    ///
+    /// # Errors
+    /// `Conflict` if the artifact has no `recovery_required` commit or the target
+    /// exists with the wrong facts; `NotFound`/`Config`/`Database` for missing
+    /// inputs or durable failures.
+    pub async fn recover_commit(
+        &self,
+        artifact_handle_id: ArtifactHandleId,
+    ) -> Result<CommitArtifactReport, VoomError> {
+        recover_commit_inner(self, artifact_handle_id).await
+    }
+}
+
+fn recovery_read_error(err: PrepareCommitError) -> VoomError {
+    match err {
+        PrepareCommitError::AfterPending(err) => err,
+        PrepareCommitError::PreMutation(report) => {
+            VoomError::CommitFailure(format!("commit recovery cannot re-read inputs: {report:?}"))
+        }
+    }
+}
+
+async fn recover_commit_inner(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+) -> Result<CommitArtifactReport, VoomError> {
+    let record = cp
+        .artifacts
+        .list_commit_records(artifact_handle_id)
+        .await?
+        .into_iter()
+        .find(|record| record.state == ArtifactCommitState::RecoveryRequired)
+        .ok_or_else(|| {
+            VoomError::Conflict(format!(
+                "artifact_handle {artifact_handle_id} has no commit in recovery_required state"
+            ))
+        })?;
+    let target_path = PathBuf::from(&record.target_path);
+
+    // Re-read the same inputs the initial prepare used; the staging artifact is
+    // still live because finalize (which retires it) never completed.
+    let context = PreMutationContext {
+        artifact_handle_id,
+        verification_id: Some(record.verification_id),
+        target_path: target_path.clone(),
+    };
+    let mut tx = begin_tx(&cp.pool).await?;
+    let source = read_commit_source_facts(cp, &mut tx, artifact_handle_id, &context)
+        .await
+        .map_err(recovery_read_error)?;
+    let verified_staging =
+        read_verified_staging_facts(cp, &mut tx, artifact_handle_id, &target_path, &context)
+            .await
+            .map_err(recovery_read_error)?;
+    commit_tx(tx).await?;
+
+    let staging_path = PathBuf::from(&verified_staging.staging.value);
+    let expected_facts = observe_regular_file(&staging_path).await?;
+    require_expected_facts(
+        &source.handle,
+        &verified_staging.verification,
+        &expected_facts,
+    )?;
+
+    // Decide where to resume from based on the target's current state.
+    let existing_target = observe_regular_file(&target_path).await.ok();
+    let already_installed = match &existing_target {
+        Some(facts) if same_file_facts(facts, &expected_facts) => true,
+        Some(_) => {
+            return Err(VoomError::Conflict(format!(
+                "commit recovery: target {} exists with mismatched facts",
+                target_path.display()
+            )));
+        }
+        None => false,
+    };
+    let canonical_target = if already_installed {
+        fs::canonicalize(&target_path).await.map_err(|err| {
+            VoomError::CommitFailure(format!(
+                "commit recovery cannot canonicalize installed target {}: {err}",
+                target_path.display()
+            ))
+        })?
+    } else {
+        canonical_new_leaf_no_symlink(&target_path).await?
+    };
+    let temp_path = unique_temp_sibling_path(&canonical_target)?;
+
+    let prepared = PreparedCommit {
+        record,
+        artifact_handle_id,
+        source_file_version_id: source.source_file_version_id,
+        source_file_asset_id: source.source_file_asset_id,
+        staging_location_id: verified_staging.staging.id,
+        staging_path,
+        target_path: canonical_target,
+        temp_path,
+        expected_facts: expected_facts.clone(),
+        promotion_started_at: cp.clock().now(),
+    };
+
+    let promotion = if already_installed {
+        PromotionOutcome {
+            target_facts: existing_target.unwrap_or(expected_facts),
+        }
+    } else {
+        promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await?
+    };
+
+    finalize_commit(cp, &prepared, &promotion).await
 }
 
 #[derive(Debug, Clone, Copy)]
