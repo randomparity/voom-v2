@@ -1,7 +1,12 @@
 -- Sprint 14 -- audio sidecar commit persistence support.
 --
--- SQLite CHECK constraints require table rebuilds. See 0012 for the
--- transaction/FK wrapper rationale.
+-- SQLite CHECK constraints require table rebuilds. The same COMMIT / PRAGMA /
+-- BEGIN pattern as 0012 is used here for the same reason: sqlx wraps each
+-- migration in a transaction, but SQLite silently ignores session PRAGMAs
+-- (foreign_keys, legacy_alter_table) when an open transaction is active.  We
+-- COMMIT the migrator's transaction, apply the PRAGMAs while no transaction is
+-- open so they take effect, then BEGIN a new transaction for sqlx's checksum
+-- bookkeeping.
 COMMIT;
 PRAGMA foreign_keys = OFF;
 PRAGMA legacy_alter_table = ON;
