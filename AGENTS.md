@@ -100,8 +100,11 @@ voom-api (axum router, no binary yet)   voom-cli (`voom` binary)
 Worker binaries (`voom-ffprobe-worker`, `voom-ffmpeg-worker`,
 `voom-mkvtoolnix-worker`, `voom-verify-artifact-worker`) depend on
 `voom-worker-protocol` for their external contract. Test and fake-support crates
-live outside the production dependency path. `voom-artifact` is intentionally
-reserved; don't put logic in it without checking the spec.
+live outside the production dependency path. `voom-artifact` holds
+artifact-domain helpers shared outside the control-plane shell
+(`commit_pipeline` — pending-commit record + event glue and
+recovery-required commit data); keep filesystem promotion, worker
+dispatch, and use-case assembly in `voom-control-plane`.
 
 ### Load-bearing invariants
 
