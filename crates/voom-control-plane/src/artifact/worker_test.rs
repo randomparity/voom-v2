@@ -40,6 +40,20 @@ fn service_at_capacity_maps_to_worker_crash_not_malformed() {
     assert!(err.failure_class().is_retriable());
 }
 
+#[test]
+fn dispatch_timeout_maps_to_worker_crash_not_malformed() {
+    // A client-side dispatch timeout means the worker accepted the connection
+    // but never sent a response — an unresponsive worker, not a corrupt result.
+    // It must map to a retriable WorkerCrash so the dispatch is rescheduled,
+    // never the terminal MalformedWorkerResult catch-all.
+    let err = map_dispatch_protocol_error(&ProtocolError::Timeout {
+        elapsed: Duration::from_secs(30),
+        detail: "dispatch: worker did not send a response line".to_owned(),
+    });
+    assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+    assert!(err.failure_class().is_retriable());
+}
+
 #[tokio::test]
 async fn launch_uses_caller_supplied_worker_id_and_dispatches_verify_artifact() {
     let dir = tempfile::tempdir().unwrap();

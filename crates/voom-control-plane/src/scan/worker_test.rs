@@ -204,6 +204,24 @@ fn dispatch_backpressure_protocol_failures_are_worker_crashes() {
 }
 
 #[test]
+fn dispatch_timeout_maps_to_worker_crash_not_malformed() {
+    // A client-side dispatch timeout is an unresponsive worker, not a corrupt
+    // result — retriable WorkerCrash, never the terminal MalformedWorkerResult
+    // catch-all.
+    let protocol_error = ProtocolError::Timeout {
+        elapsed: Duration::from_secs(30),
+        detail: "dispatch: worker did not send a response line".to_owned(),
+    };
+    let err = map_dispatch_protocol_error_message(
+        &protocol_error,
+        format!("worker dispatch failed: {protocol_error}"),
+    );
+
+    assert_eq!(err.failure_class(), FailureClass::WorkerCrash);
+    assert_eq!(err.error_code(), ErrorCode::WorkerCrash);
+}
+
+#[test]
 fn default_ffprobe_worker_command_prefers_current_exe_sibling() {
     let dir = tempfile::tempdir().unwrap();
     let current_exe = dir.path().join("voom");

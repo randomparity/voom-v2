@@ -262,11 +262,14 @@ fn map_dispatch_protocol_error(err: &ProtocolError) -> VerifyWorkerError {
         {
             VerifyWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
         }
-        // A duplicate idempotency key (raced dispatch) and a saturated worker
-        // idempotency cache (backpressure) are both transient server-side
-        // conditions, not corrupt results — map them to a retriable WorkerCrash
-        // rather than the terminal MalformedWorkerResult catch-all.
-        ProtocolError::DuplicateIdempotencyKey { .. } | ProtocolError::ServiceAtCapacity => {
+        // A duplicate idempotency key (raced dispatch), a saturated worker
+        // idempotency cache (backpressure), and a client-side request timeout
+        // (unresponsive worker) are all transient conditions, not corrupt
+        // results — map them to a retriable WorkerCrash rather than the terminal
+        // MalformedWorkerResult catch-all.
+        ProtocolError::DuplicateIdempotencyKey { .. }
+        | ProtocolError::ServiceAtCapacity
+        | ProtocolError::Timeout { .. } => {
             VerifyWorkerError::worker_crash(format!("worker dispatch failed: {err}"))
         }
         _ => VerifyWorkerError::malformed_worker_result(format!("worker dispatch failed: {err}")),

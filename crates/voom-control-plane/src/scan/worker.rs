@@ -286,9 +286,11 @@ fn map_dispatch_protocol_error_message(err: &ProtocolError, message: String) -> 
         {
             ScanWorkerError::worker_crash(message)
         }
-        ProtocolError::DuplicateIdempotencyKey { .. } | ProtocolError::ServiceAtCapacity => {
-            ScanWorkerError::worker_crash(message)
-        }
+        // Transient: raced dispatch, worker backpressure, or an unresponsive
+        // worker (client-side timeout). All retriable, not corrupt results.
+        ProtocolError::DuplicateIdempotencyKey { .. }
+        | ProtocolError::ServiceAtCapacity
+        | ProtocolError::Timeout { .. } => ScanWorkerError::worker_crash(message),
         _ => ScanWorkerError::malformed_worker_result(message),
     }
 }

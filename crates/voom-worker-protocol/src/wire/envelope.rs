@@ -5,6 +5,8 @@
 //! See `docs/superpowers/specs/2026-05-19-voom-sprint-2-phase-1-design.md`
 //! §3.2 for the full contract.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -185,6 +187,12 @@ pub enum ProtocolError {
     InternalServerError,
     #[error("service at capacity: too many in-flight operations")]
     ServiceAtCapacity,
+    /// Client-side: the worker accepted the connection but did not respond
+    /// within the request deadline. Distinct from a malformed/closed stream so
+    /// the control plane can treat an unresponsive worker as retriable rather
+    /// than a terminal result. Never sent over the wire by a server.
+    #[error("request timed out after {elapsed:?}: {detail}")]
+    Timeout { elapsed: Duration, detail: String },
 }
 
 #[cfg(test)]
