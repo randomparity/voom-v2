@@ -95,3 +95,38 @@ fn parses_bare_transcode_as_raw() {
         crate::StatementAst::Raw { .. }
     ));
 }
+
+/// Wrap `inner` in `levels` nested `when exists audio { ... }` blocks inside a
+/// minimal phase. Each level is one block-statement nesting step.
+fn nested_when_policy(levels: usize) -> String {
+    let mut body = "keep audio where lang in [eng]".to_owned();
+    for _ in 0..levels {
+        body = format!("when exists audio {{ {body} }}");
+    }
+    format!("policy \"p\" {{ phase inspect {{ {body} }} }}")
+}
+
+#[test]
+fn accepts_blocks_nested_up_to_depth_limit() {
+    // Well under the ceiling: legitimate nesting must still parse. Guards the
+    // depth limit against being set so low it rejects real policies.
+    let src = nested_when_policy(50);
+    assert!(
+        parse_policy_source(&src).is_ok(),
+        "50-level nesting should parse"
+    );
+}
+
+#[test]
+fn rejects_blocks_nested_past_depth_limit() {
+    // 100 levels is past the 64 ceiling but shallow enough that the *current*
+    // (unbounded) parser would recurse without overflowing the stack — so
+    // pre-fix this returns Ok and the assertion fails cleanly, rather than
+    // aborting the test binary with a stack overflow.
+    let src = nested_when_policy(100);
+    let err = parse_policy_source(&src).unwrap_err();
+    assert_eq!(
+        err.diagnostics[0].code,
+        DiagnosticCode::NestingDepthExceeded.as_str()
+    );
+}

@@ -4,6 +4,7 @@ pub use crate::span::SourceLocation;
 pub enum DiagnosticCode {
     UnexpectedToken,
     SourceSizeExceeded,
+    NestingDepthExceeded,
     UnknownTopLevelBlock,
     UnknownPhaseStatementOrOperation,
     DeferredPhaseInheritance,
@@ -35,6 +36,7 @@ impl DiagnosticCode {
         match self {
             Self::UnexpectedToken => "unexpected_token",
             Self::SourceSizeExceeded => "source_size_exceeded",
+            Self::NestingDepthExceeded => "nesting_depth_exceeded",
             Self::UnknownTopLevelBlock => "unknown_top_level_block",
             Self::UnknownPhaseStatementOrOperation => "unknown_phase_statement_or_operation",
             Self::DeferredPhaseInheritance => "deferred_phase_inheritance",
