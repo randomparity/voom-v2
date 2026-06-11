@@ -802,6 +802,38 @@ async fn dispatch_times_out_when_worker_never_sends_response_line() {
     server.abort();
 }
 
+#[tokio::test]
+async fn server_closes_connection_when_request_head_never_completes() {
+    // Slowloris (M13): a peer that opens a connection and sends a partial
+    // request head, then stalls, must be cut loose once the header-read timeout
+    // elapses — not pinned to a per-connection task forever.
+    let handler: OperationHandler =
+        Arc::new(|_req| Box::pin(async { Err(ProtocolError::InternalServerError) }));
+    let server =
+        HttpServer::new(creds(), handler).with_header_read_timeout(Duration::from_millis(150));
+    let running = server.serve("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = running.bound;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    // A request line + one header, but no terminating blank line: the head is
+    // never completed, so the server keeps waiting for more header bytes.
+    stream
+        .write_all(b"POST /v1/handshake HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    // Outer guard: if the server never closes the half-open connection, the read
+    // parks forever and this timeout fires, panicking on the unwrap below.
+    let mut buf = [0_u8; 64];
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(n, 0, "expected EOF once the header-read timeout elapsed");
+
+    drop(running);
+}
+
 #[test]
 fn status_code_dependency_stays_used() {
     assert_eq!(StatusCode::OK.as_u16(), 200);

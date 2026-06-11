@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -10,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as HttpAutoBuilder;
 use secrecy::SecretString;
 use serde::de::DeserializeOwned;
@@ -35,6 +36,13 @@ use super::{
 };
 
 const MAX_BODY_BYTES: usize = 1 << 20; // 1 MiB
+
+/// Bound on how long a client may take to transmit a complete request head.
+/// A connection that opens but dribbles (or never finishes) its headers is
+/// closed after this elapses, so a stalled or slowloris-style peer cannot pin a
+/// per-connection task indefinitely. This bounds only the request-head read; a
+/// long-lived NDJSON progress *response* stream is unaffected.
+const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type OperationFuture =
     Pin<Box<dyn std::future::Future<Output = Result<OperationDispatch, ProtocolError>> + Send>>;
@@ -66,6 +74,7 @@ pub struct HttpServer {
     pub credentials: WorkerCredentials,
     pub operation_handler: OperationHandler,
     idempotency_cache: Arc<Mutex<IdempotencyCache>>,
+    header_read_timeout: Duration,
 }
 
 impl std::fmt::Debug for HttpServer {
@@ -85,7 +94,18 @@ impl HttpServer {
             idempotency_cache: Arc::new(Mutex::new(IdempotencyCache::new(
                 IDEMPOTENCY_CACHE_CAPACITY,
             ))),
+            header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
         }
+    }
+
+    /// Override the request-head read timeout. Test-only: production servers use
+    /// `DEFAULT_HEADER_READ_TIMEOUT`; tests use a short value to exercise the
+    /// slow-header close path without waiting out the production budget.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_header_read_timeout(mut self, header_read_timeout: Duration) -> Self {
+        self.header_read_timeout = header_read_timeout;
+        self
     }
 }
 
@@ -108,6 +128,7 @@ impl ServerHandle for HttpServer {
         let creds = self.credentials.clone();
         let handler = self.operation_handler.clone();
         let cache = self.idempotency_cache.clone();
+        let header_read_timeout = self.header_read_timeout;
 
         let joined = tokio::spawn(async move {
             loop {
@@ -126,9 +147,15 @@ impl ServerHandle for HttpServer {
                                 let cache = cache.clone();
                                 async move { handle_request(req, &creds, &handler, &cache).await }
                             });
-                            let _ = HttpAutoBuilder::new(TokioExecutor::new())
-                                .serve_connection(io, service)
-                                .await;
+                            let mut builder = HttpAutoBuilder::new(TokioExecutor::new());
+                            // header_read_timeout is a no-op unless a Timer is
+                            // installed, so set both. Bounds only the request-head
+                            // read; streaming responses run unbounded afterward.
+                            builder
+                                .http1()
+                                .timer(TokioTimer::new())
+                                .header_read_timeout(header_read_timeout);
+                            let _ = builder.serve_connection(io, service).await;
                         });
                     }
                 }
