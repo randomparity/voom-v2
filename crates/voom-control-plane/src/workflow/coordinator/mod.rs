@@ -1893,5 +1893,5 @@ pub(crate) async fn active_version_with_snapshot(
 }
 
 #[cfg(test)]
-#[path = "coordinator_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;
