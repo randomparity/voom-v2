@@ -262,6 +262,7 @@ impl<'a> Validator<'a> {
 
         for control in &phase.controls {
             let text = statement_text(control);
+            self.check_numeric_literals(control, text.as_ref());
             match control.keyword().value.as_str() {
                 "depends_on" | "run_if" => {}
                 "skip" => self.validate_skip_condition(control, text.as_ref()),
@@ -276,6 +277,7 @@ impl<'a> Validator<'a> {
 
         for operation in &phase.operations {
             let text = statement_text(operation);
+            self.check_numeric_literals(operation, text.as_ref());
             match operation.keyword().value.as_str() {
                 "container" => self.validate_container(operation, text.as_ref()),
                 "keep" | "remove" => self.validate_track_operation(operation, text.as_ref()),
@@ -353,6 +355,30 @@ impl<'a> Validator<'a> {
     fn error(&mut self, code: DiagnosticCode, span: SourceSpan, message: impl Into<String>) {
         let diagnostic = self.make_error(code, span, message);
         self.diagnostics.push(diagnostic);
+    }
+
+    /// Reject all-digit numeric literals that overflow `u64`. Mirrors the
+    /// numeric-literal predicate the lowering pass uses (`compiled_value`): a
+    /// token of all ASCII digits is a number. An over-long one lowers to a
+    /// `Number` the planner silently drops (`parse::<u64>()` -> `None`), so the
+    /// condition never matches — a silent wrong answer. A hard compile error is
+    /// the safer failure mode.
+    fn check_numeric_literals(&mut self, statement: &StatementAst, text: &str) {
+        for token in words(text) {
+            if !token.is_empty()
+                && token.bytes().all(|byte| byte.is_ascii_digit())
+                && token.parse::<u64>().is_err()
+            {
+                self.error(
+                    DiagnosticCode::NumericLiteralOutOfRange,
+                    statement.span(),
+                    format!(
+                        "numeric literal `{token}` exceeds the maximum supported value ({})",
+                        u64::MAX
+                    ),
+                );
+            }
+        }
     }
 
     fn warning(&mut self, code: DiagnosticCode, span: SourceSpan, message: impl Into<String>) {
