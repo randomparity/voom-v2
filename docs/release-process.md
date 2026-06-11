@@ -61,7 +61,8 @@ rather than silently dropping a field:
   do not roll it back while old-shape rows may still exist.
 - **Rollback across a payload change is not transparent:** the older binary will
   intentionally reject rows the newer binary wrote. A rollback across such a change
-  requires restoring the pre-upgrade database snapshot.
+  requires restoring the pre-upgrade database snapshot
+  (see `docs/runbooks/migration-rollback.md`).
 
 ## Never
 
