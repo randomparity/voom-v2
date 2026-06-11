@@ -126,6 +126,14 @@ item_region() {
 	done
 }
 
+# True when the item's region carries a genuine exemption marker: a line-comment
+# whose LEADING content is `payload-contract: exempt`. Anchored so doc-comment
+# (`///`) prose that merely mentions the phrase mid-sentence cannot exempt a
+# struct (the escape-hatch leak). Both gates share this, so they cannot drift.
+is_exempt() {
+	printf '%s' "$1" | grep -qE '^[[:space:]]*//[[:space:]]*payload-contract: exempt'
+}
+
 errors=0
 
 # Fail closed on multi-line `#[derive(` (open paren ends the line): the per-item
@@ -147,9 +155,14 @@ while IFS= read -r hit; do
 	file="${hit%%:*}"
 	line="${hit##*:}"
 	region=$(item_region "$file" "$line")
-	printf '%s' "$region" | grep -q 'payload-contract: exempt' && continue
-	printf '%s' "$region" | grep -q 'Deserialize' || continue
-	printf '%s' "$region" | grep -q 'deny_unknown_fields' && continue
+	is_exempt "$region" && continue
+	# Gate on the `#[derive(...)]` line, not the whole region: a Serialize-only
+	# struct whose doc comment says "Deserialize" must not be treated as a
+	# Deserialize struct.
+	printf '%s' "$region" | grep -E '^[[:space:]]*#\[derive\(' | grep -q 'Deserialize' || continue
+	# Gate on a `#[serde(...)]` line so a comment mentioning the attribute cannot
+	# count as coverage.
+	printf '%s' "$region" | grep -E '^[[:space:]]*#\[serde\(' | grep -q 'deny_unknown_fields' && continue
 	echo "check-payload-deny-unknown: $file:$line — Deserialize struct missing #[serde(deny_unknown_fields)]" >&2
 	echo "  Add the attribute, or mark '// payload-contract: exempt — <reason>'. See docs/adr/0013." >&2
 	errors=$((errors + 1))
@@ -164,8 +177,12 @@ while IFS= read -r hit; do
 	file="${hit%%:*}"
 	line="${hit##*:}"
 	region=$(item_region "$file" "$line")
-	printf '%s' "$region" | grep -q 'payload-contract: exempt' && continue
-	printf '%s' "$region" | grep -qE 'serde\(tag' || continue
+	is_exempt "$region" && continue
+	# Gate on a `#[serde(...)]` line carrying `tag` as a whole word: a plain enum
+	# whose comment mentions serde(tag must not be flagged, `untagged` must not
+	# match, and the attribute is found regardless of key order
+	# (`#[serde(rename_all = "...", tag = "...")]`).
+	printf '%s' "$region" | grep -E '^[[:space:]]*#\[serde\(' | grep -qE '\btag\b' || continue
 	echo "check-payload-deny-unknown: $file:$line — tagged enum has an inline struct-variant" >&2
 	echo "  Extract each variant's content to a named struct (newtype variant) — deny_unknown_fields is a no-op on inline variants — or mark '// payload-contract: exempt — <reason>'. See docs/adr/0013." >&2
 	errors=$((errors + 1))

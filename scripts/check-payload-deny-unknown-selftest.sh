@@ -126,6 +126,35 @@ struct AContent { x: u32 }
 #[derive(Deserialize)]
 enum PlainAfterTagged { Variant { y: u32 } }'
 
+# --- COMMENT-INTERFERENCE fixtures: region predicates are anchored to the line
+# type they belong on, so doc comments and prose cannot fool the guard. ---
+
+# Clean: a Serialize-only struct whose doc comment contains the word
+# "Deserialize" must NOT be treated as a Deserialize struct (no flag).
+expect_exit 0 '#[derive(Serialize)]
+/// Built by the writer; the Deserialize half lives elsewhere.
+struct SerializeOnly { a: u32 }'
+
+# Violation: a Deserialize struct missing the attribute whose doc comment mentions
+# "payload-contract: exempt" mid-sentence must STILL be flagged — prose is not an
+# exemption (the escape-hatch leak this fix closes).
+expect_exit 1 '#[derive(Deserialize)]
+/// This is not payload-contract: exempt and must carry deny_unknown_fields.
+struct ProseNotExempt { a: u32 }'
+
+# Clean: a genuine leading `// payload-contract: exempt — reason` marker still
+# exempts after anchoring.
+expect_exit 0 '// payload-contract: exempt — fixture-only, never read from a column
+#[derive(Deserialize)]
+struct GenuineExempt { a: u32 }'
+
+# Clean: a PLAIN (untagged) Deserialize enum with an inline struct-variant whose
+# doc comment mentions "serde(tag" must NOT be flagged — only a real
+# `#[serde(... tag ...)]` attribute line counts.
+expect_exit 0 '#[derive(Deserialize)]
+/// Unlike a serde(tag = "kind") enum, this one is untagged.
+enum PlainMentionsTag { Variant { y: u32 } }'
+
 if [[ "$failures" -gt 0 ]]; then
 	echo "check-payload-deny-unknown-selftest: $failures failure(s)." >&2
 	exit 1
