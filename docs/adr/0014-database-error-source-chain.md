@@ -63,18 +63,28 @@ existing message and adds an optional structured source:
 Database {
     message: String,
     #[source]
-    source: Option<Box<sqlx::Error>>,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
 },
 ```
 
 - `#[error("database error: {message}")]` reproduces the current `Display`
   string byte-for-byte, so the envelope `error.message` is unchanged.
 - `#[source]` on the `Option` makes `std::error::Error::source()` return the
-  wrapped `sqlx::Error` when present, and `None` otherwise — the source chain is
-  preserved exactly for the sites that have a `sqlx::Error` to give.
-- `source` is `Box`ed because `sqlx::Error` is large; boxing keeps `VoomError`
-  (and the many `Result<_, VoomError>` futures) small, satisfying clippy's
-  `large_futures`/`result_large_err` posture.
+  wrapped error when present, and `None` otherwise — the source chain is
+  preserved for the sites that have a `sqlx::Error` to give. A consumer recovers
+  the concrete type via `err.source().and_then(|s| s.downcast_ref::<sqlx::Error>())`.
+- The source is a **boxed trait object** (`Box<dyn Error + Send + Sync>`), **not**
+  a concrete `Box<sqlx::Error>`. This is deliberate: `voom-core` is the bottom of
+  the one-way layer graph (AGENTS.md Architecture) and is depended on by 19
+  crates, including the storage-agnostic `voom-policy`, `voom-plan`,
+  `voom-scheduler`, and `voom-worker-protocol`. Naming `sqlx::Error` concretely
+  would force a `sqlx` dependency — which the workspace declares with
+  `features = ["runtime-tokio", "sqlite"]` — into the foundation crate and thence
+  into every consumer. The trait object keeps `voom-core` driver-free while the
+  callers (which already have `sqlx` in scope) box their `sqlx::Error` in. The
+  `Send + Sync + 'static` bounds keep `VoomError` `Send + Sync` and downcastable.
+- Boxing also keeps `VoomError` (and the many `Result<_, VoomError>` futures)
+  small, satisfying clippy's `large_futures`/`result_large_err` posture.
 - `code()`/`error_code()` match `Self::Database { .. }` → `DbUnreachable`,
   unchanged.
 
@@ -82,39 +92,66 @@ Two constructors express intent at call sites and keep the migration mechanical:
 
 ```rust
 /// Database error with a human-readable message and no structured source.
-pub fn database(message: impl Into<String>) -> Self { ... }      // source: None
+pub fn database(message: impl Into<String>) -> Self {
+    Self::Database { message: message.into(), source: None }
+}
 
-/// Database error wrapping a `sqlx::Error`, preserving its source chain.
-/// The Display message is `"{context}: {source}"`.
-pub fn database_context(context: impl Display, source: sqlx::Error) -> Self { ... }
+/// Database error that preserves an underlying error's source chain. `context`
+/// is the full prefix that previously preceded `: {e}` in the format string, so
+/// the composed Display message — `"{context}: {source}"` — is byte-identical to
+/// the pre-migration text.
+pub fn database_context(
+    context: impl std::fmt::Display,
+    source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+) -> Self {
+    let source = source.into();
+    Self::Database { message: format!("{context}: {source}"), source: Some(source) }
+}
 ```
+
+`database_context` takes `impl Into<Box<dyn Error …>>`; a caller passes its
+`sqlx::Error` by value and the blanket `From<E: Error> for Box<dyn Error …>`
+impl boxes it. The message is composed from the boxed source's `Display` before
+the box is stored, so the text matches the old `format!("{context}: {e}")`.
 
 Migration buckets (counts at time of writing):
 
 | Bucket | Count | New form |
 |---|---|---|
-| `map_err(\|e\| Database(format!("ctx: {e}")))` over an `.await`ed sqlx call | 465 | `map_err(\|e\| VoomError::database_context("ctx", e))` |
+| `map_err(\|e\| Database(format!("<prefix>: {e}")))` over an `.await`ed sqlx call | ~465 | `map_err(\|e\| VoomError::database_context("<prefix>", e))` |
 | `Database(format!(...))` over a non-sqlx value | ~112 | `VoomError::database(format!(...))` |
 | `Database("literal".to_owned()/.into())` | ~15 | `VoomError::database("literal")` |
 | `matches!(_, Database(_))` | ~7 | `matches!(_, Database { .. })` |
 | `Database(msg)` / `Database(message) if …` binding | ~5 | `Database { message, .. }` |
 
-`voom-core` adds `sqlx` as a dependency (sqlite feature only, no runtime) to
-name the `sqlx::Error` type. This is the layer that already owns the error
-taxonomy and is depended on by every storage crate, so the type is in scope.
+**Migration rule (message-preserving).** `context` MUST be the entire prefix that
+preceded the final `: {e}` in the old format string, including any interpolated
+fragments (e.g. `format!("invalid sqlite url {url:?}")`,
+`format!("pool open failed for {url:?} (create={create})")`,
+`format!("video_profiles.{field}")`). The composed message
+`"{context}: {source}"` is then identical to the pre-migration text. A site is in
+the **sqlx** bucket iff the value being formatted is a `sqlx::Error` (the
+`.await`ed query idiom or an explicit `e: sqlx::Error`); everything else uses
+`database(..)` honestly with `source: None`.
+
+`voom-core` gains **no** new production dependency. Its sibling test file adds
+`sqlx` as a **dev-dependency** only (to construct a `sqlx::Error` for the
+source-chain unit test); dev-dependencies do not propagate to downstream crates.
 
 ## Consequences
 
 - Operators and `tracing` source-chain formatters can now walk a database error
-  down to the `sqlx::Error`, including the SQLite extended result code and
-  constraint metadata, without parsing the message string.
+  down to the underlying `sqlx::Error` (recovered via `downcast_ref`), including
+  the SQLite extended result code and constraint metadata, without parsing the
+  message string.
 - The `Display` string and `code()` are unchanged; no envelope, snapshot, or
   `error.code` consumer is affected.
 - All 644 sites are migrated in one change (no parallel/deprecated variant), per
   "Replace, don't deprecate". The genuine sqlx sites populate the source; the
   rest pass `None` honestly.
-- `voom-core` gains a `sqlx` dependency. It is compile-time only (no async
-  runtime feature) and is already transitively present workspace-wide.
+- `voom-core` gains **no** new production dependency; the boxed-trait-object
+  source keeps the foundation crate driver-free. The error-text crate's sibling
+  test adds `sqlx` as a dev-dependency only.
 - The retry classifier that matches `message.contains("database is locked")`
   keeps working because the message text is preserved. It is unchanged by this
   ADR; tightening it to inspect the structured `sqlx::Error` source instead of
@@ -140,9 +177,14 @@ taxonomy and is depended on by every storage crate, so the type is in scope.
    impl could be added later for ergonomics but is not required by this change
    and would tempt context-free `?` usage.
 
-4. **Box the whole `Database` payload or intern messages.**
-   Rejected as unnecessary: `Box<sqlx::Error>` already bounds the variant size;
-   the `String` message is small and owned at the call site.
+4. **Concrete `Option<Box<sqlx::Error>>` source field.**
+   Rejected: it forces a `sqlx` production dependency (workspace features
+   `runtime-tokio` + `sqlite`) into `voom-core`, the bottom of the one-way layer
+   graph, and thence into all 19 consumers including the storage-agnostic
+   `voom-policy`/`voom-plan`/`voom-scheduler`/`voom-worker-protocol`. The boxed
+   trait object preserves the source chain (downcastable to `sqlx::Error`) while
+   keeping the foundation crate driver-free. The minor cost is that consumers
+   recover the concrete type via `downcast_ref` rather than a direct field match.
 
 5. **Switch the `"database is locked"` retry classifier to match the structured
    `sqlx::Error` source.** Rejected as scope creep. It is a correctness-neutral
