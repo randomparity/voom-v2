@@ -109,6 +109,25 @@ impl ScoreReasonCode {
         }
     }
 
+    /// Returns a numeric priority used to surface the **most fundamental** rejection
+    /// reason when a candidate has multiple hard-gate failures.  Lower values are
+    /// more fundamental; the scorer selects the variant with the lowest priority
+    /// value via `min_by_key(ScoreReasonCode::priority)`.
+    ///
+    /// Tier ordering (ascending priority value = increasingly peripheral cause):
+    ///
+    /// | Priority | Variant | Meaning |
+    /// |----------|---------|---------|
+    /// | 0 | `MissingCapability` | Worker cannot perform the operation at all |
+    /// | 1 | `MissingGrant` | Worker lacks the required permission grant |
+    /// | 2 | `OperationDenied` | Worker is explicitly denied for this operation |
+    /// | 3 | `WorkerNotExecutable` | Worker is offline or marked non-executable |
+    /// | 4 | `NodeNotExecutable` | Host node is offline or marked non-executable |
+    /// | 5 | `HeartbeatExpired` | Node heartbeat is stale |
+    /// | 6 | `UnsupportedArtifactAccess` | No supported artifact-access mode |
+    /// | 7 | `WorkerCapacityFull` | Worker is at its active-lease limit |
+    /// | 8 | `NodeCapacityFull` | Node is at its active-lease limit |
+    /// | 9 | `Selected` / `NoReadyTicket` / `NoEligibleCandidate` | Non-rejection or aggregate outcome |
     #[must_use]
     pub const fn priority(self) -> u8 {
         match self {
