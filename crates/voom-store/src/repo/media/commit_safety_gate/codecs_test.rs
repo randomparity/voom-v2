@@ -50,7 +50,7 @@ fn replace_variant_rejects_unknown_field() {
 
 #[test]
 fn commit_target_rejects_unknown_variant_name() {
-    let v = serde_json::json!({ "kind": "teleport_file_location", "retired": "floc_1" });
+    let v = serde_json::json!({ "kind": "teleport_file_location", "retired": 1 });
     assert!(
         serde_json::from_value::<CommitTargetWire>(v).is_err(),
         "unknown variant name must be rejected",
