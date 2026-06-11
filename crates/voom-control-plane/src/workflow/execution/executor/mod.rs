@@ -1442,5 +1442,5 @@ fn sqlite_u32(value: i64) -> u32 {
 }
 
 #[cfg(test)]
-#[path = "executor_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;

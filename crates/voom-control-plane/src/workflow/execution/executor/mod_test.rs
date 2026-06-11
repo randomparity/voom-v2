@@ -2536,7 +2536,7 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
     // runs the bundled ffprobe against a parseable file. The probe only verifies
     // size+hash against these bytes; the container/codec the result claims are
     // not asserted by these dispatch/heartbeat tests.
-    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2567,7 +2567,7 @@ async fn transcode_result_payload_for_request(request: &OperationRequest) -> Val
 
 async fn remux_result_payload_for_request(request: &OperationRequest) -> Value {
     let request = serde_json::from_value::<RemuxRequest>(request.payload.clone()).unwrap();
-    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
@@ -2612,7 +2612,7 @@ async fn transcode_audio_result_payload_for_request(request: &OperationRequest) 
     // launches the bundled ffprobe against a parseable file. The probe only
     // verifies size+hash against these bytes; the container/codec the result
     // claims are not asserted by these dispatch/heartbeat tests.
-    let output_bytes = include_bytes!("../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
+    let output_bytes = include_bytes!("../../../../../voom-ffprobe-worker/fixtures/media/tiny.mp4");
     tokio::fs::write(&request.output.path, output_bytes)
         .await
         .unwrap();
