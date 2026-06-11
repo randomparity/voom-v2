@@ -1132,5 +1132,5 @@ fn same_file_facts(left: &ArtifactFileFacts, right: &ArtifactFileFacts) -> bool 
 }
 
 #[cfg(test)]
-#[path = "commit_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;
