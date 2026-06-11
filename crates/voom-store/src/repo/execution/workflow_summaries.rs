@@ -48,7 +48,7 @@ impl PhaseOutcome {
             "partially-committed" => Ok(Self::PartiallyCommitted),
             "skipped" => Ok(Self::Skipped),
             "blocked" => Ok(Self::Blocked),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "workflow_phase_summaries.outcome {other:?} not in vocab"
             ))),
         }
@@ -78,7 +78,7 @@ impl FilePhaseOutcome {
             "committed" => Ok(Self::Committed),
             "skipped" => Ok(Self::Skipped),
             "blocked" => Ok(Self::Blocked),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "workflow_file_phase_summaries.outcome {other:?} not in vocab"
             ))),
         }
@@ -232,7 +232,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(&created)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_summaries insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_summaries insert", e))?;
         Ok(WorkflowSummary {
             job_id: input.job_id,
             branch_count: input.branch_count,
@@ -287,7 +287,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(&created)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_phase_summaries insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_phase_summaries insert", e))?;
 
         if res.rows_affected() == 0 {
             return fetch_phase_by_key(&mut **tx, input.job_id, input.phase_ordinal)
@@ -354,7 +354,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(&created)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_file_phase_summaries insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_file_phase_summaries insert", e))?;
 
         if res.rows_affected() == 0 {
             return fetch_file_phase_by_key(
@@ -407,7 +407,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(i64_from_u64(job_id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_summaries get: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_summaries get", e))?;
         row.as_ref().map(row_to_summary).transpose()
     }
 
@@ -436,7 +436,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(i64_from_u64(job_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_phase_summaries list: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_phase_summaries list", e))?;
         rows.iter().map(row_to_phase).collect()
     }
 
@@ -451,7 +451,7 @@ impl SqliteWorkflowSummaryRepo {
         .bind(i64_from_u64(job_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow_file_phase_summaries list: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow_file_phase_summaries list", e))?;
         rows.iter().map(row_to_file_phase).collect()
     }
 }
@@ -459,13 +459,13 @@ impl SqliteWorkflowSummaryRepo {
 async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
     pool.begin()
         .await
-        .map_err(|e| VoomError::Database(format!("begin: {e}")))
+        .map_err(|e| VoomError::database_context("begin", e))
 }
 
 async fn commit(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))
+        .map_err(|e| VoomError::database_context("commit", e))
 }
 
 async fn fetch_phase_by_key<'e, E>(
@@ -484,7 +484,7 @@ where
     .bind(i64::from(phase_ordinal))
     .fetch_optional(exec)
     .await
-    .map_err(|e| VoomError::Database(format!("workflow_phase_summaries get: {e}")))?;
+    .map_err(|e| VoomError::database_context("workflow_phase_summaries get", e))?;
     row.as_ref().map(row_to_phase).transpose()
 }
 
@@ -506,13 +506,13 @@ where
     .bind(branch_id)
     .fetch_optional(exec)
     .await
-    .map_err(|e| VoomError::Database(format!("workflow_file_phase_summaries get: {e}")))?;
+    .map_err(|e| VoomError::database_context("workflow_file_phase_summaries get", e))?;
     row.as_ref().map(row_to_file_phase).transpose()
 }
 
 fn elapsed_to_ns(elapsed: Duration) -> Result<i64, VoomError> {
     i64::try_from(elapsed.as_nanos())
-        .map_err(|e| VoomError::Database(format!("elapsed_ns overflow ({elapsed:?}): {e}")))
+        .map_err(|e| VoomError::database_context(format!("elapsed_ns overflow ({elapsed:?})"), e))
 }
 
 fn serialize_ticket_ids(ticket_ids: &[TicketId]) -> Result<String, VoomError> {
@@ -521,7 +521,7 @@ fn serialize_ticket_ids(ticket_ids: &[TicketId]) -> Result<String, VoomError> {
 }
 
 fn parse_json(s: &str, field: &'static str) -> Result<Value, VoomError> {
-    serde_json::from_str(s).map_err(|e| VoomError::Database(format!("parse {field}: {e}")))
+    serde_json::from_str(s).map_err(|e| VoomError::database_context(format!("parse {field}"), e))
 }
 
 fn opt_id<T>(
@@ -592,7 +592,7 @@ fn row_to_phase(row: &sqlx::sqlite::SqliteRow) -> Result<PhaseSummary, VoomError
         }),
         (None, None) => None,
         _ => {
-            return Err(VoomError::Database(format!(
+            return Err(VoomError::database(format!(
                 "{t}: report_id/report half-populated for id={id}"
             )));
         }
@@ -619,8 +619,9 @@ fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, 
     let ticket_ids: String = row.try_get("ticket_ids").map_err(|e| map_row_err(t, &e))?;
     let outcome: String = row.try_get("outcome").map_err(|e| map_row_err(t, &e))?;
     let created: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
-    let raw_tickets: Vec<u64> = serde_json::from_str(&ticket_ids)
-        .map_err(|e| VoomError::Database(format!("{t}: parse ticket_ids for id={id}: {e}")))?;
+    let raw_tickets: Vec<u64> = serde_json::from_str(&ticket_ids).map_err(|e| {
+        VoomError::database_context(format!("{t}: parse ticket_ids for id={id}"), e)
+    })?;
     Ok(FilePhaseSummary {
         id: u64_from_i64(id),
         job_id: JobId(u64_from_i64(job_id)),

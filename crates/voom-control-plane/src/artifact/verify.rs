@@ -226,16 +226,16 @@ async fn load_expected_artifact_facts(
         })?)
         .fetch_optional(&cp.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("artifact_handles facts: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_handles facts", e))?;
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
             "artifact_handles {handle_id} missing"
         )));
     };
     let size_bytes: Option<i64> = sqlx::Row::try_get(&row, "size_bytes")
-        .map_err(|e| VoomError::Database(format!("artifact_handles.size_bytes: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_handles.size_bytes", e))?;
     let checksum: Option<String> = sqlx::Row::try_get(&row, "checksum")
-        .map_err(|e| VoomError::Database(format!("artifact_handles.checksum: {e}")))?;
+        .map_err(|e| VoomError::database_context("artifact_handles.checksum", e))?;
     let size_bytes = size_bytes.ok_or_else(|| {
         VoomError::Config(format!(
             "artifact_handle {handle_id} missing expected size_bytes"
@@ -248,7 +248,7 @@ async fn load_expected_artifact_facts(
     })?;
     Ok(ExpectedArtifactFacts {
         size_bytes: u64::try_from(size_bytes).map_err(|err| {
-            VoomError::Database(format!("artifact_handles.size_bytes negative: {err}"))
+            VoomError::database_context("artifact_handles.size_bytes negative", err)
         })?,
         checksum,
     })
@@ -381,7 +381,7 @@ async fn revalidate_selected_live_staging_location(
     })?)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_locations verify selected: {err}")))?;
+    .map_err(|err| VoomError::database_context("artifact_locations verify selected", err))?;
     let Some((owner_id, kind, value, retired_at)) = selected else {
         return Err(VoomError::NotFound(format!(
             "artifact_locations {location_id} missing"
@@ -408,7 +408,7 @@ async fn revalidate_selected_live_staging_location(
     })?)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_locations verify live staging: {err}")))?;
+    .map_err(|err| VoomError::database_context("artifact_locations verify live staging", err))?;
     let [(live_id, live_path)] = live_staging.as_slice() else {
         return Err(VoomError::Config(format!(
             "artifact_handle {handle_id} must still have exactly one live staging location; found {}",

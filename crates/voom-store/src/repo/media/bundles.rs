@@ -54,7 +54,7 @@ impl BundleMemberRole {
             "transcript" => Ok(Self::Transcript),
             "thumbnail" => Ok(Self::Thumbnail),
             "report" => Ok(Self::Report),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "asset_bundle_members.role {other:?} not in vocab"
             ))),
         }
@@ -122,7 +122,7 @@ impl SqliteBundleRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundles insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundles insert", e))?;
         let id = BundleId(u64_from_i64(res.last_insert_rowid()));
         get_bundle_in_tx(tx, id)
             .await?
@@ -134,11 +134,11 @@ impl SqliteBundleRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -147,7 +147,7 @@ impl SqliteBundleRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("asset_bundles get: {e}")))?;
+            .map_err(|e| VoomError::database_context("asset_bundles get", e))?;
         row.as_ref().map(row_to_bundle).transpose()
     }
 
@@ -162,7 +162,7 @@ impl SqliteBundleRepo {
         .bind(i64_from_u64(media_variant_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundles list: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundles list", e))?;
         rows.iter().map(row_to_bundle).collect()
     }
 
@@ -182,7 +182,7 @@ impl SqliteBundleRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundles update: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundles update", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "asset_bundles update_display_name: id={id} expected_epoch={expected_epoch} mismatch"
@@ -218,7 +218,7 @@ impl SqliteBundleRepo {
                     input.file_asset_id
                 ))
             } else {
-                VoomError::Database(msg)
+                VoomError::database(msg)
             }
         })?;
         let id = u64_from_i64(res.last_insert_rowid());
@@ -235,11 +235,11 @@ impl SqliteBundleRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.add_member_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -255,7 +255,7 @@ impl SqliteBundleRepo {
         .bind(i64_from_u64(file_asset_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundle_members get_by_asset: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundle_members get_by_asset", e))?;
         row.as_ref().map(row_to_bundle_member).transpose()
     }
 
@@ -274,7 +274,7 @@ impl SqliteBundleRepo {
         .bind(i64_from_u64(file_asset_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundle_members delete: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundle_members delete", e))?;
         let row = row.ok_or_else(|| {
             VoomError::NotFound(format!(
                 "asset_bundle_members not found: bundle={bundle_id} asset={file_asset_id}"
@@ -291,7 +291,7 @@ impl SqliteBundleRepo {
         .bind(i64_from_u64(bundle_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundle_members list: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundle_members list", e))?;
         rows.iter().map(row_to_bundle_member).collect()
     }
 }
@@ -307,7 +307,7 @@ async fn get_bundle_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_bundles get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_bundles get_in_tx", e))?;
     row.as_ref().map(row_to_bundle).transpose()
 }
 

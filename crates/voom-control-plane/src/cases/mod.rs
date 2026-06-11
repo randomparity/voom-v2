@@ -26,7 +26,7 @@ pub(crate) mod workers;
 pub(crate) async fn begin_tx(pool: &SqlitePool) -> Result<Transaction<'_, Sqlite>, VoomError> {
     pool.begin()
         .await
-        .map_err(|e| VoomError::Database(format!("begin: {e}")))
+        .map_err(|e| VoomError::database_context("begin", e))
 }
 
 /// Begin a transaction that takes `SQLite`'s write lock up front (`BEGIN
@@ -43,13 +43,13 @@ pub(crate) async fn begin_immediate_tx(
 ) -> Result<Transaction<'_, Sqlite>, VoomError> {
     pool.begin_with("BEGIN IMMEDIATE")
         .await
-        .map_err(|e| VoomError::Database(format!("begin immediate: {e}")))
+        .map_err(|e| VoomError::database_context("begin immediate", e))
 }
 
 pub(crate) async fn commit_tx(tx: Transaction<'_, Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))
+        .map_err(|e| VoomError::database_context("commit", e))
 }
 
 /// Reject empty or whitespace-only audit strings. The `force_release` and

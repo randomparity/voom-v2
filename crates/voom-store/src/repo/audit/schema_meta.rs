@@ -23,7 +23,7 @@ impl SqliteSchemaMetaRepo {
             .bind(key)
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("schema_meta get({key:?}) failed: {e}")))
+            .map_err(|e| VoomError::database_context(format!("schema_meta get({key:?}) failed"), e))
     }
 
     pub async fn set(&self, key: &str, value: &str) -> Result<(), VoomError> {
@@ -36,6 +36,6 @@ impl SqliteSchemaMetaRepo {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|e| VoomError::Database(format!("schema_meta set({key:?}) failed: {e}")))
+        .map_err(|e| VoomError::database_context(format!("schema_meta set({key:?}) failed"), e))
     }
 }

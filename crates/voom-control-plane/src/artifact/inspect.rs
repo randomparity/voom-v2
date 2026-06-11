@@ -389,12 +389,12 @@ async fn list_handle_ids_newest_first(
                 .await
         }
     }
-    .map_err(|err| VoomError::Database(format!("artifact_handles list: {err}")))?;
+    .map_err(|err| VoomError::database_context("artifact_handles list", err))?;
     rows.iter()
         .map(|row| {
             let id: i64 = row
                 .try_get("id")
-                .map_err(|err| VoomError::Database(format!("artifact_handles.id: {err}")))?;
+                .map_err(|err| VoomError::database_context("artifact_handles.id", err))?;
             Ok(ArtifactHandleId(u64_from_i64(id, "artifact_handles.id")?))
         })
         .collect()
@@ -411,20 +411,20 @@ async fn read_handle_facts(
     .bind(i64_from_u64(handle_id.0, "artifact_handles.id")?)
     .fetch_optional(&cp.pool)
     .await
-    .map_err(|err| VoomError::Database(format!("artifact_handles facts: {err}")))?
+    .map_err(|err| VoomError::database_context("artifact_handles facts", err))?
     .ok_or_else(|| VoomError::NotFound(format!("artifact_handles {handle_id} missing")))?;
     let id: i64 = row
         .try_get("id")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.id: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.id", err))?;
     let file_version_id: Option<i64> = row
         .try_get("file_version_id")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.file_version_id: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.file_version_id", err))?;
     let size_bytes: Option<i64> = row
         .try_get("size_bytes")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.size_bytes: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.size_bytes", err))?;
     let checksum: Option<String> = row
         .try_get("checksum")
-        .map_err(|err| VoomError::Database(format!("artifact_handles.checksum: {err}")))?;
+        .map_err(|err| VoomError::database_context("artifact_handles.checksum", err))?;
 
     Ok(HandleFacts {
         id: ArtifactHandleId(u64_from_i64(id, "artifact_handles.id")?),
@@ -445,7 +445,8 @@ fn i64_from_u64(value: u64, name: &str) -> Result<i64, VoomError> {
 }
 
 fn u64_from_i64(value: i64, name: &str) -> Result<u64, VoomError> {
-    u64::try_from(value).map_err(|err| VoomError::Database(format!("{name} is negative: {err}")))
+    u64::try_from(value)
+        .map_err(|err| VoomError::database_context(format!("{name} is negative"), err))
 }
 
 #[cfg(test)]

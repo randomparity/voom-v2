@@ -210,10 +210,20 @@ impl ErrorCode {
     }
 }
 
+/// Boxed, type-erased source error. Used to preserve an underlying error's
+/// source chain without forcing a concrete database-driver dependency into
+/// `voom-core` (the bottom of the one-way layer graph). Consumers recover the
+/// concrete type via `downcast_ref` — e.g. `downcast_ref::<sqlx::Error>()`.
+type BoxSource = Box<dyn std::error::Error + Send + Sync + 'static>;
+
 #[derive(Debug, Error)]
 pub enum VoomError {
-    #[error("database error: {0}")]
-    Database(String),
+    #[error("database error: {message}")]
+    Database {
+        message: String,
+        #[source]
+        source: Option<BoxSource>,
+    },
     #[error("uninitialized database: {0}")]
     UninitializedDatabase(String),
     #[error("migration error: {0}")]
@@ -293,12 +303,40 @@ pub enum VoomError {
 }
 
 impl VoomError {
+    /// Database error with a human-readable message and no structured source.
+    ///
+    /// Use this for database-layer failures that do not originate from a
+    /// driver error (URL/parse failures, integer overflow, decode misses,
+    /// literal sentinels). For errors that wrap a `sqlx::Error`, prefer
+    /// [`Self::database_context`] so the source chain is preserved.
+    pub fn database(message: impl Into<String>) -> Self {
+        Self::Database {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Database error that preserves an underlying error's source chain.
+    ///
+    /// `context` is the prefix describing the failing operation; the composed
+    /// `Display` message is `"database error: {context}: {source}"`. The source
+    /// is type-erased into a boxed `dyn Error` so `voom-core` needs no database
+    /// driver dependency; recover the concrete error via
+    /// `err.source().and_then(|s| s.downcast_ref::<sqlx::Error>())`.
+    pub fn database_context(context: impl std::fmt::Display, source: impl Into<BoxSource>) -> Self {
+        let source = source.into();
+        Self::Database {
+            message: format!("{context}: {source}"),
+            source: Some(source),
+        }
+    }
+
     /// Typed wire-format code for this error. Prefer this over [`Self::code`]
     /// at every consumer that classifies on the value.
     #[must_use]
     pub fn error_code(&self) -> ErrorCode {
         match self {
-            Self::Database(_) => ErrorCode::DbUnreachable,
+            Self::Database { .. } => ErrorCode::DbUnreachable,
             Self::UninitializedDatabase(_) => ErrorCode::DbUninitialized,
             Self::Migration(_) => ErrorCode::DbPartialSchema,
             Self::DirtyMigration(_) => ErrorCode::DbDirtyMigration,

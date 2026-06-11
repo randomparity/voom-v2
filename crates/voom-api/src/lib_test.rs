@@ -14,7 +14,7 @@ fn route_error_maps_db_down_family_to_service_unavailable() {
     // or an unclassified internal fault. All four DB-down codes must map to
     // Service Unavailable so callers don't read "your request was wrong".
     let db_down = [
-        VoomError::Database("disk I/O error".to_owned()),
+        VoomError::database("disk I/O error"),
         VoomError::Migration("schema_meta missing".to_owned()),
         VoomError::DirtyMigration("failed migration row present".to_owned()),
         VoomError::SchemaTooNew("db newer than this binary".to_owned()),

@@ -181,7 +181,7 @@ pub async fn persist_scanned_media_snapshot(
         .pool
         .begin()
         .await
-        .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+        .map_err(|e| VoomError::database_context("begin", e))?;
 
     ensure_worker_live_in_tx(&mut tx, worker_id).await?;
 
@@ -249,7 +249,7 @@ pub async fn persist_scanned_media_snapshot(
 
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+        .map_err(|e| VoomError::database_context("commit", e))?;
 
     Ok(PersistedScan {
         file_asset_id,
@@ -717,7 +717,7 @@ async fn ensure_worker_live_in_tx(
         .bind(worker_id_as_i64(worker_id)?)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scan persist worker reload: {e}")))?;
+        .map_err(|e| VoomError::database_context("scan persist worker reload", e))?;
     match status.as_deref() {
         Some("retired") | None => Err(VoomError::Conflict(format!(
             "scan persist rejected worker {worker_id}: missing or retired"

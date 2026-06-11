@@ -194,14 +194,15 @@ impl ControlPlane {
     }
 
     async fn ensure_scan_worker(&self) -> Result<WorkerId, VoomError> {
-        let mut tx =
-            self.pool.begin().await.map_err(|err| {
-                VoomError::Database(format!("scan worker bootstrap begin: {err}"))
-            })?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| VoomError::database_context("scan worker bootstrap begin", err))?;
         let worker = bootstrap::ensure_builtin_ffprobe_worker_in_tx(self, &mut tx).await?;
         tx.commit()
             .await
-            .map_err(|err| VoomError::Database(format!("scan worker bootstrap commit: {err}")))?;
+            .map_err(|err| VoomError::database_context("scan worker bootstrap commit", err))?;
         Ok(worker.id)
     }
 

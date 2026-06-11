@@ -114,7 +114,7 @@ impl SqliteNodeRepo {
         .bind(metadata)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes insert", e))?;
         Ok(Node {
             id: NodeId(u64_from_i64(res.last_insert_rowid())),
             name: input.name,
@@ -139,7 +139,7 @@ impl SqliteNodeRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes get: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes get", e))?;
         row.as_ref().map(row_to_node).transpose()
     }
 
@@ -160,7 +160,7 @@ impl SqliteNodeRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes list: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes list", e))?;
         rows.iter().map(row_to_node).collect()
     }
 
@@ -176,7 +176,7 @@ impl SqliteNodeRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes auth record: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes auth record", e))?;
         row.as_ref().map(row_to_auth_record).transpose()
     }
 
@@ -204,7 +204,7 @@ impl SqliteNodeRepo {
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes heartbeat: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes heartbeat", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "nodes heartbeat rejected: id={id} status changed during update"
@@ -228,7 +228,7 @@ impl SqliteNodeRepo {
         )
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes stale candidates: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes stale candidates", e))?;
         let mut changed = Vec::new();
         for row in &rows {
             let node = row_to_node(row)?;
@@ -272,7 +272,7 @@ impl SqliteNodeRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("nodes retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("nodes retire", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "nodes retire rejected: id={id} expected_epoch={expected_epoch} \
@@ -311,7 +311,7 @@ async fn mark_stale_candidate_in_tx(
     .bind(i64_from_u64(node.epoch))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("nodes mark stale: {e}")))?;
+    .map_err(|e| VoomError::database_context("nodes mark stale", e))?;
     if res.rows_affected() == 0 {
         return Ok(None);
     }
@@ -336,7 +336,7 @@ async fn get_in_tx(
     .bind(i64_from_u64(id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("nodes reload: {e}")))?;
+    .map_err(|e| VoomError::database_context("nodes reload", e))?;
     row.as_ref().map(row_to_node).transpose()
 }
 
@@ -377,7 +377,7 @@ fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<Node, VoomError> {
         heartbeat_ttl_seconds: u32_from_i64(heartbeat_ttl_seconds)?,
         auth_token_hint,
         metadata: serde_json::from_str(&metadata)
-            .map_err(|e| VoomError::Database(format!("nodes.metadata decode: {e}")))?,
+            .map_err(|e| VoomError::database_context("nodes.metadata decode", e))?,
         epoch: u64_from_i64(epoch),
     })
 }

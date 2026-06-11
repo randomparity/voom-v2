@@ -33,7 +33,7 @@ impl SchedulerDecisionKind {
             "lease_acquire" => Ok(Self::LeaseAcquire),
             "idle" => Ok(Self::Idle),
             "no_candidate" => Ok(Self::NoCandidate),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "scheduler_decisions.decision_kind {other:?} not in vocab"
             ))),
         }
@@ -57,7 +57,7 @@ impl SchedulerRequestSource {
     fn parse(s: &str) -> Result<Self, VoomError> {
         match s {
             "remote_acquire" => Ok(Self::RemoteAcquire),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "scheduler_decisions.request_source {other:?} not in vocab"
             ))),
         }
@@ -90,7 +90,7 @@ impl SchedulerDecisionOutcome {
             "idle" => Ok(Self::Idle),
             "no_eligible_candidate" => Ok(Self::NoEligibleCandidate),
             "rejected" => Ok(Self::Rejected),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "scheduler_decisions.outcome {other:?} not in vocab"
             ))),
         }
@@ -147,7 +147,7 @@ impl SchedulerReasonCode {
             "worker_capacity_full" => Ok(Self::WorkerCapacityFull),
             "node_capacity_full" => Ok(Self::NodeCapacityFull),
             "no_eligible_candidate" => Ok(Self::NoEligibleCandidate),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "scheduler_decisions.reason_code {other:?} not in vocab"
             ))),
         }
@@ -245,11 +245,11 @@ impl SqliteSchedulerDecisionRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let decision = self.create_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(decision)
     }
 
@@ -268,7 +268,7 @@ impl SqliteSchedulerDecisionRepo {
         )
         .fetch_one(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scheduler_decisions insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scheduler_decisions insert", e))?;
         row_to_decision(&row)
     }
 
@@ -280,11 +280,11 @@ impl SqliteSchedulerDecisionRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let decision = self.create_or_suppress_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(decision)
     }
 
@@ -305,7 +305,7 @@ impl SqliteSchedulerDecisionRepo {
         )
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scheduler_decisions upsert: {e}")))?;
+        .map_err(|e| VoomError::database_context("scheduler_decisions upsert", e))?;
         row.as_ref()
             .map(row_to_decision)
             .transpose()?
@@ -326,13 +326,13 @@ impl SqliteSchedulerDecisionRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let decision = self
             .link_selected_lease_in_tx(&mut tx, id, lease_id, now)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(decision)
     }
 
@@ -357,7 +357,7 @@ impl SqliteSchedulerDecisionRepo {
         .bind(i64_from_u64(lease_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("scheduler_decisions link lease: {e}")))?;
+        .map_err(|e| VoomError::database_context("scheduler_decisions link lease", e))?;
 
         match row.as_ref().map(row_to_decision).transpose()? {
             Some(decision) => Ok(decision),
@@ -372,7 +372,7 @@ impl SqliteSchedulerDecisionRepo {
         .bind(i64_from_u64(id))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("scheduler_decisions get: {e}")))?;
+        .map_err(|e| VoomError::database_context("scheduler_decisions get", e))?;
         row.as_ref().map(row_to_decision).transpose()
     }
 
@@ -408,7 +408,7 @@ impl SqliteSchedulerDecisionRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("scheduler_decisions list: {e}")))?;
+        .map_err(|e| VoomError::database_context("scheduler_decisions list", e))?;
 
         rows.iter().map(row_to_decision).collect()
     }
@@ -597,7 +597,7 @@ async fn validate_selected_lease_link_in_tx(
     .bind(i64_from_u64(decision_id))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("scheduler_decisions link coherence: {e}")))?;
+    .map_err(|e| VoomError::database_context("scheduler_decisions link coherence", e))?;
 
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
@@ -619,7 +619,7 @@ async fn link_selected_lease_after_empty_update_in_tx(
     .bind(i64_from_u64(decision_id))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("scheduler_decisions link reread: {e}")))?;
+    .map_err(|e| VoomError::database_context("scheduler_decisions link reread", e))?;
 
     let Some(row) = row else {
         return Err(VoomError::NotFound(format!(
@@ -869,9 +869,8 @@ fn row_to_decision(row: &sqlx::sqlite::SqliteRow) -> Result<SchedulerDecision, V
         selected_score,
         suppressed_count: u32_from_i64(suppressed_count)?,
         suppression_key,
-        explanation: serde_json::from_str(&explanation_json).map_err(|e| {
-            VoomError::Database(format!("scheduler_decisions explanation_json: {e}"))
-        })?,
+        explanation: serde_json::from_str(&explanation_json)
+            .map_err(|e| VoomError::database_context("scheduler_decisions explanation_json", e))?,
     })
 }
 

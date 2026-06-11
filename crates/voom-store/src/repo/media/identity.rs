@@ -53,7 +53,7 @@ impl MediaWorkKind {
             "episode" => Ok(Self::Episode),
             "personal" => Ok(Self::Personal),
             "unknown" => Ok(Self::Unknown),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "media_works.kind {other:?} not in vocab"
             ))),
         }
@@ -89,7 +89,7 @@ impl FileLocationKind {
             "object_store_key" => Ok(Self::ObjectStoreKey),
             "backup_path" => Ok(Self::BackupPath),
             "historical" => Ok(Self::Historical),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "file_locations.kind {other:?} not in vocab"
             ))),
         }
@@ -128,7 +128,7 @@ impl ProducedBy {
             "restore" => Ok(Self::Restore),
             "external_observed" => Ok(Self::ExternalObserved),
             "staged_commit" => Ok(Self::StagedCommit),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "file_versions.produced_by {other:?} not in vocab"
             ))),
         }
@@ -175,7 +175,7 @@ impl IdentityEvidenceTarget {
             "file_asset" => Ok(Self::FileAsset),
             "file_version" => Ok(Self::FileVersion),
             "file_location" => Ok(Self::FileLocation),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "identity_evidence.target_type {other:?} not in vocab"
             ))),
         }
@@ -867,13 +867,13 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .record_discovered_file_in_tx(&mut tx, discovered, alias_proof)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -897,13 +897,13 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self
             .reconcile_rename_in_tx(&mut tx, proof, observed, observed_at)
             .await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -923,7 +923,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_works insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_works insert", e))?;
         let id = MediaWorkId(u64_from_i64(res.last_insert_rowid()));
         get_media_work_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("media_works post-insert get vanished: {id}"))
@@ -935,11 +935,11 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_media_work_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -948,7 +948,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("media_works get: {e}")))?;
+            .map_err(|e| VoomError::database_context("media_works get", e))?;
         row.as_ref().map(row_to_media_work).transpose()
     }
 
@@ -960,7 +960,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("media_works list: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_works list", e))?;
         rows.iter().map(row_to_media_work).collect()
     }
 
@@ -980,7 +980,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_works update: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_works update", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "media_works update_provisional: id={id} expected_epoch={expected_epoch} mismatch"
@@ -1007,7 +1007,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_variants insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_variants insert", e))?;
         let id = MediaVariantId(u64_from_i64(res.last_insert_rowid()));
         get_media_variant_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("media_variants post-insert get vanished: {id}"))
@@ -1022,11 +1022,11 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_media_variant_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -1038,7 +1038,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("media_variants get: {e}")))?;
+            .map_err(|e| VoomError::database_context("media_variants get", e))?;
         row.as_ref().map(row_to_media_variant).transpose()
     }
 
@@ -1053,7 +1053,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(media_work_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("media_variants list: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_variants list", e))?;
         rows.iter().map(row_to_media_variant).collect()
     }
 
@@ -1073,7 +1073,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_variants update: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_variants update", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "media_variants update_provisional: id={id} expected_epoch={expected_epoch} mismatch"
@@ -1094,7 +1094,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(&ts)
             .execute(&mut **tx)
             .await
-            .map_err(|e| VoomError::Database(format!("file_assets insert: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_assets insert", e))?;
         let id = FileAssetId(u64_from_i64(res.last_insert_rowid()));
         get_file_asset_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("file_assets post-insert get vanished: {id}"))
@@ -1106,11 +1106,11 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_file_asset_in_tx(&mut tx, created_at).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -1119,7 +1119,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("file_assets get: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_assets get", e))?;
         row.as_ref().map(row_to_file_asset).transpose()
     }
 
@@ -1140,7 +1140,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_assets retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_assets retire", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "file_assets retire: id={id} expected_epoch={expected_epoch} or already retired"
@@ -1171,9 +1171,7 @@ impl IdentityRepo for SqliteIdentityRepo {
                     .bind(i64_from_u64(parent_id.0))
                     .fetch_optional(&mut **tx)
                     .await
-                    .map_err(|e| {
-                        VoomError::Database(format!("file_versions parent lookup: {e}"))
-                    })?;
+                    .map_err(|e| VoomError::database_context("file_versions parent lookup", e))?;
             let parent_asset = parent_asset.ok_or_else(|| {
                 VoomError::NotFound(format!("file_versions parent {parent_id} missing"))
             })?;
@@ -1204,7 +1202,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions insert", e))?;
         let id = FileVersionId(u64_from_i64(res.last_insert_rowid()));
         get_file_version_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("file_versions post-insert get vanished: {id}"))
@@ -1216,11 +1214,11 @@ impl IdentityRepo for SqliteIdentityRepo {
             .pool
             .begin()
             .await
-            .map_err(|e| VoomError::Database(format!("begin: {e}")))?;
+            .map_err(|e| VoomError::database_context("begin", e))?;
         let out = self.create_file_version_in_tx(&mut tx, input).await?;
         tx.commit()
             .await
-            .map_err(|e| VoomError::Database(format!("commit: {e}")))?;
+            .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
     }
 
@@ -1229,7 +1227,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("file_versions get: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_versions get", e))?;
         row.as_ref().map(row_to_file_version).transpose()
     }
 
@@ -1253,7 +1251,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(asset_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions list: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions list", e))?;
         rows.iter().map(row_to_file_version).collect()
     }
 
@@ -1265,7 +1263,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions list live: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions list live", e))?;
         rows.iter().map(row_to_file_version).collect()
     }
 
@@ -1286,7 +1284,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions retire", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "file_versions retire: id={id} expected_epoch={expected_epoch} or already retired"
@@ -1324,7 +1322,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("file_locations get: {e}")))?;
+            .map_err(|e| VoomError::database_context("file_locations get", e))?;
         row.as_ref().map(row_to_file_location).transpose()
     }
 
@@ -1348,7 +1346,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(version_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations list: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations list", e))?;
         rows.iter().map(row_to_file_location).collect()
     }
 
@@ -1365,7 +1363,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(version_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations list live: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations list live", e))?;
         rows.iter().map(row_to_file_location).collect()
     }
 
@@ -1382,7 +1380,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(version_id.0))
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations list live in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations list live in_tx", e))?;
         rows.into_iter()
             .map(|id| {
                 u64::try_from(id)
@@ -1409,7 +1407,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations retire", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "file_locations retire: id={id} expected_epoch={expected_epoch} or already retired"
@@ -1455,7 +1453,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         // pre-UPDATE state, so a caller that commits the outer tx
         // after the inner failure observes the old row still live.
         let mut sp = tx.begin().await.map_err(|e| {
-            VoomError::Database(format!("file_locations replace savepoint begin: {e}"))
+            VoomError::database_context("file_locations replace savepoint begin", e)
         })?;
 
         let ts = iso8601(retired_at)?;
@@ -1468,7 +1466,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(retired_expected_epoch))
         .execute(&mut *sp)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations replace-retire: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations replace-retire", e))?;
         if res.rows_affected() != 1 {
             // Dropping sp here ROLLBACKs TO the savepoint; outer tx restored.
             return Err(VoomError::Conflict(format!(
@@ -1486,7 +1484,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .await?;
 
         sp.commit().await.map_err(|e| {
-            VoomError::Database(format!("file_locations replace savepoint release: {e}"))
+            VoomError::database_context("file_locations replace savepoint release", e)
         })?;
         Ok(new_id)
     }
@@ -1510,7 +1508,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(expected_epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations value update: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations value update", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "file_locations value update: id={id} expected_epoch={expected_epoch} or already retired"
@@ -1540,7 +1538,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("identity_evidence get: {e}")))?;
+            .map_err(|e| VoomError::database_context("identity_evidence get", e))?;
         row.as_ref().map(row_to_identity_evidence).transpose()
     }
 
@@ -1569,7 +1567,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(target_id))
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence list_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence list_in_tx", e))?;
         rows.iter().map(row_to_identity_evidence).collect()
     }
 
@@ -1589,7 +1587,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(target_id))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence list: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence list", e))?;
         rows.iter().map(row_to_identity_evidence).collect()
     }
 
@@ -1610,7 +1608,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(target_id))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence list live: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence list live", e))?;
         rows.iter().map(row_to_identity_evidence).collect()
     }
 
@@ -1661,7 +1659,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence accept: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence accept", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "identity_evidence accept: id={id} already accepted, superseded, or missing"
@@ -1693,7 +1691,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(old_id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence supersede: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence supersede", e))?;
         if res.rows_affected() != 1 {
             return Err(VoomError::Conflict(format!(
                 "identity_evidence supersede: id={old_id} already superseded or missing"
@@ -1725,7 +1723,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(payload_str)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_snapshots insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_snapshots insert", e))?;
         let id = MediaSnapshotId(u64_from_i64(res.last_insert_rowid()));
         get_media_snapshot_in_tx(tx, id).await?.ok_or_else(|| {
             VoomError::Internal(format!("media_snapshots post-insert get vanished: {id}"))
@@ -1740,7 +1738,7 @@ impl IdentityRepo for SqliteIdentityRepo {
             .bind(i64_from_u64(id.0))
             .fetch_optional(&self.pool)
             .await
-            .map_err(|e| VoomError::Database(format!("media_snapshots get: {e}")))?;
+            .map_err(|e| VoomError::database_context("media_snapshots get", e))?;
         row.as_ref().map(row_to_media_snapshot).transpose()
     }
 
@@ -1763,7 +1761,7 @@ impl IdentityRepo for SqliteIdentityRepo {
         .bind(i64_from_u64(version_id.0))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("media_snapshots list: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_snapshots list", e))?;
         rows.iter().map(row_to_media_snapshot).collect()
     }
 }
@@ -1900,7 +1898,7 @@ async fn ingest_new_file_asset(
         .bind(&ts)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_assets insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_assets insert", e))?;
     let asset_id = FileAssetId(u64_from_i64(asset_res.last_insert_rowid()));
 
     // Insert FileVersion (produced_by = 'ingest', parent NULL).
@@ -1922,7 +1920,7 @@ async fn ingest_new_file_asset(
     .bind(&ts)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("file_versions insert: {e}")))?;
+    .map_err(|e| VoomError::database_context("file_versions insert", e))?;
     let version_id = FileVersionId(u64_from_i64(version_res.last_insert_rowid()));
 
     // Insert FileLocation carrying the discovered proof (if any).
@@ -1953,7 +1951,7 @@ async fn ingest_new_file_asset(
     .bind(i64_from_u64(version_id.0))
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("file_versions hash-match probe: {e}")))?;
+    .map_err(|e| VoomError::database_context("file_versions hash-match probe", e))?;
     let hash_match_evidence = if let Some((prior_version_i, prior_asset_i)) = prior {
         let prior_version_id = FileVersionId(u64_from_i64(prior_version_i));
         let prior_asset_id = FileAssetId(u64_from_i64(prior_asset_i));
@@ -2137,7 +2135,7 @@ async fn reconcile_rename_impl(
     .bind(i64_from_u64(prior_location_id.0))
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("reconcile_rename retire: {e}")))?;
+    .map_err(|e| VoomError::database_context("reconcile_rename retire", e))?;
     if retire_res.rows_affected() != 1 {
         return Err(VoomError::Conflict(format!(
             "reconcile_rename: race on retire of {prior_location_id}"
@@ -2228,7 +2226,7 @@ async fn insert_file_location_with_raw_proof(
     .bind(&ts)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("file_locations insert: {e}")))?;
+    .map_err(|e| VoomError::database_context("file_locations insert", e))?;
     Ok(FileLocationId(u64_from_i64(res.last_insert_rowid())))
 }
 
@@ -2256,7 +2254,7 @@ async fn insert_identity_evidence(
     .bind(&ts)
     .execute(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("identity_evidence insert: {e}")))?;
+    .map_err(|e| VoomError::database_context("identity_evidence insert", e))?;
     Ok(EvidenceId(u64_from_i64(res.last_insert_rowid())))
 }
 
@@ -2273,7 +2271,7 @@ async fn get_media_work_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_works get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_works get_in_tx", e))?;
     row.as_ref().map(row_to_media_work).transpose()
 }
 
@@ -2317,7 +2315,7 @@ async fn get_media_variant_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_variants get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_variants get_in_tx", e))?;
     row.as_ref().map(row_to_media_variant).transpose()
 }
 
@@ -2361,7 +2359,7 @@ async fn get_file_asset_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_assets get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_assets get_in_tx", e))?;
     row.as_ref().map(row_to_file_asset).transpose()
 }
 
@@ -2398,7 +2396,7 @@ async fn get_file_version_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_versions get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_versions get_in_tx", e))?;
     row.as_ref().map(row_to_file_version).transpose()
 }
 
@@ -2431,7 +2429,7 @@ fn row_to_file_version(row: &sqlx::sqlite::SqliteRow) -> Result<FileVersion, Voo
         .try_get("epoch")
         .map_err(|e| map_row_err("file_versions", &e))?;
     let size = u64::try_from(size_bytes).map_err(|_| {
-        VoomError::Database(format!("file_versions.size_bytes negative ({size_bytes})"))
+        VoomError::database(format!("file_versions.size_bytes negative ({size_bytes})"))
     })?;
     Ok(FileVersion {
         id: FileVersionId(u64_from_i64(id)),
@@ -2458,7 +2456,7 @@ async fn get_file_location_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("file_locations get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("file_locations get_in_tx", e))?;
     row.as_ref().map(row_to_file_location).transpose()
 }
 
@@ -2519,7 +2517,7 @@ async fn get_identity_evidence_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("identity_evidence get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("identity_evidence get_in_tx", e))?;
     row.as_ref().map(row_to_identity_evidence).transpose()
 }
 
@@ -2531,7 +2529,7 @@ async fn ensure_policy_version_exists(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("policy_versions existence check: {e}")))?;
+        .map_err(|e| VoomError::database_context("policy_versions existence check", e))?;
     if exists.is_none() {
         return Err(VoomError::PolicyValidationError(format!(
             "accepted_policy_id {id} is not a policy version"
@@ -2599,12 +2597,12 @@ fn row_to_identity_evidence(row: &sqlx::sqlite::SqliteRow) -> Result<IdentityEvi
         .try_get("pinned_locations")
         .map_err(|e| map_row_err("identity_evidence", &e))?;
     let provenance_v: JsonValue = serde_json::from_str(&provenance)
-        .map_err(|e| VoomError::Database(format!("parse provenance: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse provenance", e))?;
     let parse_opt =
         |s: Option<String>, col: &'static str| -> Result<Option<JsonValue>, VoomError> {
             s.map(|s| serde_json::from_str(&s))
                 .transpose()
-                .map_err(|e| VoomError::Database(format!("parse {col}: {e}")))
+                .map_err(|e| VoomError::database_context(format!("parse {col}"), e))
         };
     Ok(IdentityEvidence {
         id: EvidenceId(u64_from_i64(id)),
@@ -2640,7 +2638,7 @@ async fn get_media_snapshot_in_tx(
         .bind(i64_from_u64(id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("media_snapshots get_in_tx: {e}")))?;
+        .map_err(|e| VoomError::database_context("media_snapshots get_in_tx", e))?;
     row.as_ref().map(row_to_media_snapshot).transpose()
 }
 
@@ -2661,7 +2659,7 @@ fn row_to_media_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot,
         .try_get("payload")
         .map_err(|e| map_row_err("media_snapshots", &e))?;
     let payload_v: JsonValue = serde_json::from_str(&payload)
-        .map_err(|e| VoomError::Database(format!("parse media_snapshots.payload: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse media_snapshots.payload", e))?;
     Ok(MediaSnapshot {
         id: MediaSnapshotId(u64_from_i64(id)),
         file_version_id: FileVersionId(u64_from_i64(file_version_id)),

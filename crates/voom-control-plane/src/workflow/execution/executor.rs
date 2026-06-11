@@ -1034,12 +1034,12 @@ impl WorkflowExecutor {
         .bind(workflow_id)
         .fetch_all(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow succeeded node ids: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow succeeded node ids", e))?;
         let mut node_ids = HashSet::new();
         for row in rows {
             let node_id: Option<String> = row
                 .try_get("node_id")
-                .map_err(|e| VoomError::Database(format!("succeeded node id row: {e}")))?;
+                .map_err(|e| VoomError::database_context("succeeded node id row", e))?;
             if let Some(node_id) = node_id {
                 node_ids.insert(node_id);
             }
@@ -1067,7 +1067,7 @@ impl WorkflowExecutor {
         .bind(node_id)
         .fetch_one(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow node ticket exists: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow node ticket exists", e))?;
         Ok(count > 0)
     }
 
@@ -1092,12 +1092,14 @@ impl WorkflowExecutor {
         .bind(i64::from(self.options.queue.ready_batch_size))
         .fetch_all(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow ready tickets for {job_id}: {e}")))?;
+        .map_err(|e| {
+            VoomError::database_context(format!("workflow ready tickets for {job_id}"), e)
+        })?;
         let mut tickets = Vec::with_capacity(rows.len());
         for row in rows {
             let id: i64 = row
                 .try_get("id")
-                .map_err(|e| VoomError::Database(format!("workflow ready ticket id: {e}")))?;
+                .map_err(|e| VoomError::database_context("workflow ready ticket id", e))?;
             let ticket_id = TicketId(sqlite_u64(id));
             let ticket = self
                 .control_plane
@@ -1105,7 +1107,7 @@ impl WorkflowExecutor {
                 .get(ticket_id)
                 .await
                 .map_err(|e| {
-                    VoomError::Database(format!(
+                    VoomError::database(format!(
                         "load workflow ready ticket {ticket_id} for {job_id}: {e}"
                     ))
                 })?
@@ -1133,7 +1135,7 @@ impl WorkflowExecutor {
         .fetch_one(&self.control_plane.pool)
         .await
         .map_err(|e| {
-            VoomError::Database(format!("workflow unfinished tickets for {job_id}: {e}"))
+            VoomError::database_context(format!("workflow unfinished tickets for {job_id}"), e)
         })?;
         Ok(unfinished == 0)
     }
@@ -1149,19 +1151,21 @@ impl WorkflowExecutor {
         .bind(sqlite_i64(job_id.0))
         .fetch_optional(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow failed ticket for {job_id}: {e}")))?;
+        .map_err(|e| {
+            VoomError::database_context(format!("workflow failed ticket for {job_id}"), e)
+        })?;
         let Some(row) = row else {
             return Ok(None);
         };
         let id: i64 = row
             .try_get("id")
-            .map_err(|e| VoomError::Database(format!("workflow failed ticket id: {e}")))?;
+            .map_err(|e| VoomError::database_context("workflow failed ticket id", e))?;
         let ticket_id = TicketId(sqlite_u64(id));
         let kind: String = row.try_get("kind").map_err(|e| {
-            VoomError::Database(format!("workflow failed ticket {ticket_id} kind: {e}"))
+            VoomError::database_context(format!("workflow failed ticket {ticket_id} kind"), e)
         })?;
         let payload: String = row.try_get("payload").map_err(|e| {
-            VoomError::Database(format!("workflow failed ticket {ticket_id} payload: {e}"))
+            VoomError::database_context(format!("workflow failed ticket {ticket_id} payload"), e)
         })?;
         let payload: Value = serde_json::from_str(&payload).map_err(|e| {
             VoomError::Internal(format!(
@@ -1194,15 +1198,17 @@ impl WorkflowExecutor {
         .bind(sqlite_i64(ticket_id.0))
         .fetch_optional(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow failure event for {ticket_id}: {e}")))?;
+        .map_err(|e| {
+            VoomError::database_context(format!("workflow failure event for {ticket_id}"), e)
+        })?;
         let Some(row) = row else {
             return Ok(None);
         };
         let event_id: i64 = row.try_get("event_id").map_err(|e| {
-            VoomError::Database(format!("workflow failure event id for {ticket_id}: {e}"))
+            VoomError::database_context(format!("workflow failure event id for {ticket_id}"), e)
         })?;
         let payload: String = row.try_get("payload").map_err(|e| {
-            VoomError::Database(format!(
+            VoomError::database(format!(
                 "workflow failure event {event_id} payload for {ticket_id}: {e}"
             ))
         })?;
@@ -1243,7 +1249,9 @@ impl WorkflowExecutor {
         .bind(workflow_id)
         .fetch_optional(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow retry delay for {job_id}: {e}")))?;
+        .map_err(|e| {
+            VoomError::database_context(format!("workflow retry delay for {job_id}"), e)
+        })?;
         let Some((Some(next_eligible),)) = row else {
             return Ok(None);
         };
@@ -1282,22 +1290,22 @@ impl WorkflowExecutor {
         .bind(operation_name)
         .fetch_all(&self.control_plane.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("workflow worker candidates: {e}")))?;
+        .map_err(|e| VoomError::database_context("workflow worker candidates", e))?;
 
         let mut views = Vec::new();
         for row in rows {
             let worker_id: i64 = row
                 .try_get("worker_id")
-                .map_err(|e| VoomError::Database(format!("worker candidate row: {e}")))?;
+                .map_err(|e| VoomError::database_context("worker candidate row", e))?;
             let can_execute: String = row
                 .try_get("can_execute")
-                .map_err(|e| VoomError::Database(format!("worker grant can_execute: {e}")))?;
+                .map_err(|e| VoomError::database_context("worker grant can_execute", e))?;
             let denies: String = row
                 .try_get("denies")
-                .map_err(|e| VoomError::Database(format!("worker grant denies: {e}")))?;
+                .map_err(|e| VoomError::database_context("worker grant denies", e))?;
             let max_parallel: String = row
                 .try_get("max_parallel")
-                .map_err(|e| VoomError::Database(format!("worker grant max_parallel: {e}")))?;
+                .map_err(|e| VoomError::database_context("worker grant max_parallel", e))?;
             if !json_string_array_contains(&can_execute, operation_name)?
                 || json_string_array_contains(&denies, operation_name)?
             {
@@ -1306,7 +1314,7 @@ impl WorkflowExecutor {
             let worker_id = WorkerId(sqlite_u64(worker_id));
             let active_leases: i64 = row
                 .try_get("active_leases")
-                .map_err(|e| VoomError::Database(format!("worker active lease count: {e}")))?;
+                .map_err(|e| VoomError::database_context("worker active lease count", e))?;
             let reserved = reservations.get(&worker_id).copied().unwrap_or(0);
             views.push(WorkerView {
                 worker_id,
@@ -1401,13 +1409,13 @@ fn local_reservation_blocks(
 
 fn json_string_array_contains(raw: &str, needle: &str) -> Result<bool, VoomError> {
     let values: Vec<String> = serde_json::from_str(raw)
-        .map_err(|e| VoomError::Database(format!("parse worker grant array: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse worker grant array", e))?;
     Ok(values.iter().any(|value| value == needle))
 }
 
 fn max_parallel_for_operation(raw: &str, operation: &str) -> Result<u32, VoomError> {
     let value: Value = serde_json::from_str(raw)
-        .map_err(|e| VoomError::Database(format!("parse worker max_parallel: {e}")))?;
+        .map_err(|e| VoomError::database_context("parse worker max_parallel", e))?;
     let max = value
         .get(operation)
         .or_else(|| value.get("*"))

@@ -30,7 +30,7 @@ impl NodeKind {
 
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value)
-            .ok_or_else(|| VoomError::Database(format!("{field} {value:?} not in node kind vocab")))
+            .ok_or_else(|| VoomError::database(format!("{field} {value:?} not in node kind vocab")))
     }
 }
 
@@ -67,7 +67,7 @@ impl NodeStatus {
 
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
-            VoomError::Database(format!("{field} {value:?} not in node status vocab"))
+            VoomError::database(format!("{field} {value:?} not in node status vocab"))
         })
     }
 }
@@ -102,7 +102,7 @@ impl WorkerKind {
 
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
-            VoomError::Database(format!("{field} {value:?} not in worker kind vocab"))
+            VoomError::database(format!("{field} {value:?} not in worker kind vocab"))
         })
     }
 }
@@ -140,7 +140,7 @@ impl WorkerStatus {
 
     pub fn parse_database(field: &str, value: &str) -> Result<Self, VoomError> {
         Self::from_wire(value).ok_or_else(|| {
-            VoomError::Database(format!("{field} {value:?} not in worker status vocab"))
+            VoomError::database(format!("{field} {value:?} not in worker status vocab"))
         })
     }
 }

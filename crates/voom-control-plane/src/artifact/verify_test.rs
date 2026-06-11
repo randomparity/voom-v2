@@ -580,7 +580,7 @@ impl VerifyArtifactHooks for FailBeforeTerminalEvent {
         &self,
         _context: VerifyArtifactPersistContext<'_>,
     ) -> Result<(), VoomError> {
-        Err(VoomError::Database(
+        Err(VoomError::database(
             "injected verification event failure".to_owned(),
         ))
     }

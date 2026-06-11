@@ -135,7 +135,7 @@ where
             Err(err) => return Err(err),
         }
     }
-    Err(last.unwrap_or_else(|| VoomError::Database("database is locked".to_owned())))
+    Err(last.unwrap_or_else(|| VoomError::database("database is locked")))
 }
 
 pub(crate) fn failure_class_for_error(source: &VoomError) -> FailureClass {
@@ -148,5 +148,5 @@ pub(super) fn time_duration(duration: Duration) -> Result<time::Duration, VoomEr
 }
 
 fn is_database_locked(err: &VoomError) -> bool {
-    matches!(err, VoomError::Database(message) if message.contains("database is locked"))
+    matches!(err, VoomError::Database { message, .. } if message.contains("database is locked"))
 }

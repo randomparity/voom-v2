@@ -36,7 +36,7 @@ impl PolicyIssueStatus {
             "open" => Ok(Self::Open),
             "planned" => Ok(Self::Planned),
             "resolved" => Ok(Self::Resolved),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "issues.status {other:?} not in policy issue vocab"
             ))),
         }
@@ -117,7 +117,7 @@ impl SqliteIssueRepo {
             Err(err) => {
                 let existing = select_issue_detail(tx, &draft.dedupe_key).await?;
                 let Some(existing) = existing else {
-                    return Err(VoomError::Database(format!("issues insert: {err}")));
+                    return Err(VoomError::database_context("issues insert", err));
                 };
                 existing
             }
@@ -147,7 +147,7 @@ impl SqliteIssueRepo {
         .bind(i64_from_u64(existing.row.id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("issues update: {e}")))?;
+        .map_err(|e| VoomError::database_context("issues update", e))?;
 
         Ok(PolicyIssueMutation {
             kind: PolicyIssueMutationKind::Updated,
@@ -185,7 +185,7 @@ impl SqliteIssueRepo {
         .bind(i64_from_u64(existing.id.0))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("issues resolve: {e}")))?;
+        .map_err(|e| VoomError::database_context("issues resolve", e))?;
 
         Ok(Some(PolicyIssueMutation {
             kind: PolicyIssueMutationKind::Resolved,
@@ -213,7 +213,7 @@ impl SqliteIssueRepo {
         .bind(dedupe_prefix)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("issues list live: {e}")))?;
+        .map_err(|e| VoomError::database_context("issues list live", e))?;
 
         rows.iter().map(row_to_policy_issue).collect()
     }
@@ -238,7 +238,7 @@ async fn select_issue_detail(
     .bind(dedupe_key)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("issues select detail: {e}")))?;
+    .map_err(|e| VoomError::database_context("issues select detail", e))?;
     row.as_ref().map(row_to_policy_issue_detail).transpose()
 }
 
@@ -256,23 +256,23 @@ async fn select_live_policy_issue(
     .bind(dedupe_key)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| VoomError::Database(format!("issues select live: {e}")))?;
+    .map_err(|e| VoomError::database_context("issues select live", e))?;
     row.as_ref().map(row_to_policy_issue).transpose()
 }
 
 fn row_to_policy_issue(row: &sqlx::sqlite::SqliteRow) -> Result<PolicyIssueRow, VoomError> {
     let id: i64 = row
         .try_get("id")
-        .map_err(|e| VoomError::Database(format!("read issue id: {e}")))?;
+        .map_err(|e| VoomError::database_context("read issue id", e))?;
     let dedupe_key: String = row
         .try_get("dedupe_key")
-        .map_err(|e| VoomError::Database(format!("read issue dedupe_key: {e}")))?;
+        .map_err(|e| VoomError::database_context("read issue dedupe_key", e))?;
     let status: String = row
         .try_get("status")
-        .map_err(|e| VoomError::Database(format!("read issue status: {e}")))?;
+        .map_err(|e| VoomError::database_context("read issue status", e))?;
     let epoch: i64 = row
         .try_get("epoch")
-        .map_err(|e| VoomError::Database(format!("read issue epoch: {e}")))?;
+        .map_err(|e| VoomError::database_context("read issue epoch", e))?;
     Ok(PolicyIssueRow {
         id: IssueId(u64_from_i64(id)),
         dedupe_key,
@@ -288,13 +288,13 @@ fn row_to_policy_issue_detail(
         row: row_to_policy_issue(row)?,
         title: row
             .try_get("title")
-            .map_err(|e| VoomError::Database(format!("read issue title: {e}")))?,
+            .map_err(|e| VoomError::database_context("read issue title", e))?,
         body: row
             .try_get("body")
-            .map_err(|e| VoomError::Database(format!("read issue body: {e}")))?,
+            .map_err(|e| VoomError::database_context("read issue body", e))?,
         priority_reason: row
             .try_get("priority_reason")
-            .map_err(|e| VoomError::Database(format!("read issue priority_reason: {e}")))?,
+            .map_err(|e| VoomError::database_context("read issue priority_reason", e))?,
     };
     Ok(detail)
 }

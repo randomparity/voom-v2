@@ -221,14 +221,15 @@ fn result_probe_request(
 }
 
 async fn ensure_result_probe_worker(cp: &ControlPlane) -> Result<WorkerId, VoomError> {
-    let mut tx =
-        cp.pool.begin().await.map_err(|err| {
-            VoomError::Database(format!("remux result probe worker begin: {err}"))
-        })?;
+    let mut tx = cp
+        .pool
+        .begin()
+        .await
+        .map_err(|err| VoomError::database_context("remux result probe worker begin", err))?;
     let worker = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx).await?;
     tx.commit()
         .await
-        .map_err(|err| VoomError::Database(format!("remux result probe worker commit: {err}")))?;
+        .map_err(|err| VoomError::database_context("remux result probe worker commit", err))?;
     Ok(worker.id)
 }
 

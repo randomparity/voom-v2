@@ -52,7 +52,7 @@ impl UseLeaseKind {
             "manual_lock" => Ok(Self::ManualLock),
             "external_lock" => Ok(Self::ExternalLock),
             "worker_operation" => Ok(Self::WorkerOperation),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "asset_use_leases.kind {other:?} not in vocab"
             ))),
         }
@@ -84,7 +84,7 @@ impl IssuerKind {
             "control_plane" => Ok(Self::ControlPlane),
             "worker" => Ok(Self::Worker),
             "external_system" => Ok(Self::ExternalSystem),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "asset_use_leases.issuer_kind {other:?} not in vocab"
             ))),
         }
@@ -110,7 +110,7 @@ impl BlockingMode {
         match s {
             "blocking" => Ok(Self::Blocking),
             "advisory" => Ok(Self::Advisory),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "asset_use_leases.blocking_mode {other:?} not in vocab"
             ))),
         }
@@ -145,7 +145,7 @@ impl UseLeaseReleaseReason {
             "issuer_lost" => Ok(Self::IssuerLost),
             "superseded" => Ok(Self::Superseded),
             "force_released" => Ok(Self::ForceReleased),
-            other => Err(VoomError::Database(format!(
+            other => Err(VoomError::database(format!(
                 "asset_use_leases.release_reason {other:?} not in vocab"
             ))),
         }
@@ -271,13 +271,13 @@ impl Repository for SqliteUseLeaseRepo {}
 async fn begin_tx(pool: &SqlitePool) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, VoomError> {
     pool.begin()
         .await
-        .map_err(|e| VoomError::Database(format!("begin: {e}")))
+        .map_err(|e| VoomError::database_context("begin", e))
 }
 
 async fn commit_tx(tx: sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<(), VoomError> {
     tx.commit()
         .await
-        .map_err(|e| VoomError::Database(format!("commit: {e}")))
+        .map_err(|e| VoomError::database_context("commit", e))
 }
 
 /// Diagnose a single-row lifecycle UPDATE that returned no row. Runs
@@ -295,7 +295,7 @@ async fn diagnose_use_lease_miss(
     {
         Ok(Some(_)) => VoomError::Conflict(format!("use_lease {lease_id} already terminal")),
         Ok(None) => VoomError::NotFound(format!("use_lease {lease_id} not found")),
-        Err(e) => VoomError::Database(format!("asset_use_leases probe: {e}")),
+        Err(e) => VoomError::database_context("asset_use_leases probe", e),
     }
 }
 
@@ -343,7 +343,7 @@ fn row_to_use_lease(row: &sqlx::sqlite::SqliteRow) -> Result<UseLease, VoomError
         (None, None, Some(v), None) => LeaseScope::Version(FileVersionId(u64_from_i64(v))),
         (None, None, None, Some(v)) => LeaseScope::Location(FileLocationId(u64_from_i64(v))),
         _ => {
-            return Err(VoomError::Database(
+            return Err(VoomError::database(
                 "asset_use_leases row violates one-of scope_*_id invariant".to_owned(),
             ));
         }
@@ -434,8 +434,7 @@ async fn probe_scope_liveness(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     scope: LeaseScope,
 ) -> Result<Option<Option<String>>, VoomError> {
-    let err =
-        |e: sqlx::Error| VoomError::Database(format!("use_lease acquire liveness check: {e}"));
+    let err = |e: sqlx::Error| VoomError::database_context("use_lease acquire liveness check", e);
     let id_arg = i64_from_u64(scope.id_u64());
     let sql = match scope {
         LeaseScope::Asset(_) => "SELECT retired_at FROM file_assets WHERE id = ?",
@@ -469,7 +468,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(id.0))
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases get: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases get", e))?;
         row.as_ref().map(row_to_use_lease).transpose()
     }
 
@@ -499,7 +498,7 @@ impl SqliteUseLeaseRepo {
         .bind(l)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases list_for_scope: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases list_for_scope", e))?;
         rows.iter().map(row_to_use_lease).collect()
     }
 
@@ -598,7 +597,7 @@ impl SqliteUseLeaseRepo {
         .bind(&expires_iso)
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases insert: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases insert", e))?;
 
         // 4) Construct the return value directly (no post-write re-read needed —
         //    every field is deterministic from input + the rowid).
@@ -644,7 +643,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(lease_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases heartbeat read: {e}")))?
+        .map_err(|e| VoomError::database_context("asset_use_leases heartbeat read", e))?
         .ok_or_else(|| VoomError::NotFound(format!("use_lease {lease_id} not found")))?;
 
         let existing = row_to_use_lease(&row)?;
@@ -664,7 +663,7 @@ impl SqliteUseLeaseRepo {
         // `acquired_at` directly would inflate the TTL on every heartbeat
         // (60s → 90s → 150s …) because `expires_at` already moved forward.
         let original_expires = existing.expires_at.ok_or_else(|| {
-            VoomError::Database(
+            VoomError::database(
                 "TTL-bound lease missing expires_at — schema CHECK should have caught this"
                     .to_owned(),
             )
@@ -687,7 +686,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(existing.epoch))
         .execute(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases heartbeat update: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases heartbeat update", e))?;
         if res.rows_affected() == 0 {
             return Err(VoomError::Conflict(format!(
                 "use_lease {lease_id} concurrent modification"
@@ -743,7 +742,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(lease_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases release: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases release", e))?;
         match row.as_ref().map(row_to_use_lease).transpose()? {
             Some(lease) => Ok(lease),
             None => Err(diagnose_use_lease_miss(tx, lease_id).await),
@@ -779,7 +778,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(lease_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases force_release: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases force_release", e))?;
         match row.as_ref().map(row_to_use_lease).transpose()? {
             Some(lease) => Ok(lease),
             None => Err(diagnose_use_lease_miss(tx, lease_id).await),
@@ -825,7 +824,7 @@ impl SqliteUseLeaseRepo {
         .bind(USE_LEASE_BATCH_LIMIT)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases expire update: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases expire update", e))?;
         let expired: Vec<UseLeaseId> = rows
             .iter()
             .map(|r| -> Result<UseLeaseId, VoomError> {
@@ -866,7 +865,7 @@ impl SqliteUseLeaseRepo {
         .bind(i64_from_u64(lease_id.0))
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases recover update: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases recover update", e))?;
         if let Some(lease) = row.as_ref().map(row_to_use_lease).transpose()? {
             return Ok(lease);
         }
@@ -876,7 +875,7 @@ impl SqliteUseLeaseRepo {
                 .bind(i64_from_u64(lease_id.0))
                 .fetch_optional(&mut **tx)
                 .await
-                .map_err(|e| VoomError::Database(format!("asset_use_leases recover probe: {e}")))?;
+                .map_err(|e| VoomError::database_context("asset_use_leases recover probe", e))?;
         let Some(probe) = probe else {
             return Err(VoomError::NotFound(format!(
                 "use_lease {lease_id} not found"
@@ -955,7 +954,7 @@ impl SqliteUseLeaseRepo {
         .bind(USE_LEASE_BATCH_LIMIT)
         .fetch_all(&mut **tx)
         .await
-        .map_err(|e| VoomError::Database(format!("asset_use_leases reanchor update: {e}")))?;
+        .map_err(|e| VoomError::database_context("asset_use_leases reanchor update", e))?;
         let reanchored: Vec<UseLeaseId> = rows
             .iter()
             .map(|r| -> Result<UseLeaseId, VoomError> {
