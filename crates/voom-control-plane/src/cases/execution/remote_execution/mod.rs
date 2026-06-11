@@ -18,7 +18,7 @@ mod heartbeat;
 mod recover;
 
 #[cfg(test)]
-pub(crate) use acquire::{
+use acquire::{
     capacity_suppression_key, scheduler_reason, score_remote_candidates, suppression_key,
 };
 

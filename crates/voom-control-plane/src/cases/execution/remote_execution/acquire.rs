@@ -598,7 +598,7 @@ fn candidate_from_ticket(
     })
 }
 
-pub(crate) fn score_remote_candidates(
+pub(super) fn score_remote_candidates(
     candidates: &[SchedulerCandidate],
 ) -> Result<ScoreDecision, VoomError> {
     if candidates.is_empty() {
@@ -990,7 +990,7 @@ fn capacity_decision(
     }
 }
 
-pub(crate) fn scheduler_reason(reason: ScoreReasonCode) -> StoreSchedulerReasonCode {
+pub(super) fn scheduler_reason(reason: ScoreReasonCode) -> StoreSchedulerReasonCode {
     match reason {
         ScoreReasonCode::Selected => StoreSchedulerReasonCode::Selected,
         ScoreReasonCode::NoReadyTicket => StoreSchedulerReasonCode::NoReadyTicket,
@@ -1028,7 +1028,7 @@ fn scheduler_summary(score: &voom_scheduler::ScoreDecision) -> String {
     }
 }
 
-pub(crate) fn suppression_key(
+pub(super) fn suppression_key(
     input: &RemoteAcquireInput,
     score: &voom_scheduler::ScoreDecision,
 ) -> Option<String> {
@@ -1042,7 +1042,7 @@ pub(crate) fn suppression_key(
     ))
 }
 
-pub(crate) fn capacity_suppression_key(
+pub(super) fn capacity_suppression_key(
     input: &RemoteAcquireInput,
     reason: &str,
     operation: &TicketOperation,
