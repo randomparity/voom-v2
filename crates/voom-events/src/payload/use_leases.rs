@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 // --- M3 — asset use leases (Phase 1) -----------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseAcquiredPayload {
     pub lease_id: u64,
     /// One of: `"playback" | "scan" | "copy" | "manual_lock" | "external_lock" | "worker_operation"`.
@@ -24,6 +25,7 @@ pub struct UseLeaseAcquiredPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseReleasedPayload {
     pub lease_id: u64,
     /// One of: `"released" | "superseded"` (the issuer-driven release reasons).
@@ -35,6 +37,7 @@ pub struct UseLeaseReleasedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseExpiredPayload {
     pub lease_id: u64,
     #[serde(with = "time::serde::iso8601")]
@@ -42,6 +45,7 @@ pub struct UseLeaseExpiredPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseForceReleasedPayload {
     pub lease_id: u64,
     pub actor: String,
@@ -51,6 +55,7 @@ pub struct UseLeaseForceReleasedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseRecoveredStaleIssuerPayload {
     pub lease_id: u64,
     pub actor: String,
@@ -60,6 +65,7 @@ pub struct UseLeaseRecoveredStaleIssuerPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UseLeaseReanchoredByMovePayload {
     pub lease_id: u64,
     pub retired_location_id: u64,
