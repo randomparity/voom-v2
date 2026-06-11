@@ -1,5 +1,18 @@
+//! Strongly-typed ID newtypes for every persistent entity in the workspace.
+//!
+//! All IDs are database-generated (`ROWID` / `last_insert_rowid`). They are
+//! stored as bare `u64` values and are **not validated on construction** — a
+//! value of `0` or any other `u64` is accepted without error. This is
+//! intentional: the application never constructs raw IDs by hand; it only
+//! round-trips values emitted by `SQLite`.
+
 use serde::{Deserialize, Serialize};
 
+/// Defines a strongly-typed `u64` ID newtype.
+///
+/// The inner value is database-generated and unvalidated by design. No
+/// boundary checks are applied; all valid `u64` values are accepted so that
+/// values returned by `SQLite` can be stored without loss.
 macro_rules! define_id {
     ($name:ident) => {
         #[derive(
