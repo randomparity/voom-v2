@@ -6,6 +6,10 @@ on:
 
 permissions:
   contents: write
+  # Mint an OIDC token and write a build-provenance attestation for each
+  # release artifact (actions/attest-build-provenance).
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -85,8 +89,20 @@ jobs:
           name="voom-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p dist
           cp target/${{ matrix.target }}/release/voom dist/$name
-          (cd dist && tar -czf $name.tar.gz $name)
+          (cd dist && tar -czf "$name.tar.gz" "$name")
+          # Publish a SHA256 alongside each archive so downloaders can verify
+          # integrity. The sum file is relative (no dist/ prefix) so
+          # `sha256sum -c` works from the download directory.
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - name: Attest build provenance
+        # Cryptographically attest that each archive was built by this workflow
+        # at this commit, so consumers can verify provenance with `gh attestation`.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: dist/*.tar.gz
       - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
           draft: true
