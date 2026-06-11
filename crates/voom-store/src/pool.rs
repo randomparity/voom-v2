@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqlitePool};
 use voom_core::VoomError;
 
@@ -43,7 +43,15 @@ async fn connect_inner(url: &str, create: bool) -> Result<SqlitePool, VoomError>
     if is_memory {
         options = options.shared_cache(true);
     } else {
-        options = options.journal_mode(SqliteJournalMode::Wal);
+        options = options
+            .journal_mode(SqliteJournalMode::Wal)
+            // WAL + NORMAL is the safe, standard pairing: commits stay durable
+            // (the WAL header is fsynced) and the only crash-loss window is the
+            // last few committed transactions, never corruption. sqlx defaults
+            // to FULL, which fsyncs on every commit — needless overhead here.
+            // Set explicitly so the durability/throughput tradeoff is intentional
+            // rather than an unstated default for the "durable tickets" invariant.
+            .synchronous(SqliteSynchronous::Normal);
     }
 
     // On-disk pools use WAL so operator processes can read committed snapshots

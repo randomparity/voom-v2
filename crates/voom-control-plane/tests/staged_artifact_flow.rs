@@ -47,6 +47,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staging_path.parent().unwrap().to_path_buf(),
         })
         .await
         .unwrap();
@@ -177,6 +178,7 @@ async fn verified_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFi
     let verified = cp
         .verify_artifact(VerifyArtifactInput {
             artifact_handle_id: staged.artifact_handle_id,
+            staging_root: staged.staging_path.parent().unwrap().to_path_buf(),
         })
         .await
         .unwrap();

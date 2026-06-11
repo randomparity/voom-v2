@@ -301,6 +301,10 @@ pub enum ArtifactCommand {
     Verify {
         #[arg(long)]
         artifact_handle_id: u64,
+        /// Staging directory the artifact must reside within. The worker
+        /// rejects any artifact path not contained by this root.
+        #[arg(long)]
+        staging_root: PathBuf,
     },
     /// Promote a verified staged artifact to an add-only target path.
     Commit {
@@ -308,6 +312,11 @@ pub enum ArtifactCommand {
         artifact_handle_id: u64,
         #[arg(long)]
         target_path: PathBuf,
+    },
+    /// Re-drive a commit left in `recovery_required` back to completion.
+    RecoverCommit {
+        #[arg(long)]
+        artifact_handle_id: u64,
     },
     /// List artifact handles, optionally filtered by inspection state.
     List {

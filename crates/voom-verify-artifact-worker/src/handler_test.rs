@@ -47,6 +47,7 @@ async fn missing_file_emits_terminal_artifact_unavailable_error() {
                 .join("missing.bin")
                 .to_string_lossy()
                 .into_owned(),
+            staging_root: dir.path().to_string_lossy().into_owned(),
             expected: VerifyArtifactExpectedFacts {
                 size_bytes: 1,
                 content_hash: format!("blake3:{}", blake3::hash(b"x").to_hex()),
@@ -123,6 +124,29 @@ async fn malformed_request_payload_is_accepted_then_terminal_malformed_worker_re
 }
 
 #[tokio::test]
+async fn path_outside_staging_root_is_terminal_malformed_worker_result() {
+    // M10: even though the path exists and matches expected facts, a path whose
+    // parent is not contained by staging_root must be rejected — the control
+    // plane should never direct the verifier outside the staging area.
+    let dir = tempfile::tempdir().unwrap();
+    let staging = dir.path().join("stage");
+    tokio::fs::create_dir(&staging).await.unwrap();
+    let outside = dir.path().join("outside.bin");
+    tokio::fs::write(&outside, b"artifact bytes").await.unwrap();
+
+    let mut request = verify_request(&outside).await;
+    request.payload["staging_root"] = serde_json::json!(staging.to_string_lossy().into_owned());
+
+    let frames = dispatch_frames(handle_operation(request).await.unwrap());
+
+    assert_terminal_error(
+        frames.last().unwrap(),
+        FailureClass::MalformedWorkerResult,
+        ErrorCode::MalformedWorkerResult,
+    );
+}
+
+#[tokio::test]
 async fn unsupported_operation_returns_unknown_operation_protocol_error() {
     let request = OperationRequest {
         operation: OperationKind::ProbeFile,
@@ -151,6 +175,7 @@ async fn verify_request(path: &std::path::Path) -> OperationRequest {
     let observed = observe_file_facts(path).await.unwrap();
     let payload = serde_json::to_value(VerifyArtifactRequest {
         path: path.to_string_lossy().into_owned(),
+        staging_root: path.parent().unwrap().to_string_lossy().into_owned(),
         expected: VerifyArtifactExpectedFacts {
             size_bytes: observed.size_bytes,
             content_hash: observed.content_hash,

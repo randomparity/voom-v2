@@ -339,6 +339,89 @@ async fn failure_after_target_install_before_finalize_keeps_target_visible_and_m
 }
 
 #[tokio::test]
+async fn recover_commit_resumes_finalize_when_target_already_installed() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+
+    // Fail at before_finalize: the target is installed but the record is stuck.
+    commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        },
+        &FailBeforeFinalize,
+    )
+    .await
+    .unwrap_err();
+
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    assert!(report.result_file_version_id.is_some());
+    assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
+    // The single owner record was resumed, not duplicated.
+    assert_eq!(
+        count_commit_records(&cp, staged.artifact_handle_id).await,
+        1
+    );
+    assert_eq!(
+        count_events(&cp, EventKind::ArtifactCommitCompleted).await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn recover_commit_repromotes_when_target_absent() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+
+    // Fail after prepare: the target was never installed.
+    commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        },
+        &FailAfterPrepare,
+    )
+    .await
+    .unwrap_err();
+    assert!(!target.exists());
+
+    let report = cp.recover_commit(staged.artifact_handle_id).await.unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    assert_eq!(std::fs::read(&target).unwrap(), b"source bytes");
+    assert_eq!(
+        count_commit_records(&cp, staged.artifact_handle_id).await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn recover_commit_without_recovery_required_is_conflict() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let target = dir.path().join("target.bin");
+    cp.commit_artifact(CommitArtifactInput {
+        artifact_handle_id: staged.artifact_handle_id,
+        target_path: target,
+    })
+    .await
+    .unwrap();
+
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::Conflict);
+}
+
+#[tokio::test]
 async fn duplicate_pending_committed_and_recovery_owners_are_rejected_by_repo_constraints() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
@@ -435,9 +518,7 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(bytes.to_vec()),
         &NoVerifyArtifactHooks,
     )

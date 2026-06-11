@@ -4,6 +4,7 @@ use super::*;
 fn verify_artifact_request_serializes_expected_facts_with_null_optionals() {
     let req = VerifyArtifactRequest {
         path: "/staging/movie.mkv".to_owned(),
+        staging_root: "/staging".to_owned(),
         expected: VerifyArtifactExpectedFacts {
             size_bytes: 12,
             content_hash: "blake3:012345".to_owned(),
@@ -18,6 +19,7 @@ fn verify_artifact_request_serializes_expected_facts_with_null_optionals() {
         json,
         serde_json::json!({
             "path": "/staging/movie.mkv",
+            "staging_root": "/staging",
             "expected": {
                 "size_bytes": 12,
                 "content_hash": "blake3:012345",
@@ -51,6 +53,7 @@ fn verify_artifact_result_status_serializes_as_verified() {
 fn verify_artifact_payloads_reject_unknown_fields() {
     let request_err = serde_json::from_value::<VerifyArtifactRequest>(serde_json::json!({
         "path": "/staging/movie.mkv",
+        "staging_root": "/staging",
         "expected": {
             "size_bytes": 12,
             "content_hash": "blake3:012345",

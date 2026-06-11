@@ -92,94 +92,98 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
             return Err(ProtocolError::UnexpectedFrameAfterTerminal);
         }
 
-        self.line_buf.clear();
-        let n = self
-            .reader
-            .read_until(b'\n', &mut self.line_buf)
-            .await
-            .map_err(|e| ProtocolError::MalformedFrame {
-                detail: format!("read error: {e}"),
-            })?;
+        // Dropped duplicate-seq frames are consumed iteratively. Recursing per
+        // dropped frame (even boxed) polls each call on the current stack when
+        // reads resolve synchronously, so a long run of duplicates would
+        // exhaust the stack and abort the task.
+        loop {
+            self.line_buf.clear();
+            let n = self
+                .reader
+                .read_until(b'\n', &mut self.line_buf)
+                .await
+                .map_err(|e| ProtocolError::MalformedFrame {
+                    detail: format!("read error: {e}"),
+                })?;
 
-        if n == 0 {
-            // Clean EOF on a frame boundary.
-            return Ok(NdjsonOutcome::StreamEnd { partial_bytes: 0 });
-        }
+            if n == 0 {
+                // Clean EOF on a frame boundary.
+                return Ok(NdjsonOutcome::StreamEnd { partial_bytes: 0 });
+            }
 
-        // Strip trailing newline if present.
-        let had_newline = self.line_buf.last() == Some(&b'\n');
-        let payload_len = if had_newline {
-            self.line_buf.len() - 1
-        } else {
-            self.line_buf.len()
-        };
+            // Strip trailing newline if present.
+            let had_newline = self.line_buf.last() == Some(&b'\n');
+            let payload_len = if had_newline {
+                self.line_buf.len() - 1
+            } else {
+                self.line_buf.len()
+            };
 
-        if payload_len > self.max_frame_bytes {
-            return Err(ProtocolError::FrameTooLarge {
-                bytes: payload_len as u64,
-                max: self.max_frame_bytes as u64,
-            });
-        }
+            if payload_len > self.max_frame_bytes {
+                return Err(ProtocolError::FrameTooLarge {
+                    bytes: payload_len as u64,
+                    max: self.max_frame_bytes as u64,
+                });
+            }
 
-        if !had_newline {
-            // EOF inside a frame without a terminating newline. The Phase 1
-            // design treats this as MalformedFrame (truncated JSON), NOT
-            // StreamEnd — a stream that ends mid-line is by definition
-            // truncated, distinct from a clean close on a frame boundary.
-            return Err(ProtocolError::MalformedFrame {
-                detail: format!(
-                    "stream truncated mid-frame: {payload_len} bytes accumulated without newline"
-                ),
-            });
-        }
+            if !had_newline {
+                // EOF inside a frame without a terminating newline. The Phase 1
+                // design treats this as MalformedFrame (truncated JSON), NOT
+                // StreamEnd — a stream that ends mid-line is by definition
+                // truncated, distinct from a clean close on a frame boundary.
+                return Err(ProtocolError::MalformedFrame {
+                    detail: format!(
+                        "stream truncated mid-frame: {payload_len} bytes accumulated without newline"
+                    ),
+                });
+            }
 
-        let json_slice = &self.line_buf[..payload_len];
-        let frame: ProgressFrame =
-            serde_json::from_slice(json_slice).map_err(|e| ProtocolError::MalformedFrame {
-                detail: format!("json decode: {e}"),
-            })?;
+            let json_slice = &self.line_buf[..payload_len];
+            let frame: ProgressFrame =
+                serde_json::from_slice(json_slice).map_err(|e| ProtocolError::MalformedFrame {
+                    detail: format!("json decode: {e}"),
+                })?;
 
-        // Lease boundary BEFORE seq / terminal logic.
-        if frame.lease_id() != self.expected_lease_id {
-            return Err(ProtocolError::WrongLeaseId {
-                expected: self.expected_lease_id,
-                got: frame.lease_id(),
-            });
-        }
+            // Lease boundary BEFORE seq / terminal logic.
+            if frame.lease_id() != self.expected_lease_id {
+                return Err(ProtocolError::WrongLeaseId {
+                    expected: self.expected_lease_id,
+                    got: frame.lease_id(),
+                });
+            }
 
-        // Seq monotonicity.
-        let got_seq = frame.seq();
-        match self.last_seq {
-            None => {
-                if got_seq != 0 {
-                    return Err(ProtocolError::OutOfOrderFrame {
-                        expected_seq: 0,
-                        got_seq,
-                    });
+            // Seq monotonicity.
+            let got_seq = frame.seq();
+            match self.last_seq {
+                None => {
+                    if got_seq != 0 {
+                        return Err(ProtocolError::OutOfOrderFrame {
+                            expected_seq: 0,
+                            got_seq,
+                        });
+                    }
+                }
+                Some(last) => {
+                    if got_seq <= last {
+                        // Duplicate / lower seq → drop and read the next line.
+                        continue;
+                    }
+                    if got_seq != last + 1 {
+                        return Err(ProtocolError::OutOfOrderFrame {
+                            expected_seq: last + 1,
+                            got_seq,
+                        });
+                    }
                 }
             }
-            Some(last) => {
-                if got_seq <= last {
-                    // Duplicate / lower seq → drop and recurse to read the
-                    // next line. (Boxed future to avoid the implicit
-                    // infinite-size pin chain on async recursion.)
-                    return Box::pin(self.next_frame()).await;
-                }
-                if got_seq != last + 1 {
-                    return Err(ProtocolError::OutOfOrderFrame {
-                        expected_seq: last + 1,
-                        got_seq,
-                    });
-                }
-            }
-        }
-        self.last_seq = Some(got_seq);
+            self.last_seq = Some(got_seq);
 
-        if frame.is_terminal() {
-            self.terminal_seen = true;
-            Ok(NdjsonOutcome::Terminated(frame))
-        } else {
-            Ok(NdjsonOutcome::Frame(frame))
+            return if frame.is_terminal() {
+                self.terminal_seen = true;
+                Ok(NdjsonOutcome::Terminated(frame))
+            } else {
+                Ok(NdjsonOutcome::Frame(frame))
+            };
         }
     }
 }

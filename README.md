@@ -45,11 +45,11 @@ just smoke
 | `voom-mkvtoolnix-worker` | Local mkvtoolnix-backed remux worker. |
 | `voom-verify-artifact-worker` | Local artifact verification worker. |
 
-Reserved crate:
+Artifact-domain crate:
 
 | Crate | Purpose |
 |---|---|
-| `voom-artifact` | Future home for reusable artifact domain types; runtime artifact orchestration lives in `voom-control-plane::artifact` today. |
+| `voom-artifact` | Artifact-domain helpers shared outside the control-plane shell (`commit_pipeline` — pending-commit record + event glue and recovery-required commit data). Filesystem promotion, worker dispatch, and use-case assembly stay in `voom-control-plane::artifact`. |
 
 ## Design and decisions
 

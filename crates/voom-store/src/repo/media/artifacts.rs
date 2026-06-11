@@ -743,11 +743,15 @@ impl SqliteArtifactRepo {
         validate_committed_result(tx, id, result_file_version_id, result_file_location_id).await?;
         let promotion_started_at = iso8601(promotion_started_at)?;
         let finished_at = iso8601(finished_at)?;
+        // `recovery_required` is allowed alongside `pending` so the recovery
+        // entrypoint can finalize a re-driven commit on the existing record;
+        // `committed`/`failed` remain terminal and are still rejected.
         let res = sqlx::query(
             "UPDATE artifact_commit_records \
              SET state = 'committed', result_file_version_id = ?, result_file_location_id = ?, \
-                 promotion_started_at = ?, finished_at = ? \
-             WHERE id = ? AND state = 'pending'",
+                 promotion_started_at = ?, finished_at = ?, \
+                 failure_class = NULL, error_code = NULL, message = NULL, recovery_reason = NULL \
+             WHERE id = ? AND state IN ('pending', 'recovery_required')",
         )
         .bind(i64_from_u64(result_file_version_id.0))
         .bind(i64_from_u64(result_file_location_id.0))
@@ -1231,9 +1235,11 @@ async fn validate_committed_result(
     result_file_version_id: FileVersionId,
     result_file_location_id: FileLocationId,
 ) -> Result<(), VoomError> {
+    // Accept `recovery_required` as well as `pending`: the recovery entrypoint
+    // finalizes a re-driven commit on the existing (recovery_required) record.
     let pending_row: Option<(i64, String)> = sqlx::query_as(
         "SELECT source_file_version_id, target_path FROM artifact_commit_records \
-         WHERE id = ? AND state = 'pending'",
+         WHERE id = ? AND state IN ('pending', 'recovery_required')",
     )
     .bind(i64_from_u64(commit_id.0))
     .fetch_optional(&mut **tx)
@@ -1241,7 +1247,7 @@ async fn validate_committed_result(
     .map_err(|e| VoomError::Database(format!("artifact_commit_records pending lookup: {e}")))?;
     let (source_version_id, target_path) = pending_row.ok_or_else(|| {
         VoomError::Conflict(format!(
-            "artifact_commit_records commit: id={commit_id} not pending"
+            "artifact_commit_records commit: id={commit_id} not pending or recovery_required"
         ))
     })?;
 

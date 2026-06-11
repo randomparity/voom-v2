@@ -46,12 +46,15 @@ async fn artifact_full_flow_outputs_committed_envelopes() {
     );
     let artifact_handle_id = id(&stage["data"]["artifact"]["artifact_handle_id"]);
     let verify = run(
-        artifact_command(&seeded.url).args([
-            "artifact",
-            "verify",
-            "--artifact-handle-id",
-            &artifact_handle_id.to_string(),
-        ]),
+        artifact_command(&seeded.url)
+            .args([
+                "artifact",
+                "verify",
+                "--artifact-handle-id",
+                &artifact_handle_id.to_string(),
+                "--staging-root",
+            ])
+            .arg(dir.path()),
         Some(0),
     );
     let commit = run(
@@ -356,12 +359,15 @@ fn create_staged_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture 
 fn create_verified_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture {
     let mut artifact = create_staged_artifact(url, dir, name);
     let verify = run(
-        artifact_command(url).args([
-            "artifact",
-            "verify",
-            "--artifact-handle-id",
-            &artifact.artifact_handle_id.to_string(),
-        ]),
+        artifact_command(url)
+            .args([
+                "artifact",
+                "verify",
+                "--artifact-handle-id",
+                &artifact.artifact_handle_id.to_string(),
+                "--staging-root",
+            ])
+            .arg(dir),
         Some(0),
     );
     assert_eq!(verify["data"]["artifact"]["status"], "succeeded");
@@ -393,12 +399,15 @@ fn create_failed_artifact(url: &str, dir: &Path, name: &str) -> ArtifactFixture 
     let mut artifact = create_staged_artifact(url, dir, name);
     std::fs::write(&artifact.staging_path, b"changed bytes").unwrap();
     let verify = run(
-        artifact_command(url).args([
-            "artifact",
-            "verify",
-            "--artifact-handle-id",
-            &artifact.artifact_handle_id.to_string(),
-        ]),
+        artifact_command(url)
+            .args([
+                "artifact",
+                "verify",
+                "--artifact-handle-id",
+                &artifact.artifact_handle_id.to_string(),
+                "--staging-root",
+            ])
+            .arg(dir),
         Some(0),
     );
     assert_eq!(verify["data"]["artifact"]["status"], "failed");

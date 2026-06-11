@@ -1,5 +1,5 @@
 use std::fmt::{Display, Formatter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use time::OffsetDateTime;
@@ -116,6 +116,7 @@ async fn verify_artifact(
     request: &VerifyArtifactRequest,
 ) -> Result<VerifyArtifactResult, VerifyArtifactError> {
     let path = PathBuf::from(&request.path);
+    validate_within_staging_root(Path::new(&request.staging_root), &path)?;
     let observed = Box::pin(observe_file_facts(&path))
         .await
         .map_err(VerifyArtifactError::from)?;
@@ -127,6 +128,66 @@ async fn verify_artifact(
         provider_version: env!("CARGO_PKG_VERSION").to_owned(),
         observed,
     })
+}
+
+/// Reject any artifact path the control plane should never produce: a
+/// non-absolute path, one whose argument begins with `-`, or one whose
+/// canonical parent is not contained by the (canonical, non-symlink) staging
+/// root. Mirrors the ffmpeg worker's `validate_staging_path` so a control-plane
+/// bug cannot direct the verifier at an arbitrary file. The path source is
+/// trusted today; this is defense-in-depth parity across workers.
+fn validate_within_staging_root(
+    staging_root: &Path,
+    path: &Path,
+) -> Result<(), VerifyArtifactError> {
+    if path.as_os_str().as_encoded_bytes().first() == Some(&b'-') {
+        return Err(containment_error(format!(
+            "artifact path must not begin with '-': {}",
+            path.display()
+        )));
+    }
+    if !path.is_absolute() {
+        return Err(containment_error(format!(
+            "artifact path must be absolute: {}",
+            path.display()
+        )));
+    }
+    let root = canonical_existing_dir_no_symlink(staging_root)?;
+    let parent = path.parent().ok_or_else(|| {
+        containment_error(format!("artifact path has no parent: {}", path.display()))
+    })?;
+    let parent = canonical_existing_dir_no_symlink(parent)?;
+    if !parent.starts_with(&root) {
+        return Err(containment_error(format!(
+            "artifact path {} escapes staging root {}",
+            path.display(),
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn canonical_existing_dir_no_symlink(path: &Path) -> Result<PathBuf, VerifyArtifactError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|err| containment_error(format!("{}: {err}", path.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(containment_error(format!(
+            "path is not a non-symlink directory: {}",
+            path.display()
+        )));
+    }
+    path.canonicalize()
+        .map_err(|err| containment_error(format!("{}: {err}", path.display())))
+}
+
+/// A path that fails containment is a malformed request from the trusted
+/// control plane, so it maps to the terminal `MalformedWorkerResult` class
+/// (the same failure class the ffmpeg worker's `ConfigInvalid` produces).
+fn containment_error(message: String) -> VerifyArtifactError {
+    VerifyArtifactError::MalformedWorkerResult {
+        payload: serde_json::json!({ "stage": "validate_staging_root", "message": message }),
+        message,
+    }
 }
 
 fn verify_expected_facts(

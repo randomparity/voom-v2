@@ -2,8 +2,22 @@ use super::*;
 
 use time::OffsetDateTime;
 use voom_events::{
-    Event, EventEnvelope, EventKind, SubjectType, payload::SchemaInitializedPayload,
+    Event, EventEnvelope, EventId, EventKind, SubjectType, payload::SchemaInitializedPayload,
 };
+
+/// Insert a row whose `kind` is not in this build's `EventKind` vocab,
+/// simulating an event written by a newer binary. A valid `occurred_at` is
+/// copied from an existing row so only the kind is unrecognized.
+async fn insert_unknown_kind_row(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        "INSERT INTO events (occurred_at, kind, subject_type, subject_id, trace_id, payload) \
+         SELECT occurred_at, 'future.unknown_kind', 'system', NULL, NULL, '{}' \
+         FROM events LIMIT 1",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
 
 use crate::test_support::fresh_initialized_pool_at;
 
@@ -138,6 +152,45 @@ async fn list_cursor_signals_exhaustion_with_none() {
         second.next_cursor, None,
         "exhausted list must return next_cursor None"
     );
+}
+
+#[tokio::test]
+async fn list_skips_rows_with_unknown_event_kind() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    insert_unknown_kind_row(&pool).await;
+
+    // The unrecognized row must not poison the whole read (mixed-version
+    // tolerance): list returns the known events and skips the unknown one.
+    let page = repo
+        .list(
+            EventFilter::default(),
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "the seeded schema.initialized row");
+    assert_eq!(
+        page.items[0].envelope.payload.kind(),
+        EventKind::SchemaInitialized
+    );
+}
+
+#[tokio::test]
+async fn get_returns_none_for_unknown_event_kind() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    insert_unknown_kind_row(&pool).await;
+    let id: i64 = sqlx::query_scalar("SELECT MAX(event_id) FROM events")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let got = repo.get(EventId(u64::try_from(id).unwrap())).await.unwrap();
+    assert!(got.is_none(), "unknown-kind row is skipped, not an error");
 }
 
 #[tokio::test]

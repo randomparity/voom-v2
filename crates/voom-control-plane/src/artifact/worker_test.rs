@@ -394,6 +394,7 @@ fn target_debug_dir() -> PathBuf {
 fn verify_request(path: &Path, expected_bytes: &[u8]) -> VerifyArtifactRequest {
     VerifyArtifactRequest {
         path: path.to_string_lossy().into_owned(),
+        staging_root: path.parent().unwrap().to_string_lossy().into_owned(),
         expected: VerifyArtifactExpectedFacts {
             size_bytes: u64::try_from(expected_bytes.len()).unwrap(),
             content_hash: blake3_checksum(expected_bytes),

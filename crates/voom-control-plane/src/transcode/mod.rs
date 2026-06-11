@@ -169,7 +169,8 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
     let staged =
         commit::record_staged_transcode(cp, &input, selected.location.id, &staging_path, &result)
             .await?;
-    let verified = verify_staged_transcode(cp, staged.artifact_handle_id, verify).await?;
+    let verified =
+        verify_staged_transcode(cp, staged.artifact_handle_id, &input.staging_root, verify).await?;
     let committed = commit_and_probe_transcode_result(
         cp,
         staged.artifact_handle_id,
@@ -288,11 +289,15 @@ async fn commit_and_probe_transcode_result(
 async fn verify_staged_transcode(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
+    staging_root: &std::path::Path,
     verify: &dyn VerifyArtifactDispatcher,
 ) -> Result<crate::artifact::verify::VerifyArtifactReport, VoomError> {
     let verified = verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput { artifact_handle_id },
+        VerifyArtifactInput {
+            artifact_handle_id,
+            staging_root: staging_root.to_path_buf(),
+        },
         verify,
         &NoVerifyArtifactHooks,
     )

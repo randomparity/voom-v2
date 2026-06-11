@@ -298,9 +298,10 @@ async fn commit_verified_transcode_audio(
 ) -> Result<ExecuteTranscodeAudioReport, VoomError> {
     let verified = verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: request.staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(
+            request.staged.artifact_handle_id,
+            &request.staging_path,
+        ),
         verify,
         &NoVerifyArtifactHooks,
     )
@@ -561,9 +562,7 @@ async fn execute_extract_audio_inner(
     context.artifact_location_id = Some(staged.artifact_location_id);
     let verified = verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staging.path),
         verify,
         &NoVerifyArtifactHooks,
     )

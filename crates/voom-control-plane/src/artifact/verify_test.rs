@@ -27,6 +27,7 @@ async fn missing_artifact_handle_returns_not_found() {
         &cp,
         VerifyArtifactInput {
             artifact_handle_id: ArtifactHandleId(404),
+            staging_root: std::path::PathBuf::from("/tmp"),
         },
         &StaticDispatcher::success(b"unused"),
         &NoVerifyArtifactHooks,
@@ -51,9 +52,7 @@ async fn verify_requires_exactly_one_live_staging_location() {
         .unwrap();
     let zero_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -82,9 +81,7 @@ async fn verify_requires_exactly_one_live_staging_location() {
 
     let multiple_err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -103,9 +100,7 @@ async fn missing_location_during_persist_returns_not_found() {
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &DeleteLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -128,9 +123,7 @@ async fn worker_success_persists_verification_with_bootstrapped_worker_id() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &dispatcher,
         &NoVerifyArtifactHooks,
     )
@@ -182,9 +175,7 @@ async fn worker_terminal_failure_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::failure(
             FailureClass::ArtifactChecksumMismatch,
             ErrorCode::ArtifactChecksumMismatch,
@@ -231,9 +222,7 @@ async fn mismatched_worker_success_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"different bytes"),
         &NoVerifyArtifactHooks,
     )
@@ -260,9 +249,7 @@ async fn malformed_worker_result_persists_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::failure(
             FailureClass::MalformedWorkerResult,
             ErrorCode::MalformedWorkerResult,
@@ -288,9 +275,7 @@ async fn retired_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &RetireLocationBeforePersist {
             location_id: staged.artifact_location_id,
@@ -315,9 +300,7 @@ async fn second_staging_location_before_persist_records_failed_verification() {
 
     let report = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &RecordSecondStagingBeforePersist {
             path: second.display().to_string(),
@@ -341,9 +324,7 @@ async fn verification_events_use_same_transaction_as_persisted_verification_rows
 
     let err = verify_artifact_with_dispatcher(
         &cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(b"source bytes"),
         &FailBeforeTerminalEvent,
     )

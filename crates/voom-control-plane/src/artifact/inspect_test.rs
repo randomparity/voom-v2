@@ -313,9 +313,7 @@ async fn stage_and_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> 
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::success(bytes.to_vec()),
         &NoVerifyArtifactHooks,
     )
@@ -332,9 +330,7 @@ async fn stage_and_fail_verify_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]
     let staged = stage_bytes(cp, dir, bytes).await;
     verify_artifact_with_dispatcher(
         cp,
-        VerifyArtifactInput {
-            artifact_handle_id: staged.artifact_handle_id,
-        },
+        VerifyArtifactInput::for_staged_file(staged.artifact_handle_id, &staged.staging_path),
         &StaticDispatcher::failure(
             FailureClass::ArtifactChecksumMismatch,
             ErrorCode::ArtifactChecksumMismatch,

@@ -24,6 +24,11 @@ pub struct VerifyArtifactObservedFacts {
 #[serde(deny_unknown_fields)]
 pub struct VerifyArtifactRequest {
     pub path: String,
+    /// Directory the artifact must reside within. The worker rejects any
+    /// `path` whose canonical parent is not contained by this root, mirroring
+    /// the ffmpeg worker's staging-root containment so a control-plane bug
+    /// cannot direct the verifier to read an arbitrary file.
+    pub staging_root: String,
     pub expected: VerifyArtifactExpectedFacts,
 }
 
