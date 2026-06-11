@@ -115,6 +115,20 @@ Several behaviors are deliberate and documented in `docs/adr/` + `docs/specs/voo
 - **All providers are out-of-process workers.** No in-process fast path. `voom-worker-protocol` marks and enforces the HTTP/NDJSON contract boundary. (`docs/adr/0002`.)
 - **Stack is tokio + sqlx + axum, async-first.** Blocking code is the exception. Migrations are embedded via `sqlx::migrate!` against `migrations/`.
 
+### Durable payload schema-evolution contract (audit M4, ADR 0013)
+
+A JSON column deserialized into a `Deserialize` type carries
+`#[serde(deny_unknown_fields)]` on the real serde unit — a plain or newtype-wrapped
+content struct. A tagged enum is not annotated (serde ignores it there); its
+variants are newtype variants over annotated content structs, and serde's tag
+discriminator rejects unknown variant names. Inline tagged struct-variants are a
+silent no-op and are forbidden for durable enums. Payloads evolve **additive-only**
+(new fields `Option`/`#[serde(default)]`); a rename/remove/retype is a deliberate,
+coordinated change requiring binary-before-DB upgrade ordering, never a silent
+default. New durable typed columns are added to `docs/payload-contract-inventory.md`
+and `scripts/payload-contract-scope.txt`. Enforced by
+`scripts/check-payload-deny-unknown.sh` in `just ci`.
+
 ### CLI output contract
 
 The `voom` binary is agent-facing. Every invocation MUST emit exactly one JSON envelope on stdout (`schema_version`, `command`, `status`, `data` | `error`, optional `local`, `warnings`). Logs go to stderr. Even clap parse failures route through `envelope::emit_err` so stdout is always parseable — see `crates/voom-cli/src/main.rs`. Exit codes: `0` ok, `1` BAD_ARGS, `2` runtime error.
