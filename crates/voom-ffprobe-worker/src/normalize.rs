@@ -142,16 +142,24 @@ fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value
     let Some(tags) = input.get("tags").and_then(Value::as_object) else {
         return;
     };
-    // Matroska tag names are case-insensitive by spec; ffprobe passes keys such
-    // as ROLE and HANDLER_NAME through unchanged, so match by folded key.
+    // Match by folded key: ffprobe passes Matroska custom tags such as ROLE and
+    // HANDLER_NAME through uppercase, and Matroska tag names are case-insensitive
+    // by spec. Folding `language`/`title` too is intentional and harmless — real
+    // ffprobe emits those lowercase, so folding only adds tolerance and never
+    // changes current output.
     for key in ["language", "title", "role", "handler_name"] {
-        let value = tags.iter().find_map(|(tag_key, tag_value)| {
-            if tag_key.eq_ignore_ascii_case(key) {
-                tag_value.as_str()
-            } else {
-                None
-            }
-        });
+        let value = tags
+            .iter()
+            .find_map(|(tag_key, tag_value)| {
+                if tag_key.eq_ignore_ascii_case(key) {
+                    tag_value.as_str()
+                } else {
+                    None
+                }
+            })
+            // Drop ffprobe sentinels ("", "N/A", "unknown") so they never reach
+            // the durable snapshot — the same guard insert_string_as applies.
+            .filter(|value| !is_unknown_value(value));
         if let Some(value) = value {
             output.insert(key.to_owned(), Value::String(value.to_owned()));
         }

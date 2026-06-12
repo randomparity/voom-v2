@@ -315,6 +315,35 @@ fn omits_unknown_ffprobe_sentinel_values() {
 }
 
 #[test]
+fn omits_unknown_ffprobe_sentinel_values_in_stream_tags() {
+    // The unified tag loop must apply the same sentinel filter as the direct
+    // stream fields: a sentinel `language`/`title`/`role` is omitted, not
+    // written into the durable snapshot. Exporting a sentinel language into
+    // observed-state can trip the exact probe mismatch this path guards against.
+    let raw = serde_json::json!({
+        "format": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "tags": { "language": "N/A", "title": "", "role": "unknown" }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert!(snapshot["streams"][0].get("language").is_none());
+    assert!(snapshot["streams"][0].get("title").is_none());
+    assert!(snapshot["streams"][0].get("role").is_none());
+}
+
+#[test]
 fn rejects_malformed_present_numeric_values() {
     let raw = serde_json::json!({
         "format": {},
