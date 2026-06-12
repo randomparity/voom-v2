@@ -7,7 +7,10 @@ use voom_core::{
     clock_test_support::FrozenClock,
 };
 use voom_events::EventKind;
-use voom_scheduler::ScoreReasonCode;
+use voom_scheduler::{
+    NodeCandidate, SCORING_VERSION, SchedulerCandidate, ScoreDecision, ScoreOutcome,
+    ScoreReasonCode, TicketCandidate, WorkerCandidate,
+};
 use voom_store::repo::artifact_access_plans::{ArtifactAccessMode, ArtifactAccessPlanStatus};
 use voom_store::repo::nodes::NodeKind;
 use voom_store::repo::remote_idempotency::RemoteMutationReplay;
