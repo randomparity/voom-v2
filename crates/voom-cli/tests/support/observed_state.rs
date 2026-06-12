@@ -202,6 +202,11 @@ fn probed_media(
     })))
 }
 
+// Exports the probe-fact subset the current chaos fixtures exercise. Known
+// missing facts the oracle compares strictly (chaos-librarian issue #222):
+// attached_pic (cover art) and asset-level chapters — the worker snapshot
+// captures neither, so cover-art and chaptered fixtures cannot pass compare
+// until both layers learn those facts.
 fn probed_stream(stream: &Value) -> Option<Value> {
     let kind = stream.get("kind").and_then(Value::as_str)?;
     let codec = stream.get("codec_name").and_then(Value::as_str)?;
