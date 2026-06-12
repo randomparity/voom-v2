@@ -42,8 +42,8 @@ jobs:
 
       - name: Install ffmpeg 7
         env:
-          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-05-25-14-02/ffmpeg-n7.1.4-6-g181cfa1008-linux64-gpl-7.1.tar.xz
-          FFMPEG_ARCHIVE_SHA256: ab8fa7effd8e25e28814cea93cc2f1b242beda7db5ffef23610cf88238d9b943
+          FFMPEG_ARCHIVE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-11-14-22/ffmpeg-n7.1.4-39-ga5faeca88f-linux64-gpl-7.1.tar.xz
+          FFMPEG_ARCHIVE_SHA256: f4dc7135b55c4043b84eb16304697b9da56053baaa021f844b8da0b2a914d950
         run: |
           archive="$RUNNER_TEMP/ffmpeg.tar.xz"
           install_dir="$RUNNER_TEMP/ffmpeg"
