@@ -162,12 +162,6 @@ impl ChaosLibrarian {
             .join(name)
     }
 
-    pub fn voom_scenario(&self, name: &str) -> PathBuf {
-        self.workspace_root
-            .join("crates/voom-cli/tests/fixtures/chaos")
-            .join(name)
-    }
-
     fn uv_json<const N: usize>(
         &self,
         args: [&str; N],

@@ -71,7 +71,7 @@ pub async fn export_observed_state(
 
     let observed_at = time::OffsetDateTime::now_utc().format(&Rfc3339)?;
     let observed = json!({
-        "schema_version": 1,
+        "schema_version": 4,
         "consumer": {
             "name": "voom",
             "version": consumer_version,
@@ -211,8 +211,23 @@ fn probed_stream(stream: &Value) -> Option<Value> {
     let mut out = serde_json::Map::new();
     out.insert("kind".to_owned(), Value::String(kind.to_owned()));
     out.insert("codec".to_owned(), Value::String(codec.to_owned()));
-    if let Some(language) = stream.get("language").and_then(Value::as_str) {
-        out.insert("language".to_owned(), Value::String(language.to_owned()));
+    for (source, target) in [
+        ("language", "language"),
+        ("title", "title"),
+        ("channel_layout", "channel_layout"),
+        ("role", "role"),
+    ] {
+        if let Some(value) = stream.get(source).and_then(Value::as_str) {
+            out.insert(target.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    // Chaos Librarian's oracle reads MP4 audio titles from the hdlr box
+    // (ffprobe handler_name); mirror that fallback so titled MP4 audio matches.
+    if kind == "audio"
+        && !out.contains_key("title")
+        && let Some(handler_name) = stream.get("handler_name").and_then(Value::as_str)
+    {
+        out.insert("title".to_owned(), Value::String(handler_name.to_owned()));
     }
     for (source, target) in [
         ("width", "width"),
@@ -222,6 +237,18 @@ fn probed_stream(stream: &Value) -> Option<Value> {
     ] {
         if let Some(value) = stream.get(source).and_then(Value::as_u64) {
             out.insert(target.to_owned(), Value::Number(value.into()));
+        }
+    }
+    // The oracle records default/forced dispositions only for subtitle streams;
+    // exporting them for audio/video would diverge against an expected null.
+    if kind == "subtitle" {
+        for flag in ["default", "forced"] {
+            if let Some(value) = stream
+                .pointer(&format!("/disposition/{flag}"))
+                .and_then(Value::as_bool)
+            {
+                out.insert(flag.to_owned(), Value::Bool(value));
+            }
         }
     }
     if let Some(fps) = stream

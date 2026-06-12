@@ -28,7 +28,7 @@ fn chaos_librarian_submodule_is_pinned_and_ready() {
 
     assert_eq!(
         readiness.revision,
-        "057a4033a3a9ae14fef664ab82f2c31e1a223544"
+        "9f4c3bf7b7908484ad179d288dd59f3f85185053"
     );
     assert!(
         readiness.capabilities["ready_for"]["materialize_static"]
@@ -42,6 +42,11 @@ fn chaos_librarian_submodule_is_pinned_and_ready() {
     );
     assert!(
         readiness.capabilities["ready_for"]["materialize_media_mutations"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+    assert!(
+        readiness.capabilities["ready_for"]["materialize_hevc_video"]
             .as_bool()
             .unwrap_or(false)
     );
@@ -161,7 +166,7 @@ async fn policy_seed_creates_durable_ids_from_scan_envelope() {
     let chaos = ready_chaos();
     let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
         &chaos,
-        &chaos.voom_scenario("video-transcode-required.yaml"),
+        &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
@@ -181,7 +186,7 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     let chaos = ready_chaos();
     let ScannedChaosRun { run, db, scan } = scan_materialized_scenario(
         &chaos,
-        &chaos.voom_scenario("video-transcode-required.yaml"),
+        &chaos.upstream_scenario("voom-ci/h264-transcode-candidate.yaml"),
     )
     .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
@@ -234,25 +239,23 @@ async fn transcode_required_executes_real_worker_and_commits_hevc_mkv() {
     .unwrap();
     worker.shutdown().unwrap();
 
-    assert_eq!(execute.status_code, Some(0), "stderr: {}", execute.stderr);
-    let ticket = execute.json["data"]["tickets"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|ticket| ticket["operation"] == "transcode_video")
-        .unwrap();
-    assert_eq!(ticket["state"], "succeeded");
-    assert!(
-        ticket["result"]["staged_artifact_handle_id"]
-            .as_u64()
-            .unwrap()
-            > 0
+    assert_eq!(
+        execute.status_code,
+        Some(0),
+        "envelope: {} stderr: {}",
+        execute.json,
+        execute.stderr
     );
-    assert!(ticket["result"]["verification_id"].as_u64().unwrap() > 0);
-    assert!(ticket["result"]["commit_record_id"].as_u64().unwrap() > 0);
-    let target_path = ticket["result"]["target_path"].as_str().unwrap();
-    assert!(std::path::Path::new(target_path).is_file());
-    assert!(std::path::Path::new(target_path).starts_with(&out));
+    let transcode_summary = &execute.json["data"]["summary"]["per_operation"]["transcode_video"];
+    assert_eq!(transcode_summary["success_count"], 1);
+    assert_eq!(transcode_summary["failure_count"], 0);
+    let file_phase = &execute.json["data"]["file_phases"][0];
+    assert_eq!(file_phase["outcome"], "committed");
+    assert!(!file_phase["ticket_ids"].as_array().unwrap().is_empty());
+    assert!(file_phase["produced_file_version_id"].as_u64().unwrap() > 0);
+    assert!(file_phase["reprobe_snapshot_id"].as_u64().unwrap() > 0);
+    let produced = first_file_with_extension(&out, "mkv").unwrap();
+    assert!(produced.is_file());
 }
 
 #[tokio::test]
@@ -261,11 +264,10 @@ async fn transcode_noop_does_not_schedule_worker_mutation() {
     let chaos = ready_chaos();
 
     let run = chaos
-        .materialize(&chaos.voom_scenario("video-transcode-noop.yaml"))
+        .materialize(&chaos.upstream_scenario("voom-ci/hevc-noop.yaml"))
         .unwrap();
     let db = VoomTestDb::init().await.unwrap();
     let library_path = run.scan_root();
-    rewrite_first_mkv_to_hevc(&library_path);
     let library_arg = library_path.to_str().unwrap().to_owned();
     let scan = run_voom(&db.url, ["scan", "--path", library_arg.as_str()]).unwrap();
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
@@ -353,9 +355,23 @@ async fn malformed_media_fails_loudly_without_execution_ticket() {
     )
     .await;
 
-    assert_eq!(scan.status_code, Some(2), "stderr: {}", scan.stderr);
-    assert_eq!(scan.json["status"], "error");
-    assert_ne!(scan.json["error"]["code"], "INTERNAL");
+    // Directory scans continue past unprobeable media (#213): the command
+    // succeeds while the malformed file carries an explicit per-file error.
+    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+    assert_eq!(scan.json["status"], "ok");
+    assert_eq!(scan.json["data"]["summary"]["failed"], 1);
+    assert_eq!(scan.json["data"]["summary"]["ingested"], 0);
+    let file = &scan.json["data"]["files"][0];
+    assert_eq!(file["status"], "failed");
+    assert_ne!(file["error"]["code"], "INTERNAL");
+    assert!(
+        file["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ffprobe"),
+        "file error should surface the probe failure: {}",
+        file["error"]
+    );
 
     let pool = voom_store::connect(&db.url).await.unwrap();
     let ticket_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
@@ -363,33 +379,6 @@ async fn malformed_media_fails_loudly_without_execution_ticket() {
         .await
         .unwrap();
     assert_eq!(ticket_count, 0);
-}
-
-fn rewrite_first_mkv_to_hevc(library_path: &std::path::Path) {
-    let path = first_file_with_extension(library_path, "mkv").unwrap();
-    let temp = path.with_extension("hevc.tmp.mkv");
-    let status = std::process::Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            path.to_str().unwrap(),
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "log-level=error",
-            "-tag:v",
-            "hvc1",
-            "-c:a",
-            "copy",
-            temp.to_str().unwrap(),
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success(), "ffmpeg HEVC rewrite failed: {status}");
-    std::fs::rename(temp, path).unwrap();
 }
 
 fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<std::path::PathBuf> {
