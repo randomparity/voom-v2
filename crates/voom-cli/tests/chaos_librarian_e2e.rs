@@ -347,7 +347,7 @@ async fn step_mutation_rescan_observes_changed_media_facts() {
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn malformed_media_fails_loudly_without_execution_ticket() {
+async fn malformed_media_records_per_file_failure_without_execution_ticket() {
     let chaos = ready_chaos();
     let ScannedChaosRun { db, scan, .. } = scan_materialized_scenario(
         &chaos,
@@ -392,9 +392,11 @@ async fn hardlinked_paths_scan_as_duplicate_candidates_with_shared_hash() {
     .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
-    // The scanner has no same-inode dedup: both hardlinked paths ingest as
-    // independent assets whose identical content hash is the duplicate-candidate
-    // evidence downstream dedup must act on.
+    // Characterization of a known gap (#249): the scanner records no inode
+    // facts, so both hardlinked paths ingest as independent assets and the
+    // identical content hash is the only duplicate-candidate evidence. The
+    // upstream recipe expects same-inode detection; update this test when
+    // inode facts land.
     assert_eq!(scan.json["data"]["summary"]["ingested"], 2);
     assert_eq!(scan.json["data"]["summary"]["failed"], 0);
     let files = scan.json["data"]["files"].as_array().unwrap();
