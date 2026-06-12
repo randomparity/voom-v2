@@ -2,33 +2,19 @@ use super::*;
 use crate::ProtocolError;
 
 #[test]
-fn negotiate_supported_returns_agreed() {
-    let resp = negotiate(1).unwrap();
-    assert_eq!(resp.agreed, 1);
+fn negotiate_exact_match_returns_agreed() {
+    let resp = negotiate(voom_core::PROTOCOL_VERSION).unwrap();
+    assert_eq!(resp.agreed, voom_core::PROTOCOL_VERSION);
 }
 
 #[test]
-fn negotiate_below_min_rejects() {
-    let err = negotiate(0).unwrap_err();
-    assert!(matches!(
-        err,
-        ProtocolError::UnsupportedProtocolVersion {
-            offered: 0,
-            supported_min: 1,
-            supported_max: 1,
-        }
-    ));
-}
-
-#[test]
-fn negotiate_above_max_rejects() {
-    let err = negotiate(2).unwrap_err();
+fn negotiate_other_version_rejects() {
+    let err = negotiate(voom_core::PROTOCOL_VERSION + 1).unwrap_err();
     assert!(matches!(
         err,
         ProtocolError::UnsupportedProtocolVersion {
             offered: 2,
-            supported_min: 1,
-            supported_max: 1,
+            expected: 1,
         }
     ));
 }

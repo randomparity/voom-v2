@@ -219,12 +219,7 @@ fn enforce_version(headers: &hyper::HeaderMap) -> Result<(), ProtocolError> {
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
     match v {
-        Some(n) if n == voom_core::PROTOCOL_VERSION => Ok(()),
-        Some(n) => Err(ProtocolError::UnsupportedProtocolVersion {
-            offered: n,
-            supported_min: voom_core::PROTOCOL_VERSION_SUPPORTED_MIN,
-            supported_max: voom_core::PROTOCOL_VERSION_SUPPORTED_MAX,
-        }),
+        Some(n) => negotiate(n).map(|_| ()),
         None => Err(ProtocolError::InvalidPayload {
             detail: format!("missing {PROTOCOL_VERSION_HEADER}"),
         }),
@@ -452,3 +447,7 @@ fn json_ok<T: serde::Serialize>(status: StatusCode, v: &T) -> Response<ResponseB
 fn json_error(status: StatusCode, e: &ProtocolError) -> Response<ResponseBody> {
     json_ok(status, e)
 }
+
+#[cfg(test)]
+#[path = "server_test.rs"]
+mod tests;

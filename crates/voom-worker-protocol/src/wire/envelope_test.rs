@@ -135,12 +135,28 @@ fn progress_frame_error_round_trips() {
 fn protocol_error_unsupported_version_round_trips() {
     let err = ProtocolError::UnsupportedProtocolVersion {
         offered: 99,
-        supported_min: 1,
-        supported_max: 1,
+        expected: 1,
     };
     let json = serde_json::to_string(&err).unwrap();
     let back: ProtocolError = serde_json::from_str(&json).unwrap();
     assert_eq!(err, back);
+}
+
+#[test]
+fn protocol_error_unsupported_version_serializes_offered_and_expected() {
+    let err = ProtocolError::UnsupportedProtocolVersion {
+        offered: 99,
+        expected: 1,
+    };
+    let value = serde_json::to_value(&err).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "code": "UNSUPPORTED_PROTOCOL_VERSION",
+            "offered": 99,
+            "expected": 1,
+        })
+    );
 }
 
 #[test]
