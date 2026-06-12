@@ -26,3 +26,20 @@ are still being characterized.
 The Ubuntu runner's apt ffmpeg package may lag Chaos Librarian's minimum. The
 workflow therefore installs ffmpeg/ffprobe from a pinned 7.x archive and
 verifies its checksum before running the suite.
+
+## Bumping the Chaos Librarian pin
+
+Moving the submodule to a new revision requires updating the recorded SHA in
+three places, or readiness checks fail before any test runs:
+
+- `crates/voom-cli/tests/chaos_librarian_e2e.rs`
+  (`chaos_librarian_submodule_is_pinned_and_ready`)
+- `scripts/chaos-e2e-local.sh` (submodule status guard)
+- `scripts/test-chaos-e2e-local.sh` (faked `git submodule status` output)
+
+Also re-check the observed-state contract version: the exporter in
+`crates/voom-cli/tests/support/observed_state.rs` emits a literal
+`schema_version` that must match `schemas/observed-state.schema.json` in the
+submodule, and `compare` strictly checks optional probe stream fields
+(`channel_layout`, `title`, `role`) whenever the oracle records them — see
+chaos-librarian issue #222 for the consumer-side normalization rules.

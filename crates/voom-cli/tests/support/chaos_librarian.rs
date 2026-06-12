@@ -81,7 +81,9 @@ impl ChaosLibrarian {
 
     pub fn materialize(&self, scenario: &Path) -> Result<ChaosRun, Box<dyn std::error::Error>> {
         let tmp = TempDir::new()?;
-        let run_dir = tmp.path().join("run");
+        // Canonicalize so downstream staging/output paths do not traverse the
+        // macOS /var -> /private/var symlink, which voom's staging guard rejects.
+        let run_dir = tmp.path().canonicalize()?.join("run");
         let report = self.uv_json_with_args([
             "run",
             "chaos-librarian",
@@ -160,10 +162,8 @@ impl ChaosLibrarian {
             .join(name)
     }
 
-    pub fn voom_scenario(&self, name: &str) -> PathBuf {
-        self.workspace_root
-            .join("crates/voom-cli/tests/fixtures/chaos")
-            .join(name)
+    pub fn upstream_recipe(&self, name: &str) -> PathBuf {
+        self.submodule_dir.join("recipes").join(name)
     }
 
     fn uv_json<const N: usize>(

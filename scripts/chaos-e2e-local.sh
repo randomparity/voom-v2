@@ -36,7 +36,6 @@ esac
 
 case "$scenario" in
   */*) scenario_path="$scenario" ;;
-  video-transcode-*.yaml) scenario_path="$repo_root/crates/voom-cli/tests/fixtures/chaos/$scenario" ;;
   *) scenario_path="$chaos_dir/tests/fixtures/scenarios/$scenario" ;;
 esac
 
@@ -70,7 +69,7 @@ cleanup_run() {
 trap cleanup_run EXIT INT TERM
 mkdir -p "$workdir"
 
-git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 057a4033a3a9ae14fef664ab82f2c31e1a223544 ' >/dev/null
+git -C "$repo_root" submodule status third_party/chaos-librarian | grep -E '^ 9f4c3bf7b7908484ad179d288dd59f3f85185053 ' >/dev/null
 if [[ -n "$(git -C "$chaos_dir" status --short --untracked-files=no)" ]]; then
   echo "Chaos Librarian submodule has tracked modifications" >&2
   exit 1
