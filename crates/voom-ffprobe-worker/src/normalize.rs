@@ -124,6 +124,7 @@ fn stream_objects(streams: &[Value]) -> Result<Vec<Value>, WorkerError> {
             insert_string(input, &mut output, "avg_frame_rate");
             insert_u64_string(input, &mut output, "sample_rate", "sample_rate")?;
             insert_u64_value(input, &mut output, "channels", "channels")?;
+            insert_string(input, &mut output, "channel_layout");
             insert_string_as(input, &mut output, "pix_fmt", "pixel_format");
             insert_string(input, &mut output, "profile");
             // ffprobe may emit `level` as a JSON number (e.g. 153); normalize to string
@@ -141,8 +142,20 @@ fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value
     let Some(tags) = input.get("tags").and_then(Value::as_object) else {
         return;
     };
-    insert_string_as(tags, output, "language", "language");
-    insert_string_as(tags, output, "title", "title");
+    // Matroska tag names are case-insensitive by spec; ffprobe passes keys such
+    // as ROLE and HANDLER_NAME through unchanged, so match by folded key.
+    for key in ["language", "title", "role", "handler_name"] {
+        let value = tags.iter().find_map(|(tag_key, tag_value)| {
+            if tag_key.eq_ignore_ascii_case(key) {
+                tag_value.as_str()
+            } else {
+                None
+            }
+        });
+        if let Some(value) = value {
+            output.insert(key.to_owned(), Value::String(value.to_owned()));
+        }
+    }
 }
 
 fn insert_disposition(

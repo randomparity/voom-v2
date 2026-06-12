@@ -29,6 +29,113 @@ fn normalizes_ffprobe_json_into_sprint10_snapshot() {
 }
 
 #[test]
+fn normalizes_audio_channel_layout_and_role_tag() {
+    // Channel layout ("5.1", "stereo") and the audio role tag are oracle facts in
+    // Chaos Librarian probe comparison; omitting them reads as a probe mismatch.
+    let raw = serde_json::json!({
+        "format": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "channels": 6,
+                "channel_layout": "5.1",
+                "tags": { "language": "eng", "role": "main" }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert_eq!(snapshot["streams"][0]["channel_layout"], "5.1");
+    assert_eq!(snapshot["streams"][0]["role"], "main");
+}
+
+#[test]
+fn omits_channel_layout_and_role_when_ffprobe_does_not_report_them() {
+    let raw = serde_json::json!({
+        "format": { "format_name": "mov,mp4" },
+        "streams": [
+            { "index": 0, "codec_type": "video", "codec_name": "h264" }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert!(snapshot["streams"][0].get("channel_layout").is_none());
+    assert!(snapshot["streams"][0].get("role").is_none());
+}
+
+#[test]
+fn matches_matroska_tag_keys_case_insensitively() {
+    // Matroska tag names are case-insensitive by spec; ffprobe passes through
+    // uppercase keys such as ROLE and HANDLER_NAME unchanged.
+    let raw = serde_json::json!({
+        "format": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "tags": {
+                    "LANGUAGE": "eng",
+                    "TITLE": "Main Audio",
+                    "ROLE": "main",
+                    "HANDLER_NAME": "Main Audio"
+                }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert_eq!(snapshot["streams"][0]["language"], "eng");
+    assert_eq!(snapshot["streams"][0]["title"], "Main Audio");
+    assert_eq!(snapshot["streams"][0]["role"], "main");
+    assert_eq!(snapshot["streams"][0]["handler_name"], "Main Audio");
+}
+
+#[test]
+fn captures_mp4_handler_name_without_synthesizing_title() {
+    // MP4 has no stream-title atom; ffmpeg stores titles in the hdlr box, which
+    // ffprobe reports as handler_name. The snapshot records the raw fact and
+    // leaves title interpretation to consumers.
+    let raw = serde_json::json!({
+        "format": { "format_name": "mov,mp4" },
+        "streams": [
+            {
+                "index": 1,
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "tags": { "language": "eng", "handler_name": "Main Audio" }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "7.0", "2026-05-24T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert_eq!(snapshot["streams"][0]["handler_name"], "Main Audio");
+    assert!(snapshot["streams"][0].get("title").is_none());
+}
+
+#[test]
 fn normalizes_stream_language_and_disposition_for_mp4() {
     let raw = serde_json::json!({
         "format": { "format_name": "mov,mp4" },
