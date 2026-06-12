@@ -211,14 +211,19 @@ fn probed_stream(stream: &Value) -> Option<Value> {
     let mut out = serde_json::Map::new();
     out.insert("kind".to_owned(), Value::String(kind.to_owned()));
     out.insert("codec".to_owned(), Value::String(codec.to_owned()));
-    for (source, target) in [
-        ("language", "language"),
-        ("title", "title"),
-        ("channel_layout", "channel_layout"),
-        ("role", "role"),
-    ] {
+    for (source, target) in [("language", "language"), ("title", "title")] {
         if let Some(value) = stream.get(source).and_then(Value::as_str) {
             out.insert(target.to_owned(), Value::String(value.to_owned()));
+        }
+    }
+    // The oracle records channel_layout and role for audio streams only; a
+    // ROLE tag on a video or subtitle stream must not be exported, or it
+    // diverges against an expected null.
+    if kind == "audio" {
+        for (source, target) in [("channel_layout", "channel_layout"), ("role", "role")] {
+            if let Some(value) = stream.get(source).and_then(Value::as_str) {
+                out.insert(target.to_owned(), Value::String(value.to_owned()));
+            }
         }
     }
     // Chaos Librarian's oracle reads MP4 audio titles from the hdlr box
