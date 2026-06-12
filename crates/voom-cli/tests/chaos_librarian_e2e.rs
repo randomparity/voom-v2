@@ -381,6 +381,47 @@ async fn malformed_media_fails_loudly_without_execution_ticket() {
     assert_eq!(ticket_count, 0);
 }
 
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn hardlinked_paths_scan_as_duplicate_candidates_with_shared_hash() {
+    let chaos = ready_chaos();
+    let ScannedChaosRun { scan, .. } = scan_materialized_scenario(
+        &chaos,
+        &chaos.upstream_recipe("scanner/hardlink-duplicates.yaml"),
+    )
+    .await;
+    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+
+    // The scanner has no same-inode dedup: both hardlinked paths ingest as
+    // independent assets whose identical content hash is the duplicate-candidate
+    // evidence downstream dedup must act on.
+    assert_eq!(scan.json["data"]["summary"]["ingested"], 2);
+    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
+    let files = scan.json["data"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["content_hash"], files[1]["content_hash"]);
+    assert_ne!(files[0]["file_asset_id"], files[1]["file_asset_id"]);
+}
+
+#[tokio::test]
+#[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
+async fn symlinked_media_is_skipped_not_double_counted() {
+    let chaos = ready_chaos();
+    let ScannedChaosRun { scan, .. } = scan_materialized_scenario(
+        &chaos,
+        &chaos.upstream_recipe("scanner/symlink-external.yaml"),
+    )
+    .await;
+    assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
+
+    // The scanner skips symlinks rather than following them, so the linked
+    // target ingests exactly once and the link itself is recorded as skipped.
+    assert_eq!(scan.json["data"]["summary"]["discovered"], 2);
+    assert_eq!(scan.json["data"]["summary"]["ingested"], 1);
+    assert_eq!(scan.json["data"]["summary"]["skipped"], 1);
+    assert_eq!(scan.json["data"]["summary"]["failed"], 0);
+}
+
 fn first_file_with_extension(dir: &std::path::Path, extension: &str) -> Option<std::path::PathBuf> {
     let mut entries = std::fs::read_dir(dir)
         .ok()?

@@ -162,6 +162,10 @@ impl ChaosLibrarian {
             .join(name)
     }
 
+    pub fn upstream_recipe(&self, name: &str) -> PathBuf {
+        self.submodule_dir.join("recipes").join(name)
+    }
+
     fn uv_json<const N: usize>(
         &self,
         args: [&str; N],
