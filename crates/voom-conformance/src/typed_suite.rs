@@ -85,8 +85,8 @@ pub async fn run(launch: &mut crate::WorkerLaunch, entry: &ActiveBinary) -> crat
     .await;
     record(
         &mut result,
-        format!("{}::handshake_rejects_below_supported_min", entry.name),
-        handshake_rejects_below_supported_min(&client),
+        format!("{}::handshake_rejects_unsupported_version", entry.name),
+        handshake_rejects_unsupported_version(&client),
     )
     .await;
     record(
@@ -196,11 +196,9 @@ async fn handshake_returns_supported_version(client: &HttpClient) -> Result<(), 
     }
 }
 
-async fn handshake_rejects_below_supported_min(client: &HttpClient) -> Result<(), ProtocolError> {
+async fn handshake_rejects_unsupported_version(client: &HttpClient) -> Result<(), ProtocolError> {
     expect_protocol_err(
-        client
-            .handshake(voom_core::PROTOCOL_VERSION_SUPPORTED_MIN - 1)
-            .await,
+        client.handshake(voom_core::PROTOCOL_VERSION + 1).await,
         |e| matches!(e, ProtocolError::UnsupportedProtocolVersion { .. }),
     )
 }

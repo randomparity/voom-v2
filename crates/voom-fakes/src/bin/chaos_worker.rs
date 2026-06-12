@@ -464,8 +464,7 @@ fn enforce_version(headers: &[(String, String)]) -> Result<(), ProtocolError> {
     } else {
         Err(ProtocolError::UnsupportedProtocolVersion {
             offered,
-            supported_min: voom_core::PROTOCOL_VERSION_SUPPORTED_MIN,
-            supported_max: voom_core::PROTOCOL_VERSION_SUPPORTED_MAX,
+            expected: voom_core::PROTOCOL_VERSION,
         })
     }
 }

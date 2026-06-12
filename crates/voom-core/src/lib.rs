@@ -107,16 +107,16 @@ pub use transcode_video_profile::{
 pub use version::VersionInfo;
 
 /// Worker-protocol wire version (Sprint 2). Consumed by
-/// `voom-worker-protocol`'s handshake and middleware. Bumped only
-/// when the on-wire shape changes in an incompatible way.
+/// `voom-worker-protocol`'s handshake and middleware.
+///
+/// Workers are bundled, co-deployed, and version-locked with the
+/// control-plane build (ADR-0002), so the contract is an **exact match**:
+/// a worker whose offered version is not equal to `PROTOCOL_VERSION` is
+/// rejected at the `/v1/handshake` negotiation — and again by the
+/// operations-path middleware — with
+/// `ProtocolError::UnsupportedProtocolVersion`. There is no supported
+/// version range; skew is rejected by design. Bumping this constant is a
+/// flag day: every worker and the control plane move together because they
+/// are the same release. See ADR-0016
+/// (`docs/adr/0016-worker-protocol-exact-version-match.md`).
 pub const PROTOCOL_VERSION: u32 = 1;
-
-/// Minimum protocol version this binary will accept on a handshake.
-/// A worker offering a lower value is rejected with
-/// `ProtocolError::UnsupportedProtocolVersion`.
-pub const PROTOCOL_VERSION_SUPPORTED_MIN: u32 = 1;
-
-/// Maximum protocol version this binary will accept on a handshake.
-/// A worker offering a higher value is rejected with
-/// `ProtocolError::UnsupportedProtocolVersion`.
-pub const PROTOCOL_VERSION_SUPPORTED_MAX: u32 = 1;

@@ -18,18 +18,18 @@ pub struct HandshakeResponse {
 
 /// Decide whether the offered protocol version is acceptable.
 ///
-/// Returns `Ok(HandshakeResponse { agreed })` when `offered` falls in
-/// `[voom_core::PROTOCOL_VERSION_SUPPORTED_MIN, voom_core::PROTOCOL_VERSION_SUPPORTED_MAX]`,
-/// or `Err(ProtocolError::UnsupportedProtocolVersion)` with the
-/// supported range populated so the caller can negotiate.
+/// The contract is an **exact match** (ADR-0016): workers are bundled and
+/// version-locked with the control-plane build, so the only acceptable
+/// offer is `voom_core::PROTOCOL_VERSION`. Returns
+/// `Ok(HandshakeResponse { agreed })` (where `agreed == offered`) on a
+/// match, or `Err(ProtocolError::UnsupportedProtocolVersion)` carrying the
+/// single `expected` version on any mismatch. This is the sole definition
+/// of the version check; the operations-path middleware delegates to it.
 pub fn negotiate(offered: u32) -> Result<HandshakeResponse, ProtocolError> {
-    let min = voom_core::PROTOCOL_VERSION_SUPPORTED_MIN;
-    let max = voom_core::PROTOCOL_VERSION_SUPPORTED_MAX;
-    if offered < min || offered > max {
+    if offered != voom_core::PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedProtocolVersion {
             offered,
-            supported_min: min,
-            supported_max: max,
+            expected: voom_core::PROTOCOL_VERSION,
         });
     }
     Ok(HandshakeResponse { agreed: offered })

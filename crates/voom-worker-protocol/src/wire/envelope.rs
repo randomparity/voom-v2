@@ -146,14 +146,8 @@ impl ProgressFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProtocolError {
-    #[error(
-        "unsupported protocol version: offered={offered}, supported [{supported_min}, {supported_max}]"
-    )]
-    UnsupportedProtocolVersion {
-        offered: u32,
-        supported_min: u32,
-        supported_max: u32,
-    },
+    #[error("unsupported protocol version: offered={offered}, expected {expected}")]
+    UnsupportedProtocolVersion { offered: u32, expected: u32 },
     #[error("unknown operation: {name}")]
     UnknownOperation { name: String },
     #[error("invalid payload: {detail}")]

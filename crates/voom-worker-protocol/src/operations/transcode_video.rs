@@ -59,7 +59,9 @@ fn is_false(value: &bool) -> bool {
 /// plane (ADR-0002 / `VOOM_FFMPEG_WORKER_BIN`), so this schema is lock-stepped
 /// with the control-plane build. The required fields and `deny_unknown_fields`
 /// are a deliberate fail-loud choice for an in-build contract — NOT a
-/// cross-version durable-replay contract. There is no version skew to tolerate.
+/// cross-version durable-replay contract. There is no version skew to tolerate:
+/// the wire protocol enforces an exact version match (ADR-0016), consistent with
+/// this lock-stepped schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscodeVideoRequest {
