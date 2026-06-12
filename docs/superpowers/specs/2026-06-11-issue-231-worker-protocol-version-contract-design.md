@@ -96,18 +96,50 @@ AGENTS.md Rule 9). Files:
 - **`envelope_test.rs`** — update the `UnsupportedProtocolVersion` construction
   to `{ offered, expected }` and assert the new serialized JSON shape
   (`code`, `offered`, `expected`; no `supported_min`/`supported_max`).
-- **`server` tests** (wherever `enforce_version` is unit-tested) — add/confirm a
-  test that a present-but-wrong version header is rejected as
-  `UnsupportedProtocolVersion` (via the delegated `negotiate`), and that a
-  missing header is still `InvalidPayload`.
-- **`crates/voom-conformance/src/typed_suite.rs`** — `handshake_rejects_below_-`
-  `supported_min` offers `PROTOCOL_VERSION_SUPPORTED_MIN - 1`. Rename to
+- **`enforce_version` unit coverage (new sibling file).** `enforce_version` has
+  **no** unit test today — there is no `crates/voom-worker-protocol/src/http/`
+  `*_test.rs` sibling — and the prior coverage audit
+  (`docs/test-coverage-audit-2026-05-28.md`) records the missing-header →
+  `InvalidPayload` branch as pinned by nothing (the conformance probe loosely
+  accepts either variant). That branch is `enforce_version`'s **own** logic, not
+  reached through `negotiate`, so pin it. Add
+  `crates/voom-worker-protocol/src/http/server_test.rs` and wire it from
+  `server.rs` with the mandatory sibling-test declaration (AGENTS.md test layout /
+  ADR-0004):
+
+  ```rust
+  // at the bottom of server.rs
+  #[cfg(test)]
+  #[path = "server_test.rs"]
+  mod tests;
+  ```
+
+  `enforce_version` is private; the sibling test reaches it via `use super::*;`
+  (no visibility change). Two cases, both building a `hyper::HeaderMap`:
+  - present-but-wrong version header (`PROTOCOL_VERSION + 1`) → `Err(`
+    `UnsupportedProtocolVersion { offered, expected })` (proves the delegation to
+    `negotiate` carries through);
+  - **no** `x-voom-protocol-version` header → `Err(InvalidPayload { .. })` (pins
+    the previously-uncovered branch).
+
+  Do **not** add an inline `#[cfg(test)] mod tests { … }` to `server.rs`:
+  `just check-test-layout` (in `just ci`) rejects inline test modules in `src/`.
+- **`crates/voom-conformance/src/typed_suite.rs`** — the test is referenced at
+  **three** sites that all must move together: the case registration display
+  string (`typed_suite.rs:88`, the `format!("…::handshake_rejects_below_-`
+  `supported_min", …)` literal — the compiler will **not** flag a stale string),
+  the call in that same registration block (`:89`), and the function definition
+  (`:199`, which offers `PROTOCOL_VERSION_SUPPORTED_MIN - 1`). Rename all three to
   `handshake_rejects_unsupported_version` and offer a non-matching version
-  (`PROTOCOL_VERSION + 1`); it already asserts
+  (`PROTOCOL_VERSION + 1`). The body already asserts
   `matches!(e, UnsupportedProtocolVersion { .. })`, which still holds.
 - **`crates/voom-conformance/src/raw_wire_suite.rs`** — the
-  `UnsupportedProtocolVersion { .. }` match arm is field-agnostic and unaffected;
-  confirm the offered-version it sends still triggers the error.
+  `UnsupportedProtocolVersion { .. }` match arm is field-agnostic and unaffected,
+  and the error is decoded by `RawHttpResponse::protocol_error()` via a plain
+  `serde_json::from_slice` into `ProtocolError` (not a key-by-key assertion), so
+  the `{offered, expected}` reshape needs **no** decoder change — confirmed no
+  conformance test asserts the old `supported_min`/`supported_max` keys. Confirm
+  the offered version it sends (`{"offered": 0}`) still triggers the error.
 
 ## Verification
 
