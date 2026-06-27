@@ -23,7 +23,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
@@ -37,7 +37,7 @@ jobs:
         run: cargo install --locked cargo-deny cargo-audit
 
       - name: Install ast-grep
-        uses: taiki-e/install-action@50b4a718b59c718df4ef27a3b445f86cd57b9f00  # v2.80.0
+        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9  # v2.82.1
         with:
           tool: ast-grep
 
@@ -61,7 +61,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
           fetch-depth: 0  # SonarCloud uses git history for blame.
@@ -70,7 +70,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@50b4a718b59c718df4ef27a3b445f86cd57b9f00  # v2.80.0
+        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9  # v2.82.1
         with:
           tool: cargo-llvm-cov
 
@@ -87,6 +87,6 @@ jobs:
         if: >-
           github.event_name != 'pull_request' ||
           github.event.pull_request.user.login != 'dependabot[bot]'
-        uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995  # v8.1.0
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e  # v8.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
