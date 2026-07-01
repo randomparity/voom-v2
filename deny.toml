@@ -41,6 +41,10 @@ skip = [
     # idempotency replay hash) pulls 0.3. Both are thin CPU-feature probes;
     # no behavior risk. Revisit on sqlx bump.
     { crate = "cpufeatures", reason = "transitive duplication: sqlx@0.8 still on cpufeatures 0.2, blake3@1 on 0.3" },
+    # voom crates use constant_time_eq 0.5 for constant-time comparisons while
+    # blake3@1.8 still pins 0.4. Both are thin constant-time-equality helpers;
+    # no behavior risk. Revisit when blake3 moves to constant_time_eq 0.5.
+    { crate = "constant_time_eq", reason = "transitive duplication: blake3@1.8 pins 0.4, voom crates on 0.5" },
 ]
 skip-tree = []
 
