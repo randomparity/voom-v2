@@ -20,6 +20,7 @@ members = [
     "crates/voom-ffmpeg-worker",
     "crates/voom-mkvtoolnix-worker",
     "crates/voom-verify-artifact-worker",
+    "crates/voom-backup-worker",
 ]
 
 [workspace.package]

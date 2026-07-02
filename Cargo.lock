@@ -2463,6 +2463,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "voom-backup-worker"
+version = "0.1.0-dev"
+dependencies = [
+ "blake3",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "voom-core",
+ "voom-worker-protocol",
+]
+
+[[package]]
 name = "voom-cli"
 version = "0.1.0-dev"
 dependencies = [
