@@ -111,10 +111,9 @@ fn evaluate_supported_audio_filter(
 ) -> Result<bool, AudioPlanningBlock> {
     match filter {
         TrackFilter::LanguageIn { values } => {
-            let language = stream
-                .language
-                .as_ref()
-                .ok_or(AudioPlanningBlock::InsufficientSnapshotFacts)?;
+            // A missing language tag matches as `und` (ISO 639-2 undetermined)
+            // rather than blocking planning (ADR 0021, issue #272).
+            let language = stream.language.as_deref().unwrap_or("und");
             Ok(values.iter().any(|value| value == language))
         }
         TrackFilter::CodecIn { values } => {
