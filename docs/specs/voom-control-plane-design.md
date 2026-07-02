@@ -1108,6 +1108,17 @@ through path aliases. A daemon may not watch a path that lacks a live
 `LibraryRoot`; if a root is disabled or its safety/scheduling profile is missing
 or stale, the daemon records a blocked issue and does not synthesize defaults.
 
+The V1 CLI implementation of this model (durable `libraries`/`library_roots`
+tables, `voom library`/`voom library root` CRUD, `voom scan --root`, root-scoped
+policy input building, and the fail-closed disabled-root refusal) is ADR 0027.
+V1 stores the full field set but applies only `extension_allowlist` and canonical
+path scoping during a CLI scan; include/exclude globs, stability/debounce,
+symlink/hidden-file/max-depth policies are stored for the Sprint 18 watcher. The
+disabled-root block is surfaced as a fail-closed `BLOCKED` refusal (not a scan);
+the durable blocked-`Issue` record is deferred to Sprint 18. The library's
+default scheduling/safety policy (#281), quality-scoring profile (#285), and
+external-system links (#284) are added as columns by their owning issues.
+
 ## Issue Model
 
 `Issue` records a durable condition that should remain visible until resolved,
