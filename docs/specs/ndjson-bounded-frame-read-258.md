@@ -60,17 +60,21 @@ bound was exceeded" — always `> max`, but no longer necessarily the true line
 length for a streaming source. This is intended: computing the true length would
 require reading the whole line, defeating the fix. `bytes` remains a
 diagnostic-only field of `ProtocolError::FrameTooLarge`; only `ProtocolError`
-`code` strings are public contract (they are unchanged). For an in-memory reader
-whose `fill_buf` returns the entire remaining slice at once (e.g. a `&[u8]`),
-`bytes` still equals the exact length, so existing `&[u8]`-based tests are
-unaffected.
+`code` strings are public contract (they are unchanged). `BufReader::fill_buf`
+returns at most the reader's internal capacity per fill (tokio default 8 KiB),
+regardless of the underlying source, so `bytes` equals the exact payload length
+only when the offending line fits within a single fill. The existing
+`frame_too_large_rejects` test (a 201-byte `&[u8]` line, well under 8 KiB) is one
+such case and is unaffected; a hypothetical over-length line exceeding one fill
+would report a capped `bytes` value.
 
 **Edge cases:**
 - Over-length line from a chunked stream → `FrameTooLarge` with `bytes > max`,
   and the reader consumes at most `max + BufReader_capacity` bytes of input
   before erroring (the load-bearing new behavior).
-- Over-length line from an in-memory `&[u8]` → `FrameTooLarge` with `bytes` equal
-  to the exact payload length (unchanged).
+- Over-length line from an in-memory `&[u8]` that fits within one `fill_buf`
+  (≤ capacity) → `FrameTooLarge` with `bytes` equal to the exact payload length
+  (unchanged; covers the existing 201-byte test).
 - Line exactly `max_frame_bytes` payload + newline → accepted (boundary,
   unchanged).
 - Empty line (`"\n"`) → payload length 0 → serde decode error →
@@ -81,11 +85,15 @@ unaffected.
   (unchanged).
 
 **Acceptance criteria:**
-- A reader that streams non-newline bytes far larger than `max_frame_bytes` in
-  bounded chunks returns `FrameTooLarge` **and** consumes at most
-  `max_frame_bytes` + one buffer's worth of input, proven by a counting reader
-  that records total bytes served. Against the pre-fix code this test fails
-  (the whole stream is consumed); against the fix it passes.
+- A reader that streams `N` non-newline bytes (`N` fixed at 4 MiB — far larger
+  than `max_frame_bytes`, yet small enough to fully allocate in the pre-fix red
+  run) in bounded chunks returns `FrameTooLarge` **and** consumes far fewer than
+  `N` bytes, proven by a counting reader that records total bytes served. Assert
+  `served` is orders of magnitude below `N` (e.g. `served < 64 KiB`) rather than a
+  tight `max + capacity`, so the guarantee tested is "bounded, not
+  line-proportional" and the test does not depend on the undocumented BufReader
+  capacity constant. Against the pre-fix code this test fails (all `N` bytes are
+  consumed); against the fix it passes.
 - The existing `frame_too_large_rejects` test (in-memory `&[u8]`,
   `bytes: 200, max: 64`) still passes unchanged.
 - All existing `ndjson_test.rs` cases still pass (seq monotonicity, duplicate
@@ -116,8 +124,12 @@ this is an in-process API change, **not** a durable-payload change under ADR-001
 The removed state was already unreachable, so no behavior changes.
 
 **Acceptance criteria:**
-- `rg partial_bytes crates/` returns nothing (source + tests).
-- `StreamEnd` consumers and tests compile and pass.
+- `just test` (workspace, `--all-features`) compiles and passes — the compiler is
+  the authoritative completeness signal, because a surviving
+  `NdjsonOutcome::StreamEnd { .. }` struct-pattern arm fails to compile against a
+  unit variant (a `partial_bytes` grep would not catch it, since such an arm names
+  no field).
+- `rg 'StreamEnd \{' crates/` and `rg partial_bytes crates/` both return nothing.
 
 ## Decisions
 
@@ -142,10 +154,11 @@ Guardrails before each commit: `just fmt-check`, `just lint`,
 `cargo test -p voom-worker-protocol`; `just ci` before pushing.
 
 1. **Failing test — bounded consumption.** In `ndjson_test.rs`, add a `CountingReader`
-   `AsyncRead` that serves N non-newline bytes in bounded chunks and records total
-   bytes served. Test: with a small `max_frame_bytes` and N far larger, `next_frame`
-   returns `FrameTooLarge` and `served <= max_frame_bytes + slack`. Confirm it fails
-   against the current `read_until` implementation (whole stream consumed).
+   `AsyncRead` that serves `N = 4 MiB` of non-newline bytes in bounded chunks and
+   records total bytes served. Test: with a small `max_frame_bytes`, `next_frame`
+   returns `FrameTooLarge` and `served` is far below `N` (assert `served < 64 KiB`).
+   Confirm it fails against the current `read_until` implementation (all `N` bytes
+   consumed).
 2. **Implement the cap.** Replace the `read_until` call with a chunked read helper
    (`fill_buf`/`consume`) that appends to `line_buf` and returns `FrameTooLarge` once
    the accumulated bytes exceed `max_frame_bytes`; return whether a newline
