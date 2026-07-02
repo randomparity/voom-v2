@@ -16,11 +16,12 @@ repoint is the promotion's commit point**: `working_dir_artifacts` only returns 
 location whose value still lives under a working dir, so once the value is
 repointed a resume skips the artifact.
 
-On a same-filesystem promotion `rename` is atomic and there is no window. On a
-**cross-filesystem** promotion `rename` fails with `EXDEV` and the code falls back
-to `copy` then `remove_file(current)` (`promotion.rs:132`, `:139`). These are two
-non-atomic filesystem steps that both complete **before** the caller repoints the
-DB.
+On a same-filesystem promotion `rename` is atomic and there is no window. When
+`rename(current, dest)` fails for any reason — the motivating case is a
+cross-filesystem move failing with `EXDEV`, but the code falls back on *any*
+rename error (`promotion.rs:128`, `is_ok()`) — it falls back to `copy` then
+`remove_file(current)` (`promotion.rs:132`, `:139`). These are two non-atomic
+filesystem steps that both complete **before** the caller repoints the DB.
 
 ### Failure scenario (finding M-A)
 
@@ -82,15 +83,24 @@ racing another promoter for the same `dest`.
 
 ### D1 — Atomic cross-FS copy via a temp file (eliminates S1′)
 
-On the cross-FS fallback, do not stream bytes straight into `dest`. Copy into a
-**deterministic** temp path adjacent to `dest` on the destination filesystem
-(e.g. `<dest>.voom-tmp`), then `rename(tmp, dest)`. A rename within one filesystem
-is atomic, so `dest` is only ever observed complete or absent — the partial-`dest`
-state (S1′) cannot occur on our own path. The temp name is deterministic (not
-randomised) so a re-run after a crash mid-copy overwrites the same partial temp
-rather than accumulating orphans; a `copy` or `rename` failure removes the temp
-best-effort before returning the error. The pre-copy dest-absent check still
-guards the add-only contract (single-writer, so no TOCTOU race for `dest`).
+On the fallback (any failed `rename(current, dest)`, typically `EXDEV`), do not
+stream bytes straight into `dest`. Copy into a **deterministic** temp path
+adjacent to `dest` in the same destination directory (e.g. `<dest>.voom-tmp`, a
+sibling so the temp is on `dest`'s filesystem), then `rename(tmp, dest)`. A rename
+within one filesystem is atomic, so `dest` is only ever observed complete or
+absent — the partial-`dest` state (S1′) cannot occur on our own path. The temp
+name is deterministic (not randomised) so a re-run after a crash mid-copy
+overwrites the same partial temp rather than accumulating orphans; a `copy` or
+`rename` failure removes the temp best-effort before returning the error. The
+pre-copy dest-absent check still guards the add-only contract (single-writer, so
+no TOCTOU race for `dest`).
+
+This fallback (copy → temp → atomic rename → best-effort remove `current`) is
+extracted into a directly-callable private helper (e.g. `copy_into_place`) so it
+can be unit-tested on a single tmpdir without a real cross-FS mount: a test drives
+the helper and asserts `dest` holds `current`'s bytes, `current` is removed, and
+no `<dest>.voom-tmp` sibling remains. `move_terminal_artifact` tries `rename`
+first and calls this helper on failure.
 
 This makes D2's premise sound: any `dest` that exists is either a **complete**
 promoted copy of `current` or a genuinely foreign file — never a truncated copy of
@@ -221,15 +231,16 @@ or `rename` failure still errors (the bytes are *not* safely and completely at
 
 ## Acceptance criteria
 
-Sibling unit tests on `move_terminal_artifact` (`promotion_test.rs` via `#[path]`,
-per ADR 0004), all on a single tmpdir so no real cross-FS mount is required — the
-S1 state is constructed directly by pre-creating `dest`. On one filesystem
-`rename(current, dest)` always succeeds, so the `EXDEV` copy/temp path (D1) is not
-exercised by these unit tests; its atomicity is a reasoned property (rename within
-one FS is atomic) and the residual partial-`dest` it prevents is covered by the
-size-mismatch collision test below. The directly-tested behavior is the D2
-recovery, which is the fix for the reported wedge:
+Sibling unit tests on `move_terminal_artifact` and the extracted `copy_into_place`
+helper (`promotion_test.rs` via `#[path]`, per ADR 0004), all on a single tmpdir
+so no real cross-FS mount is required. Calling `move_terminal_artifact` on one
+filesystem always takes the `rename` branch, so the copy/temp path (D1) is covered
+by testing the `copy_into_place` helper directly; the S1 recovery (D2) is
+constructed by pre-creating `dest`:
 
+- **Copy-into-place helper (D1).** Call `copy_into_place(current, dest)` with
+  `dest` absent → `dest` holds `current`'s bytes, `current` is removed, and no
+  `<dest>.voom-tmp` sibling remains afterward.
 - **Resumed copy recovers (the fix).** `current` and `dest` both present with
   identical bytes → returns `Ok(dest)`, `current` is removed, `dest` bytes
   unchanged. With today's code this returns the collision `Err` (guards the
