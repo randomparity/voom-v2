@@ -15,7 +15,9 @@ pub use media::{
     artifact_access_plans, artifacts, backups, bundles, commit_safety_gate, identity, scan_facts,
     use_leases,
 };
-pub use policy::{issues, policies, policy_inputs, video_profiles};
+pub use policy::{
+    issues, policies, policy_inputs, safety_policies, scheduling_policies, video_profiles,
+};
 
 pub use artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
@@ -69,6 +71,14 @@ pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
 pub use use_leases::{
     BlockingMode, ExpireReport as UseLeaseExpireReport, IssuerKind, LeaseScope, NewUseLease,
     ReanchorReport, SqliteUseLeaseRepo, UseLease, UseLeaseKind, UseLeaseReleaseReason,
+};
+pub use safety_policies::{
+    CommitMode, NewSafetyPolicy, SAFETY_POLICY_SCHEMA_VERSION, SafetyPolicy,
+    SqliteSafetyPolicyRepo, VerificationLevel,
+};
+pub use scheduling_policies::{
+    NewSchedulingPolicy, SCHEDULING_POLICY_SCHEMA_VERSION, SchedulePriority, SchedulingPolicy,
+    SqliteSchedulingPolicyRepo,
 };
 pub use video_profiles::{SqliteVideoProfileRepo, VideoProfile};
 pub use workers::{

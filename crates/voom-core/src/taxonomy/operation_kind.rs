@@ -72,6 +72,16 @@ impl OperationKind {
             Self::DeleteArtifact => "delete_artifact",
         }
     }
+
+    /// Parse a wire string (the `snake_case` token produced by [`Self::as_str`])
+    /// back into a variant, or `None` for an unknown token. Symmetric with
+    /// [`Self::as_str`]; callers that need to validate an externally supplied
+    /// operation name (CLI arguments, durable safety-policy rows) use this
+    /// rather than round-tripping through `serde_json`.
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == token)
+    }
 }
 
 #[cfg(test)]
