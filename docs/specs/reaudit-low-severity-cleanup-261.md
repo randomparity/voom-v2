@@ -58,15 +58,25 @@ lets a genuinely transient IO error be retried rather than mislabeled.
 - Absent target → repromote (unchanged behavior; regression-guarded).
 - Already-installed matching file → finalize (unchanged; regression-guarded).
 - Installed mismatched-facts file → `Conflict` (unchanged; regression-guarded).
-- Directory / symlink at target → loud `ArtifactUnavailable`, not a fresh-install
-  attempt that fails with a misleading message.
-- Permission/IO error stat'ing target → `CommitFailure` naming the path.
+- Directory / symlink at target → the probe returns `Ok(_)` and delegates to
+  `observe_regular_file`, yielding a loud `ArtifactUnavailable`, not a
+  fresh-install attempt that fails with a misleading message.
+- Non-`NotFound` stat error (permission denied, or an intermediate path
+  component that is not a directory → `ENOTDIR`) → `CommitFailure` naming the
+  path. This is the branch that implements the fix's core distinction.
+- Probe → observe TOCTOU: a target that vanishes between the `symlink_metadata`
+  probe and `observe_regular_file` surfaces as `ArtifactUnavailable` rather than
+  repromoting. Erroring is acceptable — recovery is idempotent and retryable.
 
 **Acceptance criteria:**
-- Recovery with a directory occupying the target path returns
-  `ErrorCode::ArtifactUnavailable` (accurate), not `ConfigInvalid` (misleading).
+- The `Err(kind != NotFound)` arm is exercised deterministically: recovery with
+  an intermediate path component replaced by a regular file (so the target stat
+  fails with `ENOTDIR`, not `NotFound`) returns `ErrorCode::CommitFailure` and
+  does not attempt a fresh install. This is the primary new-behavior test and
+  needs no permission/uid manipulation, so it runs the same on CI and locally.
 - Existing recovery tests (`recover_commit_repromotes_when_target_absent`,
-  `recover_commit_resumes_finalize_when_target_already_installed`) still pass.
+  `recover_commit_resumes_finalize_when_target_already_installed`) still pass,
+  guarding the `NotFound`→absent and matching-facts→finalize paths.
 
 ### Item 2 — Client never validates handshake `agreed`
 
@@ -160,10 +170,15 @@ front so `busy_timeout` serializes racing writers cleanly. Use the existing
 
 **Rationale / safety:** Semantics are unchanged for the single-writer common
 case; the change only affects contended concurrent bootstraps, converting a
-spurious failure into a serialized wait. The shared helper's error context
-("begin immediate") replaces the per-site descriptive context; begin failures
-are effectively unreachable (dead pool) and the message detail is not a public
-contract (only `code` strings are).
+spurious failure into a serialized wait. Write-lock hold time barely changes: in
+every one of the five sites the first write (`register_in_tx` inside `ensure_*`,
+or the immediately-following `append_event` in `verify.rs`) occurs at most one
+`get_by_name_in_tx` SELECT after `begin`, so `BEGIN IMMEDIATE` grabs the lock
+essentially where the deferred `BEGIN` would have anyway. None of these five is
+a long-running transaction. This matches the already-accepted remote-execution
+family. The shared helper's error context ("begin immediate") replaces the
+per-site descriptive context; begin failures are effectively unreachable (dead
+pool) and the message detail is not a public contract (only `code` strings are).
 
 **Acceptance criteria:** All five sites use `begin_immediate_tx`; existing
 transcode/remux/audio/scan/verify tests still pass; `just lint` clean.
