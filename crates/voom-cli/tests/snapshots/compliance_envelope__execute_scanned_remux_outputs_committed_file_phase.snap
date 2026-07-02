@@ -1,6 +1,5 @@
 ---
 source: crates/voom-cli/tests/compliance_envelope.rs
-assertion_line: 96
 expression: json
 ---
 {
@@ -30,6 +29,13 @@ expression: json
           "retry_count": 0,
           "failure_count": 0
         }
+      },
+      "progress": {
+        "total": 1,
+        "completed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "remaining": 0
       }
     },
     "phases": [

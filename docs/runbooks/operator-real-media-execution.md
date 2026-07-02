@@ -149,6 +149,42 @@ voom compliance execute \
   output set (intermediate + final per in-flight file); transcodes are
   long-running.
 
+## Mid-run monitoring
+
+A whole-library `compliance execute` can run for hours or days. The database is
+opened in WAL mode, so a second `voom` process can read the same database
+read-only while the run is in flight — reads never block the running writer.
+
+- **Live signals (while `execute` is running):**
+  - `voom worker list` — the workers currently registered and leased for the run.
+    This concurrent read against the live database is exercised by the operator
+    execution e2e test (`crates/voom-cli/tests/operator_execution_e2e.rs`), which
+    runs `worker list` against the same database while `compliance execute` runs.
+  - The run's tickets and append-only events reflect in-flight per-file progress
+    as work is leased and completed.
+- **Recorded per-file breakdown (after the run records its summary):**
+  `voom compliance report --job-id <job_id>` returns the run's
+  `summary.progress` counts and the per-`(file, phase)` outcomes. The
+  `summary.progress` object is:
+
+  ```json
+  "progress": { "total": 12, "completed": 9, "failed": 1, "skipped": 2, "remaining": 0 }
+  ```
+
+  counted per file by its latest phase outcome: `completed` = committed,
+  `failed` = blocked, `skipped` = no work needed / deferred (a distinct bucket,
+  not outstanding work), and `remaining` = files not yet in a terminal bucket
+  (`0` for a fully-recorded successful run). The same `progress` object is in the
+  `execute` command's own output.
+
+  This is a **recorded-run breakdown, not a live ticker**: the workflow summary
+  and per-file-phase rows are written once, when the run finalizes (or when a
+  partial-failure run finalizes what committed). `report --job-id` therefore
+  reports `not found` for a job that is still running and has not yet recorded a
+  summary; use the live signals above to watch a run in progress, and
+  `report --job-id` to read the recorded breakdown of a run (or a resumed run's
+  last recorded summary).
+
 ## Output layout
 
 Outputs mirror the source tree. Each terminal artifact lands under

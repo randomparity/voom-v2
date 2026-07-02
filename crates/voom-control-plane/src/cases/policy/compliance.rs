@@ -72,15 +72,16 @@ impl ComplianceExecuteData {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
         let latest_phase_index = latest_phase_index(&phases);
+        let file_phases: Vec<FilePhaseSummaryView> = outcome
+            .file_phases
+            .iter()
+            .map(FilePhaseSummaryView::from)
+            .collect();
         Self {
             issues,
-            summary: WorkflowSummaryView::from(&outcome.summary),
+            summary: WorkflowSummaryView::from_summary(&outcome.summary, &file_phases),
             phases,
-            file_phases: outcome
-                .file_phases
-                .iter()
-                .map(FilePhaseSummaryView::from)
-                .collect(),
+            file_phases,
             latest_phase_index,
         }
     }
@@ -105,10 +106,18 @@ pub struct WorkflowSummaryView {
     pub failure_count: u64,
     pub peak_active_workflow_leases: u32,
     pub per_operation: serde_json::Value,
+    /// Per-file progress breakdown for the run, derived from the per-`(file,
+    /// phase)` rows. Available in the `execute` output and, once the run has
+    /// recorded its summary, from `report --job-id`; it is a recorded-run
+    /// breakdown, not a live mid-run ticker (#287).
+    pub progress: ProgressCountsView,
 }
 
-impl From<&voom_store::repo::workflow_summaries::WorkflowSummary> for WorkflowSummaryView {
-    fn from(summary: &voom_store::repo::workflow_summaries::WorkflowSummary) -> Self {
+impl WorkflowSummaryView {
+    fn from_summary(
+        summary: &voom_store::repo::workflow_summaries::WorkflowSummary,
+        file_phases: &[FilePhaseSummaryView],
+    ) -> Self {
         Self {
             job_id: summary.job_id.0,
             branch_count: summary.branch_count,
@@ -118,8 +127,58 @@ impl From<&voom_store::repo::workflow_summaries::WorkflowSummary> for WorkflowSu
             failure_count: summary.failure_count,
             peak_active_workflow_leases: summary.peak_active_workflow_leases,
             per_operation: summary.per_operation.clone(),
+            progress: progress_counts(file_phases),
         }
     }
+}
+
+/// Per-file progress counts for a run, computed per distinct `branch_id` by its
+/// latest (highest `phase_ordinal`) file-phase outcome. `skipped` is its own
+/// bucket — a skipped-because-compliant file is finished, not outstanding — so
+/// `remaining` (`total − completed − failed − skipped`) is `0` for a
+/// fully-recorded successful run and `> 0` only when a partial/failed run
+/// recorded rows for some files but not others.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ProgressCountsView {
+    pub total: u32,
+    pub completed: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub remaining: u32,
+}
+
+fn progress_counts(file_phases: &[FilePhaseSummaryView]) -> ProgressCountsView {
+    use std::collections::BTreeMap;
+
+    // Latest (highest phase_ordinal) outcome per distinct file/branch.
+    let mut latest: BTreeMap<&str, (u32, &str)> = BTreeMap::new();
+    for file_phase in file_phases {
+        let entry = latest
+            .entry(file_phase.branch_id.as_str())
+            .or_insert((file_phase.phase_ordinal, file_phase.outcome));
+        if file_phase.phase_ordinal >= entry.0 {
+            *entry = (file_phase.phase_ordinal, file_phase.outcome);
+        }
+    }
+
+    let mut counts = ProgressCountsView {
+        total: u32::try_from(latest.len()).unwrap_or(u32::MAX),
+        ..ProgressCountsView::default()
+    };
+    for (_, outcome) in latest.values() {
+        match *outcome {
+            "committed" => counts.completed += 1,
+            "blocked" => counts.failed += 1,
+            "skipped" => counts.skipped += 1,
+            _ => {}
+        }
+    }
+    counts.remaining = counts
+        .total
+        .saturating_sub(counts.completed)
+        .saturating_sub(counts.failed)
+        .saturating_sub(counts.skipped);
+    counts
 }
 
 /// Per-phase summary, rendered without the row `id`/`created_at`.
@@ -884,7 +943,7 @@ impl ControlPlane {
             .iter()
             .map(PhaseSummaryView::from)
             .collect();
-        let file_phases = repo
+        let file_phases: Vec<FilePhaseSummaryView> = repo
             .file_phases_for_job(job_id)
             .await?
             .iter()
@@ -892,7 +951,7 @@ impl ControlPlane {
             .collect();
         let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
-            summary: WorkflowSummaryView::from(&summary),
+            summary: WorkflowSummaryView::from_summary(&summary, &file_phases),
             phases,
             file_phases,
             latest_phase_index,
