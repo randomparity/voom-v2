@@ -108,6 +108,9 @@ fn build_args_rejects_missing_track_mapping() {
             default_streams: vec![],
             clear_default_streams: vec![],
             track_order: vec![RemuxTrackGroup::Video],
+            head_streams: vec![],
+            forced_streams: vec![],
+            clear_forced_streams: vec![],
         },
     };
     let mapping = MkvmergeTrackMapping::from_pairs([(1, 7)]);
@@ -143,6 +146,9 @@ fn build_args_disable_unselected_audio_subtitles_and_attachments() {
             default_streams: vec![],
             clear_default_streams: vec![],
             track_order: vec![RemuxTrackGroup::Video],
+            head_streams: vec![],
+            forced_streams: vec![],
+            clear_forced_streams: vec![],
         },
     };
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
@@ -152,4 +158,149 @@ fn build_args_disable_unselected_audio_subtitles_and_attachments() {
     assert!(args.contains(&"--no-audio".to_owned()));
     assert!(args.contains(&"--no-subtitles".to_owned()));
     assert!(args.contains(&"--no-attachments".to_owned()));
+}
+
+fn stream(provider_stream_index: u32) -> RemuxStreamRef {
+    RemuxStreamRef {
+        snapshot_stream_id: format!("stream-{provider_stream_index}"),
+        provider_stream_index,
+    }
+}
+
+fn remux_request(selection: RemuxSelection) -> RemuxRequest {
+    RemuxRequest {
+        input: RemuxInput {
+            path: "/tmp/input.mkv".to_owned(),
+            expected: RemuxExpectedFacts {
+                size_bytes: 1,
+                content_hash: "blake3:abc".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: RemuxOutput {
+            staging_root: "/tmp/stage".to_owned(),
+            path: "/tmp/stage/out.mkv".to_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection,
+    }
+}
+
+fn base_selection(keep: Vec<RemuxStreamRef>) -> RemuxSelection {
+    RemuxSelection {
+        keep_streams: keep,
+        default_streams: vec![],
+        clear_default_streams: vec![],
+        track_order: vec![],
+        head_streams: vec![],
+        forced_streams: vec![],
+        clear_forced_streams: vec![],
+    }
+}
+
+fn flag_pair(args: &[String], flag: &str, value: &str) -> bool {
+    args.windows(2).any(|w| w[0] == flag && w[1] == value)
+}
+
+fn first_arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.windows(2)
+        .find(|w| w[0] == flag)
+        .map(|w| w[1].as_str())
+}
+
+#[test]
+fn build_args_emits_forced_track_flags_for_set_and_clear() {
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.forced_streams = vec![stream(1)];
+    selection.clear_forced_streams = vec![stream(2)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12), (2, 14)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert!(
+        flag_pair(&args, "--forced-track-flag", "12:1"),
+        "forced set flag missing: {args:?}"
+    );
+    assert!(
+        flag_pair(&args, "--forced-track-flag", "14:0"),
+        "forced clear flag missing: {args:?}"
+    );
+}
+
+#[test]
+fn build_args_forced_set_wins_over_clear_on_collision() {
+    let mut selection = base_selection(vec![stream(0), stream(1)]);
+    selection.forced_streams = vec![stream(1)];
+    selection.clear_forced_streams = vec![stream(1)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert!(flag_pair(&args, "--forced-track-flag", "12:1"));
+    assert!(
+        !flag_pair(&args, "--forced-track-flag", "12:0"),
+        "clear must not fire when the same id is set forced: {args:?}"
+    );
+}
+
+#[test]
+fn build_args_missing_forced_stream_mapping_errors() {
+    let mut selection = base_selection(vec![stream(0)]);
+    selection.forced_streams = vec![stream(9)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
+
+    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+
+    assert!(err.to_string().contains("missing mkvmerge track id"));
+}
+
+#[test]
+fn build_args_pins_head_stream_first_in_track_order() {
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.head_streams = vec![stream(2)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12), (2, 14)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    let order = first_arg_value(&args, "--track-order").unwrap();
+    assert!(
+        order.starts_with("0:14"),
+        "head stream not pinned first: {order}"
+    );
+}
+
+#[test]
+fn build_args_head_stream_precedes_group_order() {
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.head_streams = vec![stream(2)];
+    selection.track_order = vec![RemuxTrackGroup::Video];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12), (2, 14)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    let order = first_arg_value(&args, "--track-order").unwrap();
+    assert_eq!(order, "0:14,0:7,0:12");
+}
+
+#[test]
+fn build_args_ignores_head_stream_not_kept() {
+    let mut selection = base_selection(vec![stream(0)]);
+    selection.head_streams = vec![stream(1)];
+    let request = remux_request(selection);
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12)]);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    let order = first_arg_value(&args, "--track-order").unwrap();
+    assert_eq!(
+        order, "0:7",
+        "unkept head stream must not be pinned: {order}"
+    );
 }

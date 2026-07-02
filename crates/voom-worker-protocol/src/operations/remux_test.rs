@@ -36,6 +36,15 @@ fn remux_request_serializes_wire_shape() {
                 RemuxTrackGroup::Audio,
                 RemuxTrackGroup::Subtitle,
             ],
+            head_streams: vec![RemuxStreamRef {
+                snapshot_stream_id: "stream-1".to_owned(),
+                provider_stream_index: 1,
+            }],
+            forced_streams: vec![RemuxStreamRef {
+                snapshot_stream_id: "stream-2".to_owned(),
+                provider_stream_index: 2,
+            }],
+            clear_forced_streams: vec![],
         },
     };
 
@@ -44,7 +53,34 @@ fn remux_request_serializes_wire_shape() {
         json["selection"]["track_order"],
         serde_json::json!(["video", "audio", "subtitle"])
     );
+    assert_eq!(
+        json["selection"]["head_streams"][0]["provider_stream_index"],
+        1
+    );
+    assert_eq!(
+        json["selection"]["forced_streams"][0]["provider_stream_index"],
+        2
+    );
+    assert_eq!(
+        json["selection"]["clear_forced_streams"],
+        serde_json::json!([])
+    );
     assert_eq!(json["output"]["overwrite"], false);
+}
+
+#[test]
+fn remux_selection_defaults_new_stream_lists_when_absent() {
+    let selection: RemuxSelection = serde_json::from_value(serde_json::json!({
+        "keep_streams": [],
+        "default_streams": [],
+        "clear_default_streams": [],
+        "track_order": ["video"]
+    }))
+    .unwrap();
+
+    assert!(selection.head_streams.is_empty());
+    assert!(selection.forced_streams.is_empty());
+    assert!(selection.clear_forced_streams.is_empty());
 }
 
 #[test]

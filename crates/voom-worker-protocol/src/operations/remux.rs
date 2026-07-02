@@ -52,6 +52,19 @@ pub struct RemuxSelection {
     pub default_streams: Vec<RemuxStreamRef>,
     pub clear_default_streams: Vec<RemuxStreamRef>,
     pub track_order: Vec<RemuxTrackGroup>,
+    /// Streams pinned to the front of the track order, ahead of the
+    /// `track_order` group order. Additive since ADR 0023 (#277); absent in
+    /// older payloads and defaults empty.
+    #[serde(default)]
+    pub head_streams: Vec<RemuxStreamRef>,
+    /// Streams to mark with the forced flag (`--forced-track-flag id:1`).
+    /// Additive since ADR 0023 (#277); defaults empty.
+    #[serde(default)]
+    pub forced_streams: Vec<RemuxStreamRef>,
+    /// Streams to clear the forced flag on (`--forced-track-flag id:0`),
+    /// mirroring `clear_default_streams`. Additive since ADR 0023 (#277).
+    #[serde(default)]
+    pub clear_forced_streams: Vec<RemuxStreamRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
