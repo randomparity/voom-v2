@@ -104,6 +104,36 @@ skipped.
 re-run, either `voom policy list` to find the existing document id and
 `voom policy version add --document-id <id> --file <f>`, or choose a new slug.
 
+#### Sample policy catalog
+
+The two-phase policy above is the minimal example. A set of committed samples in
+`crates/voom-control-plane/tests/fixtures/policies/` exercises the full V1(+V1.1)
+vocabulary; each has a planner-oracle test in
+`crates/voom-control-plane/tests/sample_policies_plan.rs` pinning what it plans:
+
+| Sample | What it does |
+|--------|--------------|
+| `container-normalize.voom` | Remux every file to mkv; already-mkv files are a no-op. |
+| `language-cleanup.voom` | Keep only the preferred-language audio/subtitles, then order tracks and set filter-addressed defaults. |
+| `reference-user.voom` | The whole-library flagship: mkv + HEVC video + E-AC-3 5.1 audio + a synthesized stereo downmix + language-filtered keep + filter-addressed defaults + `verify artifact`, run as a four-phase barrier chain. |
+| `verify-heavy.voom` | An artifact verification between each mutating phase. |
+
+For a real whole-library run, `reference-user.voom` is the closest to a
+production policy. Its language filters (`keep audio where lang in [eng, und]`,
+`transcode audio to eac3 where lang in [eng, und]`) behave predictably on a messy
+library (ADR 0021):
+
+- **Untagged audio is treated as `und`.** A file whose audio carries no language
+  tag matches the `und` clause instead of blocking; the plan carries a per-file
+  `untagged_track_language_defaulted` warning so you can see which files were
+  defaulted.
+- **A no-matching-language file fails per file, never silently.** If a file's
+  only audio is a language the policy does not keep, the language-filtered audio
+  transcode is blocked for that one file and a remux that would strip its last
+  audio track is rejected at execution (`no audio track survived the track
+  filters`) — surfaced as a `terminal_failure` issue for that file while the rest
+  of the library proceeds. voom never emits an audio-less artifact.
+
 ### 5. Build a whole-library input set
 
 ```
