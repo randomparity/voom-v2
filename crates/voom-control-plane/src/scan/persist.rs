@@ -26,7 +26,10 @@ use voom_worker_protocol::ProbeFileResult;
 
 use crate::ControlPlane;
 use crate::cases::append_event;
-use crate::scan::{ScanReportFileStatus, discovery::SidecarCandidate};
+use crate::scan::{
+    ScanReportFileStatus,
+    discovery::{SidecarCandidate, SidecarKind},
+};
 
 pub use super::hash::ObservedFileFacts as ObservedCandidateFacts;
 
@@ -58,9 +61,19 @@ pub struct PersistedSidecar {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedSidecar {
     path: PathBuf,
+    role: BundleMemberRole,
     location_value: String,
     content_hash: String,
     size_bytes: u64,
+}
+
+const fn role_for_sidecar_kind(kind: SidecarKind) -> BundleMemberRole {
+    match kind {
+        SidecarKind::Subtitle => BundleMemberRole::ExternalSubtitle,
+        SidecarKind::Nfo => BundleMemberRole::Nfo,
+        SidecarKind::Poster => BundleMemberRole::Poster,
+        SidecarKind::Trailer => BundleMemberRole::Trailer,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,6 +316,7 @@ async fn observe_sidecars(
         let content_hash = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
         observed.push(ObservedSidecar {
             path: sidecar.path.clone(),
+            role: role_for_sidecar_kind(sidecar.kind),
             location_value: canonical_path_value(&sidecar.path)?,
             content_hash,
             size_bytes,
@@ -451,12 +465,13 @@ async fn persist_sidecar(
         .await?;
     let IngestedIds(file_asset_id, file_version_id, file_location_id) =
         emit_ingest_events(control_plane, tx, &outcome, observed_at).await?;
+    let role = sidecar.role;
     if let Some(member) = control_plane
         .bundles
         .get_member_by_file_asset_in_tx(tx, file_asset_id)
         .await?
     {
-        if member.bundle_id == bundle_id && member.role == BundleMemberRole::ExternalSubtitle {
+        if member.bundle_id == bundle_id && member.role == role {
             return Ok(persisted_sidecar_report(
                 sidecar,
                 file_asset_id,
@@ -476,7 +491,7 @@ async fn persist_sidecar(
         tx,
         bundle_id,
         file_asset_id,
-        BundleMemberRole::ExternalSubtitle,
+        role,
         observed_at,
     )
     .await?;
@@ -502,7 +517,7 @@ fn persisted_sidecar_report(
         file_version_id,
         file_location_id,
         bundle_id,
-        bundle_member_role: BundleMemberRole::ExternalSubtitle.as_str().to_owned(),
+        bundle_member_role: sidecar.role.as_str().to_owned(),
         content_hash: sidecar.content_hash,
         size_bytes: sidecar.size_bytes,
     }

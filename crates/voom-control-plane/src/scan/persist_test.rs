@@ -234,6 +234,103 @@ fn verify_probe_facts_rejects_pre_probe_hash_mismatch() {
     assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
 }
 
+#[tokio::test]
+async fn persists_sidecars_under_per_kind_roles() {
+    use crate::scan::discovery::{SidecarCandidate, SidecarKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, bytes: &[u8]| -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    };
+    // observe_sidecars reads and hashes each file, so the paths must exist.
+    let sidecars = vec![
+        SidecarCandidate {
+            path: write("Movie.srt", b"subtitle"),
+            kind: SidecarKind::Subtitle,
+        },
+        SidecarCandidate {
+            path: write("Movie.nfo", b"nfo"),
+            kind: SidecarKind::Nfo,
+        },
+        SidecarCandidate {
+            path: write("Movie-poster.jpg", b"poster"),
+            kind: SidecarKind::Poster,
+        },
+        SidecarCandidate {
+            path: write("Movie-trailer.mkv", b"trailer"),
+            kind: SidecarKind::Trailer,
+        },
+    ];
+
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    let candidate = candidate_facts(10, "blake3:primary");
+    let result = matching_probe_result(&candidate);
+
+    let persisted = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/Movie.mkv"),
+        &sidecars,
+        &candidate,
+        &result,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        persisted.bundle_member_role.as_deref(),
+        Some("primary_video")
+    );
+    let roles: std::collections::BTreeMap<String, String> = persisted
+        .sidecars
+        .iter()
+        .map(|sidecar| {
+            (
+                sidecar
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                sidecar.bundle_member_role.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        roles.get("Movie.srt").map(String::as_str),
+        Some("external_subtitle")
+    );
+    assert_eq!(roles.get("Movie.nfo").map(String::as_str), Some("nfo"));
+    assert_eq!(
+        roles.get("Movie-poster.jpg").map(String::as_str),
+        Some("poster")
+    );
+    assert_eq!(
+        roles.get("Movie-trailer.mkv").map(String::as_str),
+        Some("trailer")
+    );
+
+    // The durable membership rows carry the same per-kind roles (primary + 4).
+    let db_roles: Vec<String> =
+        sqlx::query_scalar("SELECT role FROM asset_bundle_members ORDER BY role ASC")
+            .fetch_all(cp.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(
+        db_roles,
+        vec![
+            "external_subtitle",
+            "nfo",
+            "poster",
+            "primary_video",
+            "trailer"
+        ]
+    );
+}
+
 fn candidate_facts(size_bytes: u64, content_hash: &str) -> ObservedCandidateFacts {
     ObservedCandidateFacts {
         size_bytes,
