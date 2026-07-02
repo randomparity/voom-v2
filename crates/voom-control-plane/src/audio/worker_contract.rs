@@ -33,6 +33,11 @@ pub fn transcode_audio_request_for(
         audio: TranscodeAudioSettings {
             target_codec: selection.target_codec.clone(),
             profile: "default".to_owned(),
+            // Transcode replaces streams in place. `synthesize audio` (ADR 0026)
+            // sets these to add a downmixed companion; that execute-path wiring
+            // is a follow-up (see PR / issue #276).
+            add_track: false,
+            target_channels: None,
         },
     }
 }

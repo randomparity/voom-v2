@@ -673,6 +673,17 @@ fn validate_transcode_audio_contract(
             "transcode_audio must select at least one stream".to_owned(),
         ));
     }
+    if request.audio.add_track
+        && request
+            .audio
+            .target_channels
+            .is_none_or(|channels| channels == 0)
+    {
+        return Err(config_invalid(
+            "request",
+            "synthesize audio (add_track) requires a positive target_channels".to_owned(),
+        ));
+    }
     Ok(())
 }
 

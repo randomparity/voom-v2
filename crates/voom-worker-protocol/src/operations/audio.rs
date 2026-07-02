@@ -12,6 +12,14 @@ pub const EXTRACT_AUDIO_CODEC: &str = "opus";
 
 /// Returns true when `codec` is an audio codec the `transcode audio` operation
 /// supports (aac, opus, or eac3).
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if requires a &T predicate signature"
+)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[must_use]
 pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
     matches!(
@@ -116,6 +124,17 @@ pub struct TranscodeAudioSelection {
 pub struct TranscodeAudioSettings {
     pub target_codec: String,
     pub profile: String,
+    /// When true, the operation *adds* a downmixed companion track derived from
+    /// each selected source stream instead of re-encoding it in place
+    /// (`synthesize audio`, ADR 0026, #276). Additive; defaults to the
+    /// replace-in-place transcode behavior and is omitted from the wire when
+    /// false so the existing transcode request shape is unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub add_track: bool,
+    /// Target channel count for the synthesized companion (a downmix). Required
+    /// when `add_track` is true; ignored otherwise. Additive since ADR 0026.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_channels: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
