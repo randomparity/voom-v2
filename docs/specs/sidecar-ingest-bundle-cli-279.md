@@ -95,20 +95,29 @@ subcommands, following the standard envelope conventions (one JSON envelope on
 stdout; `voom_core::ErrorCode` codes; `NOT_FOUND` exit 2 for a missing bundle).
 
 - `voom bundle list [--limit N]` — all bundles ordered by id, each summarised
-  as `{id, media_variant_id, display_name, created_at, member_count}`.
+  as `{id, media_variant_id, display_name, created_at, member_count}`. The
+  member count is produced by a single aggregate query
+  (`LEFT JOIN ... GROUP BY bundle_id`), not one `list_members` call per bundle,
+  so the list view is a single round trip regardless of bundle count.
 - `voom bundle show --bundle-id <id>` — one bundle with:
   - `bundle`: `{id, media_variant_id, display_name, created_at, epoch}`
   - `lineage`: the `media_variant` (`{id, media_work_id, label, provisional}`)
     and `media_work` (`{id, kind, display_title, provisional}`) it belongs to
   - `members`: each `{file_asset_id, role, file_version_id, content_hash,
     size_bytes, produced_by, produced_from_version_id, location}`, ordered by
-    member id. `produced_by`/`produced_from_version_id` are read from the live
-    `file_version`, so generated members (extracted audio) show their
-    provenance without a new schema column. `location` is the live local-path
-    location, if any.
+    member id. **File-version selection is deterministic:** the member's
+    provenance is read from its single live (`retired_at IS NULL`) file version;
+    if more than one is live, the highest `id` wins; if none is live, the
+    `file_version_id`, `content_hash`, `size_bytes`, `produced_by`,
+    `produced_from_version_id`, and `location` fields are `null`. `location` is
+    the live local-path location of that chosen version, highest `id` if
+    several, else `null`. Reading provenance from `file_versions` lets generated
+    members (extracted audio) show their `produced_from_version_id` without a
+    new schema column.
 
 New read accessors (all thin, no events): `SqliteBundleRepo::list_all(limit)`
-plus `ControlPlane` wrappers for it and for the identity reads the view needs
+returning `(AssetBundle, member_count)` rows from the aggregate query, plus
+`ControlPlane` wrappers for it and for the identity reads the view needs
 (`get_media_variant`, `get_media_work`, `list_file_versions_by_asset`,
 `list_live_file_locations_by_version`) where not already exposed.
 
@@ -119,8 +128,17 @@ plus `ControlPlane` wrappers for it and for the identity reads the view needs
   `external_subtitle`, `nfo`, `poster`, `trailer` respectively.
 - An orphan sidecar of any supported kind appears in `skipped`, not as a
   member.
-- Re-scanning the same directory is idempotent (no duplicate members, no
-  conflict) for every role.
+- Within one scan, a sidecar whose `file_asset` is already a member of the
+  bundle under the same role is not double-added — the `persist_sidecar` guard
+  (`get_member_by_file_asset_in_tx`) returns the existing membership — and a
+  conflicting role for an existing member is rejected with a `Conflict`. This is
+  the existing subtitle guard, now applied per role. Cross-scan / whole-library
+  re-scan identity dedup is **not** provided here: `ingest_new_file_asset`
+  mints a fresh `file_asset` per discovered file (identity never collapses on
+  content hash, and `file_locations` has no `UNIQUE(value)`), so a second scan
+  of the same directory creates new identities today. That is a pre-existing
+  property of the ingest layer, out of scope for #279, and not claimed as an
+  acceptance criterion here.
 - `voom bundle list` emits one envelope listing every bundle with a member
   count; `voom bundle show` emits members with roles, lineage, and per-member
   provenance; a missing id yields a `NOT_FOUND` envelope with exit 2.
