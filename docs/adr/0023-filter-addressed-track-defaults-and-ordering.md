@@ -138,9 +138,14 @@ inert, never wrong.
   forces mechanical edits at construction/destructure sites and the exhaustive
   `operation_kind` match in `voom-plan`, and at the `RemuxSelection` literals in
   `voom-control-plane/remux`. Those edits are additive and behaviour-preserving.
-- `CompiledOperation` gains a durable field/variant → registered in
-  `docs/payload-contract-inventory.md` and `scripts/payload-contract-scope.txt`;
-  `check-payload-deny-unknown` stays green.
+- `compiled_json` (`policy_versions.compiled_json`) is **Class P (passthrough
+  `JsonValue`, no typed DB read)** in `docs/payload-contract-inventory.md`, so
+  `CompiledOperation` is outside the Class-T `deny_unknown_fields` regime and no
+  scope/inventory edit is needed. The new fields are additive with
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`: old compiled
+  rows deserialize (absent ⇒ `None`) and unchanged policies serialize
+  identically, so their `source_hash` — a hash of the *source text*, not the
+  compiled JSON — is unaffected.
 - Until the planner/control-plane follow-up lands, the three new intents are
   parsed and stored but do not yet change a produced artifact.
 
