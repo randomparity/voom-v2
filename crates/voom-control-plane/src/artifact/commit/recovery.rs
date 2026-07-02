@@ -80,8 +80,20 @@ pub(super) async fn recover_commit_inner(
         &expected_facts,
     )?;
 
-    // Decide where to resume from based on the target's current state.
-    let existing_target = observe_regular_file(&target_path).await.ok();
+    // Decide where to resume from based on the target's current state. Only a
+    // genuinely absent target (NotFound) means "resume a fresh install"; a
+    // permission/IO error or an occupied path must surface loudly rather than
+    // be misread as absent (which would attempt a spurious fresh install).
+    let existing_target = match fs::symlink_metadata(&target_path).await {
+        Ok(_) => Some(observe_regular_file(&target_path).await?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(VoomError::CommitFailure(format!(
+                "commit recovery cannot stat target {}: {err}",
+                target_path.display()
+            )));
+        }
+    };
     let already_installed = match &existing_target {
         Some(facts) if same_file_facts(facts, &expected_facts) => true,
         Some(_) => {
