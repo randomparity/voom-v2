@@ -41,13 +41,25 @@ impl ControlPlane {
         &self,
         id: ExternalSystemId,
     ) -> Result<ExternalSyncReport, VoomError> {
+        let system = self
+            .external_systems
+            .get(id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("external system id={id} not found")))?;
         let started_at = self.clock().now();
-        let updated = self.health_check_external_system(id).await?;
-        let finished_at = self.clock().now();
-        let active_links = self.external_systems.list_links(id).await?;
-        let outcome = sync_outcome(updated.health_status.as_str());
+        let probed = self.probe_health(&system).await?;
+        let now = self.clock().now();
 
+        // Health refresh, link snapshot, and the run event commit in one
+        // transaction so a crash never leaves a health change without its
+        // corresponding sync run (or vice versa).
         let mut tx = begin_immediate_tx(&self.pool).await?;
+        let updated = self
+            .record_probed_health_in_tx(&mut tx, id, probed, now)
+            .await?;
+        let active_links = self.external_systems.list_links_in_tx(&mut tx, id).await?;
+        let finished_at = self.clock().now();
+        let outcome = sync_outcome(updated.health_status.as_str());
         append_event(
             &self.events,
             &mut tx,

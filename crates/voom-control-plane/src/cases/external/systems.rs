@@ -1,6 +1,8 @@
 //! External-system registration, health probe, path-mapping CRUD, and link
 //! primitives.
 
+use sqlx::{Sqlite, Transaction};
+use time::OffsetDateTime;
 use voom_core::{ExternalPathMappingId, ExternalSystemId, ExternalSystemLinkId, VoomError};
 use voom_events::payload::{
     ExternalSystemHealthChangedPayload, ExternalSystemLinkedPayload,
@@ -90,20 +92,42 @@ impl ControlPlane {
         let probed = self.probe_health(&system).await?;
         let now = self.clock().now();
         let mut tx = begin_immediate_tx(&self.pool).await?;
+        let updated = self
+            .record_probed_health_in_tx(&mut tx, id, probed, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(updated)
+    }
+
+    /// Record a probed health status inside the caller's transaction, emitting
+    /// `external_system.health_changed` only when the status actually changes.
+    /// Shared by `health-check` and `sync` so a sync run's health update and its
+    /// `synced` event commit atomically.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for an unknown system; propagates repository and
+    /// event-append errors.
+    pub(crate) async fn record_probed_health_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        id: ExternalSystemId,
+        probed: ExternalSystemHealth,
+        now: OffsetDateTime,
+    ) -> Result<ExternalSystem, VoomError> {
         let current = self
             .external_systems
-            .get_in_tx(&mut tx, id)
+            .get_in_tx(tx, id)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("external system id={id} not found")))?;
         let updated = self
             .external_systems
-            .set_health_in_tx(&mut tx, id, probed)
+            .set_health_in_tx(tx, id, probed)
             .await?
             .ok_or_else(|| VoomError::NotFound(format!("external system id={id} not found")))?;
         if current.health_status != probed {
             append_event(
                 &self.events,
-                &mut tx,
+                tx,
                 SubjectType::ExternalSystem,
                 Some(id.0),
                 now,
@@ -115,14 +139,13 @@ impl ControlPlane {
             )
             .await?;
         }
-        commit_tx(tx).await?;
         Ok(updated)
     }
 
     /// Read-only health probe. V1 probes filesystem-kind systems by checking
     /// their active path mappings' external prefixes; every other kind is
     /// recorded `Unknown` until its provider ships (ADR 0029).
-    async fn probe_health(
+    pub(crate) async fn probe_health(
         &self,
         system: &ExternalSystem,
     ) -> Result<ExternalSystemHealth, VoomError> {
