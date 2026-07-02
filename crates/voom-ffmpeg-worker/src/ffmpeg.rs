@@ -80,7 +80,7 @@ pub enum FfmpegError {
 }
 
 /// Diagnostics that mean the *input bytes* are structurally unusable regardless
-/// of the ffmpeg build — a permanent [`FailureClass::MalformedMedia`], not a
+/// of the ffmpeg build — a permanent `FailureClass::MalformedMedia`, not a
 /// transient tool failure. Deliberately narrow (precision over recall): a missed
 /// signature degrades to the pre-existing retriable `FfmpegFailed`/`FfprobeFailed`
 /// mapping, whereas a false positive would wrongly condemn a transient failure.
