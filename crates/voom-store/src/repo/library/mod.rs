@@ -7,6 +7,34 @@ use voom_core::VoomError;
 
 use super::Repository;
 
+/// Generate `as_str`/`parse` for a CHECK-vocabulary enum, mirroring the column
+/// exactly. Shared by every enum in this module (`libraries`/`library_roots`).
+macro_rules! str_enum {
+    ($ty:ty, $col:literal, { $($variant:ident => $s:literal),+ $(,)? }) => {
+        impl $ty {
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $s),+
+                }
+            }
+
+            /// Parse a wire/DB value.
+            ///
+            /// # Errors
+            /// Returns a database error for a value outside the CHECK vocabulary.
+            pub fn parse(s: &str) -> Result<Self, voom_core::VoomError> {
+                match s {
+                    $($s => Ok(Self::$variant),)+
+                    other => Err(voom_core::VoomError::database(format!(
+                        "{} {other:?} not in vocab", $col
+                    ))),
+                }
+            }
+        }
+    };
+}
+
 pub mod libraries;
 pub mod library_roots;
 

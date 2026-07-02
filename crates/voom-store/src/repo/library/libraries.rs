@@ -18,33 +18,12 @@ pub enum LibraryMediaKind {
     Unknown,
 }
 
-impl LibraryMediaKind {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Movie => "movie",
-            Self::Episode => "episode",
-            Self::Personal => "personal",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// Parse a wire/DB `media_kind` value.
-    ///
-    /// # Errors
-    /// Returns a database error for a value outside the CHECK vocabulary.
-    pub fn parse(s: &str) -> Result<Self, VoomError> {
-        match s {
-            "movie" => Ok(Self::Movie),
-            "episode" => Ok(Self::Episode),
-            "personal" => Ok(Self::Personal),
-            "unknown" => Ok(Self::Unknown),
-            other => Err(VoomError::database(format!(
-                "libraries.media_kind {other:?} not in vocab"
-            ))),
-        }
-    }
-}
+str_enum!(LibraryMediaKind, "libraries.media_kind", {
+    Movie => "movie",
+    Episode => "episode",
+    Personal => "personal",
+    Unknown => "unknown",
+});
 
 /// Input for a new library.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,13 +41,6 @@ pub struct LibraryUpdate {
     pub display_name: Option<String>,
     pub media_kind: Option<LibraryMediaKind>,
     pub description: Option<String>,
-}
-
-impl LibraryUpdate {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.display_name.is_none() && self.media_kind.is_none() && self.description.is_none()
-    }
 }
 
 /// A library row.

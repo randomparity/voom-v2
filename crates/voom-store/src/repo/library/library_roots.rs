@@ -43,32 +43,6 @@ pub enum HiddenFilePolicy {
     Include,
 }
 
-macro_rules! str_enum {
-    ($ty:ty, $col:literal, { $($variant:ident => $s:literal),+ $(,)? }) => {
-        impl $ty {
-            #[must_use]
-            pub const fn as_str(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $s),+
-                }
-            }
-
-            /// Parse a wire/DB value.
-            ///
-            /// # Errors
-            /// Returns a database error for a value outside the CHECK vocabulary.
-            pub fn parse(s: &str) -> Result<Self, VoomError> {
-                match s {
-                    $($s => Ok(Self::$variant),)+
-                    other => Err(VoomError::database(format!(
-                        "{} {other:?} not in vocab", $col
-                    ))),
-                }
-            }
-        }
-    };
-}
-
 str_enum!(LibraryRootKind, "library_roots.root_kind", {
     LocalPath => "local_path",
     SharedMount => "shared_mount",
@@ -126,24 +100,6 @@ pub struct LibraryRootUpdate {
     pub default_output_root: Option<String>,
     pub default_staging_root: Option<String>,
     pub default_backup_root: Option<String>,
-}
-
-impl LibraryRootUpdate {
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.include_globs.is_none()
-            && self.exclude_globs.is_none()
-            && self.extension_allowlist.is_none()
-            && self.scan_mode.is_none()
-            && self.symlink_policy.is_none()
-            && self.hidden_file_policy.is_none()
-            && self.max_depth.is_none()
-            && self.stability_seconds.is_none()
-            && self.debounce_seconds.is_none()
-            && self.default_output_root.is_none()
-            && self.default_staging_root.is_none()
-            && self.default_backup_root.is_none()
-    }
 }
 
 /// A library-root row.

@@ -237,7 +237,7 @@ pub struct LibraryRootUpdateArgs {
 }
 
 macro_rules! value_enum_to_store {
-    ($arg:ident => $store:path { $($variant:ident => $lit:literal),+ $(,)? }) => {
+    ($arg:ident => $store:path { $($variant:ident),+ $(,)? }) => {
         #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
         #[value(rename_all = "snake_case")]
         pub enum $arg {
@@ -253,38 +253,38 @@ macro_rules! value_enum_to_store {
             }
         }
 
+        // Display mirrors the store vocabulary exactly by delegating to the
+        // store enum's `as_str()`, so the wire strings live in one place.
         impl std::fmt::Display for $arg {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(match self {
-                    $(Self::$variant => $lit),+
-                })
+                f.write_str(self.to_store().as_str())
             }
         }
     };
 }
 
 value_enum_to_store!(LibraryMediaKindArg => voom_store::repo::library::libraries::LibraryMediaKind {
-    Movie => "movie",
-    Episode => "episode",
-    Personal => "personal",
-    Unknown => "unknown",
+    Movie,
+    Episode,
+    Personal,
+    Unknown,
 });
 value_enum_to_store!(LibraryRootKindArg => voom_store::repo::library::library_roots::LibraryRootKind {
-    LocalPath => "local_path",
-    SharedMount => "shared_mount",
+    LocalPath,
+    SharedMount,
 });
 value_enum_to_store!(LibraryScanModeArg => voom_store::repo::library::library_roots::LibraryScanMode {
-    ExplicitOnly => "explicit_only",
-    ManualRecursive => "manual_recursive",
-    WatchEnabled => "watch_enabled",
+    ExplicitOnly,
+    ManualRecursive,
+    WatchEnabled,
 });
 value_enum_to_store!(SymlinkPolicyArg => voom_store::repo::library::library_roots::SymlinkPolicy {
-    Reject => "reject",
-    Follow => "follow",
+    Reject,
+    Follow,
 });
 value_enum_to_store!(HiddenFilePolicyArg => voom_store::repo::library::library_roots::HiddenFilePolicy {
-    Ignore => "ignore",
-    Include => "include",
+    Ignore,
+    Include,
 });
 
 #[derive(Subcommand, Debug, Clone)]
