@@ -348,6 +348,7 @@ fn transcode_input(source_file_version_id: FileVersionId) -> ExecuteTranscodeAud
         operation_payload: json!({}),
         staging_root: PathBuf::new(),
         target_dir: PathBuf::new(),
+        backup_root: None,
     }
 }
 
@@ -362,6 +363,7 @@ fn extract_input(source_file_version_id: FileVersionId) -> ExecuteExtractAudioIn
         operation_payload: json!({}),
         staging_root: PathBuf::new(),
         target_dir: PathBuf::new(),
+        backup_root: None,
     }
 }
 

@@ -63,6 +63,7 @@ pub(crate) async fn dispatch_control_plane_transcode(
             profile: resolved_profile,
             output_container,
         },
+        backup_root: context.backup_root.map(std::path::Path::to_path_buf),
     };
     let report = match execute_transcode_video_with_dispatchers(
         context.control,

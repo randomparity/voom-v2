@@ -1,6 +1,5 @@
 ---
 source: crates/voom-cli/tests/compliance_envelope.rs
-assertion_line: 27
 expression: json
 ---
 {
@@ -429,7 +428,8 @@ expression: json
         "reporter": "voom-plan",
         "format": "sprint6-v1"
       }
-    }
+    },
+    "backups": []
   },
   "local": {
     "db_url": "[db-url]",

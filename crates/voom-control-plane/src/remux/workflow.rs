@@ -94,6 +94,7 @@ pub(crate) async fn dispatch_control_plane_remux(
         lease_id,
         payload,
         artifact_roots: &options.artifact_roots.remux,
+        backup_root: options.artifact_roots.backup_root.as_deref(),
         timing: &options.timing,
         chaos: &options.chaos,
     })
@@ -120,6 +121,7 @@ fn remux_input_for_workflow_ticket(
             &context.artifact_roots.target_dir,
             source_file_version_id,
         ),
+        backup_root: context.backup_root.map(std::path::Path::to_path_buf),
     })
 }
 

@@ -69,6 +69,10 @@ const MIGRATION_0016_SQL: &str =
 /// compile time.
 const MIGRATION_0017_SQL: &str = include_str!("../../../migrations/0017_scan_file_facts.sql");
 
+/// SQL for migration 0018 (Sprint 17 durable backup records), embedded at
+/// compile time.
+const MIGRATION_0018_SQL: &str = include_str!("../../../migrations/0018_backups.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -201,6 +205,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("scan_file_facts"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0017_SQL),
+            false,
+        ),
+        Migration::new(
+            18,
+            Cow::Borrowed("backups"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0018_SQL),
             false,
         ),
     ]),

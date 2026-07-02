@@ -38,6 +38,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0015_workflow_summaries.sql",
     "0016_worker_grant_max_parallel_wildcard.sql",
     "0017_scan_file_facts.sql",
+    "0018_backups.sql",
 ];
 
 fn workspace_root() -> PathBuf {

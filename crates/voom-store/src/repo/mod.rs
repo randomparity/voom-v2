@@ -12,7 +12,8 @@ pub use execution::{
     workers, workflow_summaries,
 };
 pub use media::{
-    artifact_access_plans, artifacts, bundles, commit_safety_gate, identity, scan_facts, use_leases,
+    artifact_access_plans, artifacts, backups, bundles, commit_safety_gate, identity, scan_facts,
+    use_leases,
 };
 pub use policy::{issues, policies, policy_inputs, video_profiles};
 
@@ -25,6 +26,7 @@ pub use artifacts::{
     ArtifactVerificationRepo, NewArtifactHandle, NewArtifactLineage, NewArtifactLocation,
     SqliteArtifactRepo,
 };
+pub use backups::{Backup, BackupFailureDetail, BackupStatus, NewBackup, SqliteBackupRepo};
 pub use commit_safety_gate::{
     AbortReason, AffectedScopeClosure, AliasResolutionError, AliasResolver, BypassKind,
     ClosureFailure, ClosureMemberDelta, ClosureWarning, CommitGateContext, CommitGateOutcome,

@@ -1,4 +1,5 @@
 pub(crate) mod audio;
+pub(crate) mod backup;
 pub(crate) mod probe_file;
 pub(crate) mod remux;
 pub(crate) mod transcode_video;

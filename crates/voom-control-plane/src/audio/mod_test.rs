@@ -457,6 +457,7 @@ fn transcode_input() -> ExecuteTranscodeAudioInput {
         }),
         staging_root: PathBuf::from("/tmp/voom-audio-stage"),
         target_dir: PathBuf::from("/tmp/voom-audio-out"),
+        backup_root: None,
     }
 }
 
@@ -479,6 +480,7 @@ fn transcode_input_for_source(
         }),
         staging_root: dir.path().join("voom-audio-stage"),
         target_dir: dir.path().join("voom-audio-out"),
+        backup_root: None,
     }
 }
 
@@ -499,6 +501,7 @@ fn extract_input() -> ExecuteExtractAudioInput {
         }),
         staging_root: PathBuf::from("/tmp/voom-audio-stage"),
         target_dir: PathBuf::from("/tmp/voom-audio-out"),
+        backup_root: None,
     }
 }
 
@@ -524,6 +527,7 @@ fn extract_input_for_source(
         }),
         staging_root: dir.path().join("voom-audio-stage"),
         target_dir: dir.path().join("voom-audio-out"),
+        backup_root: None,
     }
 }
 

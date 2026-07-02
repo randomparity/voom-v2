@@ -33,6 +33,10 @@ pub(crate) struct WorkflowArtifactRoots {
     pub transcode: OperationArtifactRoots,
     pub remux: OperationArtifactRoots,
     pub audio: OperationArtifactRoots,
+    /// Opt-in backup-before-mutation destination root (`--backup-root`). When
+    /// `Some`, every mutating operation backs up its source here before
+    /// dispatch. `None` disables the gate. See ADR 0025.
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +116,7 @@ impl Default for WorkflowArtifactRoots {
                 PathBuf::from("/tmp/voom/audio/staging"),
                 PathBuf::from("/tmp/voom/audio/output"),
             ),
+            backup_root: None,
         }
     }
 }
@@ -133,6 +138,7 @@ impl WorkflowArtifactRoots {
                 PathBuf::from("/tmp/voom-test/audio/staging"),
                 PathBuf::from("/tmp/voom-test/audio/output"),
             ),
+            backup_root: None,
         }
     }
 }

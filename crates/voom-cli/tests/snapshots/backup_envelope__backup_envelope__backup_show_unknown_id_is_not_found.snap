@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/backup_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "backup",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "backup show: id=999 not found"
+  }
+}

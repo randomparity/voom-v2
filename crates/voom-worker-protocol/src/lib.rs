@@ -36,6 +36,7 @@ pub use operations::audio::{
     TranscodeAudioSettings, TranscodeAudioStatus, audio_target_bitrate_kbps_per_channel,
     is_supported_transcode_audio_codec,
 };
+pub use operations::backup::{BackUpFileRequest, BackUpFileResult, BackUpFileStatus};
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
 };

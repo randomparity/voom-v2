@@ -1,0 +1,36 @@
+---
+source: crates/voom-cli/tests/backup_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "backup",
+  "status": "ok",
+  "data": {
+    "backups": [
+      {
+        "id": 2,
+        "source_file_version_id": 1,
+        "job_id": 1,
+        "ticket_id": 2,
+        "provider": "voom-backup-worker",
+        "destination_path": "/backups/v1/movie.mkv",
+        "size_bytes": null,
+        "checksum": null,
+        "status": "failed",
+        "failure_class": "BackupFailure",
+        "error_code": "BACKUP_FAILURE",
+        "message": "destination unwritable",
+        "started_at": "1970-01-01T00:00:00.000000000Z",
+        "finished_at": "1970-01-01T00:00:00.000000000Z",
+        "created_at": "1970-01-01T00:00:00.000000000Z"
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

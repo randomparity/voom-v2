@@ -121,6 +121,7 @@ fn transcode_audio_input_for_workflow_ticket(
             &context.artifact_roots.target_dir,
             source_file_version_id,
         ),
+        backup_root: context.backup_root.map(std::path::Path::to_path_buf),
     })
 }
 
@@ -143,6 +144,7 @@ async fn extract_audio_input_for_workflow_ticket(
             &context.artifact_roots.target_dir,
             source_file_version_id,
         ),
+        backup_root: context.backup_root.map(std::path::Path::to_path_buf),
     })
 }
 

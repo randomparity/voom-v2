@@ -68,6 +68,44 @@ pub enum Command {
     /// List and inspect asset bundles and their members.
     #[command(subcommand)]
     Bundle(BundleCommand),
+    /// List and inspect durable backup records.
+    #[command(subcommand)]
+    Backup(BackupCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BackupCommand {
+    /// List backup records, optionally filtered by status.
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+        #[arg(long)]
+        status: Option<BackupStatusArg>,
+    },
+    /// Show one backup record.
+    Show {
+        #[arg(long)]
+        backup_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "lowercase")]
+pub enum BackupStatusArg {
+    Pending,
+    Verified,
+    Failed,
+}
+
+impl BackupStatusArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::backups::BackupStatus {
+        match self {
+            Self::Pending => voom_store::repo::backups::BackupStatus::Pending,
+            Self::Verified => voom_store::repo::backups::BackupStatus::Verified,
+            Self::Failed => voom_store::repo::backups::BackupStatus::Failed,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

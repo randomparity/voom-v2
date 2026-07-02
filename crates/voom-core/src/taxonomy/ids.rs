@@ -77,6 +77,9 @@ define_id!(UseLeaseId);
 // --- M3 Phase 2 (commit safety gate) ---
 define_id!(CommitId);
 
+// --- Sprint 17 (backups) ---
+define_id!(BackupId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;
