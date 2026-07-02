@@ -145,6 +145,14 @@ impl ControlPlane {
         self.bundles.list_by_variant(media_variant_id).await
     }
 
+    /// List bundles in id order with member counts, bounded by `limit`.
+    ///
+    /// # Errors
+    /// Propagates `SqliteBundleRepo::list_all` errors.
+    pub async fn list_bundles(&self, limit: u32) -> Result<Vec<(AssetBundle, u64)>, VoomError> {
+        self.bundles.list_all(limit).await
+    }
+
     /// List members of a bundle.
     ///
     /// # Errors
