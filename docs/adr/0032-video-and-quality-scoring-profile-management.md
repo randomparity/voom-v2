@@ -11,11 +11,11 @@ deciders: [VOOM core]
 `voom profile list|show` is read-only over the six *seeded* video encode
 profiles (migration 0014). There is no way to author a durable named video
 profile from the CLI, and there is no quality-scoring-profile command family at
-all — even though the design doc (§*Quality Scoring Registry*) and the payload
-contract inventory already reserve `quality_scoring_profiles.definition` (Class
-P passthrough JSON) and each library's active scoring profile. The 0019
-libraries migration comment explicitly defers the per-library scoring-profile
-default column to this issue (#285, T16).
+all — even though the durable `quality_scoring_profiles` **table already exists**
+(migration 0004 §10.3: `id, name, version, definition, created_at, retired_at`,
+`definition` validated `json_valid` and listed Class P passthrough in the payload
+inventory) and the 0019 libraries migration comment explicitly defers the
+per-library scoring-profile default column to this issue (#285, T16).
 
 Two independent deliverables plus one linkage:
 
@@ -26,56 +26,49 @@ Two independent deliverables plus one linkage:
    protocol-neutral function, `voom_core::validate_profile_against_descriptor`,
    over `EncoderDescriptor` — the worker request path and the compiler both use
    it. Durable create/update must reuse it rather than re-deriving the rules.
-2. **Quality-scoring-profile CRUD** over a new durable registry. Scoring
+2. **Quality-scoring-profile CRUD** over the *existing* 0004 registry. Scoring
    profiles are open-ended (the design lists a dozen candidate dimensions with
-   weights) and have **no reader yet** — exactly the shape of scheduling policy
-   (ADR 0028): named, slug-keyed operator configuration a future daemon reads
-   rather than invents.
+   weights) and have **no reader/scorer wired yet** — like scheduling policy
+   (ADR 0028), named operator configuration a future daemon reads rather than
+   invents. This issue adds the repo, control-plane, and CLI over that table; it
+   does **not** create a table.
 3. **Per-library default scoring-profile** selection, the linkage the 0019
    migration reserved.
 
 ## Decision
 
-### Schema — migration 0021 (`0021_quality_scoring_profiles.sql`)
+### Schema — migration 0021 (`0021_profile_management.sql`)
 
-One new `STRICT` table plus two additive `ALTER`s:
+Two additive `ALTER`s only; the scoring registry already exists:
 
 ```sql
-CREATE TABLE quality_scoring_profiles (
-    id           INTEGER PRIMARY KEY,
-    slug         TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    definition   TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(definition)),
-    retired_at   TEXT,
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-) STRICT;
-
 ALTER TABLE video_profiles ADD COLUMN retired_at TEXT;
-
-ALTER TABLE libraries ADD COLUMN default_scoring_profile_slug TEXT
-    REFERENCES quality_scoring_profiles (slug);
+ALTER TABLE libraries ADD COLUMN default_scoring_profile_name TEXT;
 ```
 
-- **Table name `quality_scoring_profiles`, column `definition`** match the
-  already-checked-in payload contract inventory. `definition` is a **passthrough
-  JSON object** (Class P): validated only as `json_valid` at the DB boundary and
-  as "is a JSON object" in the repo, never deserialized into a typed
-  `deny_unknown_fields` struct. Typing a dozen speculative dimension weights with
-  no consumer would be premature; the daemon-era reader will type it when it
-  exists.
-- The `libraries` FK column is nullable with a `NULL` default, so the `ALTER`
-  is legal on existing rows and FK-safe (foreign keys are enabled;
-  `slug` is `UNIQUE`, a valid FK target).
+- **Reuse the 0004 `quality_scoring_profiles` table** rather than creating a new
+  one. It is keyed by `name` (`UNIQUE`), carries an integer `version`, a JSON
+  `definition` (passthrough Class P — validated `json_valid` at the DB boundary
+  and "is a JSON object" in the repo, never deserialized into a typed
+  `deny_unknown_fields` struct), and already has its own `retired_at`.
+- **`video_profiles.retired_at`** adds the same soft-retire marker to the
+  seeded video-profile registry, which lacked one.
+- The **`libraries` linkage is a plain nullable TEXT column keyed by profile
+  `name`, not a declared foreign key.** Referential integrity is enforced at
+  write time by the repository (setting an unknown or retired profile is
+  refused) and is safe because scoring profiles are soft-retired, never
+  hard-deleted (`quality_scores.profile_id` is `ON DELETE RESTRICT`), so a
+  referenced name is never removed.
 
 ### Retire is soft, delete is not offered
 
 A durable video-profile name can be pinned by a compiled policy version
-(`transcode video hevc using profile <name>`); a scoring-profile slug can be a
-library default. Hard delete would orphan those references. Both registries get
-a nullable `retired_at`: `retire` stamps it, `list` hides retired rows by
-default, and `show`/`get_by_name`/`get_by_slug` still resolve a retired row so
-pinned references and plan resolution are unaffected. Retire is idempotent.
+(`transcode video hevc using profile <name>`); a scoring-profile name can be a
+library default; `quality_scores` reference a profile by id under `ON DELETE
+RESTRICT`. Hard delete would orphan those references. Both registries carry a
+nullable `retired_at`: `retire` stamps it, `list` hides retired rows by default,
+and `show`/`get_by_name` still resolve a retired row so pinned references and
+plan resolution are unaffected. Retire is idempotent.
 
 ### Reuse, don't duplicate, the profile validation
 
@@ -90,14 +83,15 @@ as `CONFIG_INVALID`, the same code inline-profile errors use. The generated row
 ### Layering
 
 Store repos (`SqliteVideoProfileRepo` gains `create`/`update`/`retire`;
-new `SqliteQualityScoringProfileRepo`; `SqliteLibraryRepo` gains
-`set_default_scoring_profile`) → control-plane thin delegations stamping the
-injected clock → CLI command trees emitting one JSON envelope. Config CRUD emits
-no events (operator state, not a state machine), consistent with ADR 0027/0028.
+new `SqliteQualityScoringProfileRepo` over the 0004 table; `SqliteLibraryRepo`
+gains `set_default_scoring_profile`) → control-plane thin delegations stamping
+the injected clock → CLI command trees emitting one JSON envelope. Config CRUD
+emits no events (operator state, not a state machine), consistent with ADR
+0027/0028.
 
 CLI surface: `voom profile create|update|retire`, `voom scoring-profile
 create|list|show|update|retire`, and an additive `voom library
-set-default-scoring-profile` variant (`--scoring-profile <slug>` / `--clear`).
+set-default-scoring-profile` variant (`--scoring-profile <name>` / `--clear`).
 
 ## Consequences
 
@@ -105,16 +99,17 @@ set-default-scoring-profile` variant (`--scoring-profile <slug>` / `--clear`).
   the retention planner have a real registry and per-library default to read.
 - No reader consumes scoring `definition` yet; its internal shape is
   intentionally unconstrained until one does.
-- `retired_at` is additive; no existing query changes behavior (seeded rows have
-  `NULL`). The two `ALTER`s keep migration 0021 self-contained.
+- `retired_at` on `video_profiles` is additive; no existing query changes
+  behavior (seeded rows have `NULL`). Migration 0021 is two `ALTER`s, no table.
 
 ## Alternatives considered
 
-- **Typed scoring-profile columns** (mirror scheduling policy exactly): rejected
-  — no consumer fixes the dimension schema, so any typing is speculative and
-  churn-prone. Passthrough JSON honors the reserved contract.
-- **Hard `delete`**: rejected — orphans policy-pinned and library-default
-  references. Soft `retire` preserves resolvability.
-- **Separate `scoring_profiles` table name** (as first sketched by the
-  orchestrator): rejected in favor of `quality_scoring_profiles`, the name the
-  payload inventory and design doc already reserve — Architecture Trumps All.
+- **A second, separate `scoring_profiles` table** (as first sketched by the
+  orchestrator): rejected — `quality_scoring_profiles` already exists (0004) and
+  is the name the payload inventory and design doc reserve. Reuse it; Architecture
+  Trumps All.
+- **Typed scoring-profile columns**: rejected — no consumer fixes the dimension
+  schema, so any typing is speculative and churn-prone. The 0004 passthrough
+  JSON `definition` honors the reserved contract.
+- **Hard `delete`**: rejected — orphans policy-pinned, library-default, and
+  `quality_scores` references. Soft `retire` preserves resolvability.

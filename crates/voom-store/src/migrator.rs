@@ -82,6 +82,11 @@ const MIGRATION_0019_SQL: &str = include_str!("../../../migrations/0019_librarie
 const MIGRATION_0020_SQL: &str =
     include_str!("../../../migrations/0020_scheduling_safety_policies.sql");
 
+/// SQL for migration 0021 (Sprint 17 profile management support columns:
+/// video-profile soft-retire + per-library scoring default, #285), embedded at
+/// compile time.
+const MIGRATION_0021_SQL: &str = include_str!("../../../migrations/0021_profile_management.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -235,6 +240,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("scheduling_safety_policies"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0020_SQL),
+            false,
+        ),
+        Migration::new(
+            21,
+            Cow::Borrowed("profile_management"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0021_SQL),
             false,
         ),
     ]),
