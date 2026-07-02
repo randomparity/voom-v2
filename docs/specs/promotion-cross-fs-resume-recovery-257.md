@@ -53,22 +53,59 @@ turned read-only, transient `EIO`, permissions — or whenever the process is ki
 after the copy and before the DB repoint commits. No bytes are lost (the artifact
 is intact at `dest`); the run cannot make progress.
 
+**A second, related wedge exists today: an interrupted copy.** `tokio::fs::copy`
+is *not* atomic — it opens `dest` truncating, then streams bytes. A crash/kill
+mid-copy, an `ENOSPC`, or an `EIO` partway through leaves a **partial** `dest` on
+disk with `current` still present (call it S1′). Under today's code the next
+resume hits the collision branch and errors on the partial file exactly as in S1.
+Any fix that recovers S1 by comparing `dest` against `current` must also ensure
+`dest` is never a partial copy, or a partial `dest` would be misclassified as a
+foreign file (its bytes/size differ from `current`) and wedge the run again. The
+fix therefore has to eliminate the partial-`dest` state, not just recognise a
+complete one.
+
 ## Decision
 
-Make the cross-FS promotion **idempotently resumable** by (a) recognising a
-byte-identical resumed copy in the collision branch and (b) treating source
-removal as best-effort cleanup rather than part of the promotion commit. Both
-changes are contained to `move_terminal_artifact` and two small private helpers in
-`promotion.rs`; the caller's DB-repoint transaction is unchanged.
+Make the cross-FS promotion **idempotently resumable** by (a) copying through a
+temp file so `dest` is only ever complete-or-absent, (b) recognising a
+byte-identical resumed copy in the collision branch, and (c) treating source
+removal as best-effort cleanup rather than part of the promotion commit. All
+changes are contained to `move_terminal_artifact` and a few small private helpers
+in `promotion.rs`; the caller's DB-repoint transaction is unchanged.
 
-### D1 — Content-verified already-moved recovery (fixes S1)
+Promotion of a given location is **single-writer**: durable tickets/leases route
+one execution per workflow at a time (ADR 0001), and resume opens a fresh job that
+reconciles the prior job's rows rather than running concurrently with it (ADR
+0009). The removal, temp-rename, and repoint steps below therefore need no
+cross-process interlock, and the dest-absent check that precedes the copy is not
+racing another promoter for the same `dest`.
+
+### D1 — Atomic cross-FS copy via a temp file (eliminates S1′)
+
+On the cross-FS fallback, do not stream bytes straight into `dest`. Copy into a
+**deterministic** temp path adjacent to `dest` on the destination filesystem
+(e.g. `<dest>.voom-tmp`), then `rename(tmp, dest)`. A rename within one filesystem
+is atomic, so `dest` is only ever observed complete or absent — the partial-`dest`
+state (S1′) cannot occur on our own path. The temp name is deterministic (not
+randomised) so a re-run after a crash mid-copy overwrites the same partial temp
+rather than accumulating orphans; a `copy` or `rename` failure removes the temp
+best-effort before returning the error. The pre-copy dest-absent check still
+guards the add-only contract (single-writer, so no TOCTOU race for `dest`).
+
+This makes D2's premise sound: any `dest` that exists is either a **complete**
+promoted copy of `current` or a genuinely foreign file — never a truncated copy of
+`current`.
+
+### D2 — Content-verified already-moved recovery (fixes S1)
 
 When `dest` already exists and `current` **also** exists, distinguish a resumed
 copy (S1) from a genuine foreign collision:
 
 - If `dest` is a regular file **and** its bytes are byte-for-byte equal to
-  `current` → this is a resumed cross-FS copy. Remove `current` best-effort (D2)
-  and return `dest` so the caller repoints. Forward progress guaranteed.
+  `current` → this is a resumed cross-FS copy. Log the recovery
+  (`tracing::info!` naming the location, `current`, and `dest`), remove `current`
+  best-effort (D3), and return `dest` so the caller repoints. Forward progress
+  guaranteed.
 - Otherwise (`dest` is a directory/symlink/other, or its bytes differ) → a
   genuine collision with a foreign file. Return the existing
   `"promotion destination already exists"` error unchanged.
@@ -77,8 +114,10 @@ Byte-equality is the check, not existence or size, because the add-only contract
 must never repoint a location at, and remove the source of, a *different* file —
 that would be silent data loss. `WorkingDirArtifact` carries no durable
 size/digest fact (`finalize.rs:64` — only `location_id`, `asset_id`, `value`,
-`epoch`), so the ground truth is a direct comparison of `current` against `dest`;
-`dest` was copied *from* `current`, so in S1 they are identical by construction.
+`epoch`), so the ground truth is a direct comparison of `current` against `dest`.
+By D1 a `dest` that exists is a *complete* copy, so in S1 it is byte-identical to
+`current`; a foreign `dest`, or a size mismatch of any kind, falls to the
+collision branch.
 
 The comparison is size-first (cheap reject), then a chunked streaming byte compare
 that bounds memory (media artifacts can be multi-GB — never load either file
@@ -87,21 +126,21 @@ whole). A read/stat failure during the comparison propagates as a descriptive
 
 The S2 branch (`dest` present, `current` gone) is unchanged.
 
-### D2 — Best-effort source removal after a successful copy
+### D3 — Best-effort source removal after a successful placement
 
-After a successful cross-FS `copy`, the bytes are durably at `dest`; removing
-`current` is cleanup, not part of the commit. Make `remove_file(current)`
-best-effort: on failure, log a `tracing::warn!` naming the orphaned source and
-proceed to return `dest` so the caller repoints. This lets the **first** run
-complete in S1 instead of erroring, and it is applied identically in the D1
-recovery path so that a source that can never be removed still cannot wedge the
-workflow (the DB repoints to `dest`; the orphaned `current` is left in the
+Once `dest` holds the promoted bytes (after the atomic rename, or recognised as a
+complete copy in D2), removing `current` is cleanup, not part of the commit. Make
+`remove_file(current)` best-effort: on failure, log a `tracing::warn!` naming the
+orphaned source and proceed to return `dest` so the caller repoints. This lets the
+**first** run complete in S1 instead of erroring, and it is applied identically in
+the D2 recovery path so that a source that can never be removed still cannot wedge
+the workflow (the DB repoints to `dest`; the orphaned `current` is left in the
 ephemeral working dir and no longer resolved).
 
 This is a deliberate failure-contract change: **the promotion commit point is the
 durable DB repoint; filesystem source removal is best-effort cleanup.** A `copy`
-failure still errors (bytes are *not* safe at `dest`); only the post-copy source
-removal is downgraded.
+or `rename` failure still errors (the bytes are *not* safely and completely at
+`dest`); only the post-placement source removal is downgraded.
 
 ## Decisions (process)
 
@@ -115,8 +154,8 @@ removal is downgraded.
   target"), which was scoped as a spec item with no ADR. The considered-and-
   rejected alternatives are captured below.
 - **Direct implementation, not subagent fan-out.** The change is one function plus
-  two helpers and its sibling unit tests — tightly coupled, single file. Direct
-  TDD in one session is the right execution mode.
+  a few small helpers and its sibling unit tests — tightly coupled, single file.
+  Direct TDD in one session is the right execution mode.
 
 ## Considered & rejected
 
@@ -126,10 +165,10 @@ removal is downgraded.
   splits the DB transaction across the filesystem steps in the caller (larger
   blast radius on a churn-heavy coordinator path) and *still* does not cover a
   process kill between `copy` and the repoint commit — that lands in S1 and needs
-  the same content-verified recovery anyway. D1+D2 subsume Option A's benefit
+  the same content-verified recovery anyway. D1–D3 subsume Option A's benefit
   (first-run completion) with a smaller, self-contained diff and cover the crash
   window Option A leaves open. The best-effort-remove *idea* from Option A is
-  adopted as D2.
+  adopted as D3.
 - **Size-only or existence-only "facts match".** Treat `dest` as already-moved
   when it merely exists, or when its size equals `current`. Rejected: a foreign
   file of equal (or any) size at `dest` would be accepted, the DB repointed at it,
@@ -146,6 +185,12 @@ removal is downgraded.
   never repointed, and the workflow re-wedges — the original bug. Forward progress
   requires the recovery path to repoint regardless of whether the orphan can be
   cleaned up.
+- **Guard the final rename with `renameat2(RENAME_NOREPLACE)` instead of the
+  pre-copy dest-absent check.** Rejected: `RENAME_NOREPLACE` is Linux-only and the
+  development/primary platform is macOS; a portable atomic no-clobber rename does
+  not exist. The pre-copy dest-absent check plus the single-writer guarantee is
+  the portable equivalent, matching how the current code already sequences the
+  collision check before the placement.
 
 ## Edge cases
 
@@ -161,26 +206,40 @@ removal is downgraded.
   non-regular path).
 - **S2** (`dest` present, `current` gone) → already-moved, return `dest`
   (unchanged).
-- **S0** (`dest` absent) → `rename`, else `copy` + best-effort remove (unchanged
-  placement, D2 removal semantics).
+- **S0** (`dest` absent) → `rename`; on `EXDEV`, `copy` to `<dest>.voom-tmp` then
+  atomic `rename(tmp, dest)`, then best-effort remove `current` (D3).
+- **Interrupted copy (S1′)** → the temp file, not `dest`, holds the partial bytes;
+  `dest` stays absent, so the next resume takes the S0 path and re-copies over the
+  same deterministic temp. No partial `dest` ever reaches the D2 comparison.
 - **Content-compare read/stat failure** (e.g. `dest` unreadable) → propagate a
   descriptive `VoomError`, do not silently pick a verdict.
-- **Source-removal failure in first-run copy or recovery** → `warn!` and proceed;
-  orphaned `current` left in the ephemeral working dir, DB repointed to `dest`.
+- **Copy or rename failure** → remove the temp best-effort, return the error; the
+  DB is not repointed and the run retries from S0 on resume.
+- **Source-removal failure in first-run placement or recovery** → `warn!` and
+  proceed; orphaned `current` left in the ephemeral working dir, DB repointed to
+  `dest`.
 
 ## Acceptance criteria
 
 Sibling unit tests on `move_terminal_artifact` (`promotion_test.rs` via `#[path]`,
 per ADR 0004), all on a single tmpdir so no real cross-FS mount is required — the
-S1 state is constructed directly by pre-creating `dest`:
+S1 state is constructed directly by pre-creating `dest`. On one filesystem
+`rename(current, dest)` always succeeds, so the `EXDEV` copy/temp path (D1) is not
+exercised by these unit tests; its atomicity is a reasoned property (rename within
+one FS is atomic) and the residual partial-`dest` it prevents is covered by the
+size-mismatch collision test below. The directly-tested behavior is the D2
+recovery, which is the fix for the reported wedge:
 
 - **Resumed copy recovers (the fix).** `current` and `dest` both present with
   identical bytes → returns `Ok(dest)`, `current` is removed, `dest` bytes
   unchanged. With today's code this returns the collision `Err` (guards the
   regression).
-- **Genuine collision still fails.** `current` and `dest` present with *different*
-  bytes → returns `Err` containing `"promotion destination already exists"`; both
-  files left untouched.
+- **Genuine collision, differing content, fails.** `current` and `dest` present
+  with different bytes of the *same* length → returns `Err` containing
+  `"promotion destination already exists"`; both files left untouched.
+- **Genuine collision, differing size, fails.** `current` and `dest` present with
+  different lengths (the shape a partial or foreign `dest` presents to D2) →
+  returns the collision `Err`; both files left untouched.
 - **Non-regular destination fails.** `dest` is a directory (or symlink to one),
   `current` present → returns the collision `Err`; nothing removed.
 - **Already-moved (S2) unchanged.** `dest` present, `current` absent → returns
