@@ -148,6 +148,76 @@ async fn seed_file_version(cp: &ControlPlane) -> (FileVersionId, JobId, TicketId
     )
 }
 
+/// Seed a fresh file version plus a full artifact-commit chain left in the
+/// `recovery_required` state, returning that file version. Raw inserts so the
+/// gate's recovery-required branch can be triggered without the workflow layer.
+async fn seed_recovery_required_commit(cp: &ControlPlane) -> FileVersionId {
+    let pool = cp.pool_for_test();
+    let (file_version_id, _job, _ticket) = seed_file_version(cp).await;
+    let worker = sqlx::query(
+        "INSERT INTO workers (name, kind, status, registered_at, last_seen_at, epoch) \
+         VALUES ('w', 'synthetic', 'active', ?, ?, 0)",
+    )
+    .bind(AT0)
+    .bind(AT0)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let handle = sqlx::query(
+        "INSERT INTO artifact_handles \
+         (privacy_class, durability_class, allowed_access_modes, mutability, created_at) \
+         VALUES ('private', 'durable', '[]', 'immutable', ?)",
+    )
+    .bind(AT0)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let location = sqlx::query(
+        "INSERT INTO artifact_locations (artifact_handle_id, kind, value, observed_at) \
+         VALUES (?, 'local_path', '/a.mkv', ?)",
+    )
+    .bind(handle)
+    .bind(AT0)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    let verification = sqlx::query(
+        "INSERT INTO artifact_verifications \
+         (artifact_handle_id, artifact_location_id, path, worker_id, status, expected_size_bytes, \
+          expected_checksum, failure_class, error_code, message, report, started_at, finished_at) \
+         VALUES (?, ?, '/a.mkv', ?, 'failed', 1, 'blake3:x', 'io', 'VERIFICATION_FAILURE', 'boom', \
+                 '{}', ?, ?)",
+    )
+    .bind(handle)
+    .bind(location)
+    .bind(worker)
+    .bind(AT0)
+    .bind(AT0)
+    .execute(pool)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+    sqlx::query(
+        "INSERT INTO artifact_commit_records \
+         (artifact_handle_id, source_file_version_id, verification_id, target_path, state, \
+          failure_class, error_code, message, recovery_reason, report, started_at, finished_at) \
+         VALUES (?, ?, ?, '/a.mkv', 'recovery_required', 'io', 'COMMIT_FAILURE', 'partial', \
+                 'operator must inspect', '{}', ?, ?)",
+    )
+    .bind(handle)
+    .bind(i64::try_from(file_version_id.0).unwrap())
+    .bind(verification)
+    .bind(AT0)
+    .bind(AT0)
+    .execute(pool)
+    .await
+    .unwrap();
+    file_version_id
+}
+
 async fn safety_blocked_issues(cp: &ControlPlane) -> Vec<(String, String)> {
     sqlx::query_as::<_, (String, String)>(
         "SELECT dedupe_key, status FROM issues \
@@ -348,6 +418,37 @@ async fn latest_failed_backup_blocks_and_a_later_verified_clears_it() {
         .unwrap();
     let cleared = cp.evaluate_safety_policy("fr", &plan, false).await.unwrap();
     assert!(cleared.is_empty(), "got {cleared:?}");
+}
+
+#[tokio::test]
+async fn recovery_required_record_blocks_when_policy_sets_flag() {
+    let (cp, _tmp) = cp().await;
+    let file_version_id = seed_recovery_required_commit(&cp).await;
+    let plan = plan_with_file_version(file_version_id, PlanOperationKind::TranscodeVideo);
+
+    // With the flag off, the recovery-required record does not block.
+    cp.create_safety_policy(permissive("rr-off")).await.unwrap();
+    assert!(
+        cp.evaluate_safety_policy("rr-off", &plan, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // With the flag on, it blocks.
+    let mut policy = permissive("rr-on");
+    policy.block_on_recovery_required_records = true;
+    cp.create_safety_policy(policy).await.unwrap();
+    let blocks = cp
+        .evaluate_safety_policy("rr-on", &plan, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        blocks,
+        vec![SafetyBlock::BlockedByRecoveryRequiredRecord {
+            source_file_version_id: file_version_id.0
+        }]
+    );
 }
 
 #[tokio::test]
