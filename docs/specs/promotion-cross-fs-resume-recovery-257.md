@@ -85,15 +85,25 @@ racing another promoter for the same `dest`.
 
 On the fallback (any failed `rename(current, dest)`, typically `EXDEV`), do not
 stream bytes straight into `dest`. Copy into a **deterministic** temp path
-adjacent to `dest` in the same destination directory (e.g. `<dest>.voom-tmp`, a
-sibling so the temp is on `dest`'s filesystem), then `rename(tmp, dest)`. A rename
-within one filesystem is atomic, so `dest` is only ever observed complete or
-absent — the partial-`dest` state (S1′) cannot occur on our own path. The temp
-name is deterministic (not randomised) so a re-run after a crash mid-copy
-overwrites the same partial temp rather than accumulating orphans; a `copy` or
-`rename` failure removes the temp best-effort before returning the error. The
-pre-copy dest-absent check still guards the add-only contract (single-writer, so
-no TOCTOU race for `dest`).
+adjacent to `dest` in the same destination directory (a sibling so the temp is on
+`dest`'s filesystem), then `rename(tmp, dest)`. A rename within one filesystem is
+atomic, so `dest` is only ever observed complete or absent — the partial-`dest`
+state (S1′) cannot occur on our own path. The temp name is deterministic (not
+randomised) so a re-run after a crash mid-copy overwrites the same partial temp
+rather than accumulating orphans; a `copy` or `rename` failure removes the temp
+best-effort before returning the error. The pre-copy dest-absent check still
+guards the add-only contract (single-writer, so no TOCTOU race for `dest`).
+
+The temp name must not collide with any real promotion destination. Because
+`promote_terminal_artifacts` promotes several artifacts into a shared output dir
+and dest basenames derive from (externally influenced) media filenames, a naive
+`<dest>.voom-tmp` sibling could equal another artifact's own destination and be
+clobbered by the copy. Use a **hidden dotfile** scheme placing the temp outside
+the artifact namespace — `.voom-promote.<file_name>.partial` in the dest dir. A
+promoted artifact `dest` is a plain media filename, never a dotfile of that exact
+shape, so the temp namespace is disjoint from the destination namespace; a leftover
+partial from an earlier crash is simply overwritten by the next copy (its
+deterministic name is the orphan-avoidance).
 
 This fallback (copy → temp → atomic rename → best-effort remove `current`) is
 extracted into a directly-callable private helper (e.g. `copy_into_place`) so it
@@ -216,11 +226,16 @@ or `rename` failure still errors (the bytes are *not* safely and completely at
   non-regular path).
 - **S2** (`dest` present, `current` gone) → already-moved, return `dest`
   (unchanged).
-- **S0** (`dest` absent) → `rename`; on `EXDEV`, `copy` to `<dest>.voom-tmp` then
-  atomic `rename(tmp, dest)`, then best-effort remove `current` (D3).
+- **S0** (`dest` absent) → `rename`; on any rename failure, `copy` to
+  `.voom-promote.<file_name>.partial` then atomic `rename(tmp, dest)`, then
+  best-effort remove `current` (D3).
 - **Interrupted copy (S1′)** → the temp file, not `dest`, holds the partial bytes;
   `dest` stays absent, so the next resume takes the S0 path and re-copies over the
   same deterministic temp. No partial `dest` ever reaches the D2 comparison.
+- **Temp vs a real destination** → the temp is a hidden dotfile
+  (`.voom-promote.<file_name>.partial`), disjoint from the plain-filename
+  destination namespace, so promoting one artifact cannot clobber another's
+  promoted `dest` in a shared output dir.
 - **Content-compare read/stat failure** (e.g. `dest` unreadable) → propagate a
   descriptive `VoomError`, do not silently pick a verdict.
 - **Copy or rename failure** → remove the temp best-effort, return the error; the
@@ -240,7 +255,7 @@ constructed by pre-creating `dest`:
 
 - **Copy-into-place helper (D1).** Call `copy_into_place(current, dest)` with
   `dest` absent → `dest` holds `current`'s bytes, `current` is removed, and no
-  `<dest>.voom-tmp` sibling remains afterward.
+  `.voom-promote.<file_name>.partial` temp sibling remains afterward.
 - **Resumed copy recovers (the fix).** `current` and `dest` both present with
   identical bytes → returns `Ok(dest)`, `current` is removed, `dest` bytes
   unchanged. With today's code this returns the collision `Err` (guards the
