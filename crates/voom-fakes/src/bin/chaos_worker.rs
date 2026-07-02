@@ -459,14 +459,10 @@ fn enforce_version(headers: &[(String, String)]) -> Result<(), ProtocolError> {
         .ok_or_else(|| ProtocolError::InvalidPayload {
             detail: format!("missing {PROTOCOL_VERSION_HEADER}"),
         })?;
-    if offered == voom_core::PROTOCOL_VERSION {
-        Ok(())
-    } else {
-        Err(ProtocolError::UnsupportedProtocolVersion {
-            offered,
-            expected: voom_core::PROTOCOL_VERSION,
-        })
-    }
+    // Delegate the exact-match comparison to the single source of truth
+    // (ADR-0016), matching the handshake path above rather than re-implementing
+    // it here.
+    voom_worker_protocol::negotiate(offered).map(|_| ())
 }
 
 fn enforce_credentials(
