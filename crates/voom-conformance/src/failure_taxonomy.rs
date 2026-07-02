@@ -109,6 +109,11 @@ const REGISTRY: &[FailureTaxonomyEntry] = &[
         PlannedCoverageSource::SyntheticFrame,
     ),
     entry(
+        "failure_taxonomy_malformed_media",
+        FailureClass::MalformedMedia,
+        PlannedCoverageSource::ChaosWorkerScenario,
+    ),
+    entry(
         "failure_taxonomy_stale_identity_evidence",
         FailureClass::StaleIdentityEvidence,
         PlannedCoverageSource::SyntheticFrame,

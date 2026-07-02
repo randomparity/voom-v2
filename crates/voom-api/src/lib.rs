@@ -203,6 +203,7 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         | ErrorCode::PolicyExecutionError
         | ErrorCode::MissingCapability
         | ErrorCode::MalformedWorkerResult
+        | ErrorCode::MalformedMedia
         | ErrorCode::UserCancellation
         | ErrorCode::ApprovalRequired
         | ErrorCode::PriorityPolicyConflict
