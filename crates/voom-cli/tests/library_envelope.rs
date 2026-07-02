@@ -83,7 +83,15 @@ mod library_envelope {
         let path = dir.path().to_str().unwrap().to_owned();
         let (code, _) = run(
             url,
-            &["library", "root", "add", "--library-id", "1", "--path", &path],
+            &[
+                "library",
+                "root",
+                "add",
+                "--library-id",
+                "1",
+                "--path",
+                &path,
+            ],
         );
         assert_eq!(code, 0);
         (path, dir)
@@ -119,7 +127,14 @@ mod library_envelope {
         let fx = fixture().await;
         run(
             &fx.url,
-            &["library", "add", "--slug", "films", "--display-name", "Films"],
+            &[
+                "library",
+                "add",
+                "--slug",
+                "films",
+                "--display-name",
+                "Films",
+            ],
         );
 
         let (code, mut list) = run(&fx.url, &["library", "list"]);
@@ -129,7 +144,14 @@ mod library_envelope {
 
         let (code, updated) = run(
             &fx.url,
-            &["library", "update", "--library-id", "1", "--display-name", "Renamed"],
+            &[
+                "library",
+                "update",
+                "--library-id",
+                "1",
+                "--display-name",
+                "Renamed",
+            ],
         );
         assert_eq!(code, 0);
         assert_eq!(updated["data"]["display_name"], "Renamed");
@@ -181,7 +203,15 @@ mod library_envelope {
         let path = dir.path().to_str().unwrap().to_owned();
         let (code, mut json) = run(
             &fx.url,
-            &["library", "root", "add", "--library-id", "99", "--path", &path],
+            &[
+                "library",
+                "root",
+                "add",
+                "--library-id",
+                "99",
+                "--path",
+                &path,
+            ],
         );
         assert_eq!(code, 2);
         assert_eq!(json["error"]["code"], "NOT_FOUND");
@@ -198,7 +228,15 @@ mod library_envelope {
         let nested = nested.to_str().unwrap().to_owned();
         let (code, json) = run(
             &fx.url,
-            &["library", "root", "add", "--library-id", "1", "--path", &nested],
+            &[
+                "library",
+                "root",
+                "add",
+                "--library-id",
+                "1",
+                "--path",
+                &nested,
+            ],
         );
         assert_eq!(code, 2);
         assert_eq!(json["error"]["code"], "CONFLICT");
