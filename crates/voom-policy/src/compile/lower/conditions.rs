@@ -152,6 +152,9 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
                 values: list_values(text).into_iter().map(str::to_owned).collect(),
             })
         }
+        ["lang" | "language", "==", value] if !value.is_empty() => Some(TrackFilter::LanguageIn {
+            values: vec![strip_quotes(value)],
+        }),
         ["codec", "in", ..]
             if !list_values(text).is_empty()
                 && text_after_list(text).is_some_and(str::is_empty) =>
