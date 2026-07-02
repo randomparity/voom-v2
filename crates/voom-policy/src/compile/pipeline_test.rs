@@ -451,20 +451,58 @@ fn conformance_verify_artifact_rejects_extra_arguments() {
     );
 }
 
-#[test]
-fn conformance_synthesize_remains_deferred() {
-    assert_eq!(
-        compile_error_codes("policy \"p\" { phase a { synthesize } }"),
-        vec!["deferred_execution_operation".to_owned()]
-    );
-}
-
 // Form 5 (#276) — `synthesize audio from <track-filter> { codec … channels … }`.
 // Adds a downmixed companion track; see ADR 0026 and the V1.1 grammar delta.
+// `synthesize` is no longer a deferred keyword: a bare `synthesize` is now an
+// unknown-shape operation, and the full block form compiles.
+
+#[test]
+fn conformance_bare_synthesize_is_unknown_operation() {
+    assert_eq!(
+        compile_error_codes("policy \"p\" { phase a { synthesize } }"),
+        vec!["unknown_phase_statement_or_operation".to_owned()]
+    );
+}
 
 #[test]
 fn conformance_synthesize_audio_downmix_compiles_clean() {
     assert_compiles_clean("synthesize audio from codec in [\"eac3\"] { codec aac  channels 2 }");
+}
+
+#[test]
+fn conformance_synthesize_audio_downmix_lowers_to_synthesize_operation() {
+    assert_eq!(
+        single_op("synthesize audio from channels >= 6 { codec aac  channels 2 }"),
+        CompiledOperation::SynthesizeAudio {
+            target_codec: "aac".to_owned(),
+            container: "mkv".to_owned(),
+            target_channels: 2,
+            filter: Some(TrackFilter::Channels {
+                op: crate::ComparisonOp::Gte,
+                value: 6,
+            }),
+        }
+    );
+}
+
+#[test]
+fn conformance_synthesize_audio_rejects_bad_codec() {
+    assert_eq!(
+        compile_error_codes(
+            "policy \"p\" { phase a { synthesize audio from commentary { codec flac  channels 2 } } }"
+        ),
+        vec!["unknown_phase_statement_or_operation".to_owned()]
+    );
+}
+
+#[test]
+fn conformance_synthesize_audio_rejects_missing_channels() {
+    assert_eq!(
+        compile_error_codes(
+            "policy \"p\" { phase a { synthesize audio from commentary { codec aac } } }"
+        ),
+        vec!["unknown_phase_statement_or_operation".to_owned()]
+    );
 }
 
 #[test]

@@ -311,11 +311,7 @@ impl<'a> Validator<'a> {
                 "transcode" => self.validate_transcode_statement(operation),
                 "extract" => self.validate_extract_statement(operation),
                 "verify" => self.validate_verify_statement(operation),
-                "synthesize" => self.error(
-                    DiagnosticCode::DeferredExecutionOperation,
-                    operation.span(),
-                    "execution operation is deferred to a later sprint",
-                ),
+                "synthesize" => self.validate_synthesize_statement(operation),
                 _ => self.error(
                     DiagnosticCode::UnknownPhaseStatementOrOperation,
                     operation.span(),

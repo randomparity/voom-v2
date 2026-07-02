@@ -162,6 +162,66 @@ impl<'a> Parser<'a> {
         Ok(settings)
     }
 
+    /// Handle the two brace-body statements whose bodies are settings, not
+    /// nested statements: `transcode … { key: value … }` (colon settings) and
+    /// `synthesize … { key value … }` (space settings). Returns `None` for any
+    /// other keyword so the caller falls through to generic block parsing.
+    fn parse_inline_block(
+        &mut self,
+        keyword: &Spanned<String>,
+        start: usize,
+        open_brace: usize,
+        span: SourceSpan,
+    ) -> Result<Option<StatementAst>, ParseError> {
+        let is_transcode = keyword.value == "transcode";
+        if !is_transcode && keyword.value != "synthesize" {
+            return Ok(None);
+        }
+        let header = self.source[start..open_brace].trim().to_owned();
+        let mut inner = Self {
+            source: self.source,
+            cursor: open_brace + 1,
+            depth: self.depth + 1,
+        };
+        let statement = if is_transcode {
+            StatementAst::TranscodeInline {
+                keyword: keyword.clone(),
+                header,
+                settings: inner.parse_setting_list()?,
+                span,
+            }
+        } else {
+            StatementAst::SynthesizeInline {
+                keyword: keyword.clone(),
+                header,
+                settings: inner.parse_space_setting_list()?,
+                span,
+            }
+        };
+        Ok(Some(statement))
+    }
+
+    /// Parses a `key value key value …` list up to and through the closing `}`,
+    /// used by the `synthesize` block body (`codec aac  channels 2`). Unlike
+    /// [`Self::parse_setting_list`], keys are not followed by `:`. Assumes the
+    /// opening `{` has already been consumed.
+    fn parse_space_setting_list(&mut self) -> Result<Vec<SettingAst>, ParseError> {
+        let mut settings = Vec::new();
+        loop {
+            self.skip_ws_and_comments();
+            if self.consume_byte(b'}') {
+                break;
+            }
+            if self.is_eof() {
+                return Err(self.error_at(self.cursor, "expected `}` to close synthesize block"));
+            }
+            let key = self.parse_identifier()?;
+            let value = self.parse_expr()?;
+            settings.push(SettingAst { key, value });
+        }
+        Ok(settings)
+    }
+
     fn parse_statement_block(&mut self) -> Result<Vec<StatementAst>, ParseError> {
         self.skip_ws_and_comments();
         self.expect_byte(b'{')?;
@@ -235,20 +295,8 @@ impl<'a> Parser<'a> {
             let close_brace = block_end.ok_or_else(|| {
                 self.error_at(open_brace, "expected `}` to close statement block")
             })?;
-            if keyword.value == "transcode" {
-                let header = self.source[start..open_brace].trim().to_owned();
-                let mut inner = Self {
-                    source: self.source,
-                    cursor: open_brace + 1,
-                    depth: self.depth + 1,
-                };
-                let settings = inner.parse_setting_list()?;
-                return Ok(StatementAst::TranscodeInline {
-                    keyword,
-                    header,
-                    settings,
-                    span,
-                });
+            if let Some(statement) = self.parse_inline_block(&keyword, start, open_brace, span)? {
+                return Ok(statement);
             }
             let name = self.statement_block_name(keyword.span.end, open_brace);
             let mut inner = Self {

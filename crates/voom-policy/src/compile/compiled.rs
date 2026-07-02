@@ -130,6 +130,17 @@ pub enum CompiledOperation {
         container: String,
         filter: Option<TrackFilter>,
     },
+    /// `synthesize audio from <filter> { codec … channels … }` — add a
+    /// downmixed companion track derived from the filter-selected source
+    /// stream(s) (ADR 0026, #276). Unlike `TranscodeAudio` this *adds* a stream
+    /// rather than replacing it; `target_channels` is the companion's channel
+    /// count (a downmix, so fewer than the source).
+    SynthesizeAudio {
+        target_codec: String,
+        container: String,
+        target_channels: u64,
+        filter: Option<TrackFilter>,
+    },
     /// `verify artifact` — verify the produced artifact against its expected
     /// facts. The spec production takes no arguments, so the variant is
     /// fieldless; the target artifact is identified by the plan node's target

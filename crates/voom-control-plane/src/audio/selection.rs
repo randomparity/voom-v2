@@ -141,6 +141,10 @@ fn audio_block_error(block: AudioPlanningBlock) -> VoomError {
         AudioPlanningBlock::UnsupportedMediaShape => {
             VoomError::Config("audio selector is unsupported for this media shape".to_owned())
         }
+        AudioPlanningBlock::SynthesisNotDownmix => VoomError::Config(
+            "synthesize audio target channel count must be fewer than the source (a downmix)"
+                .to_owned(),
+        ),
     }
 }
 
