@@ -23,6 +23,7 @@ use voom_core::{Clock, ErrorCode, SystemClock, VoomError};
 use voom_store::repo::{
     artifact_access_plans::SqliteArtifactAccessPlanRepo,
     artifacts::SqliteArtifactRepo,
+    backups::SqliteBackupRepo,
     bundles::SqliteBundleRepo,
     events::SqliteEventRepo,
     identity::SqliteIdentityRepo,
@@ -47,6 +48,7 @@ use voom_store::{SchemaState, connect, probe_schema};
 
 mod artifact;
 mod audio;
+mod backup;
 mod cases;
 mod local_worker;
 mod media_snapshot;
@@ -138,6 +140,7 @@ pub struct ControlPlane {
     pub(crate) scheduler_decisions: SqliteSchedulerDecisionRepo,
     pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
+    pub(crate) backups: SqliteBackupRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -169,6 +172,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("scheduler_decisions", &self.scheduler_decisions)
             .field("scheduler_node_limits", &self.scheduler_node_limits)
             .field("workflow_summaries", &self.workflow_summaries)
+            .field("backups", &self.backups)
             .finish()
     }
 }
@@ -273,6 +277,7 @@ impl ControlPlane {
             scheduler_decisions: SqliteSchedulerDecisionRepo::new(pool.clone()),
             scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
+            backups: SqliteBackupRepo::new(pool.clone()),
             pool,
             clock,
             rng,

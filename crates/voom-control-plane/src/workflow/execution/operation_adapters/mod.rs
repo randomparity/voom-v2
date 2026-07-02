@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::Path;
 
 use serde_json::Value;
 use voom_core::OperationKind;
@@ -31,6 +32,7 @@ pub(super) async fn dispatch_control_plane_ticket(
         lease_id,
         payload,
         artifact_roots,
+        backup_root: options.artifact_roots.backup_root.as_deref(),
         timing: &options.timing,
         chaos: &options.chaos,
     };
@@ -71,6 +73,7 @@ pub(crate) struct OperationAdapterContext<'a> {
     pub(crate) lease_id: LeaseId,
     pub(crate) payload: &'a Value,
     pub(crate) artifact_roots: &'a OperationArtifactRoots,
+    pub(crate) backup_root: Option<&'a Path>,
     pub(crate) timing: &'a WorkflowTimingOptions,
     pub(crate) chaos: &'a WorkflowChaosOptions,
 }

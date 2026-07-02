@@ -186,6 +186,11 @@ pub struct ComplianceExecutionOptions {
     pub remux_target_dir: PathBuf,
     pub audio_staging_root: PathBuf,
     pub audio_target_dir: PathBuf,
+    /// Opt-in backup-before-mutation destination root (`--backup-root`). `Some`
+    /// backs up every mutating operation's source here before dispatch; `None`
+    /// disables the gate. The V1 trigger for the gate — T12 (#281) will later
+    /// source this from a durable safety policy instead. See ADR 0025.
+    pub backup_root: Option<PathBuf>,
 }
 
 impl Default for ComplianceExecutionOptions {
@@ -198,6 +203,7 @@ impl Default for ComplianceExecutionOptions {
             remux_target_dir: defaults.artifact_roots.remux.target_dir,
             audio_staging_root: defaults.artifact_roots.audio.staging_root,
             audio_target_dir: defaults.artifact_roots.audio.target_dir,
+            backup_root: defaults.artifact_roots.backup_root,
         }
     }
 }
@@ -294,6 +300,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             remux_target_dir,
             audio_staging_root,
             audio_target_dir,
+            backup_root,
         } = options;
         // Each operation commits into a per-family working dir under its staging
         // root (the `OperationArtifactRoots::target_dir`), NOT the operator's
@@ -315,6 +322,7 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
                     audio_staging_root.clone(),
                     committed_working_dir(&audio_staging_root, "audio"),
                 ),
+                backup_root,
             },
             ..WorkflowExecutorOptions::default()
         }

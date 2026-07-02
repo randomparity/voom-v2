@@ -363,6 +363,7 @@ fn combined_execution_options(root: &Path) -> ComplianceExecutionOptions {
         remux_target_dir: root.join("out/remux"),
         audio_staging_root: root.join("stage"),
         audio_target_dir: root.join("out/audio"),
+        backup_root: None,
     }
 }
 

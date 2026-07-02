@@ -38,6 +38,9 @@ pub struct ExecuteTranscodeVideoInput {
     /// The resolved video encode profile plus output container, threaded from
     /// the ticket payload (binding.rs embeds it from the planner node payload).
     pub resolved: resolve::ResolvedProfile,
+    /// Opt-in backup-before-mutation destination root; `Some` backs up the
+    /// source before dispatch (ADR 0025).
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,6 +137,16 @@ pub(crate) async fn execute_transcode_video_with_dispatchers(
 ) -> Result<ExecuteTranscodeVideoReport, VoomError> {
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
+
+    crate::backup::maybe_back_up_source(
+        cp,
+        input.backup_root.as_deref(),
+        &selected.canonical_path,
+        input.source_file_version_id,
+        input.job_id,
+        input.ticket_id,
+    )
+    .await?;
 
     let copy_video =
         decide_copy_video_for_source(cp, input.source_file_version_id, &input.resolved).await?;

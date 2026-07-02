@@ -154,6 +154,7 @@ fn transcode_input() -> ExecuteTranscodeAudioInput {
         operation_payload: serde_json::json!({"source_media_snapshot_id": 6}),
         staging_root: "/tmp/stage".into(),
         target_dir: "/tmp/out".into(),
+        backup_root: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn extract_input() -> ExecuteExtractAudioInput {
         operation_payload: serde_json::json!({"source_media_snapshot_id": 6}),
         staging_root: "/tmp/stage".into(),
         target_dir: "/tmp/out".into(),
+        backup_root: None,
     }
 }
 

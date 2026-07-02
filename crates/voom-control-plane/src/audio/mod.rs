@@ -37,6 +37,9 @@ pub struct ExecuteTranscodeAudioInput {
     pub operation_payload: serde_json::Value,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
+    /// Opt-in backup-before-mutation destination root; `Some` backs up the
+    /// source before dispatch (ADR 0025).
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +53,9 @@ pub struct ExecuteExtractAudioInput {
     pub operation_payload: serde_json::Value,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
+    /// Opt-in backup-before-mutation destination root; `Some` backs up the
+    /// source before dispatch (ADR 0025).
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -206,6 +212,15 @@ async fn execute_transcode_audio_inner(
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
     context.source_location_id = Some(selected.location.id);
+    crate::backup::maybe_back_up_source(
+        cp,
+        input.backup_root.as_deref(),
+        &selected.canonical_path,
+        input.source_file_version_id,
+        input.job_id,
+        input.ticket_id,
+    )
+    .await?;
     let snapshot =
         source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
             .await?;
@@ -502,6 +517,15 @@ async fn execute_extract_audio_inner(
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
     context.source_location_id = Some(selected.location.id);
+    crate::backup::maybe_back_up_source(
+        cp,
+        input.backup_root.as_deref(),
+        &selected.canonical_path,
+        input.source_file_version_id,
+        input.job_id,
+        input.ticket_id,
+    )
+    .await?;
     let snapshot =
         source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
             .await?;

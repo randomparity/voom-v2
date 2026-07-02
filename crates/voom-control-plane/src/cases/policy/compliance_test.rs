@@ -70,6 +70,7 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
         remux_target_dir: PathBuf::from("/srv/remux/out"),
         audio_staging_root: PathBuf::from("/srv/audio/staging"),
         audio_target_dir: PathBuf::from("/srv/audio/out"),
+        backup_root: None,
     };
 
     let converted = WorkflowExecutorOptions::from(options.clone());

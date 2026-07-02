@@ -866,6 +866,7 @@ fn remux_input_with_operation_payload(
         operation_payload,
         staging_root: root.join("stage"),
         target_dir: root.join("out"),
+        backup_root: None,
     }
 }
 

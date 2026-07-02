@@ -37,6 +37,9 @@ pub struct ExecuteRemuxInput {
     pub operation_payload: serde_json::Value,
     pub staging_root: PathBuf,
     pub target_dir: PathBuf,
+    /// Opt-in backup-before-mutation destination root; `Some` backs up the
+    /// source before dispatch (ADR 0025).
+    pub backup_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -196,6 +199,20 @@ async fn execute_remux_core(
             }
         };
     let failure = failure.with_source_location(selected.location.id);
+    if let Some(backup_root) = &input.backup_root
+        && let Err(err) = crate::backup::back_up_source_before_mutation(
+            cp,
+            backup_root,
+            &selected.canonical_path,
+            input.source_file_version_id,
+            input.job_id,
+            input.ticket_id,
+        )
+        .await
+    {
+        failure.record_failure(&err).await?;
+        return Err(err);
+    }
     let snapshot = match source::read_media_snapshot(
         cp,
         input.source_file_version_id,
