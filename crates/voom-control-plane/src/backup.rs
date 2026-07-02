@@ -138,12 +138,28 @@ pub(crate) async fn back_up_source_before_mutation_with_dispatcher(
     ticket_id: TicketId,
     dispatcher: &dyn BackUpFileDispatcher,
 ) -> Result<(), VoomError> {
-    if cp
+    // Retry short-circuit: reuse an existing verified backup. If its file is
+    // still on disk we are done; if it was removed out-of-band, restore it in
+    // place (the verified record stays — a second verified row for the same
+    // (ticket, source version) would violate `backups_verified_key`) rather
+    // than letting the mutation proceed with no real backup on disk.
+    if let Some(existing) = cp
         .backups
         .verified_for_ticket_and_version(ticket_id, source_file_version_id)
         .await?
-        .is_some()
     {
+        if tokio::fs::try_exists(&existing.destination_path)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        dispatcher
+            .dispatch_back_up_file(BackUpFileRequest {
+                source_path: source_path.to_string_lossy().into_owned(),
+                destination_path: existing.destination_path,
+            })
+            .await?;
         return Ok(());
     }
 

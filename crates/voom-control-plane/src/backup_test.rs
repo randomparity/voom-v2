@@ -229,11 +229,14 @@ async fn dispatcher_failure_aborts_with_backup_failure_and_failed_record() {
 async fn verified_backup_short_circuits_on_retry() {
     let f = fixture().await;
     let fvid = seed_file_version(&f.cp).await;
+    let dir = tempfile::tempdir().unwrap();
+    let backup_root = dir.path();
+    let source = "/library/movie.mkv";
     let first_calls = Arc::new(AtomicUsize::new(0));
     back_up_source_before_mutation_with_dispatcher(
         &f.cp,
-        std::path::Path::new("/backups"),
-        std::path::Path::new("/library/movie.mkv"),
+        backup_root,
+        std::path::Path::new(source),
         fvid,
         f.job_id,
         f.ticket_id,
@@ -247,14 +250,21 @@ async fn verified_backup_short_circuits_on_retry() {
     )
     .await
     .unwrap();
+    // The fake dispatcher records the row but writes no bytes; create the
+    // destination file so the short-circuit's on-disk check passes.
+    let destination = backup_root.join(format!("v{}/movie.mkv", fvid.0));
+    tokio::fs::create_dir_all(destination.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&destination, b"backup").await.unwrap();
 
     // A retry would re-enter the helper; a dispatcher that fails must never be
     // called because the verified backup short-circuits.
     let retry_calls = Arc::new(AtomicUsize::new(0));
     back_up_source_before_mutation_with_dispatcher(
         &f.cp,
-        std::path::Path::new("/backups"),
-        std::path::Path::new("/library/movie.mkv"),
+        backup_root,
+        std::path::Path::new(source),
         fvid,
         f.job_id,
         f.ticket_id,
@@ -268,6 +278,55 @@ async fn verified_backup_short_circuits_on_retry() {
 
     assert_eq!(retry_calls.load(Ordering::SeqCst), 0);
     assert_eq!(f.cp.backups.list(100).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn verified_backup_with_missing_file_is_re_run() {
+    let f = fixture().await;
+    let fvid = seed_file_version(&f.cp).await;
+    let dir = tempfile::tempdir().unwrap();
+    // First backup records a verified row, but its destination file is never
+    // created on disk (fake dispatcher writes no bytes).
+    back_up_source_before_mutation_with_dispatcher(
+        &f.cp,
+        dir.path(),
+        std::path::Path::new("/library/movie.mkv"),
+        fvid,
+        f.job_id,
+        f.ticket_id,
+        &FakeDispatcher {
+            outcome: FakeOutcome::Verified {
+                size_bytes: 1,
+                checksum: "blake3:1".to_owned(),
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+    )
+    .await
+    .unwrap();
+
+    // The retry must re-dispatch because the verified row's file is missing —
+    // the fail-closed guarantee requires a real backup on disk.
+    let retry_calls = Arc::new(AtomicUsize::new(0));
+    back_up_source_before_mutation_with_dispatcher(
+        &f.cp,
+        dir.path(),
+        std::path::Path::new("/library/movie.mkv"),
+        fvid,
+        f.job_id,
+        f.ticket_id,
+        &FakeDispatcher {
+            outcome: FakeOutcome::Verified {
+                size_bytes: 1,
+                checksum: "blake3:1".to_owned(),
+            },
+            calls: retry_calls.clone(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(retry_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

@@ -155,11 +155,14 @@ launching `voom-backup-worker` via `bundled_worker_command_from(…,
 source_file_version_id) -> Result<(), VoomError>`:
 
 1. **Idempotency short-circuit:** if a `verified` backup already exists for
-   `(ticket_id, source_file_version_id)`, return `Ok(())` without re-copying. This is
+   `(ticket_id, source_file_version_id)`, reuse it — return `Ok(())` when its file
+   is still on disk, or restore the file in place (re-dispatch to the same
+   destination, keeping the verified record) when it was removed out-of-band, so the
+   fail-closed guarantee is never voided by a verified row whose file is missing. A
+   second verified row is never inserted (`backups_verified_key` forbids it). This is
    the primary retry guard — the phase-barrier coordinator requeues tickets on
    retriable failures (and `BackupFailure` is itself retriable), so `execute_*_core`
-   (and thus this helper) is re-entered on retry. Without the short-circuit a
-   transient upstream blip would re-run the backup and a duplicate would be written.
+   (and thus this helper) is re-entered on retry.
 2. **Collision-free destination:** the destination is
    `<backup_root>/<source_file_version_id>/<source_basename>`, so distinct sources
    that share a basename (common in a library) never map to the same path.
