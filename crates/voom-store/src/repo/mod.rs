@@ -30,8 +30,9 @@ pub use commit_safety_gate::{
     ClosureFailure, ClosureMemberDelta, ClosureWarning, CommitGateContext, CommitGateOutcome,
     CommitGateResult, CommitIntent, CommitIntentState, CommitPermit, CommitTarget,
     DestructiveCommit, EvidenceDrift, EvidenceRevalidationResult, FileLocationProposal,
-    ForcePathToken, MutationOutcome, PendingCommitIntent, PrepareOutcome, TargetEpochDrift,
-    TargetMemberKind, prepare_destructive_commit,
+    ForcePathToken, LineageCommitLeaseCheck, MutationOutcome, PendingCommitIntent, PrepareOutcome,
+    TargetEpochDrift, TargetMemberKind, check_lineage_commit_leases_in_tx,
+    prepare_destructive_commit,
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use issues::{
