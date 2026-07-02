@@ -49,30 +49,33 @@ one PR:
 The distinction is **input-fault vs tool-fault**, decided by matching the
 tool's own diagnostic text on a non-zero exit — deterministic string matching,
 not a model call (AGENTS Rule 6). A non-zero exit whose stderr matches a curated
-set of ffmpeg/ffprobe "the input is bad" signatures is `MalformedMedia`
-(permanent); any other non-zero exit, a spawn failure, a signal kill, or a
-timeout stays `ExternalSystemUnavailable` (transient). The signature set
-(case-insensitive substring match):
+set of ffmpeg/ffprobe "the input bytes are unusable" signatures is
+`MalformedMedia` (permanent); any other non-zero exit, a spawn failure, a signal
+kill, or a timeout stays `ExternalSystemUnavailable` (transient). The signature
+set (case-insensitive substring match) is deliberately narrow — only diagnostics
+that mean the *bytes* are structurally broken regardless of ffmpeg build:
 
 ```
 invalid data found when processing input
 moov atom not found
 error opening input
-could not find codec parameters
-unknown format
-invalid data found
-end of file
-partial file
 header missing
-error splitting the input into ndjson   (guard against false hit; excluded)
 ```
 
+Deliberately **excluded** (they are not build-independent input faults, so they
+stay transient/retriable): `end of file` / `partial file` (fire on a file still
+being written or copied into the library mid-scan — transient truncation);
+`unknown format` and `could not find codec parameters` (a demuxer/codec this
+ffmpeg build lacks is a capability gap another build could probe, not corrupt
+bytes).
+
 Concretely the matcher lives in a shared `is_malformed_media_stderr(&str) -> bool`
-helper in each worker (they do not share a crate on this path). A signature
-list that is *conservative* (high precision, lower recall) is correct here: a
-missed malformed file falls back to the pre-existing retriable behavior (no
-regression), while a false positive would wrongly mark a transient failure
-permanent. Precision is therefore the priority.
+helper in each worker (they do not share a crate on this path). The list is
+tuned for **precision over recall**: a missed malformed file falls back to the
+pre-existing retriable behavior (no regression), while a false positive would
+wrongly condemn a transient or capability failure as permanent. A negative test
+asserts a truncated-but-still-growing fixture does **not** classify as
+`MalformedMedia`.
 
 - **ffprobe worker** (`ffprobe.rs`): the `!output.status.success()` arm
   currently always returns `external_system_unavailable("exit", …)`. It now
@@ -133,24 +136,39 @@ A small additive repo `SqliteScanFactsRepo` (new file under
 
 - `record_in_tx(tx, file_location_id, dev, ino, nlink, observed_at)`
 - `find_live_location_by_dev_ino_in_tx(tx, dev, ino) -> Option<ScanFactMatch>`
-  — joins `file_locations` (live, `kind='local_path'`) to return the prior
-  location id + its `file_version_id` for the same `(dev, ino)`.
+  — joins `file_locations` (live, `kind='local_path'`) to the owning live
+  `file_version` to return, for the same `(dev, ino)`: the prior location id,
+  its `file_version_id`, and the version's `content_hash` and `size_bytes`.
 
 ### Resolution (scan persist)
 
 In `persist_scanned_media_snapshot`, when Unix inode facts are present:
 
 1. Look up `find_live_location_by_dev_ino_in_tx(dev, ino)`.
-2. **Match** → the physical file is already ingested under a prior path. Attach
-   the new path as an additional live `file_location` on the *existing*
+2. **Match _and_ the prior version's `(content_hash, size_bytes)` equals the
+   candidate's** → the physical file is already ingested under a prior path.
+   Attach the new path as an additional live `file_location` on the *existing*
    `file_version` and record a `scan_file_fact` for it. No new `file_asset` /
    `file_version` / snapshot. `PersistedScan` points at the existing
    asset+version with the new location id, and is reported with a new
    `ScanReportFileStatus::ScannedHardlink` (still counts as a scanned file, but
    `ingested` is not double-incremented — it is a new *location* on an existing
    asset, so `hardlinked` is counted separately in the summary).
-3. **No match** → ingest as today, then record a `scan_file_fact` for the new
-   location.
+3. **No match, _or_ a `(dev, ino)` match whose content/size differs** → ingest
+   as today, then record a `scan_file_fact` for the new location.
+
+The content-hash+size equality precondition on step 2 is a required
+integrity guard, not an optimization: inode numbers are recycled by the
+filesystem, and a file can be edited in place (same inode, new bytes). Without
+the hash check, a scan of an unrelated file that reused a deleted file's inode,
+or a re-scan of an in-place-edited file, would silently attach mismatched bytes
+as a "hardlink" alias of a stale version. On a hash mismatch the candidate takes
+the normal-ingest branch (a recycled inode becomes its own asset; an in-place
+edit is a fresh discovery), and a `scan_file_fact` row is recorded for its new
+location. Because each row is keyed 1:1 by `file_location_id` and the `(dev,
+ino)` index is non-unique, several rows may share a `(dev, ino)`; the lookup
+joins only *live* locations, and the content-hash guard rejects any stale match
+that slips through, so a recycled inode never collapses two identities.
 
 The attach reuses the existing alias machinery's protection: it routes through
 a new `IdentityRepo::attach_local_hardlink_location_in_tx` that inserts the
@@ -174,35 +192,58 @@ CI-gating coverage.
 ### Progress counts in the workflow summary
 
 `WorkflowSummaryView` (`cases/policy/compliance.rs`) gains
-`progress: ProgressCountsView { total, completed, failed, remaining }`, derived
-purely from the run's `file_phases` (not from the job counters). Definition,
-computed per distinct `branch_id` by its **latest** (highest `phase_ordinal`)
-file-phase row:
+`progress: ProgressCountsView { total, completed, failed, skipped, remaining }`,
+derived purely from the run's `file_phases` (not from the job counters).
+Definition, computed per distinct `branch_id` by its **latest** (highest
+`phase_ordinal`) file-phase row:
 
-- `total` — distinct files (branch ids) the run has touched.
+- `total` — distinct files (branch ids) that have a recorded file-phase row.
 - `completed` — files whose latest outcome is `committed`.
 - `failed` — files whose latest outcome is `blocked`.
-- `remaining` — `total − completed − failed` (files whose latest outcome is
-  `skipped`, i.e. deferred/not-yet-terminal at the frontier).
+- `skipped` — files whose latest outcome is `skipped` (no work needed / deferred
+  — a distinct bucket, **not** folded into "remaining", because a
+  skipped-because-compliant file is finished, not outstanding).
+- `remaining` — `total − completed − failed − skipped`. Non-negative; `0` in a
+  fully-recorded successful summary (every touched file is terminal), and `> 0`
+  only for a partial/failed run whose summary recorded rows for some files but
+  not all. It is the honest "not yet accounted for" count, never a relabeled
+  `skipped`.
 
 Computed by a pure `progress_counts(&[FilePhaseSummaryView]) -> ProgressCountsView`
 so it is unit-testable without a DB. Both construction sites — `execute`
 (`ComplianceExecuteData::from_outcome`) and `report --job-id`
 (`read_compliance_run_report`) — build the view from their already-materialized
-`file_phases`, so a poller sees identical progress. The `From<&WorkflowSummary>`
-impl is replaced by `WorkflowSummaryView::from_summary(summary, &file_phases)`.
+`file_phases`, so the counts are identical whether read from the `execute`
+output or from a later `report --job-id`. The `From<&WorkflowSummary>` impl is
+replaced by `WorkflowSummaryView::from_summary(summary, &file_phases)`.
+
+**Availability.** The `workflow_summaries` / file-phase rows are written once, by
+`finalize_succeeded_run` at run completion (or the partial-failure finalizer);
+they are not written incrementally per phase. So `report --job-id` serves the
+progress counts only *after* the run has recorded its summary — this is a
+post-run / recorded-summary breakdown, not a live per-file counter that ticks up
+while `execute` runs. The runbook is worded to match; it does not promise live
+per-file counts the store cannot serve mid-run.
 
 Because a new field is added to a serialized CLI type, the affected `insta`
 snapshots are regenerated and reviewed in the same change.
 
 ### Runbook
 
-`operator-real-media-execution.md` gains a "Mid-run monitoring" section: while a
-`compliance execute` is in flight, WAL permits concurrent reads, so an operator
-can poll `voom compliance report --job-id <id>` for the progress counts and
-per-file phase outcomes, and `voom worker list` for live workers. Concurrent
-reads during a run are test-verified (`operator_execution_e2e.rs`). Output-tree
-naming at scale (#197/#199) is already documented and unchanged.
+`operator-real-media-execution.md` gains a "Mid-run monitoring" section that is
+precise about what is live vs recorded:
+
+- **While a `compliance execute` is in flight**, WAL permits a second process to
+  open the same DB read-only. The live signal is `voom worker list` (the
+  in-flight workers), which is the concurrent read that is test-verified
+  (`operator_execution_e2e.rs` runs `worker list` against the same DB while
+  `execute` runs). Reading the job's tickets/events is the other live signal.
+- **The per-file progress breakdown** (`summary.progress` + per-`(file, phase)`
+  outcomes) is available from the `execute` output itself and from
+  `voom compliance report --job-id <id>` once the run has recorded its summary.
+  It is a recorded-run breakdown, not a mid-run ticker.
+
+Output-tree naming at scale (#197/#199) is already documented and unchanged.
 
 ## Non-goals
 
@@ -213,12 +254,17 @@ naming at scale (#197/#199) is already documented and unchanged.
 ## Success criteria
 
 - New non-retriable `MALFORMED_MEDIA` class + code round-trip; ffprobe/ffmpeg
-  emit it on corrupt input and `ExternalSystemUnavailable` on transient tool
-  failure, each covered by a test that fails if the branch is swapped.
+  emit it on structurally-corrupt input and `ExternalSystemUnavailable` on
+  transient tool failure, each covered by a test that fails if the branch is
+  swapped; a truncated-still-growing fixture does **not** classify as
+  `MALFORMED_MEDIA`.
 - Two hardlinks resolve to one `file_asset` + one `file_version` with two live
   `file_locations` and two `scan_file_facts`; a byte-identical copy stays two
-  assets. Covered by CI-gating store + control-plane tests.
+  assets; a `(dev, ino)` match whose content differs (recycled inode / in-place
+  edit) does **not** collapse identity. Covered by CI-gating store +
+  control-plane tests.
 - `WorkflowSummaryView.progress` counts are correct for a mixed
-  committed/blocked/skipped frontier and identical between `execute` and
-  `report --job-id`; runbook documents the polling story.
+  committed/blocked/skipped set, identical between the `execute` output and a
+  later `report --job-id`, with `skipped` its own bucket and `remaining == 0`
+  for a fully-recorded successful run.
 - `just ci` green; migration 0017 applied only via `voom init`.

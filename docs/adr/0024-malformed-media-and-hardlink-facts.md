@@ -59,13 +59,19 @@ now with an honest permanent class.
 Capture `(st_dev, st_ino, nlink)` during the existing scan stat and persist them
 in a new additive `scan_file_facts` table (migration 0017), one row per ingested
 local `file_location`, with a `(dev, ino)` index. At ingest, a candidate whose
-`(dev, ino)` matches a live prior local location is a **hardlink**: its path is
+`(dev, ino)` matches a live prior local location **and whose `(content_hash,
+size)` equals that location's `file_version`** is a **hardlink**: its path is
 attached as an additional live `file_location` on the *existing* `file_version`
 (routed through a repo method that consults the pending-commit lock, exactly as
 alias-attach does), and no new asset/version/snapshot is minted. A candidate
 with no `(dev, ino)` match — including a byte-identical **copy**, which has a
-different inode — ingests as a new asset as before. `(dev, ino)` is the physical-
-object key; content hash remains the dedup-candidate signal only.
+different inode — ingests as a new asset as before. The content-hash+size
+equality is a required integrity guard: filesystems recycle inode numbers and
+files can be edited in place (same inode, new bytes), so a `(dev, ino)` match
+alone would let a recycled inode or an in-place edit silently attach mismatched
+bytes to a stale version; on a hash mismatch the candidate falls through to
+normal ingest. `(dev, ino)` is the physical-object key; content hash remains the
+dedup-candidate signal and, here, the attach integrity guard.
 
 ## Consequences
 
