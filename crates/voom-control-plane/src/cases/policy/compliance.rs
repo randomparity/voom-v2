@@ -914,8 +914,11 @@ fn no_partial(source: VoomError) -> ComplianceExecuteError {
 
 /// Map a plan operation to the worker operation name it dispatches as and the
 /// `run-local --kind` value that starts a worker for it. Operations with no
-/// executing worker (metadata edits, container set, conditionals) return
-/// `None`: the coordinator handles them without a runtime.
+/// `run-local`-startable worker (metadata edits, container set, conditionals)
+/// return `None`: the coordinator handles them without a separately-launched
+/// runtime. `verify_artifact` also returns `None` — the verify worker is not
+/// `run-local`-startable and verification runs inside the staged-commit flow;
+/// wiring its policy-driven dispatch is deferred to T19 (#288).
 fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &'static str)> {
     match kind {
         PlanOperationKind::Remux => Some(("remux", "mkvtoolnix")),
@@ -931,6 +934,7 @@ fn policy_worker_requirement(kind: PlanOperationKind) -> Option<(&'static str, &
         | PlanOperationKind::ClearTags
         | PlanOperationKind::SetTag
         | PlanOperationKind::DeleteTag
+        | PlanOperationKind::VerifyArtifact
         | PlanOperationKind::Conditional
         | PlanOperationKind::Rules => None,
     }

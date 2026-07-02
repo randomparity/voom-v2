@@ -435,6 +435,9 @@ impl<'a> PlanBuilder<'a> {
                     filter.as_ref(),
                 ),
             ),
+            CompiledOperation::VerifyArtifact => {
+                self.push_operation_plan(phase_name, snapshot, plan_verify_artifact(snapshot));
+            }
             unsupported => {
                 let operation_kind = operation_kind(unsupported);
                 self.expand_blocked_unsupported_for_snapshot(
@@ -1108,6 +1111,32 @@ fn build_phase_edges(policy: &CompiledPolicy, nodes: &[PlanNode]) -> Vec<Edge> {
     edges
 }
 
+/// Plan the `verify artifact` operation. Verification targets the artifact a
+/// prior phase produces, not the source snapshot's streams, so the node is
+/// always planned (never a snapshot-shape no-op or block) and routes to the
+/// `verify_artifact` worker capability. The concrete artifact facts the worker
+/// checks against are assembled downstream from the committed artifact, not at
+/// plan time; the payload only pins the operation and the source snapshot id
+/// when the caller already knows it.
+fn plan_verify_artifact(snapshot: &MediaSnapshotInput) -> OperationPlan {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "type".to_owned(),
+        json!(PlanOperationKind::VerifyArtifact.as_str()),
+    );
+    if let Some(id) = snapshot.existing_media_snapshot_id {
+        payload.insert("source_media_snapshot_id".to_owned(), json!(id.0));
+    }
+    OperationPlan::new(
+        PlanOperationKind::VerifyArtifact,
+        serde_json::Value::Object(payload),
+        None,
+        NodeStatus::Planned,
+        "artifact will be verified against its expected facts".to_owned(),
+        Some(PlanOperationKind::VerifyArtifact.as_str().to_owned()),
+    )
+}
+
 fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
     match operation {
         CompiledOperation::SetContainer { .. } => PlanOperationKind::SetContainer,
@@ -1122,6 +1151,7 @@ fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
         CompiledOperation::TranscodeVideo { .. } => PlanOperationKind::TranscodeVideo,
         CompiledOperation::TranscodeAudio { .. } => PlanOperationKind::TranscodeAudio,
         CompiledOperation::ExtractAudio { .. } => PlanOperationKind::ExtractAudio,
+        CompiledOperation::VerifyArtifact => PlanOperationKind::VerifyArtifact,
         CompiledOperation::Conditional { .. } => PlanOperationKind::Conditional,
         CompiledOperation::Rules { .. } => PlanOperationKind::Rules,
     }
