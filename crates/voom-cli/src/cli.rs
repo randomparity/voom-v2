@@ -93,6 +93,65 @@ pub enum Command {
     /// Manage durable safety policy records.
     #[command(subcommand)]
     SafetyPolicy(SafetyPolicyCommand),
+    /// Acquire, release, force-release, and list manual use-lease locks.
+    #[command(subcommand)]
+    Lease(LeaseCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum LeaseCommand {
+    /// Acquire a blocking manual lock on a scope. A live manual lock fails any
+    /// commit whose affected scope it overlaps, until it is released.
+    Acquire {
+        #[arg(long)]
+        scope_type: LeaseScopeTypeArg,
+        #[arg(long)]
+        scope_id: u64,
+        /// Identifies who holds the lock (operator name, ticket ref, ...).
+        #[arg(long)]
+        issuer_ref: String,
+    },
+    /// Release a manual lock you hold.
+    Release {
+        #[arg(long)]
+        lease_id: u64,
+    },
+    /// Force-release a manual lock held by someone else. Records an audited
+    /// override naming the actor and reason.
+    ForceRelease {
+        #[arg(long)]
+        lease_id: u64,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// List live manual locks with their age (for forgotten-hold spotting).
+    List,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum LeaseScopeTypeArg {
+    Asset,
+    Bundle,
+    Version,
+    Location,
+}
+
+impl LeaseScopeTypeArg {
+    /// Pair the scope-type discriminant with a raw id into a `LeaseScope`.
+    #[must_use]
+    pub fn to_scope(self, id: u64) -> voom_store::repo::LeaseScope {
+        use voom_core::{BundleId, FileAssetId, FileLocationId, FileVersionId};
+        use voom_store::repo::LeaseScope;
+        match self {
+            Self::Asset => LeaseScope::Asset(FileAssetId(id)),
+            Self::Bundle => LeaseScope::Bundle(BundleId(id)),
+            Self::Version => LeaseScope::Version(FileVersionId(id)),
+            Self::Location => LeaseScope::Location(FileLocationId(id)),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

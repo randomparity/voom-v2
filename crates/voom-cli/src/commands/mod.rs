@@ -13,6 +13,6 @@ pub mod ticket;
 
 pub use execution::{node, scheduler, worker};
 pub use library_domain::library;
-pub use media::{artifact, bundle, profile, scan};
+pub use media::{artifact, bundle, lease, profile, scan};
 pub use policy_domain::{compliance, plan, policy, safety_policy, scheduling_policy};
 pub use system::{health, init, token_source, version};

@@ -1155,3 +1155,67 @@ async fn acquire_succeeds_on_unrelated_scope_when_pending_commit_exists() {
         .unwrap();
     assert_eq!(lease.scope, LeaseScope::Asset(other.id));
 }
+
+// --- list_live_manual_locks ---
+
+#[tokio::test]
+async fn list_live_manual_locks_returns_only_live_manual_locks() {
+    let (pool, _tmp, asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+
+    // A live manual lock — must be listed.
+    let manual = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "operator".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    // A TTL-bound playback lease on the same scope — must be excluded (not a
+    // manual lock).
+    repo.acquire(NewUseLease {
+        kind: UseLeaseKind::Playback,
+        scope: LeaseScope::Asset(asset),
+        issuer_kind: IssuerKind::User,
+        issuer_ref: "watcher".to_owned(),
+        blocking_mode: BlockingMode::Blocking,
+        ttl: Some(Duration::seconds(60)),
+        acquired_at: T0,
+    })
+    .await
+    .unwrap();
+    // A released manual lock — must be excluded (terminal).
+    let released = repo
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Asset(asset),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "operator".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+    repo.force_release(released.id, T0 + Duration::seconds(1))
+        .await
+        .unwrap();
+
+    let listed = repo.list_live_manual_locks().await.unwrap();
+    assert_eq!(listed.len(), 1, "only the one live manual lock: {listed:?}");
+    assert_eq!(listed[0].id, manual.id);
+    assert_eq!(listed[0].kind, UseLeaseKind::ManualLock);
+    assert!(listed[0].is_live());
+}
+
+#[tokio::test]
+async fn list_live_manual_locks_is_empty_on_clean_db() {
+    let (pool, _tmp, _asset) = pool_with_asset().await;
+    let repo = SqliteUseLeaseRepo::new(pool);
+    assert!(repo.list_live_manual_locks().await.unwrap().is_empty());
+}
