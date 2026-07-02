@@ -31,6 +31,7 @@ async fn scan_stage_verify_commit_flow_persists_committed_artifact() {
     let scan = cp
         .scan_path(ScanPathInput {
             path: media.clone(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();
@@ -152,6 +153,7 @@ async fn stage_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFixtu
     let scan = cp
         .scan_path(ScanPathInput {
             path: tiny_media_fixture(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

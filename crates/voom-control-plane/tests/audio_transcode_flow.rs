@@ -203,6 +203,7 @@ async fn scan_fixture(cp: &ControlPlane, source: &Path) -> ScannedFixture {
     let scan = cp
         .scan_path(ScanPathInput {
             path: source.to_path_buf(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

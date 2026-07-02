@@ -27,6 +27,7 @@ async fn directory_scan_summarizes_successes_and_skips() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -73,6 +74,7 @@ async fn directory_scan_persists_matching_srt_sidecar_as_bundle_member() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -123,6 +125,7 @@ async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut FakeLauncher::new(FakePlan::AllSuccess),
         )
@@ -132,6 +135,7 @@ async fn repeated_directory_scan_links_sidecar_without_membership_conflict() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut FakeLauncher::new(FakePlan::AllSuccess),
         )
@@ -163,7 +167,13 @@ async fn scan_report_root_path_is_canonical() {
     let mut launcher = FakeLauncher::new(FakePlan::AllSuccess);
 
     let report = cp
-        .scan_path_with_launcher(ScanPathInput { path: noncanonical }, &mut launcher)
+        .scan_path_with_launcher(
+            ScanPathInput {
+                path: noncanonical,
+                extension_allowlist: Vec::new(),
+            },
+            &mut launcher,
+        )
         .await
         .unwrap();
 
@@ -181,6 +191,7 @@ async fn all_skipped_directory_does_not_launch_worker() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -213,6 +224,7 @@ async fn single_filesystem_directory_scan_uses_one_worker() {
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
             &classifier,
@@ -252,6 +264,7 @@ async fn multi_filesystem_directory_scan_uses_one_worker_per_identity() {
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
             &classifier,
@@ -290,6 +303,7 @@ async fn multi_filesystem_directory_scan_dispatches_groups_concurrently() {
         cp.scan_path_with_launcher_and_classifier(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
             &classifier,
@@ -330,6 +344,7 @@ async fn multi_filesystem_fatal_probe_error_preserves_ordered_report() {
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
             &classifier,
@@ -366,6 +381,7 @@ async fn launch_failure_after_prior_group_shuts_down_started_worker() {
         .scan_path_with_launcher_and_classifier(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
             &classifier,
@@ -390,6 +406,7 @@ async fn failure_after_prior_commit_returns_success_and_failing_file() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -437,6 +454,7 @@ async fn directory_scan_continues_after_unprobeable_media_file() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -474,6 +492,7 @@ async fn explicit_file_scan_keeps_unprobeable_media_failure_fatal() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: media.clone(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -501,6 +520,7 @@ async fn spawn_style_worker_failure_still_aborts_directory_scan() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -526,6 +546,7 @@ async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: media.clone(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )
@@ -565,6 +586,7 @@ async fn non_utf8_candidate_path_fails_before_worker_dispatch() {
         .scan_path_with_launcher(
             ScanPathInput {
                 path: dir.path().to_path_buf(),
+                extension_allowlist: Vec::new(),
             },
             &mut launcher,
         )

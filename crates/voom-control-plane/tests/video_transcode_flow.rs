@@ -48,6 +48,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
     let scan = cp
         .scan_path(ScanPathInput {
             path: source.clone(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

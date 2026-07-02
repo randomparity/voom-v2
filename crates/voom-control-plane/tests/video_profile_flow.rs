@@ -422,6 +422,7 @@ async fn scan_source(cp: &ControlPlane, source: &Path) -> FileVersionId {
     let scan = cp
         .scan_path(ScanPathInput {
             path: source.to_path_buf(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

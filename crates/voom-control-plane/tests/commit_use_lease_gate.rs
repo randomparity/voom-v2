@@ -245,6 +245,7 @@ async fn verified_fixture(cp: &ControlPlane, dir: &Path, name: &str) -> StagedFi
     let scan = cp
         .scan_path(ScanPathInput {
             path: tiny_media_fixture(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();
