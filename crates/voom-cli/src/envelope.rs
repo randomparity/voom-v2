@@ -25,6 +25,12 @@ pub struct Envelope<T: Serialize> {
     pub command: &'static str,
     pub status: Status,
     pub data: Option<T>,
+    /// Keyset continuation token for paged list commands (ADR 0031): the `id`
+    /// to feed back as `--after-id` for the next page. Present only when the
+    /// page was full and more rows may exist; omitted otherwise (including on
+    /// every non-list command), so its absence is the end-of-stream signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<Local>,
     pub warnings: Vec<String>,
@@ -50,6 +56,30 @@ pub fn emit_ok<T: Serialize>(
         command,
         status: Status::Ok,
         data: Some(data),
+        next_cursor: None,
+        local,
+        warnings,
+        error: None,
+    };
+    write_json(&env)
+}
+
+/// Emit a successful envelope for a paged list command, carrying the keyset
+/// continuation token (ADR 0031). `next_cursor` is `Some(id)` when the page was
+/// full and more rows may exist, `None` at end of stream.
+pub fn emit_ok_page<T: Serialize>(
+    command: &'static str,
+    data: T,
+    next_cursor: Option<u64>,
+    local: Option<Local>,
+    warnings: Vec<String>,
+) -> io::Result<()> {
+    let env = Envelope {
+        schema_version: SCHEMA_VERSION,
+        command,
+        status: Status::Ok,
+        data: Some(data),
+        next_cursor,
         local,
         warnings,
         error: None,
@@ -70,6 +100,7 @@ pub fn emit_err(
         command,
         status: Status::Error,
         data: None,
+        next_cursor: None,
         local,
         warnings: Vec::new(),
         error: Some(ErrorBody {
@@ -106,6 +137,7 @@ pub fn emit_err_with_data_and_warnings<T: Serialize>(
         command,
         status: Status::Error,
         data: Some(data),
+        next_cursor: None,
         local,
         warnings,
         error: Some(ErrorBody {

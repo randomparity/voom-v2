@@ -9,8 +9,8 @@ use voom_store::repo::identity::{
 };
 
 use crate::cli::BundleCommand;
-use crate::commands::common::{emit_voom_error, open_control_plane};
-use crate::envelope::{Local, emit_err, emit_ok};
+use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};
+use crate::envelope::{Local, emit_err, emit_ok, emit_ok_page};
 
 const COMMAND: &str = "bundle";
 
@@ -80,26 +80,35 @@ struct MemberData {
 
 pub async fn run(database_url: &str, local: Local, command: BundleCommand) -> io::Result<i32> {
     match command {
-        BundleCommand::List { limit } => list(database_url, local, limit).await,
+        BundleCommand::List { limit, after_id } => list(database_url, local, limit, after_id).await,
         BundleCommand::Show { bundle_id } => show(database_url, local, bundle_id).await,
     }
 }
 
-async fn list(database_url: &str, local: Local, limit: u32) -> io::Result<i32> {
+async fn list(
+    database_url: &str,
+    local: Local,
+    limit: u32,
+    after_id: Option<u64>,
+) -> io::Result<i32> {
     let cp = match open_control_plane(COMMAND, database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    match cp.list_bundles(limit).await {
-        Ok(rows) => emit_ok(
-            COMMAND,
-            ListData {
-                bundles: rows.into_iter().map(bundle_summary).collect(),
-            },
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
+    match cp.list_bundles(after_id, limit).await {
+        Ok(rows) => {
+            let cursor = next_cursor(&rows, limit, |(bundle, _)| bundle.id.0);
+            emit_ok_page(
+                COMMAND,
+                ListData {
+                    bundles: rows.into_iter().map(bundle_summary).collect(),
+                },
+                cursor,
+                Some(local),
+                Vec::new(),
+            )
+            .map(|()| 0)
+        }
         Err(err) => emit_voom_error(COMMAND, &err, local),
     }
 }

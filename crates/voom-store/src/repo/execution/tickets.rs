@@ -53,6 +53,12 @@ impl TicketState {
     }
 }
 
+/// Filter for the keyset-paginated `SqliteTicketRepo::list` inspection read.
+#[derive(Debug, Clone, Default)]
+pub struct TicketFilter {
+    pub state: Option<TicketState>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewTicket {
     pub job_id: Option<JobId>,
@@ -349,6 +355,30 @@ impl SqliteTicketRepo {
         id: TicketId,
     ) -> Result<Option<Ticket>, VoomError> {
         get_in_tx_inner(tx, id).await
+    }
+
+    /// Keyset-paginated inspection read for `voom ticket list` (ADR 0031).
+    /// Orders strictly by `id` descending (newest first); `after_id` is an
+    /// exclusive continuation token returning rows with `id < after_id`.
+    pub async fn list(
+        &self,
+        filter: TicketFilter,
+        after_id: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TICKET_RETURNING_COLS} FROM tickets \
+             WHERE (?1 IS NULL OR state = ?1) \
+               AND (?2 IS NULL OR id < ?2) \
+             ORDER BY id DESC LIMIT ?3"
+        ))
+        .bind(filter.state.map(TicketState::as_str))
+        .bind(after_id.map(i64_from_u64))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("tickets keyset list", e))?;
+        rows.iter().map(row_to_ticket).collect()
     }
 
     pub async fn list_by_state(
