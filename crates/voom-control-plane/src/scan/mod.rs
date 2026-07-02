@@ -303,7 +303,7 @@ impl ControlPlane {
                 error,
                 ..
             } => {
-                if mode == discovery::ScanMode::Directory && error.is_ffprobe_exit() {
+                if mode == discovery::ScanMode::Directory && error.is_unprobeable_media() {
                     report.push_worker_error(candidate.path, &facts, worker_id, &error);
                     Ok(())
                 } else {
@@ -505,7 +505,7 @@ impl ScanCandidateOutcome {
     fn is_group_terminal(&self) -> bool {
         match self {
             Self::Probed { .. } => false,
-            Self::WorkerError { error, .. } => !error.is_ffprobe_exit(),
+            Self::WorkerError { error, .. } => !error.is_unprobeable_media(),
             Self::ObserveError { .. } | Self::ProbeRequestError { .. } => true,
         }
     }
