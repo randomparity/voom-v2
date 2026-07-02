@@ -1414,6 +1414,90 @@ fn assert_extract_audio_blocked(snapshot: MediaSnapshotInput) {
     assert_eq!(plan.summary.blocked_node_count, 1);
 }
 
+// ---- #273: verify artifact ------------------------------------------------
+
+#[test]
+fn verify_artifact_plans_a_worker_node_routed_to_verify_capability() {
+    let plan = generate_plan(request(
+        policy(CompiledOperation::VerifyArtifact),
+        snapshot_mkv_with_video_audio_subtitle(),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(
+        plan.nodes[0].operation_kind,
+        PlanOperationKind::VerifyArtifact
+    );
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(plan.nodes[0].operation_payload["type"], "verify_artifact");
+    assert_eq!(
+        plan.nodes[0]
+            .capability_hints
+            .operation_capability
+            .as_deref(),
+        Some("verify_artifact")
+    );
+    assert_eq!(plan.summary.executable_node_count, 1);
+}
+
+#[test]
+fn verify_artifact_payload_carries_source_media_snapshot_id_when_available() {
+    let mut snapshot = snapshot_mkv_with_video_audio_subtitle();
+    snapshot.existing_media_snapshot_id = Some(MediaSnapshotId(77));
+
+    let plan = generate_plan(request(policy(CompiledOperation::VerifyArtifact), snapshot)).unwrap();
+
+    assert_eq!(
+        plan.nodes[0].operation_payload["source_media_snapshot_id"],
+        77
+    );
+}
+
+#[test]
+fn verify_artifact_plans_even_without_stream_facts() {
+    // Verification targets the produced artifact, not the source snapshot's
+    // streams, so a fact-poor snapshot still yields a planned node rather than a
+    // blocked one.
+    let plan = generate_plan(request(
+        policy(CompiledOperation::VerifyArtifact),
+        snapshot_with(None, None, None),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert!(plan.diagnostics.is_empty());
+}
+
+#[test]
+fn verify_phase_after_normalize_links_a_dependency_edge() {
+    let policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        ("verify", vec![CompiledOperation::VerifyArtifact]),
+    ]);
+
+    let plan = generate_plan(request(policy, snapshot_with_streams(Some("mp4")))).unwrap();
+
+    let verify = plan
+        .nodes
+        .iter()
+        .find(|node| node.operation_kind == PlanOperationKind::VerifyArtifact)
+        .unwrap();
+    assert_eq!(verify.phase_name, "verify");
+    assert_eq!(verify.status, NodeStatus::Planned);
+    assert!(
+        plan.edges
+            .iter()
+            .any(|edge| edge.to_node_id == verify.node_id),
+        "verify node should depend on the normalize node"
+    );
+}
+
 fn assert_transcode_blocked(snapshot: MediaSnapshotInput) {
     let plan = generate_plan(request_with_transcode(snapshot)).unwrap();
 
