@@ -214,16 +214,20 @@ async fn handle_request(
 }
 
 fn enforce_version(headers: &hyper::HeaderMap) -> Result<(), ProtocolError> {
-    let v = headers
+    let Some(raw) = headers
         .get(HeaderName::from_static(PROTOCOL_VERSION_HEADER))
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
-    match v {
-        Some(n) => negotiate(n).map(|_| ()),
-        None => Err(ProtocolError::InvalidPayload {
+    else {
+        return Err(ProtocolError::InvalidPayload {
             detail: format!("missing {PROTOCOL_VERSION_HEADER}"),
-        }),
-    }
+        });
+    };
+    let Ok(offered) = raw.parse::<u32>() else {
+        return Err(ProtocolError::InvalidPayload {
+            detail: format!("malformed {PROTOCOL_VERSION_HEADER}: {raw}"),
+        });
+    };
+    negotiate(offered).map(|_| ())
 }
 
 fn handle_handshake(body: &[u8]) -> Response<ResponseBody> {

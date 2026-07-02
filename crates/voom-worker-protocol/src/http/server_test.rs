@@ -22,5 +22,26 @@ fn enforce_version_wrong_version_rejects() {
 fn enforce_version_missing_header_is_invalid_payload() {
     let headers = hyper::HeaderMap::new();
     let err = enforce_version(&headers).unwrap_err();
-    assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+    assert!(matches!(
+        &err,
+        ProtocolError::InvalidPayload { detail } if detail.contains("missing")
+    ));
+}
+
+#[test]
+fn enforce_version_malformed_header_reports_malformed_not_missing() {
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static(PROTOCOL_VERSION_HEADER),
+        hyper::header::HeaderValue::from_static("1.0"),
+    );
+    let err = enforce_version(&headers).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ProtocolError::InvalidPayload { detail }
+                if detail.contains("malformed") && detail.contains("1.0") && !detail.contains("missing")
+        ),
+        "expected a malformed-value InvalidPayload, got {err:?}"
+    );
 }
