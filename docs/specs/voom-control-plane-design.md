@@ -684,6 +684,25 @@ The V1 condition and track-filter vocabulary is intentionally finite:
 <op> = == | != | < | <= | > | >=
 ```
 
+#### Track-filter language semantics
+
+The `language` track-filter forms (`language == <token>`, `language in [...]`)
+evaluate against a stream's language tag with these rules (ADR 0021):
+
+- **Untagged tracks match as `und`.** A stream with no language tag is treated as
+  the ISO 639-2 undetermined code `und`. It is never a planning block. So
+  `keep audio where language in ["eng"]` excludes an untagged stream (it is `und`,
+  not `eng`) without blocking the file, and `keep audio where language in ["und"]`
+  (or `language == "und"`) explicitly keeps untagged tracks. A file with untagged
+  tracks under a language filter also carries a per-file `Warning` diagnostic
+  (`untagged_track_language_defaulted`) so the `und` defaulting is visible.
+- **A `keep audio` that matches zero tracks is a per-file failure, never empty
+  audio.** If a source has audio but no audio track matches the `keep` filter, the
+  file fails individually (opening a `terminal_failure` issue and skipping the
+  file); the operation never produces an audio-less artifact. Other files in the
+  same operation proceed. `keep subtitle` that matches zero is allowed — a
+  subtitle-less file is a valid outcome.
+
 Named video profiles are policy references to durable quality/encode settings,
 not free-form FFmpeg argument strings. A V1 profile can select encoder family,
 CRF, preset, tune, profile, level, pixel format, max width, max height, and

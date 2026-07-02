@@ -159,6 +159,62 @@ fn audio_or_filter_does_not_mask_unsupported_selector() {
     );
 }
 
+#[test]
+fn audio_language_filter_untagged_matches_as_und() {
+    // A missing language tag is treated as `und`, never a planning block
+    // (issue #272): it is excluded by a non-`und` value set and kept by `und`.
+    let untagged = SnapshotAudioStreamFact {
+        language: None,
+        ..audio_fact(Some(false))
+    };
+
+    assert_eq!(
+        evaluate_audio_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            &untagged,
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        evaluate_audio_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["und".to_owned()],
+            },
+            &untagged,
+        ),
+        Ok(true)
+    );
+}
+
+#[test]
+fn audio_language_filter_explicit_und_matches_like_untagged() {
+    let explicit_und = SnapshotAudioStreamFact {
+        language: Some("und".to_owned()),
+        ..audio_fact(Some(false))
+    };
+
+    assert_eq!(
+        evaluate_audio_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["und".to_owned()],
+            },
+            &explicit_und,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        evaluate_audio_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            &explicit_und,
+        ),
+        Ok(false)
+    );
+}
+
 fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
         snapshot_stream_id: "stream-1".to_owned(),

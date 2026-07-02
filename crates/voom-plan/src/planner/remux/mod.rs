@@ -206,13 +206,78 @@ pub(super) fn plan_group(
         status_reason,
         capability,
     );
-    with_optional_diagnostic(
+    let plan = with_optional_diagnostic(
         plan,
         diagnostic,
         phase_name,
         snapshot,
         PlanOperationKind::Remux,
+    );
+    with_untagged_language_warning(plan, phase_name, snapshot, operations)
+}
+
+/// Attach a per-file `Warning` when a remux language filter is evaluated against a
+/// file that has an untagged track of the filtered kind (defaulted to `und`,
+/// ADR 0021). Skipped on blocked nodes.
+fn with_untagged_language_warning(
+    plan: OperationPlan,
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+) -> OperationPlan {
+    if plan.status == NodeStatus::Blocked || !remux_defaults_untagged_language(snapshot, operations)
+    {
+        return plan;
+    }
+    plan.with_diagnostic(
+        PlanningDiagnostic::warning(
+            PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted,
+            "an untagged track was matched as language und by a remux filter",
+        )
+        .with_phase(phase_name)
+        .with_operation_kind(PlanOperationKind::Remux.as_str())
+        .with_target(snapshot.target.clone()),
     )
+}
+
+fn remux_defaults_untagged_language(
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+) -> bool {
+    let Ok(facts) = stream_facts(snapshot) else {
+        return false;
+    };
+    operations.iter().any(|operation| {
+        let (CompiledOperation::KeepTracks { target, filter }
+        | CompiledOperation::RemoveTracks { target, filter }) = operation
+        else {
+            return false;
+        };
+        filter.as_ref().is_some_and(|filter| {
+            filter_references_language(filter)
+                && facts
+                    .iter()
+                    .any(|stream| stream.kind == *target && stream.language.is_none())
+        })
+    })
+}
+
+fn filter_references_language(filter: &TrackFilter) -> bool {
+    match filter {
+        TrackFilter::LanguageIn { .. } => true,
+        TrackFilter::Not { inner } => filter_references_language(inner),
+        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+            filters.iter().any(filter_references_language)
+        }
+        TrackFilter::CodecIn { .. }
+        | TrackFilter::Channels { .. }
+        | TrackFilter::Commentary
+        | TrackFilter::Forced
+        | TrackFilter::Default
+        | TrackFilter::Font
+        | TrackFilter::TitleContains { .. }
+        | TrackFilter::TitleMatches { .. } => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
