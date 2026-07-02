@@ -41,7 +41,7 @@ where
                 reader.next_frame().await?;
                 return Ok(());
             }
-            voom_worker_protocol::NdjsonOutcome::StreamEnd { .. } => {
+            voom_worker_protocol::NdjsonOutcome::StreamEnd => {
                 return Err(ProtocolError::MalformedFrame {
                     detail: "stream ended before terminal".to_owned(),
                 });

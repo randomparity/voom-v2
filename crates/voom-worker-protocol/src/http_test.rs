@@ -230,7 +230,7 @@ async fn collect_body(mut dispatch: DispatchStream) -> Vec<NdjsonOutcome> {
         let outcome = dispatch.frames.next_frame().await.unwrap();
         let done = matches!(
             outcome,
-            NdjsonOutcome::Terminated(_) | NdjsonOutcome::StreamEnd { .. }
+            NdjsonOutcome::Terminated(_) | NdjsonOutcome::StreamEnd
         );
         outcomes.push(outcome);
         if done {

@@ -168,7 +168,7 @@ async fn collect_and_validate_stream(
                 }
                 return Ok(throughput);
             }
-            other @ NdjsonOutcome::StreamEnd { .. } => {
+            other @ NdjsonOutcome::StreamEnd => {
                 return Err(TestFailure(format!(
                     "sample {sample_index}: unexpected stream outcome {other:?}"
                 )));
