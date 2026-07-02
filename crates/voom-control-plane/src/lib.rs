@@ -30,6 +30,7 @@ use voom_store::repo::{
     issues::SqliteIssueRepo,
     jobs::SqliteJobRepo,
     leases::SqliteLeaseRepo,
+    library::SqliteLibraryRepo,
     nodes::SqliteNodeRepo,
     policies::SqlitePolicyRepo,
     policy_inputs::SqlitePolicyInputRepo,
@@ -141,6 +142,7 @@ pub struct ControlPlane {
     pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
     pub(crate) backups: SqliteBackupRepo,
+    pub(crate) libraries: SqliteLibraryRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -173,6 +175,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("scheduler_node_limits", &self.scheduler_node_limits)
             .field("workflow_summaries", &self.workflow_summaries)
             .field("backups", &self.backups)
+            .field("libraries", &self.libraries)
             .finish()
     }
 }
@@ -278,6 +281,7 @@ impl ControlPlane {
             scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             backups: SqliteBackupRepo::new(pool.clone()),
+            libraries: SqliteLibraryRepo::new(pool.clone()),
             pool,
             clock,
             rng,
