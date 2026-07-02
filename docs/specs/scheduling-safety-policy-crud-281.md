@@ -128,25 +128,39 @@ generated plan and options and collects **blocks**. It fail-closes on:
    the existing #278 backup-before-mutation gate performs the backups. This is
    the wire from safety policy to the T9 hook.
 6. **Verification** — `verification_level != none` and the plan contains no
-   `verify_artifact` node ⇒ block.
+   `verify_artifact` node ⇒ block (reason `verification_required_but_absent`).
+   V1 enforces *presence only*: plan verify nodes do not yet carry a level, so
+   `quick_decode` and `full` are not distinguished. The three-value vocabulary is
+   kept for spec fidelity; level discrimination is deferred to the T19/#288
+   verify wiring. The gate never treats `full` as a stronger runtime guarantee
+   than `quick_decode` today.
 7. **Auto-execute** — any planned **mutating** operation whose `OperationKind`
-   is not in `auto_execute_operations` ⇒ block (one per operation).
-8. **Failed records** — `block_on_failed_records` and a failed backup exists for
-   any file version the plan targets ⇒ block.
+   is not in `auto_execute_operations` ⇒ block (one per operation). The
+   `PlanOperationKind → OperationKind` map is a wildcard-free `match`: mutating
+   kinds map to their `OperationKind`; `Conditional` / `Rules` (control flow) and
+   `VerifyArtifact` (read-only) are non-gated. A new `PlanOperationKind` variant
+   is a compile error, so the allowlist cannot silently fail open.
+8. **Failed records** — `block_on_failed_records` and the **latest** backup for
+   any targeted file version is `failed` ⇒ block. A later verified backup
+   supersedes an earlier failed one and clears the block (self-clearing; no
+   permanent wedge).
 9. **Recovery-required records** — `block_on_recovery_required_records` and a
-   commit record in the recovery-required state exists for any targeted file
-   version ⇒ block.
+   commit record for any targeted file version is currently in the
+   recovery-required state ⇒ block. Recovery-required is a live state; a
+   recovered/committed record leaves it, so this too is self-clearing.
 
 On one or more blocks the gate opens a durable `policy_noncompliant` issue
 (status `open`, dedupe key `safety_blocked:v1:policy=<slug>:pv=<id>:is=<id>`)
 whose body enumerates the block reasons, then returns
 `VoomError::PolicyValidationError`. `execute` surfaces exit code 2 and emits the
-error envelope. Nothing is dispatched. When there are zero blocks the run
-proceeds exactly as today, with `backup_root` threaded through.
+error envelope. Nothing is dispatched. When there are **zero** blocks the gate
+first resolves any live `safety_blocked` issue for that same dedupe key (so a
+fixed policy clears its prior blocked issue), then the run proceeds exactly as
+today with `backup_root` threaded through.
 
-The gate reads only: it opens the issue in its own transaction (mirroring the
-existing issue-application transaction boundary) and never mutates policy rows or
-media.
+The gate reads only media/policy state: it opens or resolves the tracking issue
+in its own transaction (mirroring the existing issue-application transaction
+boundary) and never mutates policy rows or media.
 
 ## Testing
 
@@ -160,8 +174,10 @@ Safety gate (control-plane, sibling `_test.rs`): each block reason triggers a
 block and opens exactly one issue and dispatches nothing — missing policy, stale
 `schema_version`, `approval_required`, `add_only` excluded, `backup_required`
 with no root, verification required with no verify node, a planned operation not
-in `auto_execute_operations`, a failed backup with `block_on_failed_records`, a
-recovery-required commit with `block_on_recovery_required_records`. Positive
+in `auto_execute_operations`, a latest-failed backup with `block_on_failed_records`,
+a recovery-required commit with `block_on_recovery_required_records`. Clearance:
+a failed backup superseded by a later verified backup does **not** block; a clean
+gate resolves a prior `safety_blocked` issue for the same dedupe key. Positive
 path: a permissive policy whose fields all pass runs to the same outcome as no
 policy, and `backup_required` + `backup_root` threads the root through.
 

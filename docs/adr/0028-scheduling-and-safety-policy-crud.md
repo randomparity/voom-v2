@@ -69,17 +69,44 @@ operator flows and their snapshots are unaffected); a future daemon always
 supplies one. When supplied, the gate evaluates the named policy against the
 generated plan and the run options and blocks on: missing policy, stale
 `schema_version`, `approval_required`, `add_only` not in `allowed_commit_modes`,
-`backup_required` with no `--backup-root`, a required `verification_level` with
-no `verify_artifact` node in the plan, any planned mutating operation absent from
-`auto_execute_operations`, a failed backup for a targeted file version when
-`block_on_failed_records`, and a recovery-required commit for a targeted file
-version when `block_on_recovery_required_records`. `backup_required` with a
+`backup_required` with no `--backup-root`, a required verification level with no
+`verify_artifact` node in the plan, any planned mutating operation absent from
+`auto_execute_operations`, a latest-failed backup for a targeted file version
+when `block_on_failed_records`, and a recovery-required commit for a targeted
+file version when `block_on_recovery_required_records`. `backup_required` with a
 supplied `--backup-root` threads the root into the ADR-0025 backup-before-
 mutation gate — the wire from safety policy to the T9 hook.
 
+Three enforcement details make the gate honest rather than falsely reassuring:
+
+- **Verification is presence-only in V1.** Plan verify nodes do not yet carry a
+  verification level, so the gate cannot distinguish `quick_decode` from `full`.
+  For any non-`none` `verification_level` it enforces only that the plan contains
+  a `verify_artifact` node, and the block reason is named accordingly
+  (`verification_required_but_absent`). The three-value vocabulary is kept for
+  spec fidelity and forward compatibility; discriminating the levels is deferred
+  until plan verify nodes carry a level (T19/#288 verify wiring). This deferral
+  is stated so operators do not read `full` as a stronger runtime guarantee than
+  `quick_decode` today.
+- **The plan → `OperationKind` map is exhaustive.** Each `PlanOperationKind` is
+  classified in a wildcard-free `match` as either a mutating operation (mapping
+  to its `OperationKind`) or non-gated control flow (`Conditional`, `Rules`) /
+  read-only (`VerifyArtifact`). A new `PlanOperationKind` variant is therefore a
+  compile error, not a silent bypass; the auto-execute allowlist cannot fail open
+  as the operation vocabulary grows.
+- **Prior-failure blocks are self-clearing.** `block_on_failed_records` consults
+  the *latest* backup per targeted file version, so a retried operation that
+  produces a verified backup supersedes an earlier failed one and clears the
+  block. `recovery_required` is a live commit state (a recovered/committed record
+  leaves it), so it is inherently self-clearing. Neither wedges a file version
+  permanently.
+
 On any block the gate opens one durable `policy_noncompliant` issue (dedupe key
 `safety_blocked:v1:policy=<slug>:pv=<id>:is=<id>`) enumerating the reasons and
-returns `VoomError::PolicyValidationError`; nothing is dispatched.
+returns `VoomError::PolicyValidationError`; nothing is dispatched. Conversely, a
+gate that finds **zero** blocks resolves any live `safety_blocked` issue for the
+same dedupe key before dispatching, so a fixed policy clears its prior blocked
+issue rather than leaving it open forever.
 
 ## Consequences
 
