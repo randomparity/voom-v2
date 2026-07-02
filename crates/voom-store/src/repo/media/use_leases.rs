@@ -502,6 +502,27 @@ impl SqliteUseLeaseRepo {
         rows.iter().map(row_to_use_lease).collect()
     }
 
+    /// Every live manual lock (`kind = 'manual_lock'`, `release_reason IS
+    /// NULL`), ordered by `id ASC`. Backs `voom lease list`: manual locks are
+    /// the operator-managed, explicit-release leases, and listing the live ones
+    /// surfaces forgotten holds. Age is derived by the caller from
+    /// `acquired_at`.
+    pub async fn list_live_manual_locks(&self) -> Result<Vec<UseLease>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, kind, scope_asset_id, scope_bundle_id, scope_version_id, \
+                    scope_location_id, issuer_kind, issuer_ref, blocking_mode, \
+                    ttl_bound, acquired_at, expires_at, last_heartbeat_at, \
+                    release_reason, released_at, epoch \
+             FROM asset_use_leases \
+             WHERE kind = 'manual_lock' AND release_reason IS NULL \
+             ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("asset_use_leases list_live_manual_locks", e))?;
+        rows.iter().map(row_to_use_lease).collect()
+    }
+
     pub async fn acquire_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
