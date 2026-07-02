@@ -1,0 +1,40 @@
+{
+  "policy_name": "audio transcode eac3",
+  "slug": "audio-transcode-eac3",
+  "source_hash": "f110997bb00e6cd35ca521887ba5894df572dcd7253d5328f1227c5cf046f116",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "eac3",
+          "container": "mkv",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng",
+              "und"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

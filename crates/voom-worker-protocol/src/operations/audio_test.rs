@@ -472,8 +472,48 @@ fn audio_contract_constants_pin_canonical_values() {
     assert_eq!(TRANSCODE_AUDIO_CONTAINER, "mkv");
     assert_eq!(TRANSCODE_AUDIO_CODEC_AAC, "aac");
     assert_eq!(TRANSCODE_AUDIO_CODEC_OPUS, "opus");
+    assert_eq!(TRANSCODE_AUDIO_CODEC_EAC3, "eac3");
+    assert_eq!(AUDIO_PROFILE_DEFAULT, "default");
     assert_eq!(EXTRACT_AUDIO_CONTAINER, "ogg");
     assert_eq!(EXTRACT_AUDIO_CODEC, "opus");
+}
+
+#[test]
+fn supported_transcode_audio_codecs_are_aac_opus_eac3() {
+    assert!(is_supported_transcode_audio_codec("aac"));
+    assert!(is_supported_transcode_audio_codec("opus"));
+    assert!(is_supported_transcode_audio_codec("eac3"));
+    assert!(!is_supported_transcode_audio_codec("flac"));
+    assert!(!is_supported_transcode_audio_codec(""));
+}
+
+#[test]
+fn default_profile_resolves_per_channel_bitrate_per_codec() {
+    assert_eq!(
+        audio_target_bitrate_kbps_per_channel("aac", AUDIO_PROFILE_DEFAULT),
+        Some(64)
+    );
+    assert_eq!(
+        audio_target_bitrate_kbps_per_channel("opus", AUDIO_PROFILE_DEFAULT),
+        Some(48)
+    );
+    assert_eq!(
+        audio_target_bitrate_kbps_per_channel("eac3", AUDIO_PROFILE_DEFAULT),
+        Some(96)
+    );
+}
+
+#[test]
+fn unsupported_codec_or_profile_has_no_target_bitrate() {
+    assert_eq!(
+        audio_target_bitrate_kbps_per_channel("flac", AUDIO_PROFILE_DEFAULT),
+        None
+    );
+    assert_eq!(
+        audio_target_bitrate_kbps_per_channel("eac3", "premium"),
+        None
+    );
+    assert_eq!(audio_target_bitrate_kbps_per_channel("aac", ""), None);
 }
 
 fn observed_facts(content_hash: &str) -> AudioObservedFacts {
