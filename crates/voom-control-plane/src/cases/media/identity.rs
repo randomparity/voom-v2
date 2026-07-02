@@ -5,7 +5,9 @@
 
 use serde_json::Value as JsonValue;
 use time::OffsetDateTime;
-use voom_core::{EvidenceId, FileVersionId, VoomError, WorkerId};
+use voom_core::{
+    EvidenceId, FileAssetId, FileVersionId, MediaVariantId, MediaWorkId, VoomError, WorkerId,
+};
 use voom_events::payload::{
     FileAssetCreatedPayload, FileLocationAliasedPayload, FileLocationRecordedByMovePayload,
     FileLocationRecordedPayload, FileLocationRetiredByMovePayload, FileVersionCreatedPayload,
@@ -15,10 +17,11 @@ use voom_events::payload::{
 };
 use voom_events::{Event, SubjectType};
 use voom_store::repo::identity::{
-    AcceptedPin, AliasProof, DiscoveredFile, FileAsset, FileVersion, IdentityEvidence,
-    IdentityEvidenceTarget, IdentityRepo, IngestOutcome, MediaSnapshot, MediaVariant, MediaWork,
-    NewFileLocation, NewFileVersion, NewIdentityEvidence, NewMediaSnapshot, NewMediaVariant,
-    NewMediaWork, ObservedBytes, RenameProof, RenameReconciledOutcome,
+    AcceptedPin, AliasProof, DiscoveredFile, FileAsset, FileLocation, FileVersion,
+    IdentityEvidence, IdentityEvidenceTarget, IdentityRepo, IngestOutcome, MediaSnapshot,
+    MediaVariant, MediaWork, NewFileLocation, NewFileVersion, NewIdentityEvidence,
+    NewMediaSnapshot, NewMediaVariant, NewMediaWork, ObservedBytes, RenameProof,
+    RenameReconciledOutcome,
 };
 
 use crate::ControlPlane;
@@ -613,6 +616,52 @@ impl ControlPlane {
         .await?;
         commit_tx(tx).await?;
         Ok(loc)
+    }
+
+    // Thin read-only accessors for the inspection surface (e.g. `voom bundle
+    // show`). They mirror the repo reads one-to-one; no event emission.
+
+    /// Get a media work by id.
+    ///
+    /// # Errors
+    /// Propagates `IdentityRepo::get_media_work` errors.
+    pub async fn get_media_work(&self, id: MediaWorkId) -> Result<Option<MediaWork>, VoomError> {
+        self.identity.get_media_work(id).await
+    }
+
+    /// Get a media variant by id.
+    ///
+    /// # Errors
+    /// Propagates `IdentityRepo::get_media_variant` errors.
+    pub async fn get_media_variant(
+        &self,
+        id: MediaVariantId,
+    ) -> Result<Option<MediaVariant>, VoomError> {
+        self.identity.get_media_variant(id).await
+    }
+
+    /// List every file version of an asset (live and retired), id order.
+    ///
+    /// # Errors
+    /// Propagates `IdentityRepo::list_file_versions_by_asset` errors.
+    pub async fn list_file_versions_by_asset(
+        &self,
+        asset_id: FileAssetId,
+    ) -> Result<Vec<FileVersion>, VoomError> {
+        self.identity.list_file_versions_by_asset(asset_id).await
+    }
+
+    /// List the live file locations of a file version.
+    ///
+    /// # Errors
+    /// Propagates `IdentityRepo::list_live_file_locations_by_version` errors.
+    pub async fn list_live_file_locations_by_version(
+        &self,
+        version_id: FileVersionId,
+    ) -> Result<Vec<FileLocation>, VoomError> {
+        self.identity
+            .list_live_file_locations_by_version(version_id)
+            .await
     }
 }
 

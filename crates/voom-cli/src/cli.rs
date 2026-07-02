@@ -65,6 +65,23 @@ pub enum Command {
         #[arg(long)]
         path: PathBuf,
     },
+    /// List and inspect asset bundles and their members.
+    #[command(subcommand)]
+    Bundle(BundleCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum BundleCommand {
+    /// List asset bundles with their member counts.
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one bundle: members, roles, and media work/variant lineage.
+    Show {
+        #[arg(long)]
+        bundle_id: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]

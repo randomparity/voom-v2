@@ -1,0 +1,70 @@
+---
+source: crates/voom-cli/tests/bundle_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "bundle",
+  "status": "ok",
+  "data": {
+    "bundle": {
+      "id": 1,
+      "media_variant_id": 1,
+      "display_name": "Solaris (1972)",
+      "created_at": "1970-01-01T00:00:00.000000000Z",
+      "epoch": 0
+    },
+    "lineage": {
+      "media_variant": {
+        "id": 1,
+        "media_work_id": 1,
+        "label": "original",
+        "provisional": false
+      },
+      "media_work": {
+        "id": 1,
+        "kind": "movie",
+        "display_title": "Solaris",
+        "provisional": false
+      }
+    },
+    "members": [
+      {
+        "file_asset_id": 1,
+        "role": "primary_video",
+        "file_version_id": 1,
+        "content_hash": "sha256:primary",
+        "size_bytes": 1000,
+        "produced_by": "ingest",
+        "produced_from_version_id": null,
+        "location": "/library/Solaris.mkv"
+      },
+      {
+        "file_asset_id": 2,
+        "role": "external_subtitle",
+        "file_version_id": 2,
+        "content_hash": "sha256:subtitle",
+        "size_bytes": 20,
+        "produced_by": "ingest",
+        "produced_from_version_id": null,
+        "location": "/library/Solaris.srt"
+      },
+      {
+        "file_asset_id": 3,
+        "role": "external_audio",
+        "file_version_id": 4,
+        "content_hash": "sha256:audio",
+        "size_bytes": 300,
+        "produced_by": "transcode",
+        "produced_from_version_id": 3,
+        "location": "/library/Solaris.eac3"
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
