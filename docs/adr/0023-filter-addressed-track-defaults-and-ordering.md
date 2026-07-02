@@ -64,16 +64,31 @@ forced audio|subtitle where <track-filter>
   with the forced flag and clears it on the group's other tracks. Unlike the two
   above it is not single-track-constrained: a title can have multiple forced
   tracks, and a filter that matches zero tracks is a no-op (consistent with
-  `keep`/`remove` filters that match nothing), not an error.
+  `keep`/`remove` filters that match nothing), not an error. **The `forced … where`
+  DSL surface and its compiled `SetForced` variant are deferred (see "Not in this
+  PR"); this PR delivers forced only at the wire + worker layer.** The spec's V1.1
+  amendment therefore publishes only the `defaults … where` and `order tracks …
+  where` productions as compiler-accepted.
 
 The single-match enforcement, the plan-time diagnostic, and filter resolution to
 a concrete stream are **planner responsibilities not implemented in this PR**
 (see section 5 and the "Not in this PR" list under Consequences). This ADR fixes
 the DSL/wire/worker contract; the compiler parses, validates the *shape* of, and
-lowers these forms, but never counts matches — it cannot, because it does not see
-the media's streams. Precedence when a strategy default and a filter-addressed
-default target the same kind group is likewise a planner rule, deferred with the
-resolution work; this PR does not define it.
+lowers the two shipped forms, but never counts matches — it cannot, because it
+does not see the media's streams. Precedence when a strategy default and a
+filter-addressed default target the same kind group is likewise a planner rule,
+deferred with the resolution work; this PR does not define it.
+
+**Interim plannability of the two shipped forms (until the planner follow-up):**
+the compiler accepts them, but the planner does not yet read `filter` /
+`head_filter`. `defaults … where` is inert (the `where` form lowers `strategy` to
+`Preserve`, a verified no-op). `order tracks [<targets>] where <filter>` applies
+its group order and ignores the head pin. Bare `order tracks where <filter>` (no
+target list) lowers to `ReorderTracks { targets: [], head_filter: Some }`; the
+existing planner blocks an empty-target reorder as `UnsupportedMediaShape`
+(`crates/voom-plan/src/planner/remux/mod.rs`), so that specific form fails the
+file loudly at plan time rather than being inert. Policies should not adopt these
+forms in production until the planner follow-up lands.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
@@ -87,10 +102,13 @@ resolution work; this PR does not define it.
   (`crates/voom-plan/src/planner/remux/mod.rs:510`), a verified no-op.
 - `ReorderTracks` gains `head_filter: Option<TrackFilter>` (same serde
   attributes). `targets` keeps its meaning; `head_filter` pins one track first.
-- New fieldful variant `SetForced { target: TrackTarget, filter: TrackFilter }`.
-  A new variant (not a field on an existing one) because forced is a distinct
-  operation with its own plan-operation kind, mirroring how the other track
-  operations are modelled.
+- A compiled representation for forced (`SetForced { target, filter }`) is
+  **deferred** (see "Not in this PR"). A new `CompiledOperation` variant forces a
+  new `PlanOperationKind`, which ripples through exhaustive matches in `voom-plan`
+  (`model.rs`, `planner.rs`, `compliance/report.rs`) and `voom-control-plane`
+  (`policy_bridge.rs`, `cases/policy/compliance.rs`) — a wide edit for a variant
+  that would be inert in this PR (nothing plans it until filter resolution lands).
+  It lands with the planner follow-up that can populate `forced_streams`.
 
 ### 3. Wire schema (`voom-worker-protocol::RemuxSelection`, additive)
 
@@ -117,27 +135,32 @@ the "exactly one match or diagnostic" enforcement for the default and order
 filters) is a planner responsibility in `voom-plan`, and populating
 `head_streams` / `forced_streams` / `clear_forced_streams` into `RemuxSelection`
 is a `voom-control-plane/remux` responsibility. Both are owned by the #272 /
-audio workstream. This PR lands the edges — DSL validate + lower + fixtures,
-wire + compiled fields, and worker emission with conformance tests — plus the
-mechanical, behaviour-preserving edits needed to keep the workspace compiling.
-The planner resolution and control-plane population are an explicitly-tracked
-follow-up; until they land, the new fields default empty and the feature is
-inert, never wrong.
+audio workstream. This PR lands the edges — the `defaults … where` and
+`order tracks … where` DSL (validate + lower + fixtures), the additive `filter` /
+`head_filter` compiled fields, the additive `RemuxSelection` wire fields
+(including forced), and the mkvmerge worker emission with conformance tests —
+plus the mechanical, behaviour-preserving edits needed to keep the workspace
+compiling. The planner resolution and control-plane population are an
+explicitly-tracked follow-up; until they land, the new wire fields default empty
+and the shipped forms are inert (or, for bare `order tracks where`, blocked),
+never wrong.
 
 ## Consequences
 
-- A policy using `defaults audio where …`, `order tracks where …`, or
-  `forced subtitle where …` compiles, and golden fixtures pin the compiled
+- A policy using `defaults audio where …` or `order tracks … where …` compiles,
+  and the golden fixture `filter-addressed-tracks.{voom,json}` pins the compiled
   shape. `compiled_json` stays backward compatible: absent fields read as
   `None`/empty, `source_hash` for existing policies is unchanged.
-- The mkvmerge worker emits `--forced-track-flag` and head-pinned
+- The mkvmerge worker emits `--forced-track-flag id:1|0` and head-pinned
   `--track-order`, covered by worker conformance tests that build a
   `RemuxRequest` directly.
 - Adding `head_streams`/`forced_streams`/`clear_forced_streams` to
-  `RemuxSelection` and `filter`/`head_filter`/`SetForced` to `CompiledOperation`
-  forces mechanical edits at construction/destructure sites and the exhaustive
-  `operation_kind` match in `voom-plan`, and at the `RemuxSelection` literals in
-  `voom-control-plane/remux`. Those edits are additive and behaviour-preserving.
+  `RemuxSelection` forces one-line empty-vector additions at the three
+  `RemuxSelection` literals in `voom-control-plane/remux`; adding `filter` /
+  `head_filter` to `CompiledOperation` forces `.., ` in a few `voom-plan`
+  destructures and `filter: None` / `head_filter: None` in its test literals.
+  `operation_kind` uses `{ .. }`, so no exhaustive-match edit is needed. All
+  edits are additive and behaviour-preserving.
 - `compiled_json` (`policy_versions.compiled_json`) is **Class P (passthrough
   `JsonValue`, no typed DB read)** in `docs/payload-contract-inventory.md`, so
   `CompiledOperation` is outside the Class-T `deny_unknown_fields` regime and no
@@ -146,12 +169,20 @@ inert, never wrong.
   rows deserialize (absent ⇒ `None`) and unchanged policies serialize
   identically, so their `source_hash` — a hash of the *source text*, not the
   compiled JSON — is unaffected.
-- Until the planner/control-plane follow-up lands, the three new intents are
-  parsed and stored but do not yet change a produced artifact.
+- Until the planner/control-plane follow-up lands, the two shipped DSL forms are
+  parsed and stored but do not yet change a produced artifact (and bare
+  `order tracks where` blocks at plan time, as noted above).
 
 **Not in this PR (tracked follow-up, #272 / audio + control-plane workstream):**
 
-- Planner filter resolution (compiled filter → concrete `RemuxStreamRef`).
+- The `forced audio|subtitle where <filter>` DSL op and its compiled `SetForced`
+  variant. Forced is delivered only at the wire (`RemuxSelection.forced_streams`
+  / `clear_forced_streams`) and worker (`--forced-track-flag`) layer here; the
+  DSL surface waits for the planner follow-up (it needs a new `PlanOperationKind`
+  and would be inert until filter resolution exists).
+- Planner filter resolution (compiled filter → concrete `RemuxStreamRef`),
+  including making bare `order tracks where <filter>` (empty target list)
+  plannable rather than `UnsupportedMediaShape`.
 - The single-match enforcement and its plan-time diagnostic for
   `defaults … where` and `order tracks … where`. The compiler validates only the
   shape; the "exactly one match or fail" acceptance criterion of #277 is met by

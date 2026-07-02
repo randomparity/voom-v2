@@ -728,16 +728,15 @@ surround-appropriate bitrate and its channel count is preserved and verified in
 the output-probe path. See ADR 0020 for the per-channel bitrate table and the
 rationale.
 
-#### Grammar amendment V1.1 — Filter-addressed track defaults, ordering, and forced flag (2026-07-02, ADR 0023)
+#### Grammar amendment V1.1 — Filter-addressed track defaults and ordering (2026-07-02, ADR 0023)
 
-Track defaults, ordering, and the forced flag can address an *individual*
-filter-selected track, not just a kind group. Three additive productions; every
-existing form is unchanged:
+Track defaults and ordering can address an *individual* filter-selected track,
+not just a kind group. Two additive productions; every existing form is
+unchanged:
 
 ```text
 defaults audio|subtitle where <track-filter>
 order tracks [<target-list>] where <track-filter>
-forced audio|subtitle where <track-filter>
 ```
 
 - `defaults … where <filter>` makes the single track the filter selects the
@@ -746,10 +745,15 @@ forced audio|subtitle where <track-filter>
 - `order tracks … where <filter>` pins the single track the filter selects to
   the head of the track order, ahead of the existing group order. The optional
   `<target-list>` retains its group-ordering meaning for the remaining tracks.
-- `forced audio|subtitle where <filter>` marks every filter-selected track with
-  the forced flag (clearing it on the group's other tracks); it may match more
-  than one track, and a filter matching zero tracks is a no-op (as with
-  `keep`/`remove`), not an error.
+
+The forced flag is also addressable, but its DSL surface (a `forced … where`
+production and compiled `SetForced` operation) is **deferred**; ADR 0023
+delivers forced only at the wire (`RemuxSelection.forced_streams` /
+`clear_forced_streams`) and mkvmerge worker (`--forced-track-flag id:1|0`) layer
+for now. Until the planner follow-up lands, the two DSL forms above compile but
+are not yet plannable — `defaults … where` and `order tracks [<targets>] where`
+are inert, and bare `order tracks where <filter>` (no target list) is blocked at
+plan time — so policies should not adopt them in production until then.
 
 The `defaults … where` and `order tracks … where` filters **must select exactly
 one track at plan time**; zero or many matches fail the file with a plan-time
@@ -758,12 +762,12 @@ never sees the media's streams, so it validates only the *shape* of these forms;
 only the planner, resolving the filter against snapshot facts, can count
 matches. This is additive: the strategy form of `defaults` and the group form of
 `order tracks` are unchanged, and the compiled `SetDefaults` / `ReorderTracks`
-gain optional filter fields (absent ⇒ existing meaning). Forced is a new
-`SetForced` operation. See ADR 0023 for the schema, wire
-(`RemuxSelection.head_streams` / `forced_streams` / `clear_forced_streams`), and
-mkvmerge (`--forced-track-flag`, head-pinned `--track-order`) contracts, and for
-the ownership split — this spec delta plus the compiler edges land first; filter
-resolution and the single-match diagnostic land with the planner work.
+gain optional filter fields (absent ⇒ existing meaning). See ADR 0023 for the
+schema, wire (`RemuxSelection.head_streams` / `forced_streams` /
+`clear_forced_streams`), and mkvmerge (`--forced-track-flag`, head-pinned
+`--track-order`) contracts, and for the ownership split — this spec delta plus
+the compiler edges land first; filter resolution, the single-match diagnostic,
+and the deferred forced DSL land with the planner work.
 
 Example scheduling policy shape:
 
