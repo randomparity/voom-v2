@@ -49,7 +49,10 @@ context); the new SQL is added as `MIGRATION_0019_SQL` with a `Migration::new(19
 - `library_roots`: `id`, `library_id` (`REFERENCES libraries(id) ON DELETE
   CASCADE`), `root_kind` (`CHECK IN ('local_path','shared_mount')`),
   `canonical_path` (UNIQUE across all roots — two roots may not watch one
-  physical path), `display_path`, `include_globs`/`exclude_globs`/
+  physical path; `library root add` additionally rejects a path that is a
+  component-wise ancestor-or-descendant of an existing root's `canonical_path`,
+  so no file is claimed by two roots and root-scoping stays unambiguous),
+  `display_path`, `include_globs`/`exclude_globs`/
   `extension_allowlist` (`TEXT DEFAULT '[]' CHECK(json_valid(...))`), `scan_mode`
   (`CHECK IN ('explicit_only','manual_recursive','watch_enabled')`),
   `symlink_policy` (`CHECK IN ('reject','follow')`), `hidden_file_policy`
@@ -80,11 +83,20 @@ with a nested `Root(LibraryRootCommand)` (the two-level nesting precedent is
 `remove` at both levels. Read-side commands open via `ControlPlane::open`
 (never migrates, ADR 0003); each emits the standard JSON envelope with a
 `#[derive(Serialize)]` DTO (never the store domain type). `library root add`
-canonicalizes `--path` with `fs::canonicalize`, stores the result as
-`canonical_path` and the operator input as `display_path`, and **rejects a
-symlinked ancestor** by comparing `std::path::absolute(input)` to the
-canonicalized path (they differ iff a symlink was resolved) — the conservative
-alias-safety property the spec calls for.
+canonicalizes `--path` with `fs::canonicalize` and stores the result as
+`canonical_path` (the operator input becomes `display_path`). Storing and later
+scanning the **canonical** path is what defeats alias-escape — a watcher reads
+the resolved path, so a symlink alias cannot widen the root. The add path
+rejects only when the **leaf** input path is itself a symlink
+(`fs::symlink_metadata(input).is_symlink()`), matching `discovery.rs`'s existing
+per-file symlink rejection. It deliberately does **not** reject symlinked
+*ancestors* by comparing `std::path::absolute(input)` to `canonicalize(input)`:
+that comparison is a lexical-vs-resolved mismatch that fires on ordinary `..`/`.`
+components and on symlinked ancestors that are ubiquitous in practice (macOS
+`/tmp` → `/private/tmp`, `/var` → `/private/var`), which would wrongly reject
+legitimate roots — including every temp-dir test root. Full ancestor-symlink
+policy is deferred to the watcher (the `symlink_policy` column carries the
+operator's choice).
 
 **4. `voom scan --root <id>` is fail-closed on a disabled root or library.**
 `Scan { --path | --root }` are mutually exclusive (clap). The control plane adds
@@ -113,10 +125,13 @@ reuses this code.
 create_policy_input_set_from_root(RootScopedScanInput { slug, library_root_id })`
 and a `voom policy input create-from-scan --root <id>` mode (mutually exclusive
 with `--all` and the single-file args). It reuses the whole-scan selection but
-keeps only file-versions whose live location `canonical_path` is a descendant of
-the root's `canonical_path`. This directly replaces the "select every video"
+keeps only file-versions with a live location whose `canonical_path` is the root
+path or a **component-wise descendant** of it (`Path::starts_with` on parsed
+paths, never a string/`LIKE` prefix — so root `/media/movies` does not match a
+sibling `/media/movies-adult`). This directly replaces the "select every video"
 workaround and subsumes the deferred `--under <path>` refinement (a root **is** a
-canonical path prefix).
+canonical path prefix). Because roots may not overlap (schema note above), each
+matched file belongs to exactly one root.
 
 ## Consequences
 
