@@ -14,7 +14,7 @@ use voom_store::repo::artifacts::{ArtifactCommitState, ArtifactVerificationStatu
 
 use crate::cli::{ArtifactCommand, ArtifactStateArg};
 use crate::commands::common::{emit_voom_error, open_control_plane};
-use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok};
+use crate::envelope::{Local, emit_err, emit_err_with_data, emit_ok, emit_ok_page};
 
 const COMMAND_STAGE_COPY: &str = "artifact.stage_copy";
 const COMMAND_VERIFY: &str = "artifact.verify";
@@ -260,7 +260,11 @@ pub async fn run(database_url: &str, local: Local, command: ArtifactCommand) -> 
         ArtifactCommand::RecoverCommit { artifact_handle_id } => {
             recover_commit(database_url, local, artifact_handle_id).await
         }
-        ArtifactCommand::List { state, limit } => list(database_url, local, state, limit).await,
+        ArtifactCommand::List {
+            state,
+            after_id,
+            limit,
+        } => list(database_url, local, state, after_id, limit).await,
         ArtifactCommand::Show { artifact_handle_id } => {
             show(database_url, local, artifact_handle_id).await
         }
@@ -431,6 +435,7 @@ async fn list(
     database_url: &str,
     local: Local,
     state: Option<ArtifactStateArg>,
+    after_id: Option<u64>,
     limit: u32,
 ) -> io::Result<i32> {
     let cp = match open_control_plane(COMMAND_LIST, database_url, &local).await? {
@@ -440,18 +445,21 @@ async fn list(
     match cp
         .list_artifacts(ArtifactListInput {
             state: state.map(artifact_state_to_control_plane),
+            after_id,
             limit,
         })
         .await
     {
-        Ok(artifacts) => emit_ok(
+        Ok(page) => emit_ok_page(
             COMMAND_LIST,
             ArtifactListData {
-                artifacts: artifacts
+                artifacts: page
+                    .artifacts
                     .into_iter()
                     .map(ArtifactSummaryData::from)
                     .collect(),
             },
+            page.next_cursor,
             Some(local),
             Vec::new(),
         )

@@ -79,6 +79,12 @@ impl ReleaseReason {
     }
 }
 
+/// Filter for the keyset-paginated `SqliteLeaseRepo::list` inspection read.
+#[derive(Debug, Clone, Default)]
+pub struct LeaseFilter {
+    pub state: Option<LeaseState>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewLease {
     pub ticket_id: TicketId,
@@ -764,6 +770,31 @@ impl SqliteLeaseRepo {
             .await
             .map_err(|e| VoomError::database_context("leases get", e))?;
         row.as_ref().map(row_to_lease).transpose()
+    }
+
+    /// Keyset-paginated inspection read for `voom scheduler leases list`
+    /// (ADR 0031). Orders strictly by `id` descending (newest first);
+    /// `after_id` is an exclusive continuation token returning rows with
+    /// `id < after_id`.
+    pub async fn list(
+        &self,
+        filter: LeaseFilter,
+        after_id: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<Lease>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {LEASE_RETURNING_COLS} FROM leases \
+             WHERE (?1 IS NULL OR state = ?1) \
+               AND (?2 IS NULL OR id < ?2) \
+             ORDER BY id DESC LIMIT ?3"
+        ))
+        .bind(filter.state.map(LeaseState::as_str))
+        .bind(after_id.map(i64_from_u64))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("leases list", e))?;
+        rows.iter().map(row_to_lease).collect()
     }
 }
 

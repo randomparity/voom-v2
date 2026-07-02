@@ -66,26 +66,47 @@ async fn list_limit_returns_newest_artifacts_first() {
     let second = stage_bytes(&cp, dir.path(), b"second").await;
     let third = stage_bytes(&cp, dir.path(), b"third").await;
 
-    let summaries = cp
+    let page = cp
         .list_artifacts(ArtifactListInput {
             state: None,
+            after_id: None,
             limit: 2,
         })
         .await
         .unwrap();
 
     assert_eq!(
-        summaries
+        page.artifacts
             .iter()
             .map(|summary| summary.artifact_handle_id)
             .collect::<Vec<_>>(),
         vec![third.artifact_handle_id, second.artifact_handle_id]
     );
     assert!(
-        !summaries
+        !page
+            .artifacts
             .iter()
             .any(|summary| { summary.artifact_handle_id == first.artifact_handle_id })
     );
+    // Full page (2 scanned == limit) hands back a cursor; feeding it back
+    // continues into the older row (ADR 0031).
+    assert_eq!(page.next_cursor, Some(second.artifact_handle_id.0));
+    let next = cp
+        .list_artifacts(ArtifactListInput {
+            state: None,
+            after_id: page.next_cursor,
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        next.artifacts
+            .iter()
+            .map(|summary| summary.artifact_handle_id)
+            .collect::<Vec<_>>(),
+        vec![first.artifact_handle_id]
+    );
+    assert_eq!(next.next_cursor, None);
 }
 
 #[tokio::test]
@@ -287,12 +308,17 @@ async fn listed_ids(
     cp: &ControlPlane,
     state: Option<ArtifactInspectionState>,
 ) -> Vec<ArtifactHandleId> {
-    cp.list_artifacts(ArtifactListInput { state, limit: 100 })
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|summary| summary.artifact_handle_id)
-        .collect()
+    cp.list_artifacts(ArtifactListInput {
+        state,
+        after_id: None,
+        limit: 100,
+    })
+    .await
+    .unwrap()
+    .artifacts
+    .into_iter()
+    .map(|summary| summary.artifact_handle_id)
+    .collect()
 }
 
 async fn stage_bytes(cp: &ControlPlane, dir: &Path, bytes: &[u8]) -> StageCopyReport {

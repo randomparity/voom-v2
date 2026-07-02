@@ -38,7 +38,19 @@ impl ArtifactInspectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArtifactListInput {
     pub state: Option<ArtifactInspectionState>,
+    /// Keyset continuation token (ADR 0031): scan handles with `id < after_id`.
+    pub after_id: Option<u64>,
     pub limit: u32,
+}
+
+/// One page of `list_artifacts` results plus its keyset continuation token
+/// (ADR 0031). Because the inspection `state` is derived per handle rather than
+/// stored in a column, the cursor keys off the last *scanned* handle id — a page
+/// that filters out every scanned row still advances and never loops.
+#[derive(Debug, Clone)]
+pub struct ArtifactListPage {
+    pub artifacts: Vec<ArtifactSummary>,
+    pub next_cursor: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,23 +149,37 @@ impl ControlPlane {
     pub async fn list_artifacts(
         &self,
         input: ArtifactListInput,
-    ) -> Result<Vec<ArtifactSummary>, VoomError> {
+    ) -> Result<ArtifactListPage, VoomError> {
         if input.limit == 0 {
-            return Ok(Vec::new());
+            return Ok(ArtifactListPage {
+                artifacts: Vec::new(),
+                next_cursor: None,
+            });
         }
 
-        let mut summaries = Vec::new();
-        let handle_limit = input.state.is_none().then_some(input.limit);
-        for handle_id in list_handle_ids_newest_first(self, handle_limit).await? {
+        // Scan exactly `limit` handles per page (newest first), keyed off the
+        // stable handle id. The derived `state` filter drops non-matching rows
+        // from the result, but the cursor advances by the scan window so paging
+        // stays bounded and never re-scans (ADR 0031).
+        let handle_ids =
+            list_handle_ids_newest_first(self, Some(input.limit), input.after_id).await?;
+        let scanned = handle_ids.len();
+        let mut artifacts = Vec::new();
+        let mut last_scanned = None;
+        for handle_id in handle_ids {
+            last_scanned = Some(handle_id.0);
             let detail = build_artifact_detail(self, handle_id).await?;
             if input.state.is_none_or(|state| detail.state == state) {
-                summaries.push(detail.into_summary());
-            }
-            if summaries.len() >= usize::try_from(input.limit).unwrap_or(usize::MAX) {
-                break;
+                artifacts.push(detail.into_summary());
             }
         }
-        Ok(summaries)
+        let next_cursor = (scanned as u64 >= u64::from(input.limit))
+            .then_some(last_scanned)
+            .flatten();
+        Ok(ArtifactListPage {
+            artifacts,
+            next_cursor,
+        })
     }
 
     pub async fn show_artifact(
@@ -375,18 +401,30 @@ async fn observe_path(path: impl AsRef<Path>) -> Result<PathObservation, VoomErr
 async fn list_handle_ids_newest_first(
     cp: &ControlPlane,
     limit: Option<u32>,
+    after_id: Option<u64>,
 ) -> Result<Vec<ArtifactHandleId>, VoomError> {
+    let after = after_id
+        .map(|id| i64_from_u64(id, "after_id"))
+        .transpose()?;
     let rows = match limit {
         Some(limit) => {
-            sqlx::query("SELECT id FROM artifact_handles ORDER BY id DESC LIMIT ?")
-                .bind(i64::from(limit))
-                .fetch_all(&cp.pool)
-                .await
+            sqlx::query(
+                "SELECT id FROM artifact_handles \
+                 WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC LIMIT ?2",
+            )
+            .bind(after)
+            .bind(i64::from(limit))
+            .fetch_all(&cp.pool)
+            .await
         }
         None => {
-            sqlx::query("SELECT id FROM artifact_handles ORDER BY id DESC")
-                .fetch_all(&cp.pool)
-                .await
+            sqlx::query(
+                "SELECT id FROM artifact_handles \
+                 WHERE (?1 IS NULL OR id < ?1) ORDER BY id DESC",
+            )
+            .bind(after)
+            .fetch_all(&cp.pool)
+            .await
         }
     }
     .map_err(|err| VoomError::database_context("artifact_handles list", err))?;

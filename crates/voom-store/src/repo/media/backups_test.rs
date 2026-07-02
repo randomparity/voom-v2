@@ -168,16 +168,51 @@ async fn mark_verified_on_non_pending_is_conflict() {
 }
 
 #[tokio::test]
-async fn list_is_ordered_by_created_then_id() {
+async fn list_is_ordered_by_id_descending() {
     let f = fixture().await;
     let first = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
     let second = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
 
-    let rows = f.repo.list(100).await.unwrap();
+    // Keyset order is newest first (id DESC), ADR 0031.
+    let rows = f.repo.list(None, None, 100).await.unwrap();
     assert_eq!(
         rows.iter().map(|b| b.id).collect::<Vec<_>>(),
-        vec![first.id, second.id]
+        vec![second.id, first.id]
     );
+}
+
+#[tokio::test]
+async fn list_keyset_after_id_and_status_filter() {
+    let f = fixture().await;
+    let first = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
+    let second = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
+    let third = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
+
+    // Page size 2 returns the two newest; after_id = last returned continues.
+    let page1 = f.repo.list(None, None, 2).await.unwrap();
+    assert_eq!(
+        page1.iter().map(|b| b.id).collect::<Vec<_>>(),
+        vec![third.id, second.id]
+    );
+    let page2 = f.repo.list(None, Some(second.id.0), 2).await.unwrap();
+    assert_eq!(
+        page2.iter().map(|b| b.id).collect::<Vec<_>>(),
+        vec![first.id]
+    );
+
+    // Status filter composes with the keyset window.
+    let pending = f
+        .repo
+        .list(Some(BackupStatus::Pending), None, 100)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 3);
+    let verified = f
+        .repo
+        .list(Some(BackupStatus::Verified), None, 100)
+        .await
+        .unwrap();
+    assert!(verified.is_empty());
 }
 
 #[tokio::test]

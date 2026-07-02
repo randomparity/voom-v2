@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::{Row, SqlitePool};
+use time::OffsetDateTime;
 use voom_core::VoomError;
 use voom_events::{Event, EventEnvelope, EventId, EventKind, SubjectType, TraceId};
 
@@ -17,6 +18,10 @@ pub struct EventFilter {
     pub kind: Option<EventKind>,
     pub subject_type: Option<SubjectType>,
     pub subject_id: Option<u64>,
+    /// Inclusive lower bound on `occurred_at` (`occurred_at >= since`).
+    pub since: Option<OffsetDateTime>,
+    /// Inclusive upper bound on `occurred_at` (`occurred_at <= until`).
+    pub until: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +145,12 @@ async fn page_query(
     if filter.subject_id.is_some() {
         sql.push_str(" AND subject_id = ?");
     }
+    if filter.since.is_some() {
+        sql.push_str(" AND occurred_at >= ?");
+    }
+    if filter.until.is_some() {
+        sql.push_str(" AND occurred_at <= ?");
+    }
     if page.cursor.is_some() {
         sql.push_str(if tail {
             " AND event_id < ?"
@@ -159,6 +170,12 @@ async fn page_query(
     }
     if let Some(s) = filter.subject_id {
         q = q.bind(i64_from_u64(s));
+    }
+    if let Some(since) = filter.since {
+        q = q.bind(iso8601(since)?);
+    }
+    if let Some(until) = filter.until {
+        q = q.bind(iso8601(until)?);
     }
     if let Some(c) = page.cursor {
         q = q.bind(i64_from_u64(c));

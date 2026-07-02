@@ -5,8 +5,8 @@ use voom_core::{BackupId, ErrorCode, format_iso8601};
 use voom_store::repo::backups::Backup;
 
 use crate::cli::BackupCommand;
-use crate::commands::common::{emit_voom_error, open_control_plane};
-use crate::envelope::{Local, emit_err, emit_ok};
+use crate::commands::common::{emit_voom_error, next_cursor, open_control_plane};
+use crate::envelope::{Local, emit_err, emit_ok, emit_ok_page};
 
 const COMMAND: &str = "backup";
 
@@ -63,7 +63,11 @@ impl From<Backup> for BackupData {
 
 pub async fn run(database_url: &str, local: Local, command: BackupCommand) -> io::Result<i32> {
     match command {
-        BackupCommand::List { limit, status } => list(database_url, local, limit, status).await,
+        BackupCommand::List {
+            limit,
+            status,
+            after_id,
+        } => list(database_url, local, limit, status, after_id).await,
         BackupCommand::Show { backup_id } => show(database_url, local, backup_id).await,
     }
 }
@@ -73,24 +77,33 @@ async fn list(
     local: Local,
     limit: u32,
     status: Option<crate::cli::BackupStatusArg>,
+    after_id: Option<u64>,
 ) -> io::Result<i32> {
     let cp = match open_control_plane(COMMAND, database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
     match cp
-        .list_backups(status.map(crate::cli::BackupStatusArg::to_store), limit)
+        .list_backups(
+            status.map(crate::cli::BackupStatusArg::to_store),
+            after_id,
+            limit,
+        )
         .await
     {
-        Ok(rows) => emit_ok(
-            COMMAND,
-            ListData {
-                backups: rows.into_iter().map(BackupData::from).collect(),
-            },
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
+        Ok(rows) => {
+            let cursor = next_cursor(&rows, limit, |backup| backup.id.0);
+            emit_ok_page(
+                COMMAND,
+                ListData {
+                    backups: rows.into_iter().map(BackupData::from).collect(),
+                },
+                cursor,
+                Some(local),
+                Vec::new(),
+            )
+            .map(|()| 0)
+        }
         Err(err) => emit_voom_error(COMMAND, &err, local),
     }
 }

@@ -57,6 +57,15 @@ pub enum Command {
     /// Inspect scheduler state.
     #[command(subcommand)]
     Scheduler(SchedulerCommand),
+    /// Inspect the append-only durable event journal.
+    #[command(subcommand)]
+    Event(EventCommand),
+    /// Inspect durable jobs (operator-initiated units of work).
+    #[command(subcommand)]
+    Job(JobCommand),
+    /// Inspect durable tickets (scheduled units of execution).
+    #[command(subcommand)]
+    Ticket(TicketCommand),
     /// Stage, verify, commit, or inspect artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
@@ -661,6 +670,10 @@ pub enum BackupCommand {
         limit: u32,
         #[arg(long)]
         status: Option<BackupStatusArg>,
+        /// Keyset cursor: return backups after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
     },
     /// Show one backup record.
     Show {
@@ -694,6 +707,10 @@ pub enum BundleCommand {
     List {
         #[arg(long, default_value_t = 100)]
         limit: u32,
+        /// Keyset cursor: return bundles after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
     },
     /// Show one bundle: members, roles, and media work/variant lineage.
     Show {
@@ -931,6 +948,173 @@ pub enum SchedulerCommand {
     /// Inspect scheduler decisions.
     #[command(subcommand)]
     Decisions(SchedulerDecisionCommand),
+    /// Inspect scheduler execution leases (the `leases` table). Distinct from
+    /// the operator use-lease `voom lease` command.
+    #[command(subcommand)]
+    Leases(SchedulerLeaseCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SchedulerLeaseCommand {
+    /// List scheduler leases, optionally filtered by state.
+    List {
+        #[arg(long)]
+        state: Option<LeaseStateArg>,
+        /// Keyset cursor: return leases after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one scheduler lease.
+    Show {
+        #[arg(long)]
+        lease_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum LeaseStateArg {
+    Held,
+    Released,
+    Expired,
+    ForceReleased,
+}
+
+impl LeaseStateArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::leases::LeaseState {
+        use voom_store::repo::leases::LeaseState;
+        match self {
+            Self::Held => LeaseState::Held,
+            Self::Released => LeaseState::Released,
+            Self::Expired => LeaseState::Expired,
+            Self::ForceReleased => LeaseState::ForceReleased,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum EventCommand {
+    /// List durable events, newest first. Filter by kind, subject, and an
+    /// occurred-at window; page with `--after-id` (ADR 0031).
+    List {
+        /// Event kind wire token, e.g. `ticket.leased` (see the event taxonomy).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Subject-type wire token, e.g. `ticket`, `lease`, `node`.
+        #[arg(long)]
+        subject_type: Option<String>,
+        /// Subject id (requires the matching `--subject-type` to be meaningful).
+        #[arg(long)]
+        subject_id: Option<u64>,
+        /// Inclusive lower bound on occurred-at (RFC 3339, e.g.
+        /// `2026-07-02T00:00:00Z`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Inclusive upper bound on occurred-at (RFC 3339).
+        #[arg(long)]
+        until: Option<String>,
+        /// Keyset cursor: return events after this id (`next_cursor` from a
+        /// prior page).
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one event by id.
+    Show {
+        #[arg(long)]
+        event_id: u64,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JobCommand {
+    /// List durable jobs, newest first, optionally filtered by state.
+    List {
+        #[arg(long)]
+        state: Option<JobStateArg>,
+        /// Keyset cursor: return jobs after this id (`next_cursor` from a prior
+        /// page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one job by id.
+    Show {
+        #[arg(long)]
+        job_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum JobStateArg {
+    Open,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl JobStateArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::jobs::JobState {
+        use voom_store::repo::jobs::JobState;
+        match self {
+            Self::Open => JobState::Open,
+            Self::Succeeded => JobState::Succeeded,
+            Self::Failed => JobState::Failed,
+            Self::Cancelled => JobState::Cancelled,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum TicketCommand {
+    /// List durable tickets, newest first, optionally filtered by state.
+    List {
+        #[arg(long)]
+        state: Option<TicketStateArg>,
+        /// Keyset cursor: return tickets after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one ticket by id.
+    Show {
+        #[arg(long)]
+        ticket_id: u64,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum TicketStateArg {
+    Pending,
+    Ready,
+    Leased,
+    Succeeded,
+    Failed,
+}
+
+impl TicketStateArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::tickets::TicketState {
+        use voom_store::repo::tickets::TicketState;
+        match self {
+            Self::Pending => TicketState::Pending,
+            Self::Ready => TicketState::Ready,
+            Self::Leased => TicketState::Leased,
+            Self::Succeeded => TicketState::Succeeded,
+            Self::Failed => TicketState::Failed,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -969,6 +1153,10 @@ pub enum ArtifactCommand {
     List {
         #[arg(long)]
         state: Option<ArtifactStateArg>,
+        /// Keyset cursor: return handles after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
@@ -1001,6 +1189,10 @@ pub enum SchedulerDecisionCommand {
         node_id: Option<u64>,
         #[arg(long)]
         outcome: Option<SchedulerDecisionOutcomeArg>,
+        /// Keyset cursor: return decisions after this id (`next_cursor` from a
+        /// prior page). See ADR 0031.
+        #[arg(long)]
+        after_id: Option<u64>,
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },

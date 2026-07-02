@@ -111,6 +111,7 @@ impl ControlPlane {
                     kind: Some(EventKind::ExternalSystemSynced),
                     subject_type: Some(SubjectType::ExternalSystem),
                     subject_id: Some(id.0),
+                    ..EventFilter::default()
                 },
                 Page {
                     limit: 1,

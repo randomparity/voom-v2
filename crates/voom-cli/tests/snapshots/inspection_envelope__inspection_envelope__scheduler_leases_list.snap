@@ -1,0 +1,45 @@
+---
+source: crates/voom-cli/tests/inspection_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scheduler",
+  "status": "ok",
+  "data": {
+    "leases": [
+      {
+        "id": 2,
+        "ticket_id": 2,
+        "worker_id": 1,
+        "state": "held",
+        "acquired_at": "1970-01-01 0:00:00.0 +00:00:00",
+        "expires_at": "1970-01-01 0:05:00.0 +00:00:00",
+        "last_heartbeat_at": "1970-01-01 0:00:00.0 +00:00:00",
+        "ttl_seconds": 300,
+        "release_reason": null,
+        "released_at": null,
+        "epoch": 0
+      },
+      {
+        "id": 1,
+        "ticket_id": 1,
+        "worker_id": 1,
+        "state": "held",
+        "acquired_at": "1970-01-01 0:00:00.0 +00:00:00",
+        "expires_at": "1970-01-01 0:05:00.0 +00:00:00",
+        "last_heartbeat_at": "1970-01-01 0:00:00.0 +00:00:00",
+        "ttl_seconds": 300,
+        "release_reason": null,
+        "released_at": null,
+        "epoch": 0
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

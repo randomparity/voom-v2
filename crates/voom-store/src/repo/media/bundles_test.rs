@@ -96,17 +96,23 @@ async fn list_all_returns_bundles_in_id_order_with_member_counts() {
     .await
     .unwrap();
 
-    let all = bun.list_all(10).await.unwrap();
+    // Keyset order is newest first (id DESC), ADR 0031.
+    let all = bun.list_all(None, 10).await.unwrap();
     assert_eq!(all.len(), 2);
-    assert_eq!(all[0].0.id, first.id);
-    assert_eq!(all[0].1, 2);
-    assert_eq!(all[1].0.id, second.id);
-    assert_eq!(all[1].1, 0);
+    assert_eq!(all[0].0.id, second.id);
+    assert_eq!(all[0].1, 0);
+    assert_eq!(all[1].0.id, first.id);
+    assert_eq!(all[1].1, 2);
 
-    // `limit` bounds the result to the lowest ids.
-    let limited = bun.list_all(1).await.unwrap();
+    // `limit` bounds the result to the newest ids.
+    let limited = bun.list_all(None, 1).await.unwrap();
     assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].0.id, first.id);
+    assert_eq!(limited[0].0.id, second.id);
+
+    // `after_id` continues past the newest into the older rows.
+    let next = bun.list_all(Some(second.id.0), 10).await.unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].0.id, first.id);
 }
 
 #[tokio::test]
