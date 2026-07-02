@@ -38,5 +38,8 @@ fn profile_data_maps_every_field_from_video_profile() {
     assert_eq!(data.max_height, Some(1080));
     assert_eq!(data.output_container, "mkv");
     assert!(data.copy_compatible);
-    assert_eq!(data.retired_at.as_deref(), Some("2023-11-14T22:13:20Z"));
+    assert_eq!(
+        data.retired_at.as_deref(),
+        Some("2023-11-14T22:13:20.000000000Z")
+    );
 }

@@ -179,22 +179,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
                 }
             }
         }
-        Command::Init => {
-            let cfg = match resolve_cfg(&cli) {
-                Ok(cfg) => cfg,
-                Err(err) => {
-                    voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
-                    return Ok(Exit::Failure);
-                }
-            };
-            let local = Local {
-                db_url: cfg.database_url.clone(),
-                config_path: cfg.config_path.display().to_string(),
-            };
-            Ok(Exit::from_run_code(
-                init::run(&cfg.database_url, local).await?,
-            ))
-        }
+        Command::Init => dispatch_init(&cli).await,
         Command::Plan(PlanCommand::DryRun {
             policy_file,
             input_fixture,
@@ -241,6 +226,23 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Issue(ref command) => dispatch_issue(&cli, command.clone()).await,
         Command::Lease(ref command) => dispatch_lease(&cli, command.clone()).await,
     }
+}
+
+async fn dispatch_init(cli: &Cli) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        init::run(&cfg.database_url, local).await?,
+    ))
 }
 
 async fn dispatch_lease(cli: &Cli, command: LeaseCommand) -> Result<Exit> {
