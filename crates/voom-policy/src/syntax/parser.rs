@@ -22,17 +22,19 @@ pub fn parse_policy_source(source: &str) -> Result<PolicyAst, ParseError> {
     Parser::new(source).parse_policy()
 }
 
-/// Maximum block-statement nesting depth. Recursive descent takes one stack
-/// frame per level, so an unbounded depth lets pathological input
-/// (`when { when { … } }` thousands deep) exhaust the stack and abort the
-/// process. 64 is far above any legitimate policy.
+/// Maximum recursive-descent nesting depth, shared by block statements and
+/// list-literal expressions. Recursive descent takes one stack frame per level,
+/// so an unbounded depth lets pathological input (`when { when { … } }` or
+/// `[[[ … ]]]` thousands deep) exhaust the stack and abort the process. 64 is
+/// far above any legitimate policy.
 const MAX_NESTING_DEPTH: usize = 64;
 
 struct Parser<'a> {
     source: &'a str,
     cursor: usize,
-    /// Block-statement nesting level. Incremented for each `inner` parser
-    /// spawned to parse a block body; checked in `parse_statement`.
+    /// Recursive-descent nesting level. Incremented for each `inner` parser
+    /// spawned to parse a block body (checked in `parse_statement`) and for each
+    /// list literal entered (checked in `parse_list`).
     depth: usize,
 }
 
@@ -337,6 +339,19 @@ impl<'a> Parser<'a> {
     fn parse_list(&mut self) -> Result<ExprAst, ParseError> {
         let start = self.cursor;
         self.expect_byte(b'[')?;
+        // List literals recurse through `parse_expr` per element, one stack
+        // frame per `[`. Guard that recursion against the same ceiling as block
+        // statements so pathological input (`[[[…]]]` thousands deep) returns a
+        // spanned diagnostic instead of exhausting the stack. Decrement on the
+        // success path so sibling lists (`[[1],[2]]`) do not accumulate depth.
+        self.depth += 1;
+        if self.depth > MAX_NESTING_DEPTH {
+            return Err(self.error_code_at(
+                DiagnosticCode::NestingDepthExceeded,
+                self.cursor,
+                format!("list nesting too deep (max {MAX_NESTING_DEPTH})"),
+            ));
+        }
         let mut values = Vec::new();
         loop {
             self.skip_ws_and_comments();
@@ -350,6 +365,7 @@ impl<'a> Parser<'a> {
             self.skip_ws_and_comments();
             let _ = self.consume_byte(b',');
         }
+        self.depth -= 1;
         Ok(ExprAst::List {
             values,
             span: SourceSpan::new(start, self.cursor),
