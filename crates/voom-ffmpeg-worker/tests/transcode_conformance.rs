@@ -17,10 +17,13 @@
 use std::path::Path;
 use std::process::Command;
 
+use voom_ffmpeg_worker::handler::handle_transcode_audio;
 use voom_ffmpeg_worker::{
     DEFAULT_PROCESS_TIMEOUT, FfmpegConfig, handle_transcode_video, preflight_from_process_env,
 };
 use voom_worker_protocol::{
+    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, TranscodeAudioInput,
+    TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
     TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
     TranscodeVideoRequest,
 };
@@ -888,5 +891,97 @@ async fn tiny_process_timeout_yields_external_system_unavailable() {
             voom_ffmpeg_worker::TranscodeVideoError::ExternalSystemUnavailable { .. }
         ),
         "expected ExternalSystemUnavailable for timeout, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audio conformance
+// ---------------------------------------------------------------------------
+
+/// Generates a 1-second, 5.1 (6-channel) FLAC-in-mkv audio source at `path`,
+/// using the same ffmpeg binary the worker uses. FLAC is lossless and supports
+/// six channels, giving a clean 5.1 input to re-encode to E-AC-3.
+fn generate_5_1_audio_fixture(ffmpeg: &Path, path: &Path) {
+    let status = Command::new(ffmpeg)
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=5.1:sample_rate=48000",
+            "-t",
+            "1",
+            "-c:a",
+            "flac",
+            path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("ffmpeg 5.1 audio fixture generation failed to start");
+    assert!(
+        status.success(),
+        "ffmpeg 5.1 audio fixture generation failed: {status}"
+    );
+}
+
+async fn audio_expected(path: &Path) -> AudioExpectedFacts {
+    let observed = voom_ffmpeg_worker::observe_file_facts(path).await.unwrap();
+    AudioExpectedFacts {
+        size_bytes: observed.size_bytes,
+        content_hash: observed.content_hash,
+        modified_at: observed.modified_at,
+        local_file_key: None,
+    }
+}
+
+#[tokio::test]
+async fn eac3_transcode_preserves_5_1_channels() {
+    let preflight = preflight_from_process_env()
+        .expect("preflight failed — ensure libx265 and libsvtav1 are available");
+    let config = ffmpeg_config(&preflight);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("out.eac3.mkv");
+    generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input);
+
+    let request = TranscodeAudioRequest {
+        input: TranscodeAudioInput {
+            path: input.to_string_lossy().into_owned(),
+            expected: audio_expected(&input).await,
+        },
+        output: TranscodeAudioOutput {
+            staging_root: dir.path().to_string_lossy().into_owned(),
+            path: output.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection: TranscodeAudioSelection {
+            selected_streams: vec![AudioStreamRef {
+                snapshot_stream_id: "audio-0".to_owned(),
+                provider_stream_index: 0,
+            }],
+        },
+        audio: TranscodeAudioSettings {
+            target_codec: "eac3".to_owned(),
+            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+        },
+    };
+
+    let result = handle_transcode_audio(&request, &config)
+        .await
+        .expect("eac3 5.1 transcode failed");
+
+    assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
+    let stream = result
+        .selected_output_streams
+        .first()
+        .expect("one selected output stream");
+    assert_eq!(stream.codec, "eac3");
+    assert_eq!(
+        stream.channels,
+        Some(6),
+        "eac3 output must preserve the 5.1 (6-channel) layout"
     );
 }
