@@ -1,0 +1,32 @@
+---
+source: crates/voom-cli/tests/issue_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "issue",
+  "status": "ok",
+  "data": {
+    "id": 1,
+    "kind": "terminal_failure",
+    "severity": "high",
+    "priority": "high",
+    "priority_source": "system",
+    "priority_reason": "seed reason",
+    "status": "resolved",
+    "suppressed_until": null,
+    "title": "Seed issue title",
+    "body": "Seed issue body",
+    "created_at": "2026-01-01T00:00:00.000000000Z",
+    "updated_at": "[ts]",
+    "resolved_at": "[ts]",
+    "epoch": 1,
+    "dedupe_key": null
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
