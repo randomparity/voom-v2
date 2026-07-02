@@ -150,19 +150,21 @@ impl SqliteSchedulingPolicyRepo {
 
     async fn classify_insert_error(&self, slug: &str, err: sqlx::Error) -> VoomError {
         match self.get_by_slug(slug).await {
-            Ok(Some(_)) => VoomError::Conflict(format!(
-                "scheduling policy slug {slug:?} already exists"
-            )),
+            Ok(Some(_)) => {
+                VoomError::Conflict(format!("scheduling policy slug {slug:?} already exists"))
+            }
             _ => VoomError::database_context("scheduling_policies create", err),
         }
     }
 
     pub async fn get_by_slug(&self, slug: &str) -> Result<Option<SchedulingPolicy>, VoomError> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM scheduling_policies WHERE slug = ?"))
-            .bind(slug)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| VoomError::database_context("scheduling_policies get_by_slug", e))?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLS} FROM scheduling_policies WHERE slug = ?"
+        ))
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("scheduling_policies get_by_slug", e))?;
         row.as_ref().map(row_to_scheduling_policy).transpose()
     }
 
@@ -255,7 +257,9 @@ fn row_to_scheduling_policy(row: &SqliteRow) -> Result<SchedulingPolicy, VoomErr
         move |e: sqlx::Error| VoomError::database_context(format!("{t}.{field}"), e)
     };
     let id: i64 = row.try_get("id").map_err(map("id"))?;
-    let schema_version: i64 = row.try_get("schema_version").map_err(map("schema_version"))?;
+    let schema_version: i64 = row
+        .try_get("schema_version")
+        .map_err(map("schema_version"))?;
     let priority: String = row.try_get("priority").map_err(map("priority"))?;
     let large_jobs_night_only: i64 = row
         .try_get("large_jobs_night_only")

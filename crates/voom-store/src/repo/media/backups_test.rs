@@ -217,6 +217,42 @@ async fn list_pending_returns_only_pending_rows() {
 }
 
 #[tokio::test]
+async fn latest_by_file_version_returns_none_then_the_most_recent_row() {
+    let f = fixture().await;
+    assert!(
+        f.repo
+            .latest_by_file_version(f.file_version_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // An earlier failed backup superseded by a later verified one: the safety
+    // gate's self-clearing semantics depend on the latest row winning.
+    let failed = f.repo.insert_pending(f.new_backup(), at(0)).await.unwrap();
+    let detail = BackupFailureDetail {
+        failure_class: "io".to_owned(),
+        error_code: "BACKUP_FAILURE".to_owned(),
+        message: "disk full".to_owned(),
+    };
+    f.repo.mark_failed(failed.id, &detail, at(1)).await.unwrap();
+    let verified = f.repo.insert_pending(f.new_backup(), at(2)).await.unwrap();
+    f.repo
+        .mark_verified(verified.id, 1, "blake3:1", at(3))
+        .await
+        .unwrap();
+
+    let latest = f
+        .repo
+        .latest_by_file_version(f.file_version_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.id, verified.id);
+    assert_eq!(latest.status, BackupStatus::Verified);
+}
+
+#[tokio::test]
 async fn verified_lookup_finds_the_verified_backup() {
     let f = fixture().await;
     assert!(

@@ -3,7 +3,11 @@ use voom_core::{OperationKind, VoomError};
 
 use super::*;
 
-async fn repo() -> (SqliteSafetyPolicyRepo, sqlx::SqlitePool, tempfile::NamedTempFile) {
+async fn repo() -> (
+    SqliteSafetyPolicyRepo,
+    sqlx::SqlitePool,
+    tempfile::NamedTempFile,
+) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let pool = crate::test_support::fresh_initialized_pool_at(tmp.path())
         .await
@@ -133,7 +137,12 @@ async fn update_replaces_all_mutable_fields_and_bumps_updated_at() {
 #[tokio::test]
 async fn update_unknown_slug_is_none() {
     let (repo, _pool, _tmp) = repo().await;
-    assert!(repo.update(sample("missing"), now()).await.unwrap().is_none());
+    assert!(
+        repo.update(sample("missing"), now())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -162,7 +171,10 @@ async fn bad_verification_level_rejected_at_db_boundary() {
     .bind("1970-01-01T00:00:00Z")
     .execute(&pool)
     .await;
-    assert!(res.is_err(), "DB CHECK must reject an invalid verification_level");
+    assert!(
+        res.is_err(),
+        "DB CHECK must reject an invalid verification_level"
+    );
 }
 
 #[tokio::test]

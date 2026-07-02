@@ -84,7 +84,9 @@ impl VerificationLevel {
 
     fn parse(s: &str) -> Result<Self, VoomError> {
         Self::from_wire(s).ok_or_else(|| {
-            VoomError::database(format!("safety_policies.verification_level {s:?} not in vocab"))
+            VoomError::database(format!(
+                "safety_policies.verification_level {s:?} not in vocab"
+            ))
         })
     }
 }
@@ -204,7 +206,11 @@ impl SqliteSafetyPolicyRepo {
         .execute(&self.pool)
         .await;
         match res {
-            Ok(res) => Ok(row_from_input(u64_from_i64(res.last_insert_rowid()), input, now)),
+            Ok(res) => Ok(row_from_input(
+                u64_from_i64(res.last_insert_rowid()),
+                input,
+                now,
+            )),
             Err(err) => Err(self.classify_insert_error(&input.slug, err).await),
         }
     }
@@ -219,19 +225,23 @@ impl SqliteSafetyPolicyRepo {
     }
 
     pub async fn get_by_slug(&self, slug: &str) -> Result<Option<SafetyPolicy>, VoomError> {
-        let row = sqlx::query(&format!("SELECT {COLS} FROM safety_policies WHERE slug = ?"))
-            .bind(slug)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| VoomError::database_context("safety_policies get_by_slug", e))?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLS} FROM safety_policies WHERE slug = ?"
+        ))
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("safety_policies get_by_slug", e))?;
         row.as_ref().map(row_to_safety_policy).transpose()
     }
 
     pub async fn list(&self) -> Result<Vec<SafetyPolicy>, VoomError> {
-        let rows = sqlx::query(&format!("SELECT {COLS} FROM safety_policies ORDER BY slug ASC"))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| VoomError::database_context("safety_policies list", e))?;
+        let rows = sqlx::query(&format!(
+            "SELECT {COLS} FROM safety_policies ORDER BY slug ASC"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("safety_policies list", e))?;
         rows.iter().map(row_to_safety_policy).collect()
     }
 
@@ -301,7 +311,9 @@ fn encode_commit_modes(modes: &[CommitMode]) -> Result<String, VoomError> {
 
 fn decode_operations(json: &str) -> Result<Vec<OperationKind>, VoomError> {
     let tokens: Vec<String> = serde_json::from_str(json).map_err(|e| {
-        VoomError::database(format!("safety_policies.auto_execute_operations decode: {e}"))
+        VoomError::database(format!(
+            "safety_policies.auto_execute_operations decode: {e}"
+        ))
     })?;
     tokens
         .iter()
@@ -358,7 +370,9 @@ fn row_to_safety_policy(row: &SqliteRow) -> Result<SafetyPolicy, VoomError> {
         move |e: sqlx::Error| VoomError::database_context(format!("{t}.{field}"), e)
     };
     let id: i64 = row.try_get("id").map_err(map("id"))?;
-    let schema_version: i64 = row.try_get("schema_version").map_err(map("schema_version"))?;
+    let schema_version: i64 = row
+        .try_get("schema_version")
+        .map_err(map("schema_version"))?;
     let operations: String = row
         .try_get("auto_execute_operations")
         .map_err(map("auto_execute_operations"))?;
@@ -368,7 +382,9 @@ fn row_to_safety_policy(row: &SqliteRow) -> Result<SafetyPolicy, VoomError> {
     let verification_level: String = row
         .try_get("verification_level")
         .map_err(map("verification_level"))?;
-    let backup_required: i64 = row.try_get("backup_required").map_err(map("backup_required"))?;
+    let backup_required: i64 = row
+        .try_get("backup_required")
+        .map_err(map("backup_required"))?;
     let approval_required: i64 = row
         .try_get("approval_required")
         .map_err(map("approval_required"))?;

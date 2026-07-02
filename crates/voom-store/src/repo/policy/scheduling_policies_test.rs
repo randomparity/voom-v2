@@ -114,7 +114,10 @@ async fn delete_reports_whether_a_row_was_removed() {
     repo.create(sample("home"), now()).await.unwrap();
     assert!(repo.delete("home").await.unwrap());
     assert!(repo.get_by_slug("home").await.unwrap().is_none());
-    assert!(!repo.delete("home").await.unwrap(), "second delete is false");
+    assert!(
+        !repo.delete("home").await.unwrap(),
+        "second delete is false"
+    );
 }
 
 #[tokio::test]
