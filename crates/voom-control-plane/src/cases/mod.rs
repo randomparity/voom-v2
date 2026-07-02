@@ -20,6 +20,7 @@ use voom_store::repo::events::{EventFilter, Page};
 
 pub(crate) mod config;
 pub(crate) mod execution;
+pub(crate) mod external;
 pub(crate) mod media;
 pub(crate) mod policy;
 pub(crate) mod workers;
