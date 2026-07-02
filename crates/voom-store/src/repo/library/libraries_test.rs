@@ -25,6 +25,42 @@ fn new_library(slug: &str) -> NewLibrary {
 }
 
 #[tokio::test]
+async fn set_default_scoring_profile_sets_and_clears() {
+    let (repo, _tmp) = repo().await;
+    let lib = repo
+        .create_library(new_library("home"), at(1))
+        .await
+        .unwrap();
+    assert_eq!(lib.default_scoring_profile_name, None);
+
+    let set = repo
+        .set_default_scoring_profile(lib.id, Some("balanced-home"), at(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        set.default_scoring_profile_name.as_deref(),
+        Some("balanced-home")
+    );
+    assert_eq!(set.updated_at, at(2));
+
+    let cleared = repo
+        .set_default_scoring_profile(lib.id, None, at(3))
+        .await
+        .unwrap();
+    assert_eq!(cleared.default_scoring_profile_name, None);
+}
+
+#[tokio::test]
+async fn set_default_scoring_profile_missing_library_is_not_found() {
+    let (repo, _tmp) = repo().await;
+    let err = repo
+        .set_default_scoring_profile(voom_core::LibraryId(999), Some("x"), at(1))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND");
+}
+
+#[tokio::test]
 async fn create_then_get_round_trips_all_fields() {
     let (repo, _tmp) = repo().await;
     let created = repo

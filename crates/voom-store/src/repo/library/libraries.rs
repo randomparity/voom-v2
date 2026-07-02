@@ -52,12 +52,15 @@ pub struct Library {
     pub media_kind: LibraryMediaKind,
     pub description: Option<String>,
     pub enabled: bool,
+    /// Name of this library's default quality scoring profile (migration 0021),
+    /// or `None`. Repo-enforced against `quality_scoring_profiles.name`.
+    pub default_scoring_profile_name: Option<String>,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
 
-const LIBRARY_COLS: &str =
-    "id, slug, display_name, media_kind, description, enabled, created_at, updated_at";
+const LIBRARY_COLS: &str = "id, slug, display_name, media_kind, description, enabled, \
+    default_scoring_profile_name, created_at, updated_at";
 
 impl SqliteLibraryRepo {
     /// Insert a new library.
@@ -94,6 +97,7 @@ impl SqliteLibraryRepo {
             media_kind: input.media_kind,
             description: input.description,
             enabled: input.enabled,
+            default_scoring_profile_name: None,
             created_at: now,
             updated_at: now,
         })
@@ -208,6 +212,38 @@ impl SqliteLibraryRepo {
             .ok_or_else(|| VoomError::NotFound(format!("library {id} not found")))
     }
 
+    /// Set or clear a library's default scoring-profile name, rewriting
+    /// `updated_at`. `None` clears the default. The name is a direct assignment
+    /// (not COALESCE) so it can be cleared; the caller validates existence.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a missing id and propagates database errors.
+    pub async fn set_default_scoring_profile(
+        &self,
+        id: LibraryId,
+        profile_name: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<Library, VoomError> {
+        let timestamp = iso8601(now)?;
+        let mut tx = begin(&self.pool).await?;
+        let res = sqlx::query(
+            "UPDATE libraries SET default_scoring_profile_name = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(profile_name)
+        .bind(&timestamp)
+        .bind(i64_from_u64(id.0))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| VoomError::database_context("libraries set_default_scoring_profile", e))?;
+        if res.rows_affected() == 0 {
+            return Err(VoomError::NotFound(format!("library {id} not found")));
+        }
+        commit(tx).await?;
+        self.get_library(id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound(format!("library {id} not found")))
+    }
+
     /// Delete a library. Its roots cascade (FK `ON DELETE CASCADE`). Returns
     /// whether a row was removed.
     ///
@@ -251,6 +287,9 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
     let media_kind: String = row.try_get("media_kind").map_err(|e| map_row_err(t, &e))?;
     let description: Option<String> = row.try_get("description").map_err(|e| map_row_err(t, &e))?;
     let enabled: i64 = row.try_get("enabled").map_err(|e| map_row_err(t, &e))?;
+    let default_scoring_profile_name: Option<String> = row
+        .try_get("default_scoring_profile_name")
+        .map_err(|e| map_row_err(t, &e))?;
     let created_at: String = row.try_get("created_at").map_err(|e| map_row_err(t, &e))?;
     let updated_at: String = row.try_get("updated_at").map_err(|e| map_row_err(t, &e))?;
     Ok(Library {
@@ -260,6 +299,7 @@ fn row_to_library(row: &SqliteRow) -> Result<Library, VoomError> {
         media_kind: LibraryMediaKind::parse(&media_kind)?,
         description,
         enabled: enabled != 0,
+        default_scoring_profile_name,
         created_at: parse_iso8601(&created_at)?,
         updated_at: parse_iso8601(&updated_at)?,
     })
