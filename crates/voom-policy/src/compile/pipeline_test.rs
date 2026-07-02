@@ -459,6 +459,14 @@ fn conformance_synthesize_remains_deferred() {
     );
 }
 
+// Form 5 (#276) — `synthesize audio from <track-filter> { codec … channels … }`.
+// Adds a downmixed companion track; see ADR 0026 and the V1.1 grammar delta.
+
+#[test]
+fn conformance_synthesize_audio_downmix_compiles_clean() {
+    assert_compiles_clean("synthesize audio from codec in [\"eac3\"] { codec aac  channels 2 }");
+}
+
 #[test]
 fn conformance_transcode_audio_with_where_still_lowers_filter() {
     let CompiledOperation::TranscodeAudio {
