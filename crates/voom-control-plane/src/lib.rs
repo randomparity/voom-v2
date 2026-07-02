@@ -34,6 +34,7 @@ use voom_store::repo::{
     nodes::SqliteNodeRepo,
     policies::SqlitePolicyRepo,
     policy_inputs::SqlitePolicyInputRepo,
+    quality_scoring_profiles::SqliteQualityScoringProfileRepo,
     remote_idempotency::SqliteRemoteIdempotencyRepo,
     safety_policies::SqliteSafetyPolicyRepo,
     scheduler_decisions::{
@@ -43,7 +44,7 @@ use voom_store::repo::{
     scheduling_policies::SqliteSchedulingPolicyRepo,
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
-    video_profiles::{SqliteVideoProfileRepo, VideoProfile},
+    video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile},
     workers::SqliteWorkerRepo,
     workflow_summaries::SqliteWorkflowSummaryRepo,
 };
@@ -148,6 +149,7 @@ pub struct ControlPlane {
     pub(crate) libraries: SqliteLibraryRepo,
     pub(crate) scheduling_policies: SqliteSchedulingPolicyRepo,
     pub(crate) safety_policies: SqliteSafetyPolicyRepo,
+    pub(crate) quality_scoring_profiles: SqliteQualityScoringProfileRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -183,6 +185,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("libraries", &self.libraries)
             .field("scheduling_policies", &self.scheduling_policies)
             .field("safety_policies", &self.safety_policies)
+            .field("quality_scoring_profiles", &self.quality_scoring_profiles)
             .finish()
     }
 }
@@ -291,6 +294,7 @@ impl ControlPlane {
             libraries: SqliteLibraryRepo::new(pool.clone()),
             scheduling_policies: SqliteSchedulingPolicyRepo::new(pool.clone()),
             safety_policies: SqliteSafetyPolicyRepo::new(pool.clone()),
+            quality_scoring_profiles: SqliteQualityScoringProfileRepo::new(pool.clone()),
             pool,
             clock,
             rng,
@@ -382,10 +386,9 @@ impl ControlPlane {
         self.scheduler_decisions.list(filter).await
     }
 
-    /// List the seeded video encode profiles, ordered by name.
+    /// List the active (non-retired) video encode profiles, ordered by name.
     ///
-    /// The `video_profiles` registry is read-only this sprint; this surface
-    /// powers `voom profile list`.
+    /// This surface powers `voom profile list`.
     ///
     /// # Errors
     /// Propagates video-profile repository read errors.
@@ -393,7 +396,7 @@ impl ControlPlane {
         self.video_profiles.list().await
     }
 
-    /// Look up one video encode profile by registry name.
+    /// Look up one video encode profile by registry name (retired or not).
     ///
     /// Returns `None` for an unknown name; callers map that to `NOT_FOUND`.
     ///
@@ -401,6 +404,43 @@ impl ControlPlane {
     /// Propagates video-profile repository read errors.
     pub async fn get_video_profile(&self, name: &str) -> Result<Option<VideoProfile>, VoomError> {
         self.video_profiles.get_by_name(name).await
+    }
+
+    /// Create a durable video encode profile, validated against its encoder's
+    /// capability descriptor.
+    ///
+    /// # Errors
+    /// [`VoomError::Config`] for an invalid field, [`VoomError::Conflict`] for a
+    /// duplicate name, or a database error.
+    pub async fn create_video_profile(
+        &self,
+        input: NewVideoProfile,
+    ) -> Result<VideoProfile, VoomError> {
+        self.video_profiles.create(input).await
+    }
+
+    /// Full-replace update of the video profile keyed by `input.name`.
+    ///
+    /// # Errors
+    /// [`VoomError::Config`] for an invalid field, or a database error. Returns
+    /// `Ok(None)` when no profile has that name.
+    pub async fn update_video_profile(
+        &self,
+        input: NewVideoProfile,
+    ) -> Result<Option<VideoProfile>, VoomError> {
+        self.video_profiles.update(input).await
+    }
+
+    /// Soft-retire a video profile by name (idempotent). Returns `Ok(None)`
+    /// when no profile has that name.
+    ///
+    /// # Errors
+    /// Propagates video-profile repository errors.
+    pub async fn retire_video_profile(
+        &self,
+        name: &str,
+    ) -> Result<Option<VideoProfile>, VoomError> {
+        self.video_profiles.retire(name, self.clock().now()).await
     }
 
     #[cfg(any(test, feature = "test"))]

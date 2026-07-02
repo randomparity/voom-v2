@@ -95,3 +95,50 @@ async fn disable_then_enable_library() {
     assert!(!cp.set_library_enabled(lib.id, false).await.unwrap().enabled);
     assert!(cp.set_library_enabled(lib.id, true).await.unwrap().enabled);
 }
+
+#[tokio::test]
+async fn set_default_scoring_profile_validates_existence_and_retire() {
+    use voom_store::repo::quality_scoring_profiles::NewQualityScoringProfile;
+
+    let (cp, _tmp) = cp().await;
+    let lib = cp.create_library(new_library("films")).await.unwrap();
+
+    // Unknown profile is refused.
+    let err = cp
+        .set_library_default_scoring_profile(lib.id, Some("ghost"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND");
+
+    cp.create_scoring_profile(NewQualityScoringProfile {
+        name: "balanced-home".to_owned(),
+        version: 1,
+        definition: serde_json::json!({ "weights": {} }),
+    })
+    .await
+    .unwrap();
+
+    let linked = cp
+        .set_library_default_scoring_profile(lib.id, Some("balanced-home"))
+        .await
+        .unwrap();
+    assert_eq!(
+        linked.default_scoring_profile_name.as_deref(),
+        Some("balanced-home")
+    );
+
+    // A retired profile cannot become a library default.
+    cp.retire_scoring_profile("balanced-home").await.unwrap();
+    let err = cp
+        .set_library_default_scoring_profile(lib.id, Some("balanced-home"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "NOT_FOUND");
+
+    // Clearing is always allowed.
+    let cleared = cp
+        .set_library_default_scoring_profile(lib.id, None)
+        .await
+        .unwrap();
+    assert_eq!(cleared.default_scoring_profile_name, None);
+}

@@ -65,6 +65,38 @@ impl ControlPlane {
             .await
     }
 
+    /// Set or clear a library's default quality scoring profile by name. `None`
+    /// clears the default. A named profile must exist and be active (not
+    /// retired), since a library should not default to a retired profile.
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a missing library or an unknown/retired profile;
+    /// propagates repository errors.
+    pub async fn set_library_default_scoring_profile(
+        &self,
+        id: LibraryId,
+        profile_name: Option<&str>,
+    ) -> Result<Library, VoomError> {
+        if let Some(name) = profile_name {
+            match self.quality_scoring_profiles.get_by_name(name).await? {
+                Some(profile) if profile.retired_at.is_none() => {}
+                Some(_) => {
+                    return Err(VoomError::NotFound(format!(
+                        "quality scoring profile {name:?} is retired"
+                    )));
+                }
+                None => {
+                    return Err(VoomError::NotFound(format!(
+                        "quality scoring profile {name:?} not found"
+                    )));
+                }
+            }
+        }
+        self.libraries
+            .set_default_scoring_profile(id, profile_name, self.clock().now())
+            .await
+    }
+
     /// Delete a library (its roots cascade). Returns whether a row was removed.
     ///
     /// # Errors

@@ -6,4 +6,5 @@ pub(crate) mod issues;
 pub(crate) mod plans;
 pub(crate) mod policies;
 pub(crate) mod policy_inputs;
+pub(crate) mod quality_scoring_profiles;
 pub(crate) mod safety_gate;
