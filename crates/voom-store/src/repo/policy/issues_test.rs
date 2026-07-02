@@ -1,5 +1,7 @@
 use super::*;
 
+use voom_core::FailureClass;
+
 use crate::test_support::fresh_initialized_pool_at;
 
 async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -72,6 +74,183 @@ async fn issue_dedupe_key_column_is_nullable_and_unique_when_present() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("UNIQUE"));
+}
+
+fn terminal_draft(
+    ticket_id: u64,
+    lease_id: Option<u64>,
+    class: FailureClass,
+) -> TerminalFailureIssueDraft {
+    TerminalFailureIssueDraft {
+        ticket_id: TicketId(ticket_id),
+        lease_id: lease_id.map(LeaseId),
+        severity: class.issue_severity(),
+        priority: class.issue_priority(),
+        priority_reason: format!("terminal failure classified {class:?}"),
+        title: format!("Terminal failure on ticket {ticket_id}"),
+        body: "worker timed out with no retries remaining".to_owned(),
+    }
+}
+
+async fn issue_scalar<T>(pool: &sqlx::SqlitePool, sql: &str) -> T
+where
+    T: for<'r> sqlx::Decode<'r, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + Send + Unpin,
+{
+    sqlx::query_scalar::<_, T>(sql)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn open_terminal_failure_inserts_issue_and_ticket_lease_links() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteIssueRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let id = repo
+        .open_terminal_failure_in_tx(
+            &mut tx,
+            terminal_draft(7, Some(42), FailureClass::MalformedWorkerResult),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let kind: String = issue_scalar(
+        &pool,
+        &format!("SELECT kind FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(kind, "terminal_failure");
+    let severity: String = issue_scalar(
+        &pool,
+        &format!("SELECT severity FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(severity, "high", "non-retriable class stamps high severity");
+    let priority: String = issue_scalar(
+        &pool,
+        &format!("SELECT priority FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(priority, "high");
+    let source: String = issue_scalar(
+        &pool,
+        &format!("SELECT priority_source FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(source, "system", "auto-opened issues are system priority");
+    let status: String = issue_scalar(
+        &pool,
+        &format!("SELECT status FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(status, "open");
+    let dedupe: String = issue_scalar(
+        &pool,
+        &format!("SELECT dedupe_key FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(dedupe, "terminal_failure:ticket:7");
+
+    let links: Vec<(String, String, i64)> =
+        sqlx::query_as("SELECT link_type, target_type, target_id FROM issue_links WHERE issue_id = ? ORDER BY link_type")
+            .bind(i64::try_from(id.0).unwrap())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        links,
+        vec![
+            ("lease".to_owned(), "lease".to_owned(), 42),
+            ("ticket".to_owned(), "ticket".to_owned(), 7),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn open_terminal_failure_without_lease_links_only_ticket() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteIssueRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let id = repo
+        .open_terminal_failure_in_tx(
+            &mut tx,
+            terminal_draft(9, None, FailureClass::WorkerTimeout),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Retriable-exhausted class stamps medium severity / normal priority.
+    let severity: String = issue_scalar(
+        &pool,
+        &format!("SELECT severity FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(severity, "medium");
+    let priority: String = issue_scalar(
+        &pool,
+        &format!("SELECT priority FROM issues WHERE id = {}", id.0),
+    )
+    .await;
+    assert_eq!(priority, "normal");
+
+    let link_count: i64 = issue_scalar(
+        &pool,
+        &format!("SELECT COUNT(*) FROM issue_links WHERE issue_id = {}", id.0),
+    )
+    .await;
+    assert_eq!(link_count, 1, "no lease => only the ticket link");
+}
+
+#[tokio::test]
+async fn open_terminal_failure_is_idempotent_per_ticket() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteIssueRepo::new(pool.clone());
+    let mut tx = pool.begin().await.unwrap();
+
+    let first = repo
+        .open_terminal_failure_in_tx(
+            &mut tx,
+            terminal_draft(3, Some(1), FailureClass::ApprovalRequired),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    let second = repo
+        .open_terminal_failure_in_tx(
+            &mut tx,
+            terminal_draft(3, Some(1), FailureClass::ApprovalRequired),
+            time::OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(first, second, "same ticket returns the same issue id");
+    let issue_count: i64 = issue_scalar(
+        &pool,
+        "SELECT COUNT(*) FROM issues WHERE kind = 'terminal_failure'",
+    )
+    .await;
+    assert_eq!(issue_count, 1, "exactly one issue per terminal transition");
+    let link_count: i64 = issue_scalar(
+        &pool,
+        &format!(
+            "SELECT COUNT(*) FROM issue_links WHERE issue_id = {}",
+            first.0
+        ),
+    )
+    .await;
+    assert_eq!(
+        link_count, 2,
+        "links are not duplicated on the idempotent path"
+    );
 }
 
 #[tokio::test]
