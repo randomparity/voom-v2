@@ -1230,22 +1230,23 @@ fn file_version_target_node(file_version_id: u64) -> voom_plan::PlanNode {
     }
 }
 
-fn payload_source_node(source_file_version_id: u64) -> voom_plan::PlanNode {
+fn synthetic_node() -> voom_plan::PlanNode {
     voom_plan::PlanNode {
         target: voom_plan::TargetRef::Synthetic {
             key: "movie-a".to_owned(),
             kind: voom_policy::TargetKind::MediaWork,
         },
-        operation_payload: serde_json::json!({
-            "source_file_version_id": source_file_version_id
-        }),
         ..file_version_target_node(0)
     }
 }
 
 #[test]
-fn plan_file_version_targets_collects_target_and_payload_ids() {
-    let plan = backup_evidence_plan(vec![file_version_target_node(11), payload_source_node(22)]);
+fn plan_file_version_targets_collects_file_version_targets_only() {
+    let plan = backup_evidence_plan(vec![
+        file_version_target_node(11),
+        synthetic_node(),
+        file_version_target_node(22),
+    ]);
 
     let ids: Vec<u64> = super::plan_file_version_targets(&plan)
         .into_iter()

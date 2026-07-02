@@ -73,10 +73,10 @@ impl From<voom_store::repo::backups::Backup> for BackupEvidence {
 /// Per-file-version cap on backup records pulled into report evidence.
 const BACKUP_EVIDENCE_LIMIT: u32 = 100;
 
-/// Distinct source file versions a plan targets: either directly via a
-/// `FileVersion` target ref, or via a `source_file_version_id` embedded in a
-/// node's operation payload (present once tickets are bound / regenerated).
-/// `BTreeSet` gives a deterministic ascending order for report evidence.
+/// Distinct source file versions a plan targets, via each node's `FileVersion`
+/// target ref (the planner keys real-file nodes on `TargetRef::FileVersion` —
+/// see `coordinator/planning.rs` / `executor/tickets.rs`). `BTreeSet` gives a
+/// deterministic ascending order for report evidence.
 fn plan_file_version_targets(
     plan: &voom_plan::ExecutionPlan,
 ) -> std::collections::BTreeSet<FileVersionId> {
@@ -84,13 +84,6 @@ fn plan_file_version_targets(
     for node in &plan.nodes {
         if let voom_plan::TargetRef::FileVersion { id } = node.target {
             ids.insert(id);
-        }
-        if let Some(id) = node
-            .operation_payload
-            .get("source_file_version_id")
-            .and_then(serde_json::Value::as_u64)
-        {
-            ids.insert(FileVersionId(id));
         }
     }
     ids

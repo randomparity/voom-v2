@@ -93,12 +93,11 @@ ticket's failure with `FailureClass::BackupFailure`. This is the first real
 planner.** `voom_plan::generate_compliance_report` stays pure (plan-only, so
 `report_hash` is unaffected). `ComplianceReportData` gains a `backups:
 Vec<BackupEvidence>` field populated by reading `SqliteBackupRepo` for the file
-versions the plan targets — collected from each node's `FileVersion` target ref and
-any `source_file_version_id` in its operation payload (so both preview and
-tickets-bound/regenerated plans key correctly). Evidence attaches to the `report`
-(preview) surface; it reflects durable state: empty before any backup runs (and for
-synthetic-fixture previews, which have no real file versions), populated once an
-execute run with `--backup-root` has produced backups for those versions.
+versions the plan targets — collected from each node's `FileVersion` target ref (the
+planner keys real-file nodes on `TargetRef::FileVersion`). Evidence attaches to the
+`report` (preview) surface; it reflects durable state: empty before any backup runs
+(and for synthetic-fixture previews, which have no real file versions), populated
+once an execute run with `--backup-root` has produced backups for those versions.
 
 **6. `voom backup list [--limit] [--status] | show --backup-id` inspection**, read-side
 (`ControlPlane::open`, never migrates — ADR 0003), ordered `created_at ASC, id ASC`

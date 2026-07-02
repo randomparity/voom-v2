@@ -130,7 +130,9 @@ async fn copy_into_temp_then_promote(
 }
 
 async fn copy_source_to_temp(source: &Path, temp: &Path) -> Result<BackUpOutcome, BackupIoError> {
-    let mut reader = open_regular_no_follow(source).await?;
+    let mut reader = open_regular_no_follow(source)
+        .await
+        .map_err(|err| source_unavailable(source, err))?;
     let mut writer = tokio::fs::File::create(temp).await.map_err(|err| {
         BackupIoError::BackupFailure(format!("create temp {}: {err}", temp.display()))
     })?;
@@ -182,7 +184,7 @@ async fn hash_stream(
 ) -> Result<BackUpOutcome, BackupIoError> {
     let mut file = open_regular_no_follow(path)
         .await
-        .map_err(|err| map_open_error(err, path, &on_read_error))?;
+        .map_err(|err| on_read_error(path, err))?;
     let mut hasher = blake3::Hasher::new();
     let mut size: u64 = 0;
     let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
@@ -203,20 +205,6 @@ async fn hash_stream(
     })
 }
 
-fn map_open_error(
-    err: BackupIoError,
-    path: &Path,
-    on_read_error: &impl Fn(&Path, std::io::Error) -> BackupIoError,
-) -> BackupIoError {
-    // `open_regular_no_follow` always yields an ArtifactUnavailable; re-tag it
-    // with the caller's classification (source vs destination read).
-    match err {
-        BackupIoError::ArtifactUnavailable(message) | BackupIoError::BackupFailure(message) => {
-            on_read_error(path, std::io::Error::other(message))
-        }
-    }
-}
-
 fn temp_path_for(destination: &Path) -> PathBuf {
     let mut name: OsString = destination.as_os_str().to_owned();
     name.push(".voom-backup-partial");
@@ -227,12 +215,13 @@ fn source_unavailable(path: &Path, err: impl Display) -> BackupIoError {
     BackupIoError::ArtifactUnavailable(format!("source path {}: {err}", path.display()))
 }
 
+/// Open `path` read-only without following a final symlink. Returns the raw
+/// `io::Error` so the caller classifies it (source read vs destination read).
 #[cfg(unix)]
-async fn open_regular_no_follow(path: &Path) -> Result<tokio::fs::File, BackupIoError> {
+async fn open_regular_no_follow(path: &Path) -> std::io::Result<tokio::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let path = path.to_owned();
-    let open_path = path.clone();
+    let open_path = path.to_owned();
     let std_file = tokio::task::spawn_blocking(move || {
         std::fs::OpenOptions::new()
             .read(true)
@@ -240,16 +229,13 @@ async fn open_regular_no_follow(path: &Path) -> Result<tokio::fs::File, BackupIo
             .open(open_path)
     })
     .await
-    .map_err(|err| source_unavailable(&path, err))?
-    .map_err(|err| source_unavailable(&path, err))?;
+    .map_err(std::io::Error::other)??;
     Ok(tokio::fs::File::from_std(std_file))
 }
 
 #[cfg(not(unix))]
-async fn open_regular_no_follow(path: &Path) -> Result<tokio::fs::File, BackupIoError> {
-    tokio::fs::File::open(path)
-        .await
-        .map_err(|err| source_unavailable(path, err))
+async fn open_regular_no_follow(path: &Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::File::open(path).await
 }
 
 #[cfg(unix)]
