@@ -91,24 +91,32 @@ matching echo succeeds; malformed/non-2xx paths unchanged.
 **Where it fits:** `voom-fakes` chaos worker; de-duplicates the operations-path
 version check against ADR-0016's single source of truth.
 
-**Files:** `crates/voom-fakes/src/bin/chaos_worker.rs` (`enforce_version`).
+**Files:** `crates/voom-fakes/src/bin/chaos_worker.rs` (`enforce_version`),
+`crates/voom-fakes/src/bin/chaos_worker_test.rs` (sibling test, `use super::*`
+already gives access to the private `enforce_version`).
 
-**TDD:** This is a behavior-preserving de-duplication (both the hand-rolled
-check and `negotiate` return `UnsupportedProtocolVersion { offered, expected }`
-on mismatch and both require a present, parseable header), so there is no new
-observable behavior to assert with a failing test. Verification is by
-inspection + existing coverage:
-1. Replace the `if offered == voom_core::PROTOCOL_VERSION { Ok } else { Err(...) }`
+**Verification note:** The only end-to-end driver of this binary
+(`chaos_librarian_e2e`) is `#[ignore]`-gated (`just chaos-e2e-ci`), so it does
+**not** run in `just ci`. `chaos_worker_test.rs` currently has no coverage of
+`enforce_version`. Do not claim conformance coverage that CI does not run — add
+a real unit test instead. This is a behavior-preserving de-duplication, so the
+test is a characterization test that passes both before and after the refactor.
+
+**TDD:**
+1. Add characterization tests in `chaos_worker_test.rs` for the current
+   `enforce_version`: wrong version → `UnsupportedProtocolVersion { offered,
+   expected }`; missing header → `InvalidPayload`; correct version → `Ok(())`.
+   Run them; confirm they pass on the current hand-rolled implementation (they
+   lock in the behavior the refactor must preserve).
+2. Replace the `if offered == voom_core::PROTOCOL_VERSION { Ok } else { Err(...) }`
    tail of `enforce_version` with `voom_worker_protocol::negotiate(offered).map(|_| ())`,
    keeping the existing present-and-parseable header extraction unchanged.
-2. `cargo build -p voom-fakes` and `just lint` clean.
-3. Confirm the Chaos Librarian conformance tests that drive the fake's
-   operations path (wrong version rejected, missing header rejected) still pass
-   under a normal `cargo test` (they are not `--ignored`-gated at the unit
-   level). Do not un-gate any `#[ignore]` E2E test to prove this.
+3. Re-run the tests (still green), `cargo build -p voom-fakes`, `just lint`.
+   Do not un-gate any `#[ignore]` E2E test.
 
-**Acceptance:** `enforce_version` delegates to `negotiate`; build + lint clean;
-existing wrong-version / missing-header rejection behavior unchanged.
+**Acceptance:** `enforce_version` delegates to `negotiate`; the new unit tests
+run under `just ci` and stay green; build + lint clean; wrong-version /
+missing-header rejection behavior unchanged.
 
 **Rollback:** revert the function tail.
 
@@ -130,7 +138,12 @@ lint:
    (`cp.pool.begin()` / `self.pool.begin()` / `begin_tx(&cp.pool)`) with
    `begin_immediate_tx(&cp.pool)` (or `&self.pool`), keeping the
    `ensure_*_in_tx` call and commit unchanged.
-2. Remove any now-unused `begin_tx` import (`verify.rs`) to keep zero warnings.
+2. Fix imports per site: `verify.rs` already imports
+   `{append_event, begin_tx, commit_tx}` and uses `begin_tx` a second time in
+   `persist_verification_outcome` (unchanged by this task), so `begin_tx` stays
+   imported — add `begin_immediate_tx` alongside it, do **not** remove it. Sites
+   that inline `pool.begin()` gain a `begin_immediate_tx` import. Let `just lint`
+   (unused-import denial) be the backstop; do not pre-emptively delete imports.
 3. Run `cargo test -p voom-control-plane` and `just lint`.
 
 **Acceptance:** all five sites use `begin_immediate_tx`; existing
@@ -154,9 +167,10 @@ target absence from occupied/unstattable targets.
    - stage + verify bytes, run `commit_artifact_with_hooks(..., &FailAfterPrepare)`
      with `target = dir/install/target.bin` (create `dir/install` first) so a
      recovery-required record exists and the target is absent;
-   - replace the intermediate component: `remove_dir(dir/install)` then
+   - replace the intermediate component: `remove_dir_all(dir/install)` then
      `write(dir/install, b"x")`, so `symlink_metadata(dir/install/target.bin)`
-     fails with `ENOTDIR` (kind != `NotFound`);
+     fails with `ENOTDIR` (kind != `NotFound`). Use `remove_dir_all` in case a
+     temp sibling was created under `install`;
    - assert `cp.recover_commit(handle).await.unwrap_err().error_code()
      == ErrorCode::CommitFailure` and that no fresh install occurred.
    Run it; confirm it fails against current code (the `.ok()` collapses the
