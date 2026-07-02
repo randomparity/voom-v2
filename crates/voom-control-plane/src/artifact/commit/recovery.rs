@@ -127,6 +127,10 @@ pub(super) async fn recover_commit_inner(
         temp_path,
         expected_facts: expected_facts.clone(),
         promotion_started_at: cp.clock().now(),
+        // Recovery re-drives a commit that already passed the gate at its
+        // original prepare; it does not re-evaluate the gate (out of scope,
+        // documented in the spec/ADR), so no leases are recorded here.
+        gate_evaluated_lease_ids: Vec::new(),
     };
 
     let promotion = if already_installed {
