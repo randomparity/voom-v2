@@ -1,7 +1,9 @@
-use voom_core::{FileVersionId, MediaSnapshotId, PolicyInputSetId, VoomError};
+use std::path::{Path, PathBuf};
+
+use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyInputSetId, VoomError};
 use voom_policy::{MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSourceKind, TargetRef};
 use voom_store::repo::{
-    identity::IdentityRepo,
+    identity::{FileLocationKind, IdentityRepo},
     policy_inputs::{PolicyInputSet, PolicyInputSetSummary},
 };
 
@@ -30,6 +32,25 @@ pub struct PolicyInputFromScanResult {
 #[derive(Debug, Clone)]
 pub struct WholeScanInput {
     pub slug: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RootScopedScanInput {
+    pub slug: String,
+    pub library_root_id: LibraryRootId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootScopedScanInputResult {
+    pub input_set_id: PolicyInputSetId,
+    pub slug: String,
+    pub library_root_id: LibraryRootId,
+    /// Live file-versions under the root whose latest snapshot had a video
+    /// stream.
+    pub included_count: u32,
+    /// Live file-versions skipped: no live location under the root, or no
+    /// snapshot / no video stream.
+    pub skipped_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +226,102 @@ impl ControlPlane {
             included_count,
             skipped_count,
         })
+    }
+
+    /// Create one durable policy input set covering the currently-scanned video
+    /// files under a single library root.
+    ///
+    /// Scopes the whole-scan anchor to file-versions with a live local location
+    /// whose canonical path is the root path or a component-wise descendant of
+    /// it, replacing the un-scoped whole-library selection. This is the
+    /// per-library input builder the "DB-per-library" workaround stood in for
+    /// (ADR 0027).
+    ///
+    /// # Errors
+    /// Returns `NotFound` for a missing root; propagates policy validation and
+    /// repository errors.
+    pub async fn create_policy_input_set_from_root(
+        &self,
+        input: RootScopedScanInput,
+    ) -> Result<RootScopedScanInputResult, VoomError> {
+        let root = self
+            .get_library_root(input.library_root_id)
+            .await?
+            .ok_or_else(|| {
+                VoomError::NotFound(format!("library root {} not found", input.library_root_id))
+            })?;
+        let root_path = PathBuf::from(&root.canonical_path);
+
+        let versions = self.identity.list_live_file_versions().await?;
+        let mut media_snapshots: Vec<MediaSnapshotInput> = Vec::new();
+        let mut included_count: u32 = 0;
+        let mut skipped_count: u32 = 0;
+        for version in versions {
+            if !self
+                .file_version_is_under_root(version.id, &root_path)
+                .await?
+            {
+                skipped_count += 1;
+                continue;
+            }
+            let latest = self
+                .identity
+                .list_media_snapshots_by_version(version.id)
+                .await?
+                .into_iter()
+                .next_back();
+            let Some(snapshot) = latest.filter(|s| snapshot_has_video_stream(&s.payload)) else {
+                skipped_count += 1;
+                continue;
+            };
+            let mut member = crate::media_snapshot::planning_input(&snapshot);
+            included_count += 1;
+            member.ordinal = included_count;
+            media_snapshots.push(member);
+        }
+
+        let draft = PolicyInputSetDraft {
+            slug: input.slug.clone(),
+            display_name: input.slug.clone(),
+            schema_version: 1,
+            source_kind: PolicyInputSourceKind::Imported,
+            created_at: self.clock().now(),
+            description: None,
+            fixture_labels: vec![format!("root-scan-{}", input.slug)],
+            synthetic_targets: Vec::new(),
+            media_snapshots,
+            identity_evidence: Vec::new(),
+            bundle_targets: Vec::new(),
+            quality_profiles: Vec::new(),
+            issues: Vec::new(),
+        };
+        let created = self.create_policy_input_set(draft).await?;
+        Ok(RootScopedScanInputResult {
+            input_set_id: created.id,
+            slug: created.slug,
+            library_root_id: input.library_root_id,
+            included_count,
+            skipped_count,
+        })
+    }
+
+    /// True when a file-version has a live local/shared-mount location whose
+    /// path is the root path or a component-wise descendant of it.
+    async fn file_version_is_under_root(
+        &self,
+        file_version_id: FileVersionId,
+        root_path: &Path,
+    ) -> Result<bool, VoomError> {
+        let locations = self
+            .identity
+            .list_live_file_locations_by_version(file_version_id)
+            .await?;
+        Ok(locations.iter().any(|loc| {
+            matches!(
+                loc.kind,
+                FileLocationKind::LocalPath | FileLocationKind::SharedMount
+            ) && Path::new(&loc.value).starts_with(root_path)
+        }))
     }
 
     /// Get a policy input set by id.

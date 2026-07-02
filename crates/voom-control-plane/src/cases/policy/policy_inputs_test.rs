@@ -5,9 +5,14 @@ use voom_policy::{FixtureName, TargetRef, load_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 
+use voom_store::repo::library::libraries::{LibraryMediaKind, NewLibrary};
+use voom_store::repo::library::library_roots::{
+    HiddenFilePolicy, LibraryRootKind, LibraryScanMode, NewLibraryRoot, SymlinkPolicy,
+};
+
 use crate::cases::cp;
 
-use super::{PolicyInputFromScanInput, WholeScanInput};
+use super::{PolicyInputFromScanInput, RootScopedScanInput, WholeScanInput};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -276,6 +281,99 @@ async fn whole_scan_includes_video_and_skips_non_video() {
         media.existing_media_snapshot_id,
         Some(video_media_snapshot_id)
     );
+}
+
+async fn library_root_at(
+    cp: &crate::ControlPlane,
+    slug: &str,
+    path: &str,
+) -> voom_core::LibraryRootId {
+    let lib = cp
+        .create_library(NewLibrary {
+            slug: slug.to_owned(),
+            display_name: slug.to_owned(),
+            media_kind: LibraryMediaKind::Movie,
+            description: None,
+            enabled: true,
+        })
+        .await
+        .unwrap();
+    cp.create_library_root(NewLibraryRoot {
+        library_id: lib.id,
+        root_kind: LibraryRootKind::LocalPath,
+        canonical_path: path.to_owned(),
+        display_path: path.to_owned(),
+        include_globs: Vec::new(),
+        exclude_globs: Vec::new(),
+        extension_allowlist: Vec::new(),
+        scan_mode: LibraryScanMode::ManualRecursive,
+        symlink_policy: SymlinkPolicy::Reject,
+        hidden_file_policy: HiddenFilePolicy::Ignore,
+        max_depth: None,
+        stability_seconds: 0,
+        debounce_seconds: 0,
+        default_output_root: None,
+        default_staging_root: None,
+        default_backup_root: None,
+        enabled: true,
+    })
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn root_scoped_scan_includes_only_files_under_the_root() {
+    let (cp, _tmp) = cp().await;
+    let video = || {
+        json!({
+            "container": "mp4",
+            "video_codec": "h264",
+            "streams": [{"id": "v-0", "index": 0, "kind": "video", "codec_name": "h264"}]
+        })
+    };
+    // Under the root.
+    let (under, _) =
+        scanned_snapshot_with_payload(&cp, "/media/films/a.mp4", "hash-a", video()).await;
+    // Different library.
+    scanned_snapshot_with_payload(&cp, "/media/shows/b.mp4", "hash-b", video()).await;
+    // Sibling sharing a textual prefix — must NOT match.
+    scanned_snapshot_with_payload(&cp, "/media/films-4k/c.mp4", "hash-c", video()).await;
+
+    let root_id = library_root_at(&cp, "films", "/media/films").await;
+    let result = cp
+        .create_policy_input_set_from_root(RootScopedScanInput {
+            slug: "films-input".to_owned(),
+            library_root_id: root_id,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.included_count, 1);
+    assert_eq!(result.skipped_count, 2);
+    let input_set = cp
+        .get_policy_input_set(result.input_set_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(input_set.media_snapshots.len(), 1);
+    assert_eq!(
+        input_set.media_snapshots[0].target,
+        PolicyInputTargetRef::FileVersion { id: under }
+    );
+}
+
+#[tokio::test]
+async fn root_scoped_scan_missing_root_is_not_found() {
+    let (cp, _tmp) = cp().await;
+    let err = cp
+        .create_policy_input_set_from_root(RootScopedScanInput {
+            slug: "x".to_owned(),
+            library_root_id: voom_core::LibraryRootId(999),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::NotFound);
 }
 
 async fn scanned_snapshot(
