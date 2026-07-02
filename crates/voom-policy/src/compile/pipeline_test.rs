@@ -185,8 +185,7 @@ fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
 // three forms fixed by #271 (`language == <token>`, the `media.*` field-path
 // root, and the optional `where` on transcode/extract audio) plus the
 // already-working productions, so grammar drift in either direction fails a
-// test. `verify artifact` is intentionally excluded — it remains a deferred
-// operation until #273.
+// test. `verify artifact` is covered by the #273 forms below.
 
 /// Diagnostic codes produced by a policy that fails to compile.
 fn compile_error_codes(source: &str) -> Vec<String> {
@@ -350,6 +349,47 @@ fn conformance_extract_audio_without_where_selects_all() {
     );
 }
 
+// Form 4 (#273) — `verify artifact`. The spec production takes no arguments;
+// it compiles to the fieldless `VerifyArtifact` operation.
+
+#[test]
+fn conformance_verify_artifact_compiles_and_lowers() {
+    assert_eq!(
+        single_op("verify artifact"),
+        CompiledOperation::VerifyArtifact
+    );
+}
+
+#[test]
+fn conformance_verify_artifact_serializes_with_snake_case_tag() {
+    let value = serde_json::to_value(CompiledOperation::VerifyArtifact).unwrap();
+    assert_eq!(value, serde_json::json!({ "type": "verify_artifact" }));
+}
+
+#[test]
+fn conformance_verify_without_artifact_target_is_rejected() {
+    assert_eq!(
+        compile_error_codes("policy \"p\" { phase a { verify } }"),
+        vec!["unknown_phase_statement_or_operation".to_owned()]
+    );
+}
+
+#[test]
+fn conformance_verify_artifact_rejects_extra_arguments() {
+    assert_eq!(
+        compile_error_codes("policy \"p\" { phase a { verify artifact now } }"),
+        vec!["unknown_phase_statement_or_operation".to_owned()]
+    );
+}
+
+#[test]
+fn conformance_synthesize_remains_deferred() {
+    assert_eq!(
+        compile_error_codes("policy \"p\" { phase a { synthesize } }"),
+        vec!["deferred_execution_operation".to_owned()]
+    );
+}
+
 #[test]
 fn conformance_transcode_audio_with_where_still_lowers_filter() {
     let CompiledOperation::TranscodeAudio {
@@ -397,6 +437,7 @@ fn conformance_working_v1_productions_compile_clean() {
         "when count audio >= 2 { container mkv }",
         "when video.codec == hevc { container mkv }",
         "when video.width >= 1920 { container mkv }",
+        "verify artifact",
     ] {
         assert_compiles_clean(body);
     }

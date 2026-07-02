@@ -120,6 +120,11 @@ pub enum CompiledOperation {
         container: String,
         filter: Option<TrackFilter>,
     },
+    /// `verify artifact` — verify the produced artifact against its expected
+    /// facts. The spec production takes no arguments, so the variant is
+    /// fieldless; the target artifact is identified by the plan node's target
+    /// and snapshot, not by operation parameters.
+    VerifyArtifact,
     Conditional {
         condition: CompiledCondition,
         operations: Vec<CompiledOperation>,
