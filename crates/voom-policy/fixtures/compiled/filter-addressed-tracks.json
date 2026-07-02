@@ -1,0 +1,83 @@
+{
+  "policy_name": "filter addressed tracks",
+  "slug": "filter-addressed-tracks",
+  "source_hash": "c8bf610ee2cffdf5af32df062b11f9a064824291309992a34a8dfc4c543201d4",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "reorder_tracks",
+          "targets": [
+            "video",
+            "audio",
+            "subtitle"
+          ],
+          "head_filter": {
+            "type": "and",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng"
+                ]
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "commentary"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "set_defaults",
+          "target": "audio",
+          "strategy": "preserve",
+          "filter": {
+            "type": "and",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng"
+                ]
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "commentary"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "set_defaults",
+          "target": "subtitle",
+          "strategy": "preserve",
+          "filter": {
+            "type": "forced"
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

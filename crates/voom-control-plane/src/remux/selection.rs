@@ -89,6 +89,11 @@ pub fn selection_from_payload_and_snapshot(
         default_streams,
         clear_default_streams,
         track_order: payload.track_order,
+        // ADR 0023 (#277): filter-addressed head/forced streams are populated by
+        // the deferred planner/control-plane follow-up; empty until then.
+        head_streams: Vec::new(),
+        forced_streams: Vec::new(),
+        clear_forced_streams: Vec::new(),
     })
 }
 

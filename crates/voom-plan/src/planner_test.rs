@@ -293,6 +293,7 @@ fn groups_container_and_track_operations_into_one_remux_node() {
         CompiledOperation::SetDefaults {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::First,
+            filter: None,
         },
     ]);
 
@@ -563,6 +564,7 @@ fn defaults_best_blocks_instead_of_joining_executable_group() {
         CompiledOperation::SetDefaults {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Best,
+            filter: None,
         },
     ]);
 
@@ -664,6 +666,7 @@ fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
         target: TrackTarget::Audio,
         strategy: DefaultStrategy::First,
+        filter: None,
     }]);
 
     let plan = generate_plan(request(
@@ -688,6 +691,7 @@ fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
             TrackTarget::Audio,
             TrackTarget::Subtitle,
         ],
+        head_filter: None,
     }]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
@@ -708,6 +712,7 @@ fn track_remux_reorder_no_ops_when_absent_groups_are_in_canonical_order() {
             TrackTarget::Audio,
             TrackTarget::Subtitle,
         ],
+        head_filter: None,
     }]);
 
     let plan = generate_plan(request(
@@ -729,6 +734,7 @@ fn track_remux_preserve_defaults_no_ops_when_no_other_shape_change() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
         target: TrackTarget::Audio,
         strategy: DefaultStrategy::Preserve,
+        filter: None,
     }]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
@@ -746,6 +752,7 @@ fn track_remux_defaults_none_no_ops_when_target_track_kind_is_absent() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
         target: TrackTarget::Subtitle,
         strategy: DefaultStrategy::None,
+        filter: None,
     }]);
 
     let plan = generate_plan(request(
@@ -767,6 +774,7 @@ fn track_remux_defaults_preserve_no_ops_when_target_track_kind_is_absent() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
         target: TrackTarget::Subtitle,
         strategy: DefaultStrategy::Preserve,
+        filter: None,
     }]);
 
     let plan = generate_plan(request(
@@ -791,6 +799,7 @@ fn track_remux_reorder_plans_when_group_order_differs_from_snapshot() {
             TrackTarget::Video,
             TrackTarget::Subtitle,
         ],
+        head_filter: None,
     }]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
@@ -812,6 +821,7 @@ fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
                 TrackTarget::Video,
                 TrackTarget::Subtitle,
             ],
+            head_filter: None,
         },
         CompiledOperation::ReorderTracks {
             targets: vec![
@@ -819,6 +829,7 @@ fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
                 TrackTarget::Audio,
                 TrackTarget::Subtitle,
             ],
+            head_filter: None,
         },
     ]);
 
@@ -836,6 +847,7 @@ fn track_remux_multiple_reorders_in_same_group_blocks_as_ambiguous() {
 fn track_remux_reorder_with_duplicate_group_blocks_as_unsupported_shape() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
         targets: vec![TrackTarget::Video, TrackTarget::Audio, TrackTarget::Audio],
+        head_filter: None,
     }]);
 
     let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
