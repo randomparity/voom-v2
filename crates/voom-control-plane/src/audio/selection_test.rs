@@ -173,6 +173,43 @@ fn transcode_selection_admits_streams_missing_descriptive_facts() {
     }
 }
 
+#[test]
+fn transcode_untagged_language_selects_under_und_and_excludes_under_eng() {
+    // The execution selector calls the shared evaluator, so the `und` fallback for
+    // an untagged track is inherited (ADR 0021): it matches `und`, not `eng`.
+    let snapshot = snapshot_with_streams(vec![audio(
+        "a-1",
+        1,
+        "aac",
+        None,
+        Some("Main"),
+        Some(false),
+    )]);
+
+    let selection = transcode_selection_from_payload_and_snapshot(
+        &transcode_payload(&json!({"type": "language_in", "values": ["und"]})),
+        &snapshot,
+    )
+    .unwrap();
+    assert_eq!(
+        selection
+            .selection
+            .selected_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-1"]
+    );
+
+    let err = transcode_selection_from_payload_and_snapshot(
+        &transcode_payload(&json!({"type": "language_in", "values": ["eng"]})),
+        &snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("zero streams"), "{err}");
+}
+
 fn transcode_payload(filter: &Value) -> Value {
     payload("transcode_audio", "aac", "mkv", filter)
 }

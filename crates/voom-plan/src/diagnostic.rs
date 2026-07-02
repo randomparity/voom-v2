@@ -17,6 +17,7 @@ pub enum PlanningDiagnosticCode {
     EmptyInputSet,
     InvalidPlanningRequest,
     DeterministicSerializationFailure,
+    UntaggedTrackLanguageDefaulted,
 }
 
 impl PlanningDiagnosticCode {
@@ -32,6 +33,7 @@ impl PlanningDiagnosticCode {
             Self::EmptyInputSet => "empty_input_set",
             Self::InvalidPlanningRequest => "invalid_planning_request",
             Self::DeterministicSerializationFailure => "deterministic_serialization_failure",
+            Self::UntaggedTrackLanguageDefaulted => "untagged_track_language_defaulted",
         }
     }
 }
