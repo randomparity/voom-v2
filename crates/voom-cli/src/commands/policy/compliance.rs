@@ -141,29 +141,38 @@ pub async fn apply(
     }
 }
 
-pub async fn execute(
-    database_url: &str,
-    local: Local,
-    policy_version_id: u64,
-    input_set_id: u64,
-    staging_root: Option<std::path::PathBuf>,
-    output_dir: Option<std::path::PathBuf>,
-) -> io::Result<i32> {
+/// Arguments for `compliance execute`, grouped to keep the handler within the
+/// positional-parameter limit.
+#[derive(Debug)]
+pub struct ExecuteArgs {
+    pub policy_version_id: u64,
+    pub input_set_id: u64,
+    pub staging_root: Option<std::path::PathBuf>,
+    pub output_dir: Option<std::path::PathBuf>,
+    pub safety_policy: Option<String>,
+    pub backup_root: Option<std::path::PathBuf>,
+}
+
+pub async fn execute(database_url: &str, local: Local, args: ExecuteArgs) -> io::Result<i32> {
     let cp = match open_control_plane("compliance", database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
-    let mut options = ComplianceExecutionOptions::default();
-    if let Some(staging_root) = staging_root {
+    let mut options = ComplianceExecutionOptions {
+        safety_policy_slug: args.safety_policy,
+        backup_root: args.backup_root,
+        ..ComplianceExecutionOptions::default()
+    };
+    if let Some(staging_root) = args.staging_root {
         options.apply_staging_root(staging_root);
     }
-    if let Some(output_dir) = output_dir {
+    if let Some(output_dir) = args.output_dir {
         options.apply_output_dir(output_dir);
     }
     match cp
         .execute_compliance_policy_with_options(
-            PolicyVersionId(policy_version_id),
-            PolicyInputSetId(input_set_id),
+            PolicyVersionId(args.policy_version_id),
+            PolicyInputSetId(args.input_set_id),
             options,
         )
         .await

@@ -8,5 +8,5 @@ mod system;
 
 pub use execution::{node, scheduler, worker};
 pub use media::{artifact, bundle, profile, scan};
-pub use policy_domain::{compliance, plan, policy};
+pub use policy_domain::{compliance, plan, policy, safety_policy, scheduling_policy};
 pub use system::{health, init, token_source, version};
