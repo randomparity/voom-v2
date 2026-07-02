@@ -109,6 +109,12 @@ pub enum EventKind {
     CommitAbortedPreMutation,
     CommitRecoveryRequired,
     CommitForcedOverride,
+    // Sprint 17 T15 — external-system lifecycle.
+    ExternalSystemRegistered,
+    ExternalSystemHealthChanged,
+    ExternalSystemLinked,
+    ExternalSystemUnlinked,
+    ExternalSystemSynced,
 }
 
 impl EventKind {
@@ -205,6 +211,11 @@ impl EventKind {
             Self::CommitAbortedPreMutation => "commit.aborted_pre_mutation",
             Self::CommitRecoveryRequired => "commit.recovery_required",
             Self::CommitForcedOverride => "commit.forced_override",
+            Self::ExternalSystemRegistered => "external_system.registered",
+            Self::ExternalSystemHealthChanged => "external_system.health_changed",
+            Self::ExternalSystemLinked => "external_system.linked",
+            Self::ExternalSystemUnlinked => "external_system.unlinked",
+            Self::ExternalSystemSynced => "external_system.synced",
         }
     }
 
@@ -218,6 +229,11 @@ impl EventKind {
         clippy::should_implement_trait,
         reason = "explicit inherent fn keeps the dotted wire format the single source of truth; \
                   std::str::FromStr would mask the dedicated VoomError-bearing API"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat wire-string arm per EventKind variant; splitting the mirror of \
+                  as_str() across helpers would hide the round-trip contract"
     )]
     pub fn from_str(s: &str) -> Result<Self, VoomError> {
         Ok(match s {
@@ -311,6 +327,11 @@ impl EventKind {
             "commit.aborted_pre_mutation" => Self::CommitAbortedPreMutation,
             "commit.recovery_required" => Self::CommitRecoveryRequired,
             "commit.forced_override" => Self::CommitForcedOverride,
+            "external_system.registered" => Self::ExternalSystemRegistered,
+            "external_system.health_changed" => Self::ExternalSystemHealthChanged,
+            "external_system.linked" => Self::ExternalSystemLinked,
+            "external_system.unlinked" => Self::ExternalSystemUnlinked,
+            "external_system.synced" => Self::ExternalSystemSynced,
             other => {
                 return Err(VoomError::database(format!(
                     "events.kind {other:?} not in EventKind vocab"

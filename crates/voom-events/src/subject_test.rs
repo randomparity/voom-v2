@@ -68,6 +68,13 @@ fn commit_safety_gate_subject_round_trips() {
 }
 
 #[test]
+fn external_system_subject_round_trips() {
+    let s = SubjectType::ExternalSystem;
+    assert_eq!(s.as_str(), "external_system");
+    assert_eq!(SubjectType::from_str("external_system").unwrap(), s);
+}
+
+#[test]
 fn identity_layer_subjects_use_expected_wire_format() {
     assert_eq!(SubjectType::MediaWork.as_str(), "media_work");
     assert_eq!(SubjectType::MediaVariant.as_str(), "media_variant");

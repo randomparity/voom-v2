@@ -84,6 +84,11 @@ define_id!(BackupId);
 define_id!(LibraryId);
 define_id!(LibraryRootId);
 
+// --- External system (Sprint 17, T15) ---
+define_id!(ExternalSystemId);
+define_id!(ExternalPathMappingId);
+define_id!(ExternalSystemLinkId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;

@@ -495,6 +495,30 @@ fn commit_safety_gate_event_kinds_use_dotted_wire_format() {
 }
 
 #[test]
+fn external_system_event_kinds_use_dotted_wire_format_and_round_trip() {
+    let cases = [
+        (
+            EventKind::ExternalSystemRegistered,
+            "external_system.registered",
+        ),
+        (
+            EventKind::ExternalSystemHealthChanged,
+            "external_system.health_changed",
+        ),
+        (EventKind::ExternalSystemLinked, "external_system.linked"),
+        (
+            EventKind::ExternalSystemUnlinked,
+            "external_system.unlinked",
+        ),
+        (EventKind::ExternalSystemSynced, "external_system.synced"),
+    ];
+    for (kind, wire) in cases {
+        assert_eq!(kind.as_str(), wire);
+        assert_eq!(EventKind::from_str(wire).unwrap(), kind);
+    }
+}
+
+#[test]
 fn commit_safety_gate_event_kinds_round_trip() {
     for k in [
         EventKind::CommitIntentRecorded,

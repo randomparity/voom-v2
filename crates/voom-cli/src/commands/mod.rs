@@ -2,6 +2,8 @@ pub mod backup;
 pub(crate) mod common;
 pub mod event;
 mod execution;
+#[path = "external/mod.rs"]
+mod external_domain;
 pub mod job;
 #[path = "library/mod.rs"]
 mod library_domain;
@@ -12,6 +14,7 @@ mod system;
 pub mod ticket;
 
 pub use execution::{node, scheduler, worker};
+pub use external_domain::system as external_system;
 pub use library_domain::library;
 pub use media::{artifact, bundle, lease, profile, scan};
 pub use policy_domain::{
