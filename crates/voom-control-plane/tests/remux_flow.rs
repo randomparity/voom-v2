@@ -57,6 +57,7 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     let scan = cp
         .scan_path(ScanPathInput {
             path: source.clone(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

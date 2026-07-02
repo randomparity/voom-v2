@@ -216,7 +216,9 @@ fn voom_error_response(err: &VoomError) -> axum::response::Response {
         // Worker-protocol codes (Sprint 2) — not on the health path.
         | ErrorCode::WorkerRetired
         | ErrorCode::WorkerIncarnationStale
-        | ErrorCode::AmbiguousWorkerSelection => (StatusCode::INTERNAL_SERVER_ERROR, None),
+        | ErrorCode::AmbiguousWorkerSelection
+        // Library-config block — not on the connect/probe_schema path.
+        | ErrorCode::Blocked => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     err_response(status, "health", err.code(), err.to_string(), hint)
 }

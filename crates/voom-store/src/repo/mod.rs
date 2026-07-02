@@ -3,6 +3,7 @@
 pub mod audit;
 pub(crate) mod common;
 pub mod execution;
+pub mod library;
 pub mod media;
 pub mod policy;
 
@@ -47,6 +48,12 @@ pub use jobs::{Job, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
     ExpireReport, ForceReleaseOutcome, Lease, LeaseState, NewLease, ReleaseReason, SqliteLeaseRepo,
 };
+pub use library::libraries::{Library, LibraryMediaKind, LibraryUpdate, NewLibrary};
+pub use library::library_roots::{
+    HiddenFilePolicy, LibraryRoot, LibraryRootKind, LibraryRootUpdate, LibraryScanMode,
+    NewLibraryRoot, SymlinkPolicy,
+};
+pub use library::{SqliteLibraryRepo, libraries, library_roots};
 pub use nodes::{NewNode, Node, NodeAuthRecord, NodeKind, NodeStatus, SqliteNodeRepo};
 pub use policies::{
     CreatedPolicyVersion, NewPolicyDocumentVersion, PolicyDocument, PolicyDocumentSummary,

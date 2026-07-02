@@ -5,10 +5,10 @@ use std::path::Path;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::policy::{
-    PolicyInputFromScanInput, PolicyInputFromScanResult, PolicyMutationError, WholeScanInput,
-    WholeScanInputResult,
+    PolicyInputFromScanInput, PolicyInputFromScanResult, PolicyMutationError, RootScopedScanInput,
+    RootScopedScanInputResult, WholeScanInput, WholeScanInputResult,
 };
-use voom_core::{FileVersionId, MediaSnapshotId, PolicyDocumentId};
+use voom_core::{FileVersionId, LibraryRootId, MediaSnapshotId, PolicyDocumentId};
 use voom_store::repo::policies::{
     CreatedPolicyVersion, PolicyDocument, PolicyDocumentSummary, PolicyVersion,
 };
@@ -42,6 +42,34 @@ pub struct PolicyInputWholeScanSummary {
     pub slug: String,
     pub included_count: u32,
     pub skipped_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyInputRootScanData {
+    pub input_set: PolicyInputRootScanSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyInputRootScanSummary {
+    pub input_set_id: u64,
+    pub slug: String,
+    pub library_root_id: u64,
+    pub included_count: u32,
+    pub skipped_count: u32,
+}
+
+impl From<RootScopedScanInputResult> for PolicyInputRootScanData {
+    fn from(result: RootScopedScanInputResult) -> Self {
+        Self {
+            input_set: PolicyInputRootScanSummary {
+                input_set_id: result.input_set_id.0,
+                slug: result.slug,
+                library_root_id: result.library_root_id.0,
+                included_count: result.included_count,
+                skipped_count: result.skipped_count,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -93,6 +121,7 @@ pub async fn run(database_url: &str, local: Local, command: PolicyCommand) -> io
         PolicyCommand::Input(PolicyInputCommand::CreateFromScan {
             slug,
             all,
+            root,
             file_version_id,
             media_snapshot_id,
             container,
@@ -100,6 +129,9 @@ pub async fn run(database_url: &str, local: Local, command: PolicyCommand) -> io
         }) => {
             if all {
                 return create_from_whole_scan(&cp, local, slug).await;
+            }
+            if let Some(root_id) = root {
+                return create_from_root(&cp, local, slug, LibraryRootId(root_id)).await;
             }
             match single_file_input(
                 slug,
@@ -165,6 +197,30 @@ async fn create_from_whole_scan(cp: &ControlPlane, local: Local, slug: String) -
     }
 }
 
+async fn create_from_root(
+    cp: &ControlPlane,
+    local: Local,
+    slug: String,
+    library_root_id: LibraryRootId,
+) -> io::Result<i32> {
+    match cp
+        .create_policy_input_set_from_root(RootScopedScanInput {
+            slug,
+            library_root_id,
+        })
+        .await
+    {
+        Ok(result) => emit_ok(
+            "policy",
+            PolicyInputRootScanData::from(result),
+            Some(local),
+            Vec::new(),
+        )
+        .map(|()| 0),
+        Err(err) => emit_voom_error("policy", &err, local),
+    }
+}
+
 /// Validate the single-file `create-from-scan` arguments.
 ///
 /// clap's `requires_all` already rejects `--file-version-id` without its
@@ -188,9 +244,9 @@ fn single_file_input(
             })
         }
         _ => Err(
-            "policy input create-from-scan requires either --all (whole library) or \
-                  --file-version-id with --media-snapshot-id, --container, and --video-codec \
-                  (single file)"
+            "policy input create-from-scan requires --all (whole library), --root <id> \
+                  (one library root), or --file-version-id with --media-snapshot-id, \
+                  --container, and --video-codec (single file)"
                 .to_owned(),
         ),
     }

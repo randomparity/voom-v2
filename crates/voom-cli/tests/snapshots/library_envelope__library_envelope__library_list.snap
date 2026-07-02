@@ -1,0 +1,28 @@
+---
+source: crates/voom-cli/tests/library_envelope.rs
+expression: list
+---
+{
+  "schema_version": "0",
+  "command": "library",
+  "status": "ok",
+  "data": {
+    "libraries": [
+      {
+        "library_id": 1,
+        "slug": "films",
+        "display_name": "Films",
+        "media_kind": "unknown",
+        "enabled": true,
+        "created_at": "[ts]",
+        "updated_at": "[ts]"
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

@@ -4,10 +4,10 @@ use std::path::Path;
 use serde::Serialize;
 use voom_control_plane::ControlPlane;
 use voom_control_plane::scan::{
-    ScanFileErrorReport, ScanFileReport, ScanMode, ScanPathInput, ScanReport, ScanReportFileStatus,
-    ScanSidecarReport, is_supported_media_path,
+    RootScanBlocked, RootScanOutcome, ScanFileErrorReport, ScanFileReport, ScanMode, ScanPathInput,
+    ScanReport, ScanReportFileStatus, ScanSidecarReport, is_supported_media_path,
 };
-use voom_core::{ErrorCode, FailureClass};
+use voom_core::{ErrorCode, FailureClass, LibraryRootId};
 
 use crate::commands::common::open_control_plane;
 use crate::envelope::{Local, emit_err, emit_err_with_data_and_warnings, emit_ok};
@@ -79,7 +79,29 @@ pub struct ScanFileErrorData {
     pub message: String,
 }
 
-pub async fn run(database_url: &str, local: Local, path: &Path) -> io::Result<i32> {
+pub async fn run(
+    database_url: &str,
+    local: Local,
+    path: Option<&Path>,
+    root: Option<u64>,
+) -> io::Result<i32> {
+    match (path, root) {
+        (Some(path), None) => run_explicit_path(database_url, local, path).await,
+        (None, Some(root_id)) => run_root(database_url, local, LibraryRootId(root_id)).await,
+        _ => {
+            emit_err(
+                "scan",
+                ErrorCode::BadArgs.as_str(),
+                "exactly one of --path or --root is required".to_owned(),
+                None,
+                Some(local),
+            )?;
+            Ok(1)
+        }
+    }
+}
+
+async fn run_explicit_path(database_url: &str, local: Local, path: &Path) -> io::Result<i32> {
     if let Err(message) = validate_explicit_path(path).await {
         emit_err(
             "scan",
@@ -98,10 +120,75 @@ pub async fn run(database_url: &str, local: Local, path: &Path) -> io::Result<i3
     scan_with_control_plane(&cp, local, path).await
 }
 
+async fn run_root(database_url: &str, local: Local, root_id: LibraryRootId) -> io::Result<i32> {
+    let cp = match open_control_plane("scan", database_url, &local).await? {
+        Ok(cp) => cp,
+        Err(code) => return Ok(code),
+    };
+    match cp.scan_library_root(root_id).await {
+        Ok(RootScanOutcome::Scanned(report)) => {
+            emit_ok("scan", ScanData::from(report), Some(local), scan_warnings()).map(|()| 0)
+        }
+        Ok(RootScanOutcome::Blocked(blocked)) => {
+            let message = format!(
+                "library root {} is blocked ({}); not scanned",
+                blocked.library_root_id,
+                blocked.reason.as_str()
+            );
+            emit_err_with_data_and_warnings(
+                "scan",
+                BlockedData::from(blocked),
+                ErrorCode::Blocked.as_str(),
+                message,
+                None,
+                Some(local),
+                scan_warnings(),
+            )?;
+            Ok(2)
+        }
+        Err(err) => {
+            let code = err.code();
+            let message = err.to_string();
+            emit_err_with_data_and_warnings(
+                "scan",
+                ScanData::from(err.into_report()),
+                code.as_str(),
+                message,
+                None,
+                Some(local),
+                scan_warnings(),
+            )?;
+            Ok(2)
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct BlockedData {
+    pub status: &'static str,
+    pub reason: &'static str,
+    pub library_id: u64,
+    pub library_root_id: u64,
+    pub canonical_path: String,
+}
+
+impl From<RootScanBlocked> for BlockedData {
+    fn from(blocked: RootScanBlocked) -> Self {
+        Self {
+            status: "blocked",
+            reason: blocked.reason.as_str(),
+            library_id: blocked.library_id.0,
+            library_root_id: blocked.library_root_id.0,
+            canonical_path: path_wire(&blocked.canonical_path),
+        }
+    }
+}
+
 async fn scan_with_control_plane(cp: &ControlPlane, local: Local, path: &Path) -> io::Result<i32> {
     match cp
         .scan_path(ScanPathInput {
             path: path.to_path_buf(),
+            extension_allowlist: Vec::new(),
         })
         .await
     {

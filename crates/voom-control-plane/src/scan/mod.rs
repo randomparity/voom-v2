@@ -16,14 +16,20 @@ use crate::cases::begin_immediate_tx;
 pub(crate) mod bootstrap;
 pub(crate) mod discovery;
 pub(crate) mod hash;
+pub(crate) mod library;
 pub(crate) mod persist;
 pub(crate) mod worker;
 
 pub use discovery::{ScanMode, SidecarKind, classify_sidecar, is_supported_media_path};
+pub use library::{RootBlockReason, RootScanBlocked, RootScanOutcome};
 
 #[derive(Debug, Clone)]
 pub struct ScanPathInput {
     pub path: PathBuf,
+    /// Primary-media extension allowlist. Empty = the built-in
+    /// `SUPPORTED_EXTENSIONS` (unchanged explicit-path behavior). A
+    /// `voom scan --root` fills this from the `LibraryRoot`.
+    pub extension_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,7 +166,7 @@ impl ControlPlane {
         L: ScanWorkerLauncher + Send,
         C: ScanFilesystemClassifier,
     {
-        let discovered = discovery::discover_path(&input.path)
+        let discovered = discovery::discover_path_filtered(&input.path, &input.extension_allowlist)
             .await
             .map_err(|err| discovery_error(input.path.clone(), &err))?;
         let report = ScanReportBuilder::from_discovered(&discovered);

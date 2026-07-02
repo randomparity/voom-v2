@@ -107,6 +107,12 @@ pub enum ErrorCode {
     /// More than one active worker advertises the requested
     /// `OperationKind` and no explicit override is set.
     AmbiguousWorkerSelection,
+    // --- Library config (Sprint 17, T11) ------------------------------
+    /// A configured resource is in an intentional state that forbids the
+    /// requested action — e.g. `voom scan --root` on a disabled library
+    /// root or library. Retrying does not clear it; the operator must
+    /// enable the resource first. Reused by the Sprint 18 watcher.
+    Blocked,
 }
 
 impl ErrorCode {
@@ -153,6 +159,7 @@ impl ErrorCode {
         Self::WorkerRetired,
         Self::WorkerIncarnationStale,
         Self::AmbiguousWorkerSelection,
+        Self::Blocked,
     ];
 
     /// Wire-format string for the JSON envelope's `error.code` field.
@@ -199,6 +206,7 @@ impl ErrorCode {
             Self::WorkerRetired => "WORKER_RETIRED",
             Self::WorkerIncarnationStale => "WORKER_INCARNATION_STALE",
             Self::AmbiguousWorkerSelection => "AMBIGUOUS_WORKER_SELECTION",
+            Self::Blocked => "BLOCKED",
         }
     }
 

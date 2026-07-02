@@ -80,6 +80,10 @@ define_id!(CommitId);
 // --- Sprint 17 (backups) ---
 define_id!(BackupId);
 
+// --- Library config (Sprint 17, T11) ---
+define_id!(LibraryId);
+define_id!(LibraryRootId);
+
 #[cfg(test)]
 #[path = "ids_test.rs"]
 mod tests;

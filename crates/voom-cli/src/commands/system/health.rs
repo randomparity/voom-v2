@@ -107,7 +107,9 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         // Worker-protocol codes (Sprint 2) — health command never reaches these.
         | ErrorCode::WorkerRetired
         | ErrorCode::WorkerIncarnationStale
-        | ErrorCode::AmbiguousWorkerSelection => None,
+        | ErrorCode::AmbiguousWorkerSelection
+        // Library-config block — health command never reaches this.
+        | ErrorCode::Blocked => None,
     }
 }
 

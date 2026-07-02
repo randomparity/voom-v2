@@ -30,6 +30,7 @@ use voom_store::repo::{
     issues::SqliteIssueRepo,
     jobs::SqliteJobRepo,
     leases::SqliteLeaseRepo,
+    library::SqliteLibraryRepo,
     nodes::SqliteNodeRepo,
     policies::SqlitePolicyRepo,
     policy_inputs::SqlitePolicyInputRepo,
@@ -79,7 +80,8 @@ pub mod policy {
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
-        PolicyInputFromScanInput, PolicyInputFromScanResult, WholeScanInput, WholeScanInputResult,
+        PolicyInputFromScanInput, PolicyInputFromScanResult, RootScopedScanInput,
+        RootScopedScanInputResult, WholeScanInput, WholeScanInputResult,
     };
 }
 
@@ -143,6 +145,7 @@ pub struct ControlPlane {
     pub(crate) scheduler_node_limits: SqliteSchedulerNodeLimitRepo,
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
     pub(crate) backups: SqliteBackupRepo,
+    pub(crate) libraries: SqliteLibraryRepo,
     pub(crate) scheduling_policies: SqliteSchedulingPolicyRepo,
     pub(crate) safety_policies: SqliteSafetyPolicyRepo,
 }
@@ -177,6 +180,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("scheduler_node_limits", &self.scheduler_node_limits)
             .field("workflow_summaries", &self.workflow_summaries)
             .field("backups", &self.backups)
+            .field("libraries", &self.libraries)
             .field("scheduling_policies", &self.scheduling_policies)
             .field("safety_policies", &self.safety_policies)
             .finish()
@@ -284,6 +288,7 @@ impl ControlPlane {
             scheduler_node_limits: SqliteSchedulerNodeLimitRepo::new(pool.clone()),
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             backups: SqliteBackupRepo::new(pool.clone()),
+            libraries: SqliteLibraryRepo::new(pool.clone()),
             scheduling_policies: SqliteSchedulingPolicyRepo::new(pool.clone()),
             safety_policies: SqliteSafetyPolicyRepo::new(pool.clone()),
             pool,

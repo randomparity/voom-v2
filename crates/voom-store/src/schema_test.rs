@@ -27,7 +27,52 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 19);
+    assert_eq!(expected_migrations(), 20);
+}
+
+#[tokio::test]
+async fn library_schema_enforces_vocab_and_root_cascade() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let libraries_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'libraries'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        libraries_sql.contains("CHECK (media_kind IN ('movie', 'episode', 'personal', 'unknown'))")
+    );
+
+    let roots_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'library_roots'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(roots_sql.contains("CHECK (json_valid(include_globs))"));
+    assert!(
+        roots_sql.contains(
+            "CHECK (scan_mode IN ('explicit_only', 'manual_recursive', 'watch_enabled'))"
+        )
+    );
+
+    let slug_index_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'libraries_slug'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(slug_index_count, 1);
+
+    let fk_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('library_roots') \
+         WHERE \"table\" = 'libraries' AND on_delete = 'CASCADE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fk_count, 1);
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {

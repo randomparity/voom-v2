@@ -1047,6 +1047,7 @@ async fn scan_one(cp: &ControlPlane, source: &Path) -> ScannedFile {
     let scan = cp
         .scan_path(ScanPathInput {
             path: source.to_owned(),
+            extension_allowlist: Vec::new(),
         })
         .await
         .unwrap();

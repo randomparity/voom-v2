@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "voom", version, about = "VOOM control plane CLI", long_about = None)]
@@ -60,10 +60,14 @@ pub enum Command {
     /// Stage, verify, commit, or inspect artifacts.
     #[command(subcommand)]
     Artifact(ArtifactCommand),
-    /// Scan an explicit file or directory path.
+    /// Scan an explicit path (`--path`) or a configured library root (`--root`).
     Scan {
-        #[arg(long)]
-        path: PathBuf,
+        #[arg(long, required_unless_present = "root", conflicts_with = "root")]
+        path: Option<PathBuf>,
+        /// Scan the enabled library root with this id. A disabled root or
+        /// library is refused (`BLOCKED`), not scanned.
+        #[arg(long, conflicts_with = "path")]
+        root: Option<u64>,
     },
     /// List and inspect asset bundles and their members.
     #[command(subcommand)]
@@ -71,6 +75,9 @@ pub enum Command {
     /// List and inspect durable backup records.
     #[command(subcommand)]
     Backup(BackupCommand),
+    /// Manage libraries and their roots (durable scan configuration).
+    #[command(subcommand)]
+    Library(LibraryCommand),
     /// Manage durable scheduling policy records.
     #[command(subcommand)]
     SchedulingPolicy(SchedulingPolicyCommand),
@@ -249,6 +256,213 @@ impl std::fmt::Display for VerificationLevelArg {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum LibraryCommand {
+    /// Create a library.
+    Add {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long, default_value_t = LibraryMediaKindArg::Unknown)]
+        media_kind: LibraryMediaKindArg,
+        #[arg(long)]
+        description: Option<String>,
+        /// Create the library disabled.
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// List libraries.
+    List,
+    /// Show one library.
+    Show {
+        #[arg(long)]
+        library_id: u64,
+    },
+    /// Update a library's mutable attributes.
+    Update {
+        #[arg(long)]
+        library_id: u64,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        media_kind: Option<LibraryMediaKindArg>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Enable a library.
+    Enable {
+        #[arg(long)]
+        library_id: u64,
+    },
+    /// Disable a library (its roots refuse scans until re-enabled).
+    Disable {
+        #[arg(long)]
+        library_id: u64,
+    },
+    /// Delete a library and cascade its roots.
+    Remove {
+        #[arg(long)]
+        library_id: u64,
+    },
+    /// Manage library roots.
+    #[command(subcommand)]
+    Root(LibraryRootCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum LibraryRootCommand {
+    /// Add a root to a library. `--path` is canonicalized and stored; a
+    /// symlinked path is rejected.
+    Add(LibraryRootAddArgs),
+    /// List roots, optionally filtered to one library.
+    List {
+        #[arg(long)]
+        library_id: Option<u64>,
+    },
+    /// Show one root.
+    Show {
+        #[arg(long)]
+        root_id: u64,
+    },
+    /// Update a root's mutable discovery settings.
+    Update(LibraryRootUpdateArgs),
+    /// Enable a root.
+    Enable {
+        #[arg(long)]
+        root_id: u64,
+    },
+    /// Disable a root (refuses scans until re-enabled).
+    Disable {
+        #[arg(long)]
+        root_id: u64,
+    },
+    /// Delete a root.
+    Remove {
+        #[arg(long)]
+        root_id: u64,
+    },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct LibraryRootAddArgs {
+    #[arg(long)]
+    pub library_id: u64,
+    #[arg(long)]
+    pub path: PathBuf,
+    #[arg(long, default_value_t = LibraryRootKindArg::LocalPath)]
+    pub root_kind: LibraryRootKindArg,
+    #[arg(long, default_value_t = LibraryScanModeArg::ManualRecursive)]
+    pub scan_mode: LibraryScanModeArg,
+    #[arg(long = "include-glob")]
+    pub include_glob: Vec<String>,
+    #[arg(long = "exclude-glob")]
+    pub exclude_glob: Vec<String>,
+    /// Primary-media extension allowlist. Empty = the built-in default set.
+    #[arg(long = "extension")]
+    pub extension: Vec<String>,
+    #[arg(long, default_value_t = SymlinkPolicyArg::Reject)]
+    pub symlink_policy: SymlinkPolicyArg,
+    #[arg(long, default_value_t = HiddenFilePolicyArg::Ignore)]
+    pub hidden_file_policy: HiddenFilePolicyArg,
+    #[arg(long)]
+    pub max_depth: Option<u32>,
+    #[arg(long, default_value_t = 0)]
+    pub stability_seconds: u32,
+    #[arg(long, default_value_t = 0)]
+    pub debounce_seconds: u32,
+    #[arg(long)]
+    pub output_root: Option<String>,
+    #[arg(long)]
+    pub staging_root: Option<String>,
+    #[arg(long)]
+    pub backup_root: Option<String>,
+    /// Create the root disabled.
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct LibraryRootUpdateArgs {
+    #[arg(long)]
+    pub root_id: u64,
+    #[arg(long = "include-glob")]
+    pub include_glob: Option<Vec<String>>,
+    #[arg(long = "exclude-glob")]
+    pub exclude_glob: Option<Vec<String>>,
+    #[arg(long = "extension")]
+    pub extension: Option<Vec<String>>,
+    #[arg(long)]
+    pub scan_mode: Option<LibraryScanModeArg>,
+    #[arg(long)]
+    pub symlink_policy: Option<SymlinkPolicyArg>,
+    #[arg(long)]
+    pub hidden_file_policy: Option<HiddenFilePolicyArg>,
+    #[arg(long)]
+    pub max_depth: Option<u32>,
+    #[arg(long)]
+    pub stability_seconds: Option<u32>,
+    #[arg(long)]
+    pub debounce_seconds: Option<u32>,
+    #[arg(long)]
+    pub output_root: Option<String>,
+    #[arg(long)]
+    pub staging_root: Option<String>,
+    #[arg(long)]
+    pub backup_root: Option<String>,
+}
+
+macro_rules! value_enum_to_store {
+    ($arg:ident => $store:path { $($variant:ident),+ $(,)? }) => {
+        #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+        #[value(rename_all = "snake_case")]
+        pub enum $arg {
+            $($variant),+
+        }
+
+        impl $arg {
+            #[must_use]
+            pub const fn to_store(self) -> $store {
+                match self {
+                    $(Self::$variant => <$store>::$variant),+
+                }
+            }
+        }
+
+        // Display mirrors the store vocabulary exactly by delegating to the
+        // store enum's `as_str()`, so the wire strings live in one place.
+        impl std::fmt::Display for $arg {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.to_store().as_str())
+            }
+        }
+    };
+}
+
+value_enum_to_store!(LibraryMediaKindArg => voom_store::repo::library::libraries::LibraryMediaKind {
+    Movie,
+    Episode,
+    Personal,
+    Unknown,
+});
+value_enum_to_store!(LibraryRootKindArg => voom_store::repo::library::library_roots::LibraryRootKind {
+    LocalPath,
+    SharedMount,
+});
+value_enum_to_store!(LibraryScanModeArg => voom_store::repo::library::library_roots::LibraryScanMode {
+    ExplicitOnly,
+    ManualRecursive,
+    WatchEnabled,
+});
+value_enum_to_store!(SymlinkPolicyArg => voom_store::repo::library::library_roots::SymlinkPolicy {
+    Reject,
+    Follow,
+});
+value_enum_to_store!(HiddenFilePolicyArg => voom_store::repo::library::library_roots::HiddenFilePolicy {
+    Ignore,
+    Include,
+});
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum BackupCommand {
     /// List backup records, optionally filtered by status.
     List {
@@ -358,8 +572,12 @@ pub enum PolicyInputCommand {
         #[arg(long)]
         slug: String,
         /// Whole-library mode: build from all live video file-versions.
-        #[arg(long, conflicts_with_all = ["file_version_id", "media_snapshot_id", "container", "video_codec"])]
+        #[arg(long, conflicts_with_all = ["root", "file_version_id", "media_snapshot_id", "container", "video_codec"])]
         all: bool,
+        /// Root-scoped mode: build from live video file-versions under this
+        /// library root's canonical path.
+        #[arg(long, conflicts_with_all = ["file_version_id", "media_snapshot_id", "container", "video_codec"])]
+        root: Option<u64>,
         #[arg(long, requires_all = ["media_snapshot_id", "container", "video_codec"])]
         file_version_id: Option<u64>,
         #[arg(long)]

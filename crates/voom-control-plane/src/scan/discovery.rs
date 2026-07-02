@@ -96,6 +96,25 @@ pub fn is_supported_media_path(path: &Path) -> bool {
         })
 }
 
+/// True when `path` is primary media under the given extension allowlist. An
+/// **empty** allowlist means "use the built-in `SUPPORTED_EXTENSIONS`" — so a
+/// root that configures no allowlist scans the default media set. A non-empty
+/// allowlist restricts primary-media discovery to those extensions
+/// (case-insensitive). Sidecar classification is unaffected.
+#[must_use]
+pub fn matches_media_extension(path: &Path, allowlist: &[String]) -> bool {
+    if allowlist.is_empty() {
+        return is_supported_media_path(path);
+    }
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            allowlist
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+}
+
 /// Classify a file as an external sidecar asset by extension and, for
 /// trailers, filename convention. Returns `None` for primary media and for
 /// anything outside the V1 sidecar set. See ADR 0022.
@@ -129,7 +148,13 @@ fn has_trailer_suffix(path: &Path) -> bool {
         })
 }
 
-pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, ScanError> {
+/// Discover under `path`, restricting primary-media discovery to
+/// `extension_allowlist` (empty = the built-in `SUPPORTED_EXTENSIONS`). Used by
+/// `voom scan --root` to honor a `LibraryRoot`'s configured allowlist.
+pub async fn discover_path_filtered(
+    path: impl AsRef<Path>,
+    extension_allowlist: &[String],
+) -> Result<DiscoveredScan, ScanError> {
     let path = path.as_ref();
     let metadata = fs::symlink_metadata(path).await.map_err(|err| {
         bad_args(format!(
@@ -145,10 +170,10 @@ pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, Sca
         )));
     }
     if file_type.is_file() {
-        return discover_file(path).await;
+        return discover_file(path, extension_allowlist).await;
     }
     if file_type.is_dir() {
-        return discover_directory(path).await;
+        return discover_directory(path, extension_allowlist).await;
     }
     Err(bad_args(format!(
         "scan path must be a file or directory: {}",
@@ -156,8 +181,11 @@ pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, Sca
     )))
 }
 
-async fn discover_file(path: &Path) -> Result<DiscoveredScan, ScanError> {
-    if !is_supported_media_path(path) {
+async fn discover_file(
+    path: &Path,
+    extension_allowlist: &[String],
+) -> Result<DiscoveredScan, ScanError> {
+    if !matches_media_extension(path, extension_allowlist) {
         return Err(bad_args(format!(
             "unsupported media extension: {}",
             path.display()
@@ -175,7 +203,10 @@ async fn discover_file(path: &Path) -> Result<DiscoveredScan, ScanError> {
     })
 }
 
-async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
+async fn discover_directory(
+    path: &Path,
+    extension_allowlist: &[String],
+) -> Result<DiscoveredScan, ScanError> {
     let root = canonicalize(path).await?;
     let mut pending = vec![root.clone()];
     let mut candidates = Vec::new();
@@ -221,7 +252,7 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
                 // candidates (ADR 0022).
                 if let Some(kind) = classify_sidecar(&entry_path) {
                     sidecars.push((canonicalize(&entry_path).await?, kind));
-                } else if is_supported_media_path(&entry_path) {
+                } else if matches_media_extension(&entry_path, extension_allowlist) {
                     candidates.push(ScanCandidate {
                         path: canonicalize(&entry_path).await?,
                         sidecars: Vec::new(),

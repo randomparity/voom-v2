@@ -215,6 +215,7 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::WorkerRetired,
         ErrorCode::WorkerIncarnationStale,
         ErrorCode::AmbiguousWorkerSelection,
+        ErrorCode::Blocked,
     ] {
         // Confirm the exhaustive match in `as_str()` produces a
         // SCREAMING_SNAKE_CASE token; format isn't load-bearing beyond
@@ -226,6 +227,15 @@ fn every_error_code_has_a_wire_string() {
             "{code:?} wire string {s:?} is not SCREAMING_SNAKE_CASE"
         );
     }
+}
+
+#[test]
+fn blocked_code_has_stable_wire_string() {
+    assert_eq!(ErrorCode::Blocked.as_str(), "BLOCKED");
+    assert_eq!(
+        ErrorCode::from_wire_str("BLOCKED"),
+        Some(ErrorCode::Blocked)
+    );
 }
 
 #[test]

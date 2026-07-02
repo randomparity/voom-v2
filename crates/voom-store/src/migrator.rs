@@ -73,10 +73,12 @@ const MIGRATION_0017_SQL: &str = include_str!("../../../migrations/0017_scan_fil
 /// compile time.
 const MIGRATION_0018_SQL: &str = include_str!("../../../migrations/0018_backups.sql");
 
+/// SQL for migration 0019 (Sprint 17 library + library-root config, T11),
+/// embedded at compile time.
+const MIGRATION_0019_SQL: &str = include_str!("../../../migrations/0019_libraries.sql");
+
 /// SQL for migration 0020 (Sprint 17 scheduling + safety policy CRUD, #281),
-/// embedded at compile time. Version 0019 is owned by a sibling branch (#280);
-/// the schema probe is count- and version-membership-based, not contiguity-based
-/// (see `schema.rs`), so a gap here is well-defined until the branches merge.
+/// embedded at compile time.
 const MIGRATION_0020_SQL: &str =
     include_str!("../../../migrations/0020_scheduling_safety_policies.sql");
 
@@ -219,6 +221,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("backups"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0018_SQL),
+            false,
+        ),
+        Migration::new(
+            19,
+            Cow::Borrowed("libraries"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0019_SQL),
             false,
         ),
         Migration::new(
