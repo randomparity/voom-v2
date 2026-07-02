@@ -145,6 +145,28 @@ async fn reference_user_sample_plans_the_full_pipeline() {
         vec![(PlanOperationKind::VerifyArtifact, NodeStatus::Planned)],
     );
 
+    // Pin the reference-user *parameters*, not just the pipeline shape — the
+    // samples are the proof the DSL targets these exact formats. This also
+    // disambiguates the two same-kind audio nodes by their payload `type`.
+    let remux = only_node(&plan, "normalize", |_| true);
+    assert_eq!(remux.operation_payload["container"], "mkv");
+
+    let video = only_node(&plan, "video", |_| true);
+    assert_eq!(video.operation_payload["target_codec"], "hevc");
+    assert_eq!(video.operation_payload["container"], "mkv");
+
+    let eac3 = only_node(&plan, "audio", |node| {
+        node.operation_payload["type"] == "transcode_audio"
+    });
+    assert_eq!(eac3.operation_payload["target_codec"], "eac3");
+    assert_eq!(eac3.operation_payload["container"], "mkv");
+
+    let downmix = only_node(&plan, "audio", |node| {
+        node.operation_payload["type"] == "synthesize_audio"
+    });
+    assert_eq!(downmix.operation_payload["target_codec"], "aac");
+    assert_eq!(downmix.operation_payload["target_channels"], 2);
+
     // An already-normalized mkv/hevc file with a 5.1 eac3 track: container,
     // video, and audio transcode are all no-ops. The stereo downmix is still
     // planned — synthesis always *adds* a companion track, so it is never a
@@ -377,6 +399,28 @@ fn phase_ops(plan: &ExecutionPlan, phase: &str) -> Vec<(PlanOperationKind, NodeS
         .collect::<Vec<_>>();
     ops.sort_by_key(|(kind, status)| (kind.as_str(), format!("{status:?}")));
     ops
+}
+
+/// Returns the single node in a phase matching `predicate`, panicking unless
+/// exactly one matches — used to pin an operation's payload parameters.
+fn only_node<'a>(
+    plan: &'a ExecutionPlan,
+    phase: &str,
+    predicate: impl Fn(&&'a voom_plan::PlanNode) -> bool,
+) -> &'a voom_plan::PlanNode {
+    let mut matches = plan
+        .nodes
+        .iter()
+        .filter(|node| node.phase_name == phase)
+        .filter(predicate);
+    let Some(node) = matches.next() else {
+        panic!("no node matched in phase {phase}");
+    };
+    assert!(
+        matches.next().is_none(),
+        "more than one node matched in phase {phase}"
+    );
+    node
 }
 
 /// Same as [`phase_ops`] but scoped to a single library target.
