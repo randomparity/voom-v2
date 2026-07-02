@@ -71,10 +71,48 @@ pub enum FfmpegError {
     FfmpegFailed(String),
     #[error("ffprobe failed: {0}")]
     FfprobeFailed(String),
+    #[error("malformed media: {0}")]
+    MalformedMedia(String),
     #[error("output facts mismatch: {0}")]
     OutputFactsMismatch(String),
     #[error("unsupported input: {0}")]
     UnsupportedInput(String),
+}
+
+/// Diagnostics that mean the *input bytes* are structurally unusable regardless
+/// of the ffmpeg build — a permanent [`FailureClass::MalformedMedia`], not a
+/// transient tool failure. Deliberately narrow (precision over recall): a missed
+/// signature degrades to the pre-existing retriable `FfmpegFailed`/`FfprobeFailed`
+/// mapping, whereas a false positive would wrongly condemn a transient failure.
+/// See `docs/adr/0024`. Kept in sync with the ffprobe worker's copy.
+fn is_malformed_media_stderr(stderr: &str) -> bool {
+    const SIGNATURES: [&str; 4] = [
+        "invalid data found when processing input",
+        "moov atom not found",
+        "error opening input",
+        "header missing",
+    ];
+    let lowered = stderr.to_ascii_lowercase();
+    SIGNATURES
+        .iter()
+        .any(|signature| lowered.contains(signature))
+}
+
+/// Classify a non-zero process exit. A structural-input-fault stderr on a real
+/// exit (not a signal kill) is a permanent [`FfmpegError::MalformedMedia`];
+/// anything else takes the caller's transient constructor
+/// (`FfmpegFailed`/`FfprobeFailed`).
+fn classify_process_failure(
+    output: &std::process::Output,
+    transient: impl Fn(String) -> FfmpegError,
+) -> FfmpegError {
+    let message = command_error(output);
+    if output.status.code().is_some()
+        && is_malformed_media_stderr(&String::from_utf8_lossy(&output.stderr))
+    {
+        return FfmpegError::MalformedMedia(message);
+    }
+    transient(message)
 }
 
 /// Facts probed from the output file after a successful transcode.
@@ -353,7 +391,10 @@ pub async fn run_ffmpeg_transcode(
     .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
     .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
     if !process_output.status.success() {
-        return Err(FfmpegError::FfmpegFailed(command_error(&process_output)));
+        return Err(classify_process_failure(
+            &process_output,
+            FfmpegError::FfmpegFailed,
+        ));
     }
 
     probe_output(config, output, container, codec, profile).await
@@ -686,7 +727,10 @@ async fn run_ffmpeg_command(
     .map_err(|_| FfmpegError::FfmpegFailed("ffmpeg timed out".to_owned()))?
     .map_err(|err| FfmpegError::FfmpegFailed(err.to_string()))?;
     if !process_output.status.success() {
-        return Err(FfmpegError::FfmpegFailed(command_error(&process_output)));
+        return Err(classify_process_failure(
+            &process_output,
+            FfmpegError::FfmpegFailed,
+        ));
     }
     Ok(())
 }
@@ -710,7 +754,10 @@ async fn probe_json(config: &FfmpegConfig, path: &Path) -> Result<Value, FfmpegE
     .map_err(|_| FfmpegError::FfprobeFailed("ffprobe timed out".to_owned()))?
     .map_err(|err| FfmpegError::FfprobeFailed(err.to_string()))?;
     if !output.status.success() {
-        return Err(FfmpegError::FfprobeFailed(command_error(&output)));
+        return Err(classify_process_failure(
+            &output,
+            FfmpegError::FfprobeFailed,
+        ));
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|err| FfmpegError::FfprobeFailed(format!("invalid ffprobe JSON: {err}")))

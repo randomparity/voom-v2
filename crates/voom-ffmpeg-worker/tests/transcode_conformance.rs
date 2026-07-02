@@ -812,9 +812,10 @@ async fn output_codec_mismatch_is_malformed_result() {
 }
 
 #[tokio::test]
-async fn provider_failure_on_corrupt_input_is_external_system_unavailable() {
-    // A truncated/garbage file that ffmpeg cannot decode → ffmpeg exits
-    // non-zero → ExternalSystemUnavailable.
+async fn provider_failure_on_corrupt_input_is_malformed_media() {
+    // A truncated/garbage file that ffmpeg cannot decode → ffmpeg/ffprobe exits
+    // non-zero with a structural-input-fault diagnostic → the permanent
+    // MalformedMedia class (#248), not the retriable ExternalSystemUnavailable.
     let preflight = preflight_from_process_env()
         .expect("preflight failed — ensure libx265 and libsvtav1 are available");
     let config = ffmpeg_config(&preflight);
@@ -844,10 +845,12 @@ async fn provider_failure_on_corrupt_input_is_external_system_unavailable() {
     assert!(
         matches!(
             err,
-            voom_ffmpeg_worker::TranscodeVideoError::ExternalSystemUnavailable { .. }
+            voom_ffmpeg_worker::TranscodeVideoError::MalformedMedia { .. }
         ),
-        "expected ExternalSystemUnavailable for corrupt input, got: {err}"
+        "expected MalformedMedia for corrupt input, got: {err}"
     );
+    assert_eq!(err.failure_class(), voom_core::FailureClass::MalformedMedia);
+    assert!(!err.failure_class().is_retriable());
 }
 
 #[tokio::test]
