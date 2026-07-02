@@ -108,15 +108,17 @@ would report a capped `bytes` value.
 recording bytes accumulated before EOF, but it is structurally always `0`: a clean
 close returns `partial_bytes: 0` (`:111`) and a partial trailing line takes the
 `MalformedFrame` branch (`:129-139`) instead, so the non-zero state is
-unreachable. Both consumers
-(`voom-control-plane/src/worker_process.rs:480`,
-`voom-control-plane/src/workflow/execution/dispatch.rs:206`) and the
-`http_test.rs:233` match already ignore it with `{ .. }`. The field and its doc
-describe an unreachable state.
+unreachable. Every consumer already ignores it with `{ .. }` — production sites in
+`voom-control-plane` (`worker_process.rs`, `workflow/execution/dispatch.rs`) plus
+match arms across the `voom-conformance` and `voom-fakes` test harnesses and
+`http_test.rs`. The field and its doc describe an unreachable state.
 
 **Target:** Make `StreamEnd` a unit variant (`NdjsonOutcome::StreamEnd`). Update
-the enum, the two return sites, the module/method docs, the sibling test, and the
-three consumer match arms (`{ .. }` / `{ partial_bytes: 0 }` → bare `StreamEnd`).
+the enum, the return site, the module/method docs, the sibling test, and every
+consumer match arm (`{ .. }` / `{ partial_bytes: 0 }` → bare `StreamEnd`). The
+compiler enumerates the arms authoritatively — a `StreamEnd { .. }` struct pattern
+against a unit variant is a compile error — so a clean workspace build is the
+completeness proof (see acceptance criteria).
 
 **Rationale / safety:** `NdjsonOutcome` derives only
 `Debug, Clone, PartialEq, Eq` — it is never serialized to the DB or the wire, so
