@@ -84,6 +84,22 @@ This wiring applies **uniformly** to aac, opus, and eac3. The value of
 is the point: it replaces reliance on ffmpeg's version-dependent audio defaults
 with a reproducible, channel-appropriate bitrate.
 
+### Channel-count ceiling for E-AC-3
+
+ffmpeg's native `eac3` encoder supports at most **5.1 (6 channels)**; it cannot
+encode a 7.1 (8-channel) source without an explicit downmix or channel remap,
+which this issue does not introduce. A `transcode audio to eac3` request against
+a source stream with more than 6 channels is therefore **out of scope** and
+fails loud at the ffmpeg boundary: `run_ffmpeg_command` surfaces the encoder's
+non-zero exit as `FfmpegError::FfmpegFailed`, which the worker returns as a
+structured error — the worker never silently downmixes or drops channels. The
+per-channel bitrate rule is deliberately not clamped for this case, because a
+larger emitted `-b:a` on a layout the encoder already rejects changes nothing
+about the (correct) loud failure. Producing a stereo/5.1 downmix from a >5.1
+source is the job of the audio-synthesis work (#276), not this target. The
+aac and opus encoders have no comparable low ceiling at V1 channel counts, so
+this constraint is eac3-specific.
+
 ### 5.1 (6-channel) preservation
 
 Channel-count preservation is a **codec-agnostic** invariant already enforced in
