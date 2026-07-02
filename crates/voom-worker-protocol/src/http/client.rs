@@ -121,11 +121,21 @@ impl ClientHandle for HttpClient {
             detail: "handshake: worker did not respond".to_owned(),
         })??;
         if status.is_success() {
-            return serde_json::from_slice::<HandshakeResponse>(&body).map_err(|e| {
+            let response = serde_json::from_slice::<HandshakeResponse>(&body).map_err(|e| {
                 ProtocolError::InvalidPayload {
                     detail: format!("decode: {e}"),
                 }
-            });
+            })?;
+            // Defense in depth: the server is the authority (ADR-0016 exact
+            // match), but a non-conforming 2xx that echoes a different version
+            // must not be silently accepted as agreement.
+            if response.agreed != offered {
+                return Err(ProtocolError::UnsupportedProtocolVersion {
+                    offered,
+                    expected: response.agreed,
+                });
+            }
+            return Ok(response);
         }
         let perr = serde_json::from_slice::<ProtocolError>(&body).unwrap_or_else(|_| {
             ProtocolError::InvalidPayload {
