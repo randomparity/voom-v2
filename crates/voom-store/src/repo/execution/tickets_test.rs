@@ -66,6 +66,55 @@ fn ticket_op(value: &str) -> TicketOperation {
 }
 
 #[tokio::test]
+async fn keyset_list_is_newest_first_and_pages_by_after_id() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteTicketRepo::new(pool.clone());
+    let first = repo.create(sample_new_ticket()).await.unwrap();
+    let second = repo.create(sample_new_ticket()).await.unwrap();
+    let third = repo.create(sample_new_ticket()).await.unwrap();
+
+    // Newest first (id DESC), ADR 0031.
+    let all = repo.list(TicketFilter::default(), None, 10).await.unwrap();
+    assert_eq!(
+        all.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![third.id, second.id, first.id]
+    );
+
+    let page2 = repo
+        .list(TicketFilter::default(), Some(second.id.0), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        page2.iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![first.id]
+    );
+
+    // State filter composes with the keyset window.
+    let pending = repo
+        .list(
+            TicketFilter {
+                state: Some(TicketState::Pending),
+            },
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 3);
+    let leased = repo
+        .list(
+            TicketFilter {
+                state: Some(TicketState::Leased),
+            },
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(leased.is_empty());
+}
+
+#[tokio::test]
 async fn create_starts_in_pending_state() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteTicketRepo::new(pool.clone());

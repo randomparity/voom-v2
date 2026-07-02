@@ -161,6 +161,8 @@ async fn event_count(pool: &SqlitePool, commit_id: CommitId, kind: EventKind) ->
                 kind: Some(kind),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,

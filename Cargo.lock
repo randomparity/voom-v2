@@ -2497,6 +2497,7 @@ dependencies = [
  "tracing-subscriber",
  "voom-control-plane",
  "voom-core",
+ "voom-events",
  "voom-plan",
  "voom-policy",
  "voom-store",

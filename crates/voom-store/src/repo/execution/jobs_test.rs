@@ -40,6 +40,54 @@ async fn get_returns_created_row() {
 }
 
 #[tokio::test]
+async fn keyset_list_is_newest_first_and_pages_by_after_id() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteJobRepo::new(pool.clone());
+    let first = repo.create(sample_new_job()).await.unwrap();
+    let second = repo.create(sample_new_job()).await.unwrap();
+    let third = repo.create(sample_new_job()).await.unwrap();
+
+    // Newest first (id DESC), ADR 0031.
+    let all = repo.list(JobFilter::default(), None, 10).await.unwrap();
+    assert_eq!(
+        all.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![third.id, second.id, first.id]
+    );
+
+    // Full page hands back a cursor; `after_id` continues past it.
+    let page1 = repo.list(JobFilter::default(), None, 2).await.unwrap();
+    assert_eq!(
+        page1.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![third.id, second.id]
+    );
+    let page2 = repo
+        .list(JobFilter::default(), Some(second.id.0), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        page2.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![first.id]
+    );
+}
+
+#[tokio::test]
+async fn keyset_list_filters_by_state() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteJobRepo::new(pool.clone());
+    let open = repo.create(sample_new_job()).await.unwrap();
+    let done = repo.create(sample_new_job()).await.unwrap();
+    repo.succeed(done.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+
+    let filter = JobFilter {
+        state: Some(JobState::Open),
+    };
+    let rows = repo.list(filter, None, 10).await.unwrap();
+    assert_eq!(rows.iter().map(|j| j.id).collect::<Vec<_>>(), vec![open.id]);
+}
+
+#[tokio::test]
 async fn list_by_state_returns_open_jobs_ordered_by_priority_desc() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteJobRepo::new(pool.clone());

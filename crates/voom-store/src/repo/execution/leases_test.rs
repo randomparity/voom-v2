@@ -76,6 +76,85 @@ async fn setup() -> (
 }
 
 #[tokio::test]
+async fn keyset_list_is_newest_first_filters_and_pages() {
+    let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
+    // `setup` seeds one ready ticket; add a second so two leases can coexist.
+    let t2 = trepo
+        .create(NewTicket {
+            job_id: None,
+            kind: ticket_op("noop"),
+            priority: 0,
+            payload: json!({}),
+            max_attempts: 3,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    trepo.mark_ready_if_unblocked(t2.id, T0).await.unwrap();
+
+    let first = lrepo
+        .acquire(NewLease {
+            ticket_id: tid,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    let second = lrepo
+        .acquire(NewLease {
+            ticket_id: t2.id,
+            worker_id: wid,
+            ttl: Duration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    // Newest first (id DESC), ADR 0031.
+    let all = lrepo.list(LeaseFilter::default(), None, 10).await.unwrap();
+    assert_eq!(
+        all.iter().map(|l| l.id).collect::<Vec<_>>(),
+        vec![second.id, first.id]
+    );
+
+    // `after_id` continues into the older lease.
+    let page = lrepo
+        .list(LeaseFilter::default(), Some(second.id.0), 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter().map(|l| l.id).collect::<Vec<_>>(),
+        vec![first.id]
+    );
+
+    // State filter: both are held, none released.
+    let held = lrepo
+        .list(
+            LeaseFilter {
+                state: Some(LeaseState::Held),
+            },
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(held.len(), 2);
+    let released = lrepo
+        .list(
+            LeaseFilter {
+                state: Some(LeaseState::Released),
+            },
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(released.is_empty());
+    drop(pool);
+}
+
+#[tokio::test]
 async fn acquire_promotes_ticket_to_leased_and_bumps_attempt() {
     let (pool, trepo, _wrepo, lrepo, tid, wid, _tmp) = setup().await;
     let lease = lrepo

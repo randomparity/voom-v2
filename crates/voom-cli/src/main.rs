@@ -5,13 +5,15 @@ use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
-    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, IssueCommand,
-    LeaseCommand, LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand,
-    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
+    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, EventCommand,
+    IssueCommand, JobCommand, LeaseCommand, LibraryCommand, NodeCommand, PlanCommand,
+    PolicyCommand, ProfileCommand, SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand,
+    TicketCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, backup, bundle, compliance, health, init, issue, lease, library, node, plan, policy,
-    profile, safety_policy, scan, scheduler, scheduling_policy, version, worker,
+    artifact, backup, bundle, compliance, event, health, init, issue, job, lease, library, node,
+    plan, policy, profile, safety_policy, scan, scheduler, scheduling_policy, ticket, version,
+    worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -178,22 +180,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
                 }
             }
         }
-        Command::Init => {
-            let cfg = match resolve_cfg(&cli) {
-                Ok(cfg) => cfg,
-                Err(err) => {
-                    voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
-                    return Ok(Exit::Failure);
-                }
-            };
-            let local = Local {
-                db_url: cfg.database_url.clone(),
-                config_path: cfg.config_path.display().to_string(),
-            };
-            Ok(Exit::from_run_code(
-                init::run(&cfg.database_url, local).await?,
-            ))
-        }
+        Command::Init => dispatch_init(&cli).await,
         Command::Plan(PlanCommand::DryRun {
             policy_file,
             input_fixture,
@@ -225,6 +212,9 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Profile(ref command) => dispatch_profile(&cli, command.clone()).await,
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
+        Command::Event(ref command) => dispatch_event(&cli, command.clone()).await,
+        Command::Job(ref command) => dispatch_job(&cli, command.clone()).await,
+        Command::Ticket(ref command) => dispatch_ticket(&cli, command.clone()).await,
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
         Command::Scan { ref path, root } => dispatch_scan(&cli, path.as_deref(), root).await,
         Command::Bundle(ref command) => dispatch_bundle(&cli, command.clone()).await,
@@ -433,6 +423,74 @@ async fn dispatch_scheduler(cli: &Cli, command: SchedulerCommand) -> Result<Exit
     };
     Ok(Exit::from_run_code(
         scheduler::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_init(cli: &Cli) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        init::run(&cfg.database_url, local).await?,
+    ))
+}
+
+async fn dispatch_event(cli: &Cli, command: EventCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("event", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        event::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_job(cli: &Cli, command: JobCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("job", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        job::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_ticket(cli: &Cli, command: TicketCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("ticket", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        ticket::run(&cfg.database_url, local, command).await?,
     ))
 }
 

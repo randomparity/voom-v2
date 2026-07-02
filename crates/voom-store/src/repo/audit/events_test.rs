@@ -90,6 +90,43 @@ async fn list_filters_by_kind() {
 }
 
 #[tokio::test]
+async fn list_filters_by_occurred_at_window() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteEventRepo::new(pool.clone());
+    // `init()` already appended a schema.initialized event at a real wall-clock
+    // time (far in the future of these 1970-epoch seeds); an `until` bound
+    // excludes it so the window is deterministic.
+    for secs in [0_i64, 10, 20] {
+        let at = OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(secs);
+        let mut env = sample_envelope();
+        env.occurred_at = at;
+        let mut tx = pool.begin().await.unwrap();
+        repo.append_in_tx(&mut tx, env).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let page = repo
+        .list(
+            EventFilter {
+                since: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(5)),
+                until: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(15)),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    // Only the epoch+10s seed falls inside [5s, 15s].
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].envelope.occurred_at,
+        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(10)
+    );
+}
+
+#[tokio::test]
 async fn tail_returns_non_null_cursor_at_end_of_stream() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteEventRepo::new(pool.clone());

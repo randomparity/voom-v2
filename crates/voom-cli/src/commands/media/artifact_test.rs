@@ -256,6 +256,7 @@ fn each_artifact_command_shape_has_exactly_one_json_envelope() {
             data: Some(ArtifactEnvelopeData {
                 artifact: ArtifactSummaryData::from(summary_fixture()),
             }),
+            next_cursor: None,
             local: None,
             warnings: Vec::new(),
             error: None,

@@ -112,10 +112,12 @@ async fn commit_rejections_and_recovery_visibility_are_inspectable() {
     let recoveries = cp
         .list_artifacts(ArtifactListInput {
             state: Some(ArtifactInspectionState::RecoveryRequired),
+            after_id: None,
             limit: 10,
         })
         .await
-        .unwrap();
+        .unwrap()
+        .artifacts;
     assert_eq!(recoveries.len(), 1);
     assert_eq!(
         recoveries[0].artifact_handle_id,
