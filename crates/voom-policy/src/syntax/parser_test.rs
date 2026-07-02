@@ -130,3 +130,52 @@ fn rejects_blocks_nested_past_depth_limit() {
         DiagnosticCode::NestingDepthExceeded.as_str()
     );
 }
+
+/// Wrap a scalar in `levels` nested list literals (`[[…1…]]`) as a metadata
+/// value. The expression grammar recurses independently of block statements,
+/// so each `[` is one `parse_list` nesting step.
+fn nested_list_policy(levels: usize) -> String {
+    let mut value = "1".to_owned();
+    for _ in 0..levels {
+        value = format!("[{value}]");
+    }
+    format!("policy \"p\" {{ metadata {{ deep: {value} }} }}")
+}
+
+#[test]
+fn accepts_lists_nested_up_to_depth_limit() {
+    // Legitimate list nesting well under the ceiling must still parse.
+    let src = nested_list_policy(50);
+    assert!(
+        parse_policy_source(&src).is_ok(),
+        "50-level list nesting should parse"
+    );
+}
+
+#[test]
+fn rejects_lists_nested_past_depth_limit() {
+    // Past the 64 ceiling but shallow enough that the pre-fix (unguarded)
+    // expression parser recurses without overflowing — so before the fix this
+    // returns Ok and the assertion fails cleanly instead of aborting the binary.
+    let src = nested_list_policy(100);
+    let err = parse_policy_source(&src).unwrap_err();
+    assert_eq!(
+        err.diagnostics[0].code,
+        DiagnosticCode::NestingDepthExceeded.as_str()
+    );
+}
+
+#[test]
+fn accepts_wide_shallow_list_without_tripping_depth_guard() {
+    // A single list with far more than MAX_NESTING_DEPTH sibling elements is
+    // shallow, not deep: sibling recursion must not accumulate depth.
+    let elements = (0..200)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = format!("policy \"p\" {{ metadata {{ wide: [{elements}] }} }}");
+    assert!(
+        parse_policy_source(&src).is_ok(),
+        "200 sibling list elements should parse"
+    );
+}
