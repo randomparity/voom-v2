@@ -3,6 +3,7 @@
 pub mod audit;
 pub(crate) mod common;
 pub mod execution;
+pub mod external;
 pub mod library;
 pub mod media;
 pub mod policy;
@@ -11,6 +12,14 @@ pub use audit::{events, schema_meta};
 pub use execution::{
     jobs, leases, nodes, remote_idempotency, scheduler_decisions, scheduler_node_limits, tickets,
     workers, workflow_summaries,
+};
+pub use external::SqliteExternalSystemRepo;
+pub use external::links::{ExternalLinkTargetType, ExternalSystemLink, NewExternalLink};
+pub use external::path_mappings::{
+    ExternalPathMapping, NewExternalPathMapping, PathMappingUpdate, PathVisibility,
+};
+pub use external::systems::{
+    ExternalSystem, ExternalSystemHealth, ExternalSystemKind, NewExternalSystem,
 };
 pub use media::{
     artifact_access_plans, artifacts, backups, bundles, commit_safety_gate, identity, scan_facts,
