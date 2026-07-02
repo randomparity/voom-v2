@@ -10,7 +10,7 @@ use voom_policy::{
 
 use crate::{
     DependencyKind, NodeStatus, PlanGenerationError, PlanOperationKind, PlanningContext,
-    PlanningDiagnosticCode, PlanningRequest, generate_plan, plan_phase,
+    PlanningDiagnosticCode, PlanningDiagnosticSeverity, PlanningRequest, generate_plan, plan_phase,
 };
 
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
@@ -193,6 +193,19 @@ fn snapshot_mkv_with_audio_languages_and_defaults(
     snapshot
 }
 
+fn snapshot_mkv_with_untagged_audio() -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mkv"), None, Some(1));
+    snapshot.stream_summary = serde_json::json!({
+        "video_stream_count": 1,
+        "streams": [
+            {"id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"},
+            {"id": "stream-1", "index": 1, "kind": "audio", "codec_name": "aac"},
+            {"id": "stream-2", "index": 2, "kind": "audio", "codec_name": "aac", "language": "eng"}
+        ]
+    });
+    snapshot
+}
+
 fn snapshot_mp4_with_audio_only_stream_facts() -> MediaSnapshotInput {
     let mut snapshot = snapshot_with(Some("mp4"), None, Some(0));
     snapshot.stream_summary = serde_json::json!({
@@ -315,6 +328,66 @@ fn groups_container_and_track_operations_into_one_remux_node() {
                 "strategy": "first"
             }
         ])
+    );
+}
+
+#[test]
+fn transcode_audio_untagged_language_emits_per_file_warning() {
+    // A language filter over a file with an untagged audio track must surface a
+    // per-file warning that the untagged track was defaulted to `und` (ADR 0021),
+    // without blocking the node.
+    let plan = generate_plan(request_with_transcode_audio(
+        snapshot_mkv_with_untagged_audio(),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    let warnings = plan
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code == PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(warnings.len(), 1, "{:?}", plan.diagnostics);
+    assert_eq!(warnings[0].severity, PlanningDiagnosticSeverity::Warning);
+}
+
+#[test]
+fn remux_keep_untagged_language_emits_per_file_warning() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
+        target: TrackTarget::Audio,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_untagged_audio())).unwrap();
+
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code
+                == PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted),
+        "{:?}",
+        plan.diagnostics
+    );
+}
+
+#[test]
+fn language_filter_over_fully_tagged_audio_emits_no_untagged_warning() {
+    let plan = generate_plan(request_with_transcode_audio(
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert!(
+        plan.diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code
+                != PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted),
+        "{:?}",
+        plan.diagnostics
     );
 }
 

@@ -63,7 +63,8 @@ pub(super) fn plan_transcode(
         status_reason,
         capability,
     );
-    with_optional_diagnostic(plan, diagnostic, phase_name, snapshot, operation_kind)
+    let plan = with_optional_diagnostic(plan, diagnostic, phase_name, snapshot, operation_kind);
+    with_untagged_language_warning(plan, phase_name, snapshot, filter, operation_kind)
 }
 
 pub(super) fn plan_extract(
@@ -111,7 +112,60 @@ pub(super) fn plan_extract(
         status_reason,
         capability,
     );
-    with_optional_diagnostic(plan, diagnostic, phase_name, snapshot, operation_kind)
+    let plan = with_optional_diagnostic(plan, diagnostic, phase_name, snapshot, operation_kind);
+    with_untagged_language_warning(plan, phase_name, snapshot, filter, operation_kind)
+}
+
+/// Attach a per-file `Warning` when a language filter is evaluated against a file
+/// that has an untagged audio track (defaulted to `und`, ADR 0021). Skipped on
+/// blocked nodes and when the filter never references a language selector.
+fn with_untagged_language_warning(
+    plan: OperationPlan,
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    filter: Option<&TrackFilter>,
+    operation_kind: PlanOperationKind,
+) -> OperationPlan {
+    if plan.status == NodeStatus::Blocked {
+        return plan;
+    }
+    let Some(filter) = filter else {
+        return plan;
+    };
+    if !filter_references_language(filter) || !audio_has_untagged_language(snapshot) {
+        return plan;
+    }
+    plan.with_diagnostic(
+        PlanningDiagnostic::warning(
+            PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted,
+            "an untagged audio track was matched as language und by this filter",
+        )
+        .with_phase(phase_name)
+        .with_operation_kind(operation_kind.as_str())
+        .with_target(snapshot.target.clone()),
+    )
+}
+
+fn audio_has_untagged_language(snapshot: &MediaSnapshotInput) -> bool {
+    stream_facts(snapshot).is_ok_and(|facts| facts.iter().any(|stream| stream.language.is_none()))
+}
+
+fn filter_references_language(filter: &TrackFilter) -> bool {
+    match filter {
+        TrackFilter::LanguageIn { .. } => true,
+        TrackFilter::Not { inner } => filter_references_language(inner),
+        TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+            filters.iter().any(filter_references_language)
+        }
+        TrackFilter::CodecIn { .. }
+        | TrackFilter::Channels { .. }
+        | TrackFilter::Commentary
+        | TrackFilter::Forced
+        | TrackFilter::Default
+        | TrackFilter::Font
+        | TrackFilter::TitleContains { .. }
+        | TrackFilter::TitleMatches { .. } => false,
+    }
 }
 
 fn with_optional_diagnostic(
