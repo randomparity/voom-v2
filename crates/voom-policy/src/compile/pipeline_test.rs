@@ -557,3 +557,42 @@ fn conformance_working_v1_productions_compile_clean() {
         assert_compiles_clean(body);
     }
 }
+
+// ---- Issue #292: spec/impl divergence — `order tracks` target list and
+// optional `where` on keep/remove --------------------------------------------
+//
+// The V1 grammar (docs/specs/voom-control-plane-design.md lines 646-648) was
+// corrected to match the validator, which is the intended contract:
+//
+//   keep audio|subtitle|attachment [where <track-filter>]
+//   remove audio|subtitle|attachment [where <track-filter>]
+//   order tracks [<track-target>, ...]
+//
+// These cases pin the aligned spec + impl so grammar drift in either direction
+// fails a test.
+
+#[test]
+fn conformance_order_tracks_requires_target_list() {
+    // The base group form is `order tracks [<track-target>, ...]`; a bare
+    // `order tracks` with no target list (and no `where` filter) is rejected.
+    assert!(
+        compile_error_codes("policy \"p\" { phase a { order tracks } }")
+            .contains(&"invalid_track_target".to_owned())
+    );
+}
+
+#[test]
+fn conformance_order_tracks_with_target_list_compiles_clean() {
+    assert_compiles_clean("order tracks [video, audio]");
+}
+
+#[test]
+fn conformance_keep_without_where_compiles_clean() {
+    // `where` is optional: an omitted filter selects all tracks of the kind.
+    assert_compiles_clean("keep audio");
+}
+
+#[test]
+fn conformance_remove_without_where_compiles_clean() {
+    assert_compiles_clean("remove subtitle");
+}

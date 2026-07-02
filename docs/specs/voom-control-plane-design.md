@@ -643,9 +643,9 @@ The V1 media operations are:
 container mkv
 transcode video to hevc [using profile <quoted-name>]
 transcode audio to aac|opus|eac3 [where <track-filter>]
-keep audio|subtitle|attachment where <track-filter>
-remove audio|subtitle|attachment where <track-filter>
-order tracks
+keep audio|subtitle|attachment [where <track-filter>]
+remove audio|subtitle|attachment [where <track-filter>]
+order tracks [<track-target>, ...]
 defaults audio|subtitle first|best|none|preserve
 extract audio [where <track-filter>]
 verify artifact
