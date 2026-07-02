@@ -52,6 +52,18 @@ async fn create_rejects_non_object_definition() {
 }
 
 #[tokio::test]
+async fn create_rejects_empty_name() {
+    let (repo, _pool, _tmp) = repo().await;
+    let bad = NewQualityScoringProfile {
+        name: "  ".to_owned(),
+        version: 1,
+        definition: json!({}),
+    };
+    let err = repo.create(bad, now()).await.unwrap_err();
+    assert_eq!(err.code(), "CONFIG_INVALID");
+}
+
+#[tokio::test]
 async fn create_rejects_duplicate_name_as_conflict() {
     let (repo, _pool, _tmp) = repo().await;
     repo.create(sample("dup"), now()).await.unwrap();

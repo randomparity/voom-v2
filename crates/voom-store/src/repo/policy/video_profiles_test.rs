@@ -78,6 +78,15 @@ async fn create_rejects_field_outside_encoder_vocabulary() {
 }
 
 #[tokio::test]
+async fn create_rejects_empty_name() {
+    let (repo, _pool, _tmp) = repo().await;
+    let mut bad = sample_new("placeholder");
+    bad.name = "  ".to_owned();
+    let err = repo.create(bad).await.unwrap_err();
+    assert_eq!(err.code(), "CONFIG_INVALID");
+}
+
+#[tokio::test]
 async fn create_rejects_duplicate_name_as_conflict() {
     let (repo, _pool, _tmp) = repo().await;
     repo.create(sample_new("dup")).await.unwrap();

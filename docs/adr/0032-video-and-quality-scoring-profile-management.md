@@ -101,6 +101,10 @@ set-default-scoring-profile` variant (`--scoring-profile <name>` / `--clear`).
   intentionally unconstrained until one does.
 - `retired_at` on `video_profiles` is additive; no existing query changes
   behavior (seeded rows have `NULL`). Migration 0021 is two `ALTER`s, no table.
+- Setting a library default refuses a retired profile, but retiring a profile a
+  library already points at leaves that link intact. This is deliberate under
+  soft-retire — the link still resolves (the row is not deleted) — and a future
+  daemon reading a retired default can surface it rather than crash.
 
 ## Alternatives considered
 

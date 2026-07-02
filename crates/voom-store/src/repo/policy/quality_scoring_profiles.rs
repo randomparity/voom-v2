@@ -56,16 +56,22 @@ impl Repository for SqliteQualityScoringProfileRepo {}
 
 const COLS: &str = "id, name, version, definition, created_at, retired_at";
 
-/// Reject a `definition` that is not a JSON object. The `definition` is a
-/// passthrough blob with no typed schema yet, but an object is the only shape
-/// dimension weights can take, so a scalar or array is a caller mistake.
-fn validate_definition(definition: &Value) -> Result<(), VoomError> {
-    if definition.is_object() {
-        return Ok(());
+/// Reject an empty name and a `definition` that is not a JSON object. The 0004
+/// table has no non-empty-name CHECK, and the `definition` is a passthrough blob
+/// with no typed schema yet, but an object is the only shape dimension weights
+/// can take, so a scalar or array is a caller mistake.
+fn validate_input(input: &NewQualityScoringProfile) -> Result<(), VoomError> {
+    if input.name.trim().is_empty() {
+        return Err(VoomError::Config(
+            "quality scoring profile name must not be empty".to_owned(),
+        ));
     }
-    Err(VoomError::Config(
-        "quality scoring profile definition must be a JSON object".to_owned(),
-    ))
+    if !input.definition.is_object() {
+        return Err(VoomError::Config(
+            "quality scoring profile definition must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 impl SqliteQualityScoringProfileRepo {
@@ -76,7 +82,7 @@ impl SqliteQualityScoringProfileRepo {
         input: NewQualityScoringProfile,
         now: OffsetDateTime,
     ) -> Result<QualityScoringProfile, VoomError> {
-        validate_definition(&input.definition)?;
+        validate_input(&input)?;
         let definition = serialize_json(&input.definition, "quality_scoring_profiles.definition")?;
         let ts = iso8601(now)?;
         let res = sqlx::query(
@@ -145,7 +151,7 @@ impl SqliteQualityScoringProfileRepo {
         &self,
         input: NewQualityScoringProfile,
     ) -> Result<Option<QualityScoringProfile>, VoomError> {
-        validate_definition(&input.definition)?;
+        validate_input(&input)?;
         let definition = serialize_json(&input.definition, "quality_scoring_profiles.definition")?;
         let affected = sqlx::query(
             "UPDATE quality_scoring_profiles SET version = ?, definition = ? WHERE name = ?",

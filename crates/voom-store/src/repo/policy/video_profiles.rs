@@ -55,6 +55,11 @@ impl NewVideoProfile {
     /// [`VoomError::Config`] when the encoder is unknown, a field falls outside
     /// the encoder's vocabulary/range, or the container/dimensions are invalid.
     fn validate(&self) -> Result<&'static str, VoomError> {
+        if self.name.trim().is_empty() {
+            return Err(VoomError::Config(
+                "video profile name must not be empty".to_owned(),
+            ));
+        }
         let descriptor = encoder_descriptor(&self.encoder)
             .ok_or_else(|| VoomError::Config(format!("unknown encoder `{}`", self.encoder)))?;
         let target_codec = descriptor.target_codec;
