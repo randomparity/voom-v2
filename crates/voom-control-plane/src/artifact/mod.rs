@@ -18,8 +18,8 @@ pub use commit::{
     CommitArtifactReport, CommitRecoveryReport,
 };
 pub use inspect::{
-    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary, CommitSummary,
-    PathFacts, PathObservation, RecoverySummary, VerificationSummary,
+    ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactListPage, ArtifactSummary,
+    CommitSummary, PathFacts, PathObservation, RecoverySummary, VerificationSummary,
 };
 pub use stage::{StageCopyCommandError, StageCopyInput, StageCopyReport};
 pub use verify::{VerifyArtifactInput, VerifyArtifactReport};

@@ -159,6 +159,8 @@ async fn abort_authorized_row_rejects_with_conflict_encoding_recovery_contract()
                 kind: Some(EventKind::CommitAbortedPreMutation),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,
@@ -231,6 +233,8 @@ async fn abort_pending_succeeds_end_to_end_with_event_payload() {
                 kind: Some(EventKind::CommitAbortedPreMutation),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,

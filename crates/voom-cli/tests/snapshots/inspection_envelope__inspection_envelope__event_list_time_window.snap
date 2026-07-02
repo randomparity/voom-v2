@@ -1,0 +1,31 @@
+---
+source: crates/voom-cli/tests/inspection_envelope.rs
+expression: windowed
+---
+{
+  "schema_version": "0",
+  "command": "event",
+  "status": "ok",
+  "data": {
+    "events": [
+      {
+        "id": 4,
+        "occurred_at": "1970-01-01 0:00:20.0 +00:00:00",
+        "kind": "schema.initialized",
+        "subject_type": "system",
+        "subject_id": null,
+        "trace_id": null,
+        "payload": {
+          "migrations_applied": 1,
+          "schema_init_at": "+001970-01-01T00:00:20.000000000Z"
+        }
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

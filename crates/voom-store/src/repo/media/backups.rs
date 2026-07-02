@@ -249,10 +249,24 @@ impl SqliteBackupRepo {
         row.as_ref().map(row_to_backup).transpose()
     }
 
-    pub async fn list(&self, limit: u32) -> Result<Vec<Backup>, VoomError> {
+    /// Keyset-paginated inspection read for `voom backup list` (ADR 0031),
+    /// optionally filtered by status. Orders strictly by `id` descending
+    /// (newest first); `after_id` is an exclusive continuation token returning
+    /// rows with `id < after_id`.
+    pub async fn list(
+        &self,
+        status: Option<BackupStatus>,
+        after_id: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<Backup>, VoomError> {
         let rows = sqlx::query(&format!(
-            "SELECT {BACKUP_COLS} FROM backups ORDER BY created_at ASC, id ASC LIMIT ?"
+            "SELECT {BACKUP_COLS} FROM backups \
+             WHERE (?1 IS NULL OR status = ?1) \
+               AND (?2 IS NULL OR id < ?2) \
+             ORDER BY id DESC LIMIT ?3"
         ))
+        .bind(status.map(BackupStatus::as_str))
+        .bind(after_id.map(i64_from_u64))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await

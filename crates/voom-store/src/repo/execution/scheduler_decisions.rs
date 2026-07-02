@@ -207,6 +207,8 @@ pub struct SchedulerDecisionFilter {
     pub worker_id: Option<WorkerId>,
     pub node_id: Option<NodeId>,
     pub outcome: Option<SchedulerDecisionOutcome>,
+    /// Keyset continuation token (ADR 0031): return rows with `id < after_id`.
+    pub after_id: Option<u64>,
     pub limit: u32,
 }
 
@@ -217,6 +219,7 @@ impl Default for SchedulerDecisionFilter {
             worker_id: None,
             node_id: None,
             outcome: None,
+            after_id: None,
             limit: 100,
         }
     }
@@ -384,15 +387,19 @@ impl SqliteSchedulerDecisionRepo {
         let worker_id = filter.worker_id.map(|id| i64_from_u64(id.0));
         let node_id = filter.node_id.map(|id| i64_from_u64(id.0));
         let outcome = filter.outcome.map(SchedulerDecisionOutcome::as_str);
+        let after_id = filter.after_id.map(i64_from_u64);
         let limit = if filter.limit == 0 { 100 } else { filter.limit };
 
+        // Keyset order is strictly by `id` descending (ADR 0031): unique and
+        // monotonic with insert order, so paging is total and cursorable.
         let rows = sqlx::query(&format!(
             "SELECT {DECISION_COLS} FROM scheduler_decisions \
              WHERE (? IS NULL OR ticket_id = ?) \
                AND (? IS NULL OR request_worker_id = ? OR selected_worker_id = ?) \
                AND (? IS NULL OR request_node_id = ? OR selected_node_id = ?) \
                AND (? IS NULL OR outcome = ?) \
-             ORDER BY created_at DESC, id DESC \
+               AND (? IS NULL OR id < ?) \
+             ORDER BY id DESC \
              LIMIT ?"
         ))
         .bind(ticket_id)
@@ -405,6 +412,8 @@ impl SqliteSchedulerDecisionRepo {
         .bind(node_id)
         .bind(outcome)
         .bind(outcome)
+        .bind(after_id)
+        .bind(after_id)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await

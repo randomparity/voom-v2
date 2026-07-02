@@ -73,6 +73,8 @@ async fn events_for(
                 kind: None,
                 subject_type: Some(subject_type),
                 subject_id: Some(subject_id),
+                since: None,
+                until: None,
             },
             Page {
                 limit,
@@ -339,6 +341,8 @@ async fn reanchor_on_move_drains_past_batch_limit() {
                 kind: Some(EventKind::UseLeaseReanchoredByMove),
                 subject_type: None,
                 subject_id: None,
+                since: None,
+                until: None,
             },
             Page {
                 limit: u32::try_from(target).unwrap() + 16,

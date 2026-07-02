@@ -9,23 +9,6 @@ expression: json
   "data": {
     "backups": [
       {
-        "id": 1,
-        "source_file_version_id": 1,
-        "job_id": 1,
-        "ticket_id": 1,
-        "provider": "voom-backup-worker",
-        "destination_path": "/backups/v1/movie.mkv",
-        "size_bytes": 3,
-        "checksum": "blake3:source",
-        "status": "verified",
-        "failure_class": null,
-        "error_code": null,
-        "message": null,
-        "started_at": "1970-01-01T00:00:00.000000000Z",
-        "finished_at": "1970-01-01T00:00:00.000000000Z",
-        "created_at": "1970-01-01T00:00:00.000000000Z"
-      },
-      {
         "id": 2,
         "source_file_version_id": 1,
         "job_id": 1,
@@ -38,6 +21,23 @@ expression: json
         "failure_class": "BackupFailure",
         "error_code": "BACKUP_FAILURE",
         "message": "destination unwritable",
+        "started_at": "1970-01-01T00:00:00.000000000Z",
+        "finished_at": "1970-01-01T00:00:00.000000000Z",
+        "created_at": "1970-01-01T00:00:00.000000000Z"
+      },
+      {
+        "id": 1,
+        "source_file_version_id": 1,
+        "job_id": 1,
+        "ticket_id": 1,
+        "provider": "voom-backup-worker",
+        "destination_path": "/backups/v1/movie.mkv",
+        "size_bytes": 3,
+        "checksum": "blake3:source",
+        "status": "verified",
+        "failure_class": null,
+        "error_code": null,
+        "message": null,
         "started_at": "1970-01-01T00:00:00.000000000Z",
         "finished_at": "1970-01-01T00:00:00.000000000Z",
         "created_at": "1970-01-01T00:00:00.000000000Z"

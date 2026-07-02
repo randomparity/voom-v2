@@ -182,6 +182,34 @@ async fn suppression_key_keeps_selected_rows_separate_from_idle_rows() {
 }
 
 #[tokio::test]
+async fn list_is_newest_first_and_pages_by_after_id() {
+    let (repo, _tmp) = repo().await;
+    let first = repo.create(selected_input()).await.unwrap();
+    let second = repo.create(selected_input()).await.unwrap();
+    let third = repo.create(selected_input()).await.unwrap();
+
+    // Keyset order is id DESC (ADR 0031).
+    let all = repo.list(SchedulerDecisionFilter::default()).await.unwrap();
+    assert_eq!(
+        all.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![third.id, second.id, first.id]
+    );
+
+    let page = repo
+        .list(SchedulerDecisionFilter {
+            after_id: Some(second.id),
+            limit: 10,
+            ..SchedulerDecisionFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![first.id]
+    );
+}
+
+#[tokio::test]
 async fn list_filters_by_request_worker_and_outcome() {
     let (repo, _tmp) = repo().await;
 

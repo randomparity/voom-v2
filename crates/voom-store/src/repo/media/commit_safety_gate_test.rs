@@ -2281,6 +2281,8 @@ async fn first_post_mutation_added_location_count(pool: &SqlitePool, commit_id: 
                 kind: Some(EventKind::CommitAbortedPostMutation),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,
@@ -2685,6 +2687,8 @@ async fn first_aborted_pre_mutation_payload(
                 kind: Some(EventKind::CommitAbortedPreMutation),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,

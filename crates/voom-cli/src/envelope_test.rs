@@ -13,6 +13,7 @@ fn ok_envelope_includes_status_ok() {
         command: "test",
         status: Status::Ok,
         data: Some(Hello { msg: "hi" }),
+        next_cursor: None,
         local: None,
         warnings: Vec::new(),
         error: None,
@@ -21,6 +22,23 @@ fn ok_envelope_includes_status_ok() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["data"]["msg"], "hi");
     assert!(json.get("local").is_none());
+    assert!(json.get("next_cursor").is_none());
+}
+
+#[test]
+fn next_cursor_serializes_when_present() {
+    let env = Envelope {
+        schema_version: SCHEMA_VERSION,
+        command: "event",
+        status: Status::Ok,
+        data: Some(Hello { msg: "hi" }),
+        next_cursor: Some(42),
+        local: None,
+        warnings: Vec::new(),
+        error: None,
+    };
+    let json = serde_json::to_value(&env).unwrap();
+    assert_eq!(json["next_cursor"], 42);
 }
 
 #[test]
@@ -30,6 +48,7 @@ fn local_block_serializes_when_present() {
         command: "test",
         status: Status::Ok,
         data: None,
+        next_cursor: None,
         local: Some(Local {
             db_url: "sqlite::memory:".into(),
             config_path: "/etc/voom".into(),
@@ -48,6 +67,7 @@ fn error_envelope_omits_data() {
         command: "test",
         status: Status::Error,
         data: None,
+        next_cursor: None,
         local: None,
         warnings: Vec::new(),
         error: Some(ErrorBody {
@@ -73,6 +93,7 @@ fn error_envelope_can_include_partial_data() {
             "issues": {"created_count": 1},
             "execution_diagnostic": {"code": "unsupported_execution_operation"}
         })),
+        next_cursor: None,
         local: None,
         warnings: Vec::new(),
         error: Some(ErrorBody {

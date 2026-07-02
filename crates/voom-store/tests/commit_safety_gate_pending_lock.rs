@@ -407,6 +407,8 @@ async fn pending_commit_event_count(pool: &SqlitePool, commit_id: voom_core::Com
                 kind: Some(EventKind::CommitAbortedByPendingCommit),
                 subject_type: Some(voom_events::SubjectType::CommitIntent),
                 subject_id: Some(commit_id.0),
+                since: None,
+                until: None,
             },
             Page {
                 limit: 20,

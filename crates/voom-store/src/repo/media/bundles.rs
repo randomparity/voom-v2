@@ -154,14 +154,22 @@ impl SqliteBundleRepo {
     /// List bundles in ascending id order with their member counts, bounded by
     /// `limit`. The count is computed in the same query (`LEFT JOIN ... GROUP
     /// BY`) so the list view is a single round trip regardless of bundle count.
-    pub async fn list_all(&self, limit: u32) -> Result<Vec<(AssetBundle, u64)>, VoomError> {
+    pub async fn list_all(
+        &self,
+        after_id: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<(AssetBundle, u64)>, VoomError> {
+        // Keyset order is newest first (id DESC); `after_id` continues with
+        // `id < after_id` (ADR 0031).
         let rows = sqlx::query(
             "SELECT b.id, b.media_variant_id, b.display_name, b.created_at, b.epoch, \
                     COUNT(m.id) AS member_count \
              FROM asset_bundles b \
              LEFT JOIN asset_bundle_members m ON m.bundle_id = b.id \
-             GROUP BY b.id ORDER BY b.id ASC LIMIT ?",
+             WHERE (?1 IS NULL OR b.id < ?1) \
+             GROUP BY b.id ORDER BY b.id DESC LIMIT ?2",
         )
+        .bind(after_id.map(i64_from_u64))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await

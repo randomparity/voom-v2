@@ -44,9 +44,10 @@ pub use issues::{
     PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueRow,
     PolicyIssueStatus, SqliteIssueRepo, TerminalFailureIssueDraft,
 };
-pub use jobs::{Job, JobState, NewJob, SqliteJobRepo};
+pub use jobs::{Job, JobFilter, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
-    ExpireReport, ForceReleaseOutcome, Lease, LeaseState, NewLease, ReleaseReason, SqliteLeaseRepo,
+    ExpireReport, ForceReleaseOutcome, Lease, LeaseFilter, LeaseState, NewLease, ReleaseReason,
+    SqliteLeaseRepo,
 };
 pub use library::libraries::{Library, LibraryMediaKind, LibraryUpdate, NewLibrary};
 pub use library::library_roots::{
@@ -82,7 +83,7 @@ pub use scheduling_policies::{
     SqliteSchedulingPolicyRepo,
 };
 pub use schema_meta::SqliteSchemaMetaRepo;
-pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
+pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketFilter, TicketState};
 pub use use_leases::{
     BlockingMode, ExpireReport as UseLeaseExpireReport, IssuerKind, LeaseScope, NewUseLease,
     ReanchorReport, SqliteUseLeaseRepo, UseLease, UseLeaseKind, UseLeaseReleaseReason,

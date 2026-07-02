@@ -180,7 +180,7 @@ async fn success_writes_a_verified_backup_record() {
     .unwrap();
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let rows = f.cp.backups.list(100).await.unwrap();
+    let rows = f.cp.backups.list(None, None, 100).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].status,
@@ -216,7 +216,7 @@ async fn dispatcher_failure_aborts_with_backup_failure_and_failed_record() {
     .unwrap_err();
 
     assert!(matches!(err, VoomError::BackupFailure(_)));
-    let rows = f.cp.backups.list(100).await.unwrap();
+    let rows = f.cp.backups.list(None, None, 100).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].status,
@@ -277,7 +277,7 @@ async fn verified_backup_short_circuits_on_retry() {
     .unwrap();
 
     assert_eq!(retry_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(f.cp.backups.list(100).await.unwrap().len(), 1);
+    assert_eq!(f.cp.backups.list(None, None, 100).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
