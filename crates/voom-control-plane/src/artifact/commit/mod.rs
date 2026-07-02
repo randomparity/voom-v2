@@ -291,6 +291,9 @@ pub(super) struct PreparedCommit {
     temp_path: PathBuf,
     expected_facts: ArtifactFileFacts,
     promotion_started_at: time::OffsetDateTime,
+    /// Use-lease ids the commit safety gate evaluated at prepare time (none
+    /// blocked). Recorded on the `ArtifactCommitCompleted` event for audit.
+    gate_evaluated_lease_ids: Vec<voom_core::UseLeaseId>,
 }
 
 #[derive(Debug)]
