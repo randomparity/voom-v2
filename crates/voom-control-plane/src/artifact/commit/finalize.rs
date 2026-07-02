@@ -77,6 +77,11 @@ pub(super) async fn finalize_commit(
             result_file_version_id: result_version.id.0,
             result_file_location_id: result_location.id.0,
             target_path: prepared.target_path.display().to_string(),
+            gate_evaluated_lease_ids: prepared
+                .gate_evaluated_lease_ids
+                .iter()
+                .map(|id| id.0)
+                .collect(),
         }),
     )
     .await?;

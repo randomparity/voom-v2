@@ -333,6 +333,7 @@ fn event_kind_matches_serde_tag() {
             result_file_version_id: 2,
             result_file_location_id: 2,
             target_path: "/target".to_owned(),
+            gate_evaluated_lease_ids: Vec::new(),
         }),
         Event::ArtifactCommitFailedPreMutation(ArtifactCommitFailedPreMutationPayload {
             artifact_handle_id: 1,
