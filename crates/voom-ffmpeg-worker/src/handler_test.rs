@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
-    AudioExpectedFacts, AudioStreamRef, ExtractAudioInput, ExtractAudioOutput, ExtractAudioRequest,
-    OperationDispatch, OperationFuture, OperationKind, OperationRequest, ProgressFrame,
-    ProtocolError, TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest,
-    TranscodeAudioSelection, TranscodeAudioSettings, TranscodeVideoExpectedFacts,
-    TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile, TranscodeVideoRequest,
+    AUDIO_PROFILE_DEFAULT, AudioExpectedFacts, AudioStreamRef, ExtractAudioInput,
+    ExtractAudioOutput, ExtractAudioRequest, OperationDispatch, OperationFuture, OperationKind,
+    OperationRequest, ProgressFrame, ProtocolError, TranscodeAudioInput, TranscodeAudioOutput,
+    TranscodeAudioRequest, TranscodeAudioSelection, TranscodeAudioSettings,
+    TranscodeVideoExpectedFacts, TranscodeVideoInput, TranscodeVideoOutput, TranscodeVideoProfile,
+    TranscodeVideoRequest,
 };
 
 use crate::DEFAULT_PROCESS_TIMEOUT;
@@ -260,6 +261,53 @@ async fn transcode_audio_existing_output_path_is_config_invalid() {
     tokio::fs::write(&request.output.path, b"exists")
         .await
         .unwrap();
+
+    let err = handle_transcode_audio(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+#[tokio::test]
+async fn transcode_audio_accepts_eac3_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "eac3");
+
+    let result = handle_transcode_audio(
+        &request,
+        &audio_config(dir.path(), "matroska", "eac3", "stream-1", "eng", "Main", 1),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.output_audio_codecs, vec!["eac3".to_owned()]);
+}
+
+#[tokio::test]
+async fn transcode_audio_rejects_unsupported_codec_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let request = transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "flac");
+
+    let err = handle_transcode_audio(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+#[tokio::test]
+async fn transcode_audio_rejects_unknown_profile_before_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request =
+        transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "eac3");
+    request.audio.profile = "premium".to_owned();
 
     let err = handle_transcode_audio(&request, &config(dir.path()))
         .await
@@ -685,7 +733,7 @@ fn transcode_audio_request(
         },
         audio: TranscodeAudioSettings {
             target_codec: target_codec.to_owned(),
-            profile: format!("default-{target_codec}"),
+            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
         },
     }
 }

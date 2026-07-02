@@ -638,10 +638,24 @@ fn validate_transcode_audio_contract(
             "transcode_audio output must request mkv".to_owned(),
         ));
     }
-    if !matches!(request.audio.target_codec.as_str(), "aac" | "opus") {
+    if !voom_worker_protocol::is_supported_transcode_audio_codec(&request.audio.target_codec) {
         return Err(config_invalid(
             "request",
-            "transcode_audio target codec must be aac or opus".to_owned(),
+            "transcode_audio target codec must be aac, opus, or eac3".to_owned(),
+        ));
+    }
+    if voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+        &request.audio.target_codec,
+        &request.audio.profile,
+    )
+    .is_none()
+    {
+        return Err(config_invalid(
+            "request",
+            format!(
+                "transcode_audio profile `{}` is not defined for codec `{}`",
+                request.audio.profile, request.audio.target_codec
+            ),
         ));
     }
     if request.selection.selected_streams.is_empty() {
