@@ -362,6 +362,59 @@ fn verify_probe_facts_rejects_pre_probe_hash_mismatch() {
 }
 
 #[tokio::test]
+async fn hardlink_with_its_own_sidecars_attaches_them_to_the_bundle() {
+    use crate::scan::discovery::{SidecarCandidate, SidecarKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar_path = {
+        let path = dir.path().join("b.srt");
+        std::fs::write(&path, b"subtitle").unwrap();
+        std::fs::canonicalize(path).unwrap()
+    };
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    // First path ingests the physical file with no sidecars.
+    let first = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+    persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/a.mkv"),
+        &[],
+        &first,
+        &matching_probe_result(&first),
+    )
+    .await
+    .unwrap();
+
+    // The hardlink at a different path carries its own sidecar. It must not be
+    // dropped: the hardlink resolves to the existing asset AND its sidecar is
+    // attached to that asset's bundle.
+    let second = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+    let sidecars = vec![SidecarCandidate {
+        path: sidecar_path,
+        kind: SidecarKind::Subtitle,
+    }];
+    let hardlink = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/b.mkv"),
+        &sidecars,
+        &second,
+        &matching_probe_result(&second),
+    )
+    .await
+    .unwrap();
+
+    assert!(hardlink.hardlink);
+    assert_eq!(hardlink.sidecars.len(), 1);
+    assert_eq!(hardlink.sidecars[0].bundle_member_role, "external_subtitle");
+    assert!(hardlink.bundle_id.is_some());
+    // One physical primary (no second asset), plus the sidecar asset.
+    assert_eq!(table_count(&cp, "file_assets").await, 2);
+    assert_eq!(table_count(&cp, "file_versions").await, 2);
+}
+
+#[tokio::test]
 async fn persists_sidecars_under_per_kind_roles() {
     use crate::scan::discovery::{SidecarCandidate, SidecarKind};
 

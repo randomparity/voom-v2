@@ -206,63 +206,36 @@ pub async fn persist_scanned_media_snapshot(
 
     ensure_worker_live_in_tx(&mut tx, worker_id).await?;
 
-    // Hardlink resolution (#249): a candidate whose (dev, ino) matches a live
-    // prior local location — and whose content matches that version — is a
-    // hardlink to an already-ingested physical file. Attach the path to the
-    // existing version instead of minting a second asset.
-    if let Some(hardlink) =
-        try_persist_hardlink(control_plane, &mut tx, candidate, &location_value, now).await?
-    {
-        tx.commit()
-            .await
-            .map_err(|e| VoomError::database_context("commit", e))?;
-        return Ok(hardlink);
-    }
-
-    let outcome = control_plane
-        .identity
-        .record_discovered_file_in_tx(
-            &mut tx,
-            DiscoveredFile {
-                location_kind: FileLocationKind::LocalPath,
-                location_value,
-                content_hash: candidate.content_hash.clone(),
-                size_bytes: candidate.size_bytes,
-                observed_at: now,
-                proof: None,
-            },
-            None,
-        )
-        .await?;
-    let IngestedIds(file_asset_id, file_version_id, file_location_id) =
-        emit_ingest_events(control_plane, &mut tx, &outcome, now).await?;
-    record_scan_fact(&mut tx, file_location_id, candidate, now).await?;
-    let snapshot = control_plane
-        .identity
-        .record_media_snapshot_in_tx(
-            &mut tx,
-            NewMediaSnapshot {
-                file_version_id,
-                probed_by: Some(worker_id),
-                probed_at: now,
-                payload: snapshot_payload,
-            },
-        )
-        .await?;
-    append_event(
-        &control_plane.events,
-        &mut tx,
-        SubjectType::MediaSnapshot,
-        Some(snapshot.id.0),
-        now,
-        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
-            media_snapshot_id: snapshot.id.0,
-            file_version_id: snapshot.file_version_id.0,
-            probed_by_worker_id: snapshot.probed_by.map(|w| w.0),
-            probed_at: snapshot.probed_at,
-        }),
-    )
-    .await?;
+    // Resolve identity. A candidate whose (dev, ino) matches a live prior local
+    // location at a different path — and whose content matches that version — is
+    // a hardlink to an already-ingested physical file (#249): attach the path to
+    // the existing version, minting no new asset/version/snapshot. Otherwise
+    // ingest a fresh asset. Either way the shared bundle/sidecar block below runs
+    // against the resolved `file_asset_id`, so a hardlink path's own sidecars are
+    // still attached to the owning bundle.
+    let resolved =
+        match resolve_hardlink(control_plane, &mut tx, candidate, &location_value, now).await? {
+            Some(hardlink) => hardlink,
+            None => {
+                ingest_new_scanned_file(
+                    control_plane,
+                    &mut tx,
+                    worker_id,
+                    location_value,
+                    candidate,
+                    snapshot_payload,
+                    now,
+                )
+                .await?
+            }
+        };
+    let ResolvedScanIdentity {
+        file_asset_id,
+        file_version_id,
+        file_location_id,
+        media_snapshot_id,
+        hardlink,
+    } = resolved;
 
     let (bundle_id, bundle_member_role, persisted_sidecars) = if observed_sidecars.is_empty() {
         (None, None, Vec::new())
@@ -290,26 +263,40 @@ pub async fn persist_scanned_media_snapshot(
         file_asset_id,
         file_version_id,
         file_location_id,
-        media_snapshot_id: Some(snapshot.id),
+        media_snapshot_id,
         bundle_id,
         bundle_member_role,
         sidecars: persisted_sidecars,
-        hardlink: false,
+        hardlink,
     })
 }
 
+/// The identity a scanned candidate resolved to: a fresh ingest or a hardlink to
+/// an existing physical file. Shared by both branches so the bundle/sidecar and
+/// report-building logic is written once.
+struct ResolvedScanIdentity {
+    file_asset_id: FileAssetId,
+    file_version_id: FileVersionId,
+    file_location_id: FileLocationId,
+    /// `Some` for a fresh ingest (a snapshot was recorded); `None` for a
+    /// hardlink (the existing version already carries one).
+    media_snapshot_id: Option<MediaSnapshotId>,
+    hardlink: bool,
+}
+
 /// Resolve a discovered candidate to an existing physical file via matching
-/// `(dev, ino)` inode facts. Returns `Some(PersistedScan)` when the candidate is
-/// a hardlink to an already-ingested file whose content still matches; `None`
-/// when there is no inode data, no `(dev, ino)` match, or a match whose content
-/// differs (a recycled inode or an in-place edit — treated as a fresh ingest).
-async fn try_persist_hardlink(
+/// `(dev, ino)` inode facts. Returns `Some` when the candidate is a hardlink to
+/// an already-ingested file whose content still matches; `None` when there is no
+/// inode data, no `(dev, ino)` match at a different path, or a match whose
+/// content differs (a recycled inode or an in-place edit — treated as a fresh
+/// ingest).
+async fn resolve_hardlink(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     candidate: &ObservedCandidateFacts,
     location_value: &str,
     now: time::OffsetDateTime,
-) -> Result<Option<PersistedScan>, ScanPersistError> {
+) -> Result<Option<ResolvedScanIdentity>, ScanPersistError> {
     let (Some(dev), Some(ino)) = (candidate.dev, candidate.ino) else {
         return Ok(None);
     };
@@ -353,16 +340,77 @@ async fn try_persist_hardlink(
         }),
     )
     .await?;
-    Ok(Some(PersistedScan {
+    Ok(Some(ResolvedScanIdentity {
         file_asset_id: version.file_asset_id,
         file_version_id: matched.file_version_id,
         file_location_id: new_location_id,
         media_snapshot_id: None,
-        bundle_id: None,
-        bundle_member_role: None,
-        sidecars: Vec::new(),
         hardlink: true,
     }))
+}
+
+/// Ingest a fresh scanned file: record the discovered file, emit ingest events,
+/// record its inode facts, and record + emit its media snapshot.
+async fn ingest_new_scanned_file(
+    control_plane: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    worker_id: WorkerId,
+    location_value: String,
+    candidate: &ObservedCandidateFacts,
+    snapshot_payload: Value,
+    now: time::OffsetDateTime,
+) -> Result<ResolvedScanIdentity, ScanPersistError> {
+    let outcome = control_plane
+        .identity
+        .record_discovered_file_in_tx(
+            tx,
+            DiscoveredFile {
+                location_kind: FileLocationKind::LocalPath,
+                location_value,
+                content_hash: candidate.content_hash.clone(),
+                size_bytes: candidate.size_bytes,
+                observed_at: now,
+                proof: None,
+            },
+            None,
+        )
+        .await?;
+    let IngestedIds(file_asset_id, file_version_id, file_location_id) =
+        emit_ingest_events(control_plane, tx, &outcome, now).await?;
+    record_scan_fact(tx, file_location_id, candidate, now).await?;
+    let snapshot = control_plane
+        .identity
+        .record_media_snapshot_in_tx(
+            tx,
+            NewMediaSnapshot {
+                file_version_id,
+                probed_by: Some(worker_id),
+                probed_at: now,
+                payload: snapshot_payload,
+            },
+        )
+        .await?;
+    append_event(
+        &control_plane.events,
+        tx,
+        SubjectType::MediaSnapshot,
+        Some(snapshot.id.0),
+        now,
+        Event::MediaSnapshotRecorded(MediaSnapshotRecordedPayload {
+            media_snapshot_id: snapshot.id.0,
+            file_version_id: snapshot.file_version_id.0,
+            probed_by_worker_id: snapshot.probed_by.map(|w| w.0),
+            probed_at: snapshot.probed_at,
+        }),
+    )
+    .await?;
+    Ok(ResolvedScanIdentity {
+        file_asset_id,
+        file_version_id,
+        file_location_id,
+        media_snapshot_id: Some(snapshot.id),
+        hardlink: false,
+    })
 }
 
 /// Record the candidate's inode facts against the given location, when the

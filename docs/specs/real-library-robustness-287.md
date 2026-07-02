@@ -254,6 +254,11 @@ Output-tree naming at scale (#197/#199) is already documented and unchanged.
 - mkvtoolnix remux worker malformed-media classification (follow-up).
 - Cross-device hardlink emulation, reflinks/CoW, or content-defined dedup.
 - Live progress streaming; polling a WAL reader is the mechanism.
+- Reclaiming `scan_file_facts` rows when a `file_location` retires. Locations are
+  retired (not deleted), so the `ON DELETE CASCADE` does not fire and stale rows
+  accumulate. Correctness is unaffected — the hardlink lookup joins only *live*
+  locations — and the rows are tiny; pruning facts for retired locations is a
+  future cleanup.
 
 ## Success criteria
 
