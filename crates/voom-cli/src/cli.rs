@@ -93,9 +93,65 @@ pub enum Command {
     /// Manage durable safety policy records.
     #[command(subcommand)]
     SafetyPolicy(SafetyPolicyCommand),
+    /// List, inspect, and transition durable issues.
+    #[command(subcommand)]
+    Issue(IssueCommand),
     /// Acquire, release, force-release, and list manual use-lease locks.
     #[command(subcommand)]
     Lease(LeaseCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum IssueCommand {
+    /// List issues, filtered and keyset-paginated by ascending id.
+    List {
+        #[arg(long)]
+        status: Option<IssueStatusArg>,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        priority: Option<IssuePriorityArg>,
+        #[arg(long)]
+        severity: Option<IssueSeverityArg>,
+        /// Return only issues with id greater than this cursor (exclusive).
+        #[arg(long)]
+        after_id: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Show one issue by id.
+    Show {
+        #[arg(long)]
+        issue_id: u64,
+    },
+    /// Override an issue's priority (stamps `priority_source = user`).
+    Update {
+        #[arg(long)]
+        issue_id: u64,
+        #[arg(long)]
+        priority: IssuePriorityArg,
+        #[arg(long)]
+        priority_reason: Option<String>,
+    },
+    /// Resolve an issue.
+    Resolve {
+        #[arg(long)]
+        issue_id: u64,
+    },
+    /// Suppress an issue for a number of days from now.
+    Suppress {
+        #[arg(long)]
+        issue_id: u64,
+        /// Days from now; capped at 100 years so the horizon cannot overflow
+        /// `OffsetDateTime` (which would panic rather than emit an envelope).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36_500))]
+        days: u32,
+    },
+    /// Accept an issue (acknowledge without acting).
+    Accept {
+        #[arg(long)]
+        issue_id: u64,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -128,6 +184,78 @@ pub enum LeaseCommand {
     },
     /// List live manual locks with their age (for forgotten-hold spotting).
     List,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum IssueStatusArg {
+    Open,
+    Planned,
+    Resolved,
+    Suppressed,
+    Accepted,
+}
+
+impl IssueStatusArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::issues::IssueStatus {
+        use voom_store::repo::issues::IssueStatus;
+        match self {
+            Self::Open => IssueStatus::Open,
+            Self::Planned => IssueStatus::Planned,
+            Self::Resolved => IssueStatus::Resolved,
+            Self::Suppressed => IssueStatus::Suppressed,
+            Self::Accepted => IssueStatus::Accepted,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum IssuePriorityArg {
+    Urgent,
+    High,
+    Normal,
+    Low,
+    Someday,
+}
+
+impl IssuePriorityArg {
+    #[must_use]
+    pub const fn to_core(self) -> voom_core::IssuePriority {
+        use voom_core::IssuePriority;
+        match self {
+            Self::Urgent => IssuePriority::Urgent,
+            Self::High => IssuePriority::High,
+            Self::Normal => IssuePriority::Normal,
+            Self::Low => IssuePriority::Low,
+            Self::Someday => IssuePriority::Someday,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum IssueSeverityArg {
+    Critical,
+    High,
+    Medium,
+    Low,
+    Info,
+}
+
+impl IssueSeverityArg {
+    #[must_use]
+    pub const fn to_core(self) -> voom_core::IssueSeverity {
+        use voom_core::IssueSeverity;
+        match self {
+            Self::Critical => IssueSeverity::Critical,
+            Self::High => IssueSeverity::High,
+            Self::Medium => IssueSeverity::Medium,
+            Self::Low => IssueSeverity::Low,
+            Self::Info => IssueSeverity::Info,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]

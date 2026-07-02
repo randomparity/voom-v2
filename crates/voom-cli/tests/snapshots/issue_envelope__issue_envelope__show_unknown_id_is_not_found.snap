@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/issue_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "issue",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "issue 999 not found"
+  }
+}

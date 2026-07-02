@@ -41,8 +41,9 @@ pub use commit_safety_gate::{
 };
 pub use events::{EventFilter, EventPage, EventRepo, EventRow, Page, SqliteEventRepo};
 pub use issues::{
-    PolicyIssueDraft, PolicyIssueMutation, PolicyIssueMutationKind, PolicyIssueRow,
-    PolicyIssueStatus, SqliteIssueRepo, TerminalFailureIssueDraft,
+    IssueFilter, IssueListPage, IssueRecord, IssueStatus, PolicyIssueDraft, PolicyIssueMutation,
+    PolicyIssueMutationKind, PolicyIssueRow, PolicyIssueStatus, SqliteIssueRepo,
+    TerminalFailureIssueDraft,
 };
 pub use jobs::{Job, JobFilter, JobState, NewJob, SqliteJobRepo};
 pub use leases::{
