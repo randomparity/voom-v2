@@ -65,7 +65,7 @@ pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSuppo
         } => CandidateSupport::Unsupported(
             "default strategy best is not supported by remux planning",
         ),
-        CompiledOperation::ReorderTracks { targets } => {
+        CompiledOperation::ReorderTracks { targets, .. } => {
             if duplicate_track_targets(targets) {
                 CandidateSupport::Unsupported("track order contains duplicate target groups")
             } else {
@@ -380,7 +380,7 @@ fn remux_payload(
     let reorder_operations = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::ReorderTracks { targets } => Some(targets),
+            CompiledOperation::ReorderTracks { targets, .. } => Some(targets),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -394,7 +394,9 @@ fn remux_payload(
     let defaults = operations
         .iter()
         .filter_map(|operation| match operation {
-            CompiledOperation::SetDefaults { target, strategy } => Some(RemuxDefaultAction {
+            CompiledOperation::SetDefaults {
+                target, strategy, ..
+            } => Some(RemuxDefaultAction {
                 target: *target,
                 strategy: *strategy,
             }),
@@ -496,7 +498,9 @@ fn evaluate_remux_track_operations(
             CompiledOperation::RemoveTracks { target, filter } => {
                 changed |= remove_tracks_changes(&facts, *target, filter.as_ref())?;
             }
-            CompiledOperation::SetDefaults { target, strategy } => {
+            CompiledOperation::SetDefaults {
+                target, strategy, ..
+            } => {
                 if !facts.iter().any(|stream| stream.kind == *target)
                     && !matches!(strategy, DefaultStrategy::None | DefaultStrategy::Preserve)
                 {
@@ -504,7 +508,7 @@ fn evaluate_remux_track_operations(
                 }
                 changed |= set_defaults_changes(&facts, *target, *strategy);
             }
-            CompiledOperation::ReorderTracks { targets } => {
+            CompiledOperation::ReorderTracks { targets, .. } => {
                 if seen_reorder || targets.is_empty() || duplicate_track_targets(targets) {
                     return Err(RemuxPlanningBlock::UnsupportedMediaShape);
                 }

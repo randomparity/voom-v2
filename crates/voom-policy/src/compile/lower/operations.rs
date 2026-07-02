@@ -52,17 +52,30 @@ fn lower_operation(
             filter: track_filter(text.as_ref()),
         }),
         "order" if tokens.get(1).copied() == Some("tracks") => {
+            let list_text = text
+                .as_ref()
+                .split_once(" where ")
+                .map_or(text.as_ref(), |(before, _)| before);
             Ok(CompiledOperation::ReorderTracks {
-                targets: list_values(text.as_ref())
+                targets: list_values(list_text)
                     .into_iter()
                     .filter_map(|target| track_target(Some(target)))
                     .collect(),
+                head_filter: track_filter(text.as_ref()),
             })
         }
-        "defaults" => Ok(CompiledOperation::SetDefaults {
-            target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
-            strategy: default_strategy(tokens.get(2).copied()).unwrap_or(DefaultStrategy::First),
-        }),
+        "defaults" => {
+            let filter = track_filter(text.as_ref());
+            Ok(CompiledOperation::SetDefaults {
+                target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
+                strategy: if filter.is_some() {
+                    DefaultStrategy::Preserve
+                } else {
+                    default_strategy(tokens.get(2).copied()).unwrap_or(DefaultStrategy::First)
+                },
+                filter,
+            })
+        }
         "actions" if tokens.get(2).copied() == Some("clear") => {
             Ok(CompiledOperation::ClearTrackActions {
                 target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),

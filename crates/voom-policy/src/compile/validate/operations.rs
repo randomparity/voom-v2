@@ -141,23 +141,30 @@ impl Validator<'_> {
             );
             return;
         }
-        let targets = list_values(text);
-        if targets.is_empty() {
+        let has_where = text.contains(" where ");
+        let list_text = text
+            .split_once(" where ")
+            .map_or(text, |(before, _)| before);
+        let targets = list_values(list_text);
+        if targets.is_empty() && !has_where {
             self.error(
                 DiagnosticCode::InvalidTrackTarget,
                 statement.span(),
-                "order tracks requires at least one track target",
+                "order tracks requires at least one track target or a `where` filter",
             );
         }
         for target in targets {
             self.validate_track_target(statement.span(), target);
         }
-        if text_after_list(text).is_some_and(|value| !value.is_empty()) {
+        if text_after_list(list_text).is_some_and(|value| !value.is_empty()) {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "order tracks does not accept extra arguments after the target list",
             );
+        }
+        if has_where {
+            self.validate_where_filter(statement, text);
         }
     }
 
@@ -169,6 +176,10 @@ impl Validator<'_> {
                 .get(1)
                 .map_or("", |value| value.trim_end_matches(':')),
         );
+        if text.contains(" where ") {
+            self.validate_where_filter(statement, text);
+            return;
+        }
         if tokens
             .get(2)
             .is_none_or(|strategy| !matches!(*strategy, "first" | "best" | "none" | "preserve"))
@@ -185,6 +196,29 @@ impl Validator<'_> {
                 statement.span(),
                 "defaults operation does not accept extra arguments",
             );
+        }
+    }
+
+    /// Validate the `where <track-filter>` clause shared by the filter-addressed
+    /// `defaults` and `order tracks` forms (ADR 0023). Rejects an unknown filter
+    /// predicate and validates language codes in the filter against the
+    /// `where`-onward slice, so a preceding target-list bracket (e.g.
+    /// `order tracks [video] where lang in […]`) is not read as the language
+    /// list.
+    fn validate_where_filter(&mut self, statement: &StatementAst, text: &str) {
+        let Some((_, filter)) = text.split_once(" where ") else {
+            return;
+        };
+        if !is_valid_track_filter(filter.trim()) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "unknown track filter predicate",
+            );
+            return;
+        }
+        if let Some(pos) = text.find(" where ") {
+            self.validate_language_tokens(statement, &text[pos..]);
         }
     }
 
