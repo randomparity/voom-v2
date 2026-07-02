@@ -93,7 +93,7 @@ impl ControlPlane {
             .ok_or_else(|| VoomError::NotFound(format!("external system id={id} not found")))?;
         let active_links = self.external_systems.list_links(id).await?;
         let latest = self
-            .events()
+            .events
             .tail(
                 EventFilter {
                     kind: Some(EventKind::ExternalSystemSynced),

@@ -5,13 +5,15 @@ use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
-    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, IssueCommand,
-    LeaseCommand, LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand,
-    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
+    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand,
+    ExternalSystemCommand, IssueCommand, LeaseCommand, LibraryCommand, NodeCommand, PlanCommand,
+    PolicyCommand, ProfileCommand, SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand,
+    WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, backup, bundle, compliance, health, init, issue, lease, library, node, plan, policy,
-    profile, safety_policy, scan, scheduler, scheduling_policy, version, worker,
+    artifact, backup, bundle, compliance, external_system, health, init, issue, lease, library,
+    node, plan, policy, profile, safety_policy, scan, scheduler, scheduling_policy, version,
+    worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -134,6 +136,11 @@ fn resolve_cfg(cli: &Cli) -> Result<Config, VoomError> {
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "flat command router: one arm per top-level subcommand; splitting it would only \
+              scatter the dispatch table across helpers"
+)]
 async fn dispatch(cli: Cli) -> Result<Exit> {
     match cli.command {
         Command::Version => {
@@ -236,7 +243,33 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::SafetyPolicy(ref command) => dispatch_safety_policy(&cli, command.clone()).await,
         Command::Issue(ref command) => dispatch_issue(&cli, command.clone()).await,
         Command::Lease(ref command) => dispatch_lease(&cli, command.clone()).await,
+        Command::ExternalSystem(ref command) => {
+            dispatch_external_system(&cli, command.clone()).await
+        }
     }
+}
+
+async fn dispatch_external_system(cli: &Cli, command: ExternalSystemCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err(
+                "external-system",
+                err.code(),
+                err.to_string(),
+                None,
+                None,
+            )?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        external_system::run(&cfg.database_url, local, command).await?,
+    ))
 }
 
 async fn dispatch_lease(cli: &Cli, command: LeaseCommand) -> Result<Exit> {

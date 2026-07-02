@@ -93,6 +93,10 @@ pub mod workers {
     };
 }
 
+pub mod external {
+    pub use crate::cases::external::sync::ExternalSyncReport;
+}
+
 pub use artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactSummary,
     CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
