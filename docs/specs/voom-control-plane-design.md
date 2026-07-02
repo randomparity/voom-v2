@@ -642,7 +642,7 @@ The V1 media operations are:
 ```text
 container mkv
 transcode video to hevc [using profile <quoted-name>]
-transcode audio to aac|opus [where <track-filter>]
+transcode audio to aac|opus|eac3 [where <track-filter>]
 keep audio|subtitle|attachment where <track-filter>
 remove audio|subtitle|attachment where <track-filter>
 order tracks
@@ -709,6 +709,24 @@ CRF, preset, tune, profile, level, pixel format, max width, max height, and
 copy/transcode behavior for compatible source tracks. The compiler must reject
 unknown profile names, unsupported codecs, malformed filters, and operation
 combinations that the current worker set cannot execute.
+
+#### Grammar amendment V1.1 — E-AC-3 audio target (2026-07-02, ADR 0020)
+
+The `transcode audio` operation accepts a third target codec, `eac3`
+(E-AC-3 / Dolby Digital Plus), so the grammar production is:
+
+```text
+transcode audio to aac|opus|eac3 [where <track-filter>]
+```
+
+This is additive: `aac` and `opus` are unchanged, and no other production is
+affected. `eac3` maps to ffmpeg's native `eac3` encoder. Audio transcodes emit a
+deterministic per-stream bitrate derived from the request's audio `profile` (a
+named quality profile; `default` is the only profile defined so far) scaled by
+the source stream's channel count, so a 5.1 (6-channel) source is encoded at a
+surround-appropriate bitrate and its channel count is preserved and verified in
+the output-probe path. See ADR 0020 for the per-channel bitrate table and the
+rationale.
 
 Example scheduling policy shape:
 

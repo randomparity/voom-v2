@@ -3,8 +3,43 @@ use serde::{Deserialize, Serialize};
 pub const TRANSCODE_AUDIO_CONTAINER: &str = "mkv";
 pub const TRANSCODE_AUDIO_CODEC_AAC: &str = "aac";
 pub const TRANSCODE_AUDIO_CODEC_OPUS: &str = "opus";
+pub const TRANSCODE_AUDIO_CODEC_EAC3: &str = "eac3";
+/// The only audio quality profile defined so far. The control plane emits this
+/// value for every transcode-audio request; see ADR 0020.
+pub const AUDIO_PROFILE_DEFAULT: &str = "default";
 pub const EXTRACT_AUDIO_CONTAINER: &str = "ogg";
 pub const EXTRACT_AUDIO_CODEC: &str = "opus";
+
+/// Returns true when `codec` is an audio codec the `transcode audio` operation
+/// supports (aac, opus, or eac3).
+#[must_use]
+pub fn is_supported_transcode_audio_codec(codec: &str) -> bool {
+    matches!(
+        codec,
+        TRANSCODE_AUDIO_CODEC_AAC | TRANSCODE_AUDIO_CODEC_OPUS | TRANSCODE_AUDIO_CODEC_EAC3
+    )
+}
+
+/// Resolves the per-channel target bitrate (kbps) for a `(codec, profile)` pair,
+/// or `None` when the codec or profile is unsupported.
+///
+/// The ffmpeg worker multiplies this by the source stream's channel count to
+/// emit a deterministic `-b:a`, so a 5.1 (6-channel) source is encoded at a
+/// surround-appropriate bitrate. Only the `default` profile is defined; the
+/// per-codec values reflect relative coding efficiency (opus < aac < eac3 for
+/// equal quality). See ADR 0020.
+#[must_use]
+pub fn audio_target_bitrate_kbps_per_channel(codec: &str, profile: &str) -> Option<u32> {
+    if profile != AUDIO_PROFILE_DEFAULT {
+        return None;
+    }
+    match codec {
+        TRANSCODE_AUDIO_CODEC_AAC => Some(64),
+        TRANSCODE_AUDIO_CODEC_OPUS => Some(48),
+        TRANSCODE_AUDIO_CODEC_EAC3 => Some(96),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

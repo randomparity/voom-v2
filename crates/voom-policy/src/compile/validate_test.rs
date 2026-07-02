@@ -134,6 +134,10 @@ fn accepts_sprint14_audio_operations() {
         compile_policy("policy \"p\" { phase a { transcode audio to opus where codec in [aac] } }")
             .is_ok()
     );
+    assert!(
+        compile_policy("policy \"p\" { phase a { transcode audio to eac3 where lang in [eng] } }")
+            .is_ok()
+    );
     assert!(compile_policy("policy \"p\" { phase a { extract audio where commentary } }").is_ok());
 }
 

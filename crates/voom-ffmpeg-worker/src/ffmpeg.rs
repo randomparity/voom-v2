@@ -367,6 +367,16 @@ pub async fn run_ffmpeg_transcode_audio(
 ) -> Result<AudioOutputProbe, FfmpegError> {
     let source_streams = probe_audio_streams(config, input).await?;
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
+    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+        &request.audio.target_codec,
+        &request.audio.profile,
+    )
+    .ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!(
+            "no audio bitrate defined for codec `{}` profile `{}`",
+            request.audio.target_codec, request.audio.profile
+        ))
+    })?;
     let mut command = Command::new(&config.ffmpeg_path);
     command
         .arg("-hide_banner")
@@ -383,6 +393,13 @@ pub async fn run_ffmpeg_transcode_audio(
         command
             .arg(format!("-c:a:{}", source.audio_ordinal))
             .arg(audio_encoder(&request.audio.target_codec)?);
+        let channels = source.channels.unwrap_or(2);
+        command
+            .arg(format!("-b:a:{}", source.audio_ordinal))
+            .arg(format!(
+                "{}k",
+                u64::from(bitrate_kbps_per_channel) * channels
+            ));
         append_audio_metadata(&mut command, source.audio_ordinal, source);
     }
     command
@@ -935,6 +952,7 @@ fn audio_encoder(codec: &str) -> Result<&'static str, FfmpegError> {
     match codec {
         "aac" => Ok("aac"),
         "opus" => Ok("libopus"),
+        "eac3" => Ok("eac3"),
         other => Err(FfmpegError::OutputFactsMismatch(format!(
             "unsupported audio codec: {other}"
         ))),

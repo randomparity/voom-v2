@@ -323,10 +323,12 @@ impl Validator<'_> {
             self.validate_transcode_video_header(statement, &tokens);
             return;
         }
-        if tokens
-            .get(0..4)
-            .is_some_and(|prefix| matches!(prefix, ["transcode", "audio", "to", "aac" | "opus"]))
-        {
+        if tokens.get(0..4).is_some_and(|prefix| {
+            matches!(
+                prefix,
+                ["transcode", "audio", "to", "aac" | "opus" | "eac3"]
+            )
+        }) {
             if self.validate_optional_track_filter(statement, text, 4) {
                 self.validate_language_tokens(statement, text);
             }
