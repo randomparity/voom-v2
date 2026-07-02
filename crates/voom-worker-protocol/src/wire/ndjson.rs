@@ -12,9 +12,10 @@
 //! - Each lease's stream ends with exactly one terminal frame
 //!   (`Result` or `Error`). Any frame after a terminal is
 //!   `UnexpectedFrameAfterTerminal`.
-//! - A single line longer than `max_frame_bytes` (default 64 KiB)
-//!   aborts the stream with `FrameTooLarge`.
-//! - EOF without a terminal frame yields `StreamEnd { partial_bytes }`.
+//! - A line whose payload exceeds `max_frame_bytes` (default 64 KiB)
+//!   aborts the stream with `FrameTooLarge` before the whole line is
+//!   buffered, so the bound caps allocation, not just rejection.
+//! - EOF on a frame boundary (no partial line) yields `StreamEnd`.
 //! - EOF mid-frame (partial JSON) is `MalformedFrame`.
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -29,10 +30,9 @@ const DEFAULT_MAX_FRAME_BYTES: usize = 64 * 1024;
 pub enum NdjsonOutcome {
     /// Non-terminal frame (`Progress`).
     Frame(ProgressFrame),
-    /// Stream closed without a terminal frame (EOF). `partial_bytes`
-    /// records how many bytes accumulated in the in-progress line buffer
-    /// before EOF (zero for a clean close on a frame boundary).
-    StreamEnd { partial_bytes: usize },
+    /// Stream closed on a frame boundary without a terminal frame (clean
+    /// EOF). A stream that ends mid-line is `MalformedFrame`, not this.
+    StreamEnd,
     /// Terminal frame (`Result` or `Error`) delivered. Subsequent
     /// `next_frame` calls return `UnexpectedFrameAfterTerminal`.
     Terminated(ProgressFrame),
@@ -80,7 +80,7 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
     /// Read the next NDJSON frame. Returns one of:
     ///   - `Frame(progress)` — non-terminal frame; caller should call again.
     ///   - `Terminated(frame)` — terminal `Result` / `Error` delivered.
-    ///   - `StreamEnd { partial_bytes }` — EOF before terminal.
+    ///   - `StreamEnd` — clean EOF on a frame boundary before terminal.
     ///
     /// Calls after `Terminated` return
     /// `ProtocolError::UnexpectedFrameAfterTerminal`.
@@ -98,32 +98,11 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
         // exhaust the stack and abort the task.
         loop {
             self.line_buf.clear();
-            let n = self
-                .reader
-                .read_until(b'\n', &mut self.line_buf)
-                .await
-                .map_err(|e| ProtocolError::MalformedFrame {
-                    detail: format!("read error: {e}"),
-                })?;
+            let had_newline = self.read_capped_line().await?;
 
-            if n == 0 {
-                // Clean EOF on a frame boundary.
-                return Ok(NdjsonOutcome::StreamEnd { partial_bytes: 0 });
-            }
-
-            // Strip trailing newline if present.
-            let had_newline = self.line_buf.last() == Some(&b'\n');
-            let payload_len = if had_newline {
-                self.line_buf.len() - 1
-            } else {
-                self.line_buf.len()
-            };
-
-            if payload_len > self.max_frame_bytes {
-                return Err(ProtocolError::FrameTooLarge {
-                    bytes: payload_len as u64,
-                    max: self.max_frame_bytes as u64,
-                });
+            if self.line_buf.is_empty() {
+                // Clean EOF on a frame boundary (nothing buffered).
+                return Ok(NdjsonOutcome::StreamEnd);
             }
 
             if !had_newline {
@@ -133,8 +112,23 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
                 // truncated, distinct from a clean close on a frame boundary.
                 return Err(ProtocolError::MalformedFrame {
                     detail: format!(
-                        "stream truncated mid-frame: {payload_len} bytes accumulated without newline"
+                        "stream truncated mid-frame: {} bytes accumulated without newline",
+                        self.line_buf.len()
                     ),
+                });
+            }
+
+            // `read_capped_line` returned `true`, so the last byte is `\n`.
+            let payload_len = self.line_buf.len() - 1;
+
+            // A chunk that carried the terminating newline is appended whole, so
+            // a line whose newline lands past the bound is caught here even
+            // though `read_capped_line` stops before the bound only for
+            // newline-free chunks.
+            if payload_len > self.max_frame_bytes {
+                return Err(ProtocolError::FrameTooLarge {
+                    bytes: payload_len as u64,
+                    max: self.max_frame_bytes as u64,
                 });
             }
 
@@ -184,6 +178,47 @@ impl<R: AsyncRead + Unpin> NdjsonReader<R> {
             } else {
                 Ok(NdjsonOutcome::Frame(frame))
             };
+        }
+    }
+
+    /// Read one line (up to and including the terminating `\n`) into
+    /// `self.line_buf`, capping the buffered bytes at the frame bound. Returns
+    /// `Ok(true)` when a newline terminated the line, `Ok(false)` on EOF.
+    ///
+    /// Fails with `FrameTooLarge` as soon as a newline-free run exceeds
+    /// `max_frame_bytes`, so an unterminated line cannot grow the buffer without
+    /// limit: memory is bounded to `max_frame_bytes` plus at most one
+    /// `BufReader` fill, not the line length.
+    async fn read_capped_line(&mut self) -> Result<bool, ProtocolError> {
+        loop {
+            let chunk =
+                self.reader
+                    .fill_buf()
+                    .await
+                    .map_err(|e| ProtocolError::MalformedFrame {
+                        detail: format!("read error: {e}"),
+                    })?;
+
+            if chunk.is_empty() {
+                return Ok(false); // EOF
+            }
+
+            if let Some(nl) = chunk.iter().position(|&b| b == b'\n') {
+                self.line_buf.extend_from_slice(&chunk[..=nl]);
+                self.reader.consume(nl + 1);
+                return Ok(true);
+            }
+
+            let consumed = chunk.len();
+            self.line_buf.extend_from_slice(chunk);
+            self.reader.consume(consumed);
+
+            if self.line_buf.len() > self.max_frame_bytes {
+                return Err(ProtocolError::FrameTooLarge {
+                    bytes: self.line_buf.len() as u64,
+                    max: self.max_frame_bytes as u64,
+                });
+            }
         }
     }
 }

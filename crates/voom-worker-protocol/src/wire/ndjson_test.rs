@@ -1,8 +1,41 @@
 use super::*;
+use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use time::OffsetDateTime;
+use tokio::io::{AsyncRead, ReadBuf};
 use voom_core::LeaseId;
 
 use crate::{PercentBps, ProgressFrame, ProtocolError};
+
+/// An `AsyncRead` that serves `remaining` non-newline bytes in bounded chunks
+/// and records the total number of bytes actually read from it. Used to prove
+/// the reader stops consuming input once a frame exceeds `max_frame_bytes`,
+/// rather than buffering the whole (potentially unbounded) line first.
+struct CountingReader {
+    remaining: usize,
+    served: Arc<AtomicUsize>,
+}
+
+impl AsyncRead for CountingReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.remaining == 0 {
+            return Poll::Ready(Ok(())); // EOF
+        }
+        let src = [b'x'; 4096];
+        let n = self.remaining.min(buf.remaining()).min(src.len());
+        buf.put_slice(&src[..n]);
+        self.remaining -= n;
+        self.served.fetch_add(n, Ordering::SeqCst);
+        Poll::Ready(Ok(()))
+    }
+}
 
 fn fixed_time() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_779_192_000).unwrap()
@@ -153,6 +186,34 @@ async fn frame_too_large_rejects() {
 }
 
 #[tokio::test]
+async fn frame_too_large_stops_reading_before_buffering_whole_line() {
+    // A worker that emits bytes without a newline must not force the whole line
+    // into memory before FrameTooLarge fires: max_frame_bytes must bound the
+    // allocation, not just the rejection. Feed a stream far larger than the
+    // frame bound and assert the reader consumes only a bounded prefix.
+    const N: usize = 4 * 1024 * 1024;
+    let lease = LeaseId(1);
+    let served = Arc::new(AtomicUsize::new(0));
+    let reader = CountingReader {
+        remaining: N,
+        served: Arc::clone(&served),
+    };
+    let mut ndjson = NdjsonReader::new(reader, lease).with_max_frame_bytes(1024);
+
+    let err = ndjson.next_frame().await.unwrap_err();
+    assert!(
+        matches!(err, ProtocolError::FrameTooLarge { .. }),
+        "got {err:?}"
+    );
+
+    let total = served.load(Ordering::SeqCst);
+    assert!(
+        total < 64 * 1024,
+        "reader consumed {total} bytes before rejecting; expected a bounded read well under N={N}"
+    );
+}
+
+#[tokio::test]
 async fn terminal_then_next_call_is_unexpected() {
     let lease = LeaseId(1);
     let bytes = line_for(&result_frame(lease, 0));
@@ -170,7 +231,7 @@ async fn eof_without_terminal_yields_stream_end() {
     let mut reader = NdjsonReader::new(bytes.as_slice(), lease);
     reader.next_frame().await.unwrap(); // seq 0
     let out = reader.next_frame().await.unwrap();
-    assert!(matches!(out, NdjsonOutcome::StreamEnd { partial_bytes: 0 }));
+    assert!(matches!(out, NdjsonOutcome::StreamEnd));
 }
 
 #[tokio::test]
