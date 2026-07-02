@@ -27,8 +27,10 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
-    // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 16);
+    // review whenever a migration is added/removed. 17 = the 16 sequential
+    // migrations 0001-0016 plus 0018 (0017 is owned by a concurrent sibling
+    // change; the hand-rolled MIGRATOR tolerates the transient gap).
+    assert_eq!(expected_migrations(), 17);
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -66,6 +68,36 @@ async fn nodes_schema_preserves_registry_constraints_and_worker_link() {
     .await
     .unwrap();
     assert_eq!(fk_count, 1);
+}
+
+#[tokio::test]
+async fn backups_schema_enforces_status_vocab_and_verified_key() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let backups_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'backups'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(backups_sql.contains("CHECK (status IN ('pending', 'verified', 'failed'))"));
+
+    let verified_key_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'backups_verified_key'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(verified_key_sql.contains("WHERE status = 'verified'"));
+
+    let fk_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('backups') \
+         WHERE \"table\" IN ('file_versions', 'jobs', 'tickets')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fk_count, 3);
 }
 
 #[tokio::test]

@@ -65,6 +65,11 @@ const MIGRATION_0015_SQL: &str = include_str!("../../../migrations/0015_workflow
 const MIGRATION_0016_SQL: &str =
     include_str!("../../../migrations/0016_worker_grant_max_parallel_wildcard.sql");
 
+/// SQL for migration 0018 (Sprint 17 durable backup records), embedded at
+/// compile time. Number 0018 is reserved by cross-agent coordination; 0017 is
+/// owned by a concurrent sibling change and lands separately.
+const MIGRATION_0018_SQL: &str = include_str!("../../../migrations/0018_backups.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -190,6 +195,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("worker_grant_max_parallel_wildcard"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0016_SQL),
+            false,
+        ),
+        Migration::new(
+            18,
+            Cow::Borrowed("backups"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0018_SQL),
             false,
         ),
     ]),
