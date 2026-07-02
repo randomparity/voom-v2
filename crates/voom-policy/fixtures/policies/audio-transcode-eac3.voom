@@ -1,0 +1,5 @@
+policy "audio transcode eac3" {
+  phase normalize {
+    transcode audio to eac3 where lang in [eng, und]
+  }
+}
