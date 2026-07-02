@@ -1181,3 +1181,165 @@ async fn read_compliance_run_report_orders_phases_and_points_at_latest() {
         "latest index points at the highest-ordinal phase's report"
     );
 }
+
+fn backup_evidence_plan(nodes: Vec<voom_plan::PlanNode>) -> voom_plan::ExecutionPlan {
+    voom_plan::ExecutionPlan {
+        schema_version: 1,
+        plan_id: "plan_backup_evidence".to_owned(),
+        plan_hash: "blake3:plan".to_owned(),
+        policy: voom_plan::PolicyIdentity {
+            slug: "backup".to_owned(),
+            source_hash: "abc".to_owned(),
+            document_id: Some(voom_core::PolicyDocumentId(1)),
+            version_id: Some(voom_core::PolicyVersionId(2)),
+        },
+        input: voom_plan::InputIdentity {
+            slug: Some("synthetic".to_owned()),
+            source_label: None,
+            input_set_id: Some(voom_core::PolicyInputSetId(3)),
+            fixture_labels: vec!["synthetic".to_owned()],
+        },
+        generated_at: None,
+        summary: voom_plan::PlanSummary::default(),
+        nodes,
+        edges: Vec::new(),
+        warnings: Vec::new(),
+        diagnostics: Vec::new(),
+        provenance: voom_plan::PlanProvenance::default(),
+    }
+}
+
+fn file_version_target_node(file_version_id: u64) -> voom_plan::PlanNode {
+    voom_plan::PlanNode {
+        node_id: "target".to_owned(),
+        phase_name: "normalize".to_owned(),
+        ordinal: 0,
+        target: voom_plan::TargetRef::FileVersion {
+            id: voom_core::FileVersionId(file_version_id),
+        },
+        operation_kind: voom_plan::PlanOperationKind::Remux,
+        operation_payload: serde_json::json!({}),
+        observed_state: None,
+        status: voom_plan::NodeStatus::Planned,
+        status_reason: String::new(),
+        capability_hints: voom_plan::CapabilityHints::default(),
+        scheduling_hints: voom_plan::SchedulingHints::default(),
+        resource_estimates: voom_plan::ResourceEstimates::default(),
+        artifact_expectations: voom_plan::ArtifactExpectations::default(),
+        safety_hints: voom_plan::SafetyHints::default(),
+    }
+}
+
+fn payload_source_node(source_file_version_id: u64) -> voom_plan::PlanNode {
+    voom_plan::PlanNode {
+        target: voom_plan::TargetRef::Synthetic {
+            key: "movie-a".to_owned(),
+            kind: voom_policy::TargetKind::MediaWork,
+        },
+        operation_payload: serde_json::json!({
+            "source_file_version_id": source_file_version_id
+        }),
+        ..file_version_target_node(0)
+    }
+}
+
+#[test]
+fn plan_file_version_targets_collects_target_and_payload_ids() {
+    let plan = backup_evidence_plan(vec![file_version_target_node(11), payload_source_node(22)]);
+
+    let ids: Vec<u64> = super::plan_file_version_targets(&plan)
+        .into_iter()
+        .map(|id| id.0)
+        .collect();
+
+    assert_eq!(ids, vec![11, 22]);
+}
+
+#[tokio::test]
+async fn backup_evidence_for_plan_surfaces_seeded_backups() {
+    let (cp, _tmp) = cp().await;
+    let pool = cp.pool_for_test();
+    let file_asset_id = sqlx::query("INSERT INTO file_assets (created_at) VALUES (?)")
+        .bind("1970-01-01T00:00:00Z")
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+    let file_version_id = voom_core::FileVersionId(
+        u64::try_from(
+            sqlx::query(
+                "INSERT INTO file_versions \
+                 (file_asset_id, content_hash, size_bytes, produced_by, created_at) \
+                 VALUES (?, 'blake3:source', 3, 'external_observed', ?)",
+            )
+            .bind(file_asset_id)
+            .bind("1970-01-01T00:00:00Z")
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid(),
+        )
+        .unwrap(),
+    );
+    let job_id = voom_core::JobId(
+        u64::try_from(
+            sqlx::query(
+                "INSERT INTO jobs (kind, state, priority, created_at, updated_at) \
+                 VALUES ('backup-test', 'open', 0, ?, ?)",
+            )
+            .bind("1970-01-01T00:00:00Z")
+            .bind("1970-01-01T00:00:00Z")
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid(),
+        )
+        .unwrap(),
+    );
+    let ticket_id = voom_core::TicketId(
+        u64::try_from(
+            sqlx::query(
+                "INSERT INTO tickets \
+                 (job_id, kind, state, priority, payload, attempt, max_attempts, \
+                  next_eligible_at, created_at, state_changed_at) \
+                 VALUES (?, 'backup-test', 'leased', 0, '{}', 1, 3, ?, ?, ?)",
+            )
+            .bind(i64::try_from(job_id.0).unwrap())
+            .bind("1970-01-01T00:00:00Z")
+            .bind("1970-01-01T00:00:00Z")
+            .bind("1970-01-01T00:00:00Z")
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid(),
+        )
+        .unwrap(),
+    );
+
+    let backup = cp
+        .backups
+        .insert_pending(
+            voom_store::repo::backups::NewBackup {
+                source_file_version_id: file_version_id,
+                job_id,
+                ticket_id,
+                provider: "voom-backup-worker".to_owned(),
+                destination_path: format!("/backups/v{}/movie.mkv", file_version_id.0),
+            },
+            T0,
+        )
+        .await
+        .unwrap();
+    cp.backups
+        .mark_verified(backup.id, 3, "blake3:source", T0)
+        .await
+        .unwrap();
+
+    let plan = backup_evidence_plan(vec![file_version_target_node(file_version_id.0)]);
+    let evidence = cp.backup_evidence_for_plan(&plan).await.unwrap();
+
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].source_file_version_id, file_version_id.0);
+    assert_eq!(evidence[0].status, "verified");
+    assert_eq!(evidence[0].checksum.as_deref(), Some("blake3:source"));
+}

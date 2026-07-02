@@ -29,6 +29,71 @@ use crate::workflow::execution::executor::{
 pub struct ComplianceReportData {
     pub plan: voom_plan::ExecutionPlan,
     pub report: voom_plan::ComplianceReport,
+    /// Durable backup records for the file versions this report's plan targets.
+    /// Reflects durable state: empty until an execute run with `--backup-root`
+    /// has produced backups, and empty for synthetic-fixture previews (which
+    /// have no real file versions). Attached at this control-plane layer so the
+    /// pure planner report and its `report_hash` stay unaffected (ADR 0025).
+    pub backups: Vec<BackupEvidence>,
+}
+
+/// A durable backup record surfaced as report evidence.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupEvidence {
+    pub id: u64,
+    pub source_file_version_id: u64,
+    pub status: &'static str,
+    pub provider: String,
+    pub destination_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub created_at: String,
+}
+
+impl From<voom_store::repo::backups::Backup> for BackupEvidence {
+    fn from(backup: voom_store::repo::backups::Backup) -> Self {
+        Self {
+            id: backup.id.0,
+            source_file_version_id: backup.source_file_version_id.0,
+            status: backup.status.as_str(),
+            provider: backup.provider,
+            destination_path: backup.destination_path,
+            size_bytes: backup.size_bytes,
+            checksum: backup.checksum,
+            error_code: backup.error_code,
+            created_at: voom_core::format_iso8601(backup.created_at),
+        }
+    }
+}
+
+/// Per-file-version cap on backup records pulled into report evidence.
+const BACKUP_EVIDENCE_LIMIT: u32 = 100;
+
+/// Distinct source file versions a plan targets: either directly via a
+/// `FileVersion` target ref, or via a `source_file_version_id` embedded in a
+/// node's operation payload (present once tickets are bound / regenerated).
+/// `BTreeSet` gives a deterministic ascending order for report evidence.
+fn plan_file_version_targets(
+    plan: &voom_plan::ExecutionPlan,
+) -> std::collections::BTreeSet<FileVersionId> {
+    let mut ids = std::collections::BTreeSet::new();
+    for node in &plan.nodes {
+        if let voom_plan::TargetRef::FileVersion { id } = node.target {
+            ids.insert(id);
+        }
+        if let Some(id) = node
+            .operation_payload
+            .get("source_file_version_id")
+            .and_then(serde_json::Value::as_u64)
+        {
+            ids.insert(FileVersionId(id));
+        }
+    }
+    ids
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -382,7 +447,30 @@ impl ControlPlane {
         )?;
         let report = voom_plan::generate_compliance_report(&plan)
             .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
-        Ok(ComplianceReportData { plan, report })
+        let backups = self.backup_evidence_for_plan(&plan).await?;
+        Ok(ComplianceReportData {
+            plan,
+            report,
+            backups,
+        })
+    }
+
+    /// Collect durable backup records for every source file version the plan
+    /// targets, ordered deterministically (`source_file_version_id`, then the
+    /// repo's `created_at ASC, id ASC`). Empty for synthetic previews.
+    async fn backup_evidence_for_plan(
+        &self,
+        plan: &voom_plan::ExecutionPlan,
+    ) -> Result<Vec<BackupEvidence>, VoomError> {
+        let mut evidence = Vec::new();
+        for file_version_id in plan_file_version_targets(plan) {
+            let rows = self
+                .backups
+                .list_by_file_version(file_version_id, BACKUP_EVIDENCE_LIMIT)
+                .await?;
+            evidence.extend(rows.into_iter().map(BackupEvidence::from));
+        }
+        Ok(evidence)
     }
 
     /// Apply actionable compliance report checks to durable policy issues.
