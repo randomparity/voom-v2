@@ -1,0 +1,26 @@
+---
+source: crates/voom-cli/tests/scoring_profile_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scoring-profile",
+  "status": "ok",
+  "data": {
+    "name": "balanced-home",
+    "version": 2,
+    "definition": {
+      "weights": {
+        "resolution": 3
+      }
+    },
+    "created_at": "[ts]",
+    "retired_at": null
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

@@ -8,12 +8,12 @@ use voom_cli::cli::{
     ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, EventCommand,
     ExternalSystemCommand, IssueCommand, JobCommand, LeaseCommand, LibraryCommand, NodeCommand,
     PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand, SchedulerCommand,
-    SchedulingPolicyCommand, TicketCommand, WorkerCommand,
+    SchedulingPolicyCommand, ScoringProfileCommand, TicketCommand, WorkerCommand,
 };
 use voom_cli::commands::{
     artifact, backup, bundle, compliance, event, external_system, health, init, issue, job, lease,
     library, node, plan, policy, profile, safety_policy, scan, scheduler, scheduling_policy,
-    ticket, version, worker,
+    scoring_profile, ticket, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -210,6 +210,9 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Policy(ref command) => dispatch_policy(&cli, command.clone()).await,
         Command::Node(ref command) => dispatch_node(&cli, command.clone()).await,
         Command::Profile(ref command) => dispatch_profile(&cli, command.clone()).await,
+        Command::ScoringProfile(ref command) => {
+            dispatch_scoring_profile(&cli, command.clone()).await
+        }
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
         Command::Event(ref command) => dispatch_event(&cli, command.clone()).await,
@@ -230,6 +233,23 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
             dispatch_external_system(&cli, command.clone()).await
         }
     }
+}
+
+async fn dispatch_init(cli: &Cli) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        init::run(&cfg.database_url, local).await?,
+    ))
 }
 
 async fn dispatch_external_system(cli: &Cli, command: ExternalSystemCommand) -> Result<Exit> {
@@ -418,6 +438,29 @@ async fn dispatch_profile(cli: &Cli, command: ProfileCommand) -> Result<Exit> {
     ))
 }
 
+async fn dispatch_scoring_profile(cli: &Cli, command: ScoringProfileCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err(
+                "scoring-profile",
+                err.code(),
+                err.to_string(),
+                None,
+                None,
+            )?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        scoring_profile::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
 async fn dispatch_worker(cli: &Cli, command: WorkerCommand) -> Result<Exit> {
     let cfg = match resolve_cfg(cli) {
         Ok(cfg) => cfg,
@@ -449,23 +492,6 @@ async fn dispatch_scheduler(cli: &Cli, command: SchedulerCommand) -> Result<Exit
     };
     Ok(Exit::from_run_code(
         scheduler::run(&cfg.database_url, local, command).await?,
-    ))
-}
-
-async fn dispatch_init(cli: &Cli) -> Result<Exit> {
-    let cfg = match resolve_cfg(cli) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            voom_cli::envelope::emit_err("init", err.code(), err.to_string(), None, None)?;
-            return Ok(Exit::Failure);
-        }
-    };
-    let local = Local {
-        db_url: cfg.database_url.clone(),
-        config_path: cfg.config_path.display().to_string(),
-    };
-    Ok(Exit::from_run_code(
-        init::run(&cfg.database_url, local).await?,
     ))
 }
 

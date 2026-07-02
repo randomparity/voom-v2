@@ -19,6 +19,7 @@ fn profile_data_maps_every_field_from_video_profile() {
         max_height: Some(1080),
         output_container: "mkv".to_owned(),
         copy_compatible: true,
+        retired_at: Some(time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap()),
     };
 
     let data = ProfileData::from(profile);
@@ -37,4 +38,8 @@ fn profile_data_maps_every_field_from_video_profile() {
     assert_eq!(data.max_height, Some(1080));
     assert_eq!(data.output_container, "mkv");
     assert!(data.copy_compatible);
+    assert_eq!(
+        data.retired_at.as_deref(),
+        Some("2023-11-14T22:13:20.000000000Z")
+    );
 }

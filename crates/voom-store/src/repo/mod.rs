@@ -26,7 +26,8 @@ pub use media::{
     use_leases,
 };
 pub use policy::{
-    issues, policies, policy_inputs, safety_policies, scheduling_policies, video_profiles,
+    issues, policies, policy_inputs, quality_scoring_profiles, safety_policies,
+    scheduling_policies, video_profiles,
 };
 
 pub use artifact_access_plans::{
@@ -75,6 +76,9 @@ pub use policy_inputs::{
     PolicyInputTargetRef, PolicyMediaSnapshotInput, PolicyQualityProfileSelection,
     PolicySyntheticTarget, SqlitePolicyInputRepo,
 };
+pub use quality_scoring_profiles::{
+    NewQualityScoringProfile, QualityScoringProfile, SqliteQualityScoringProfileRepo,
+};
 pub use remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay, SqliteRemoteIdempotencyRepo,
 };
@@ -98,7 +102,7 @@ pub use use_leases::{
     BlockingMode, ExpireReport as UseLeaseExpireReport, IssuerKind, LeaseScope, NewUseLease,
     ReanchorReport, SqliteUseLeaseRepo, UseLease, UseLeaseKind, UseLeaseReleaseReason,
 };
-pub use video_profiles::{SqliteVideoProfileRepo, VideoProfile};
+pub use video_profiles::{NewVideoProfile, SqliteVideoProfileRepo, VideoProfile};
 pub use workers::{
     Capability, Grant, NewCapability, NewGrant, NewWorker, SqliteWorkerRepo, Worker,
     WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerStatus,

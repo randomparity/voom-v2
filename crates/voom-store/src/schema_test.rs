@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 20);
+    assert_eq!(expected_migrations(), 21);
 }
 
 #[tokio::test]
@@ -79,6 +79,45 @@ async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let pool = fresh_initialized_pool_at(tmp.path()).await.unwrap();
     (pool, tmp)
+}
+
+#[tokio::test]
+async fn profile_management_columns_extend_existing_registries() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    // Soft-retire marker added to the seeded video-profile registry (0021),
+    // mirroring the retire column the 0004 scoring registry already carries.
+    let video_retired: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('video_profiles') WHERE name = 'retired_at'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(video_retired, 1);
+
+    // The scoring registry from migration 0004 is the one this issue manages —
+    // keyed by `name`, carrying a JSON `definition` and its own `retired_at`.
+    let scoring_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' \
+         AND name = 'quality_scoring_profiles'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(scoring_sql.contains("name        TEXT NOT NULL UNIQUE"));
+    assert!(scoring_sql.contains("CHECK (json_valid(definition))"));
+    assert!(scoring_sql.contains("retired_at"));
+
+    // Per-library default scoring-profile linkage column (repo-enforced by
+    // profile name, not a declared FK — see migration 0021).
+    let default_col: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('libraries') \
+         WHERE name = 'default_scoring_profile_name'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(default_col, 1);
 }
 
 #[tokio::test]

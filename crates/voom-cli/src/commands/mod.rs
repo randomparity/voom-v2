@@ -17,5 +17,7 @@ pub use execution::{node, scheduler, worker};
 pub use external_domain::system as external_system;
 pub use library_domain::library;
 pub use media::{artifact, bundle, lease, profile, scan};
-pub use policy_domain::{compliance, issue, plan, policy, safety_policy, scheduling_policy};
+pub use policy_domain::{
+    compliance, issue, plan, policy, safety_policy, scheduling_policy, scoring_profile,
+};
 pub use system::{health, init, token_source, version};

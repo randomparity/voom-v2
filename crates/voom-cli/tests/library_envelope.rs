@@ -272,4 +272,74 @@ mod library_envelope {
         // clap rejects "neither --path nor --root" at parse time (exit 1).
         assert_eq!(output.status.code(), Some(1));
     }
+
+    #[tokio::test]
+    async fn set_default_scoring_profile_links_and_clears() {
+        let fx = fixture().await;
+        let (_, lib) = run(
+            &fx.url,
+            &[
+                "library",
+                "add",
+                "--slug",
+                "films",
+                "--display-name",
+                "Films",
+            ],
+        );
+        let id = lib["data"]["library_id"].as_u64().unwrap().to_string();
+
+        // Unknown profile is refused.
+        let (code, json) = run(
+            &fx.url,
+            &[
+                "library",
+                "set-default-scoring-profile",
+                "--library-id",
+                &id,
+                "--scoring-profile",
+                "ghost",
+            ],
+        );
+        assert_eq!(code, 2);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+        run(
+            &fx.url,
+            &[
+                "scoring-profile",
+                "create",
+                "--name",
+                "balanced",
+                "--definition",
+                "{}",
+            ],
+        );
+        let (code, json) = run(
+            &fx.url,
+            &[
+                "library",
+                "set-default-scoring-profile",
+                "--library-id",
+                &id,
+                "--scoring-profile",
+                "balanced",
+            ],
+        );
+        assert_eq!(code, 0);
+        assert_eq!(json["data"]["default_scoring_profile_name"], "balanced");
+
+        let (code, json) = run(
+            &fx.url,
+            &[
+                "library",
+                "set-default-scoring-profile",
+                "--library-id",
+                &id,
+                "--clear",
+            ],
+        );
+        assert_eq!(code, 0);
+        assert!(json["data"].get("default_scoring_profile_name").is_none());
+    }
 }
