@@ -4,6 +4,7 @@
 crates/voom-events/src/payload/artifact.rs
 crates/voom-events/src/payload/commit.rs
 crates/voom-events/src/payload/execution.rs
+crates/voom-events/src/payload/external_system.rs
 crates/voom-events/src/payload/media_identity.rs
 crates/voom-events/src/payload/policy.rs
 crates/voom-events/src/payload/system.rs
