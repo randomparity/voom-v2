@@ -16,9 +16,9 @@ dead code on this path.
 
 ## Goal
 
-A fresh blocking use lease on the asset being committed actually fails the
-commit, before any irreversible filesystem mutation, and the leases the gate
-considered are recorded in the commit's event record for audit.
+A blocking use lease that is live at commit time on the asset being committed
+actually fails the commit, before any irreversible filesystem mutation, and the
+leases the gate considered are recorded in the commit's event record for audit.
 
 ## Background: the commit path shape
 
@@ -93,7 +93,25 @@ On a blocking lease the commit fails as a **pre-mutation** error
 (`VoomError::BlockedByUseLease`, code `BLOCKED_BY_USE_LEASE`), reusing the
 existing `ArtifactCommitFailedPreMutation` event and failure machinery. No
 durable `pending` record is written, no filesystem mutation happens, no orphan
-target file is left.
+target file is left. The blocking lease id and its scope are named in that
+event's `message` (free text); a blocked commit produces no completed-commit
+event, so the structured `gate_evaluated_lease_ids` audit field below is a
+success-path record only — see "Recording in the commit event".
+
+**Fail-closed.** `check_lineage_commit_leases_in_tx` runs on the host prepare
+transaction and can return `VoomError` (DB failure, bundle-membership query,
+location listing). Any such error aborts the commit as a pre-mutation failure —
+the commit never proceeds on an unresolved gate check (design §1226–1234). It is
+not swallowed or reinterpreted as "no blocking lease".
+
+**Point-in-time, not serialized.** The check reads leases once at prepare, in a
+deferred host transaction. Lease acquisition (`use_leases.rs::acquire_in_tx`) is
+serialized only against `commit_intents` rows; the artifact commit path writes
+`artifact_commit_records`, not `commit_intents`, so acquisition is **not**
+blocked by an in-flight artifact commit. A blocking lease acquired after the
+prepare check therefore does not fail the in-flight commit. This issue blocks a
+lease that is **live at commit (prepare) time**; closing the prepare→promote
+window (recompute-under-isolation) is out of scope (see below).
 
 ### New store-layer primitive
 
@@ -150,7 +168,9 @@ limitation, follow-up filed.
 
 1. A live blocking use lease on the source asset/version/location fails
    `commit_artifact` end-to-end with `ErrorCode::BlockedByUseLease`, before the
-   target file is written, and the `pending` record is not left behind.
+   target file is written, and the `pending` record is not left behind. The
+   blocking lease id is named in the `ArtifactCommitFailedPreMutation` event
+   message.
 2. A **terminal** lease (released) does **not** block the commit.
 3. A **TTL-expired** lease (`expires_at` in the past, not yet swept) does
    **not** block the commit.
@@ -158,7 +178,9 @@ limitation, follow-up filed.
    `gate_evaluated_lease_ids` on the completed event.
 5. On a normal commit with no leases, `gate_evaluated_lease_ids` is empty and
    behavior is unchanged.
-6. Guardrails green: `just ci` (fmt, clippy `-D warnings`, test-layout,
+6. A manual lock (`ttl_bound = 0`, no `expires_at`) **does** block the commit
+   (not excluded by the TTL-expiry rule).
+7. Guardrails green: `just ci` (fmt, clippy `-D warnings`, test-layout,
    test, doc, deny, audit, payload-deny-unknown).
 
 ## Out of scope / follow-ups
