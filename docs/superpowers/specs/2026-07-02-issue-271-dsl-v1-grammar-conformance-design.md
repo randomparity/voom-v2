@@ -47,8 +47,17 @@ arm. Reuse existing compiled representations — introduce no new `TrackFilter`,
 
 - **Validate** (`is_valid_track_filter`): accept
   `["lang" | "language", "==", value]` where `value` is a single token (quoted
-  or bare). Language-code validation continues via the existing
-  `validate_language_tokens` path.
+  or bare).
+- **Validate the language code.** The existing `validate_language_tokens`
+  (`conditions.rs`) only iterates bracketed `list_values`, so it does **not**
+  cover the `==` single-value form: without a fix, `language == "english"` or
+  `language == "zz"` would validate and lower to `LanguageIn { values:
+  ["english"] }`, silently matching zero streams (a fail-quiet footgun that
+  violates AGENTS.md Rule 12). `validate_language_tokens` must be extended to
+  also read the `language == <token>` RHS and apply the same
+  eng/und/3-letter-lowercase-ASCII rule, emitting `InvalidLanguageCode`
+  otherwise. A negative conformance case (`language == "english"` ⇒
+  `InvalidLanguageCode`) pins this.
 - **Lower** (`filter_from_text`): map `language == <token>` to
   `TrackFilter::LanguageIn { values: vec![<token>] }` — a single-language `in`
   set is exactly the semantics of an equality match, so no new variant is needed.
