@@ -1,0 +1,26 @@
+---
+source: crates/voom-cli/tests/bundle_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "bundle",
+  "status": "ok",
+  "data": {
+    "bundles": [
+      {
+        "id": 1,
+        "media_variant_id": 1,
+        "display_name": "Solaris (1972)",
+        "created_at": "1970-01-01T00:00:00.000000000Z",
+        "member_count": 3
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

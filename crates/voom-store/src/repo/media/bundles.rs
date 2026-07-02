@@ -151,6 +151,32 @@ impl SqliteBundleRepo {
         row.as_ref().map(row_to_bundle).transpose()
     }
 
+    /// List bundles in ascending id order with their member counts, bounded by
+    /// `limit`. The count is computed in the same query (`LEFT JOIN ... GROUP
+    /// BY`) so the list view is a single round trip regardless of bundle count.
+    pub async fn list_all(&self, limit: u32) -> Result<Vec<(AssetBundle, u64)>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT b.id, b.media_variant_id, b.display_name, b.created_at, b.epoch, \
+                    COUNT(m.id) AS member_count \
+             FROM asset_bundles b \
+             LEFT JOIN asset_bundle_members m ON m.bundle_id = b.id \
+             GROUP BY b.id ORDER BY b.id ASC LIMIT ?",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("asset_bundles list_all", e))?;
+        rows.iter()
+            .map(|row| {
+                let bundle = row_to_bundle(row)?;
+                let member_count: i64 = row
+                    .try_get("member_count")
+                    .map_err(|e| map_row_err("asset_bundles", &e))?;
+                Ok((bundle, u64_from_i64(member_count)))
+            })
+            .collect()
+    }
+
     pub async fn list_by_variant(
         &self,
         media_variant_id: MediaVariantId,

@@ -9,6 +9,18 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "avi", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "webm",
 ];
 
+const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "tbn"];
+
+/// Kind of external sidecar asset a discovered file maps to. Maps to a
+/// `voom_store` `BundleMemberRole` in `scan::persist`. See ADR 0022.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarKind {
+    Subtitle,
+    Nfo,
+    Poster,
+    Trailer,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanMode {
     File,
@@ -39,6 +51,7 @@ pub struct ScanCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidecarCandidate {
     pub path: PathBuf,
+    pub kind: SidecarKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,11 +96,37 @@ pub fn is_supported_media_path(path: &Path) -> bool {
         })
 }
 
+/// Classify a file as an external sidecar asset by extension and, for
+/// trailers, filename convention. Returns `None` for primary media and for
+/// anything outside the V1 sidecar set. See ADR 0022.
 #[must_use]
-pub fn is_supported_sidecar_path(path: &Path) -> bool {
-    path.extension()
+pub fn classify_sidecar(path: &Path) -> Option<SidecarKind> {
+    let ext = path.extension().and_then(std::ffi::OsStr::to_str)?;
+    if ext.eq_ignore_ascii_case("srt") {
+        return Some(SidecarKind::Subtitle);
+    }
+    if ext.eq_ignore_ascii_case("nfo") {
+        return Some(SidecarKind::Nfo);
+    }
+    if SUPPORTED_IMAGE_EXTENSIONS
+        .iter()
+        .any(|supported| ext.eq_ignore_ascii_case(supported))
+    {
+        return Some(SidecarKind::Poster);
+    }
+    if is_supported_media_path(path) && has_trailer_suffix(path) {
+        return Some(SidecarKind::Trailer);
+    }
+    None
+}
+
+fn has_trailer_suffix(path: &Path) -> bool {
+    path.file_stem()
         .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("srt"))
+        .is_some_and(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            stem.ends_with("-trailer") || stem.ends_with(".trailer")
+        })
 }
 
 pub async fn discover_path(path: impl AsRef<Path>) -> Result<DiscoveredScan, ScanError> {
@@ -176,29 +215,35 @@ async fn discover_directory(path: &Path) -> Result<DiscoveredScan, ScanError> {
                 });
             } else if file_type.is_dir() {
                 pending.push(entry_path);
-            } else if file_type.is_file() && is_supported_media_path(&entry_path) {
-                candidates.push(ScanCandidate {
-                    path: canonicalize(&entry_path).await?,
-                    sidecars: Vec::new(),
-                });
-            } else if file_type.is_file() && is_supported_sidecar_path(&entry_path) {
-                sidecars.push(canonicalize(&entry_path).await?);
             } else if file_type.is_file() {
-                let skipped_path = canonicalize(&entry_path).await.unwrap_or(entry_path);
-                skipped.push(SkippedFile {
-                    path: skipped_path,
-                    status: FileScanStatus::UnsupportedExtension,
-                });
+                // Classify sidecars before the primary-media check: trailers
+                // carry a media extension and must route to sidecars, not
+                // candidates (ADR 0022).
+                if let Some(kind) = classify_sidecar(&entry_path) {
+                    sidecars.push((canonicalize(&entry_path).await?, kind));
+                } else if is_supported_media_path(&entry_path) {
+                    candidates.push(ScanCandidate {
+                        path: canonicalize(&entry_path).await?,
+                        sidecars: Vec::new(),
+                    });
+                } else {
+                    let skipped_path = canonicalize(&entry_path).await.unwrap_or(entry_path);
+                    skipped.push(SkippedFile {
+                        path: skipped_path,
+                        status: FileScanStatus::UnsupportedExtension,
+                    });
+                }
             }
         }
     }
 
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
-    for sidecar in sidecars {
+    for (sidecar, kind) in sidecars {
         if let Some(candidate_index) = best_sidecar_candidate(&candidates, &sidecar) {
-            candidates[candidate_index]
-                .sidecars
-                .push(SidecarCandidate { path: sidecar });
+            candidates[candidate_index].sidecars.push(SidecarCandidate {
+                path: sidecar,
+                kind,
+            });
         } else {
             skipped.push(SkippedFile {
                 path: sidecar,
@@ -241,7 +286,7 @@ fn sidecar_matches_media(media: &Path, sidecar: &Path) -> Option<usize> {
     }
     sidecar_stem
         .strip_prefix(media_stem)
-        .filter(|suffix| suffix.starts_with('.'))
+        .filter(|suffix| suffix.starts_with('.') || suffix.starts_with('-'))
         .map(|_| media_stem.len())
 }
 

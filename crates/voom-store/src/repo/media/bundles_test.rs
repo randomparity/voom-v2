@@ -62,6 +62,54 @@ async fn create_and_list_bundle() {
 }
 
 #[tokio::test]
+async fn list_all_returns_bundles_in_id_order_with_member_counts() {
+    let (bun, _id, mv_id, a, b, _tmp) = fresh().await;
+    let first = bun
+        .create(NewAssetBundle {
+            media_variant_id: mv_id,
+            display_name: "first".to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let second = bun
+        .create(NewAssetBundle {
+            media_variant_id: mv_id,
+            display_name: "second".to_owned(),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    // `first` gets two members; `second` gets none.
+    bun.add_member(NewBundleMember {
+        bundle_id: first.id,
+        file_asset_id: a,
+        role: BundleMemberRole::PrimaryVideo,
+    })
+    .await
+    .unwrap();
+    bun.add_member(NewBundleMember {
+        bundle_id: first.id,
+        file_asset_id: b,
+        role: BundleMemberRole::ExternalSubtitle,
+    })
+    .await
+    .unwrap();
+
+    let all = bun.list_all(10).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].0.id, first.id);
+    assert_eq!(all[0].1, 2);
+    assert_eq!(all[1].0.id, second.id);
+    assert_eq!(all[1].1, 0);
+
+    // `limit` bounds the result to the lowest ids.
+    let limited = bun.list_all(1).await.unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].0.id, first.id);
+}
+
+#[tokio::test]
 async fn add_member_then_remove_member() {
     let (bun, _id, mv_id, a, _b, _tmp) = fresh().await;
     let bundle = bun
