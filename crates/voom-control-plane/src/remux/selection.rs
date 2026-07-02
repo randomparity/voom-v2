@@ -74,6 +74,8 @@ pub fn selection_from_payload_and_snapshot(
         keep_ids.insert(stream.snapshot_stream_id.clone());
     }
 
+    reject_empty_audio(&facts, &keep_ids)?;
+
     let keep_streams = facts
         .iter()
         .filter(|stream| keep_ids.contains(&stream.snapshot_stream_id))
@@ -106,6 +108,27 @@ fn matching_stream_ids(
         }
     }
     Ok(ids)
+}
+
+/// A remux must never strip a source's audio to nothing: a file with audio that
+/// keeps zero audio streams is unplayable (ADR 0021, issue #158). When the source
+/// has audio but the resolved keep set retains none, this is a per-file failure —
+/// the terminal-failure machinery opens an issue and skips the file — rather than
+/// an audio-less artifact. Scoped to audio; a subtitle-less file is a valid outcome.
+fn reject_empty_audio(
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<(), VoomError> {
+    let has_audio_source = facts.iter().any(|stream| stream.kind == TrackTarget::Audio);
+    let keeps_audio = facts.iter().any(|stream| {
+        stream.kind == TrackTarget::Audio && keep_ids.contains(&stream.snapshot_stream_id)
+    });
+    if has_audio_source && !keeps_audio {
+        return Err(VoomError::Config(
+            "remux keep would remove all audio; no audio track matched the filter".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn remove_target(
