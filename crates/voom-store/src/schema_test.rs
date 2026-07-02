@@ -28,7 +28,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 async fn expected_migrations_matches_embedded_count() {
     // Intentional literal: this is the canary that forces an explicit
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 16);
+    assert_eq!(expected_migrations(), 17);
 }
 
 async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {

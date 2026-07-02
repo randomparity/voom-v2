@@ -496,6 +496,22 @@ pub trait IdentityRepo: Repository {
         alias_proof: Option<AliasProof>,
     ) -> Result<IngestOutcome, VoomError>;
 
+    /// Attach a discovered hardlink path as an additional live local
+    /// `file_location` on an existing `file_version`, minting no new asset or
+    /// version. The caller has already proven same-physical-object identity via
+    /// `scan_file_facts` `(dev, ino)` and confirmed the version's content
+    /// matches. Like the alias-attach path, this consults the pending-commit
+    /// lock so a hardlink attach cannot race past the commit safety gate's
+    /// authorized closure (returns `Conflict` when an in-flight commit covers
+    /// the version). #249.
+    async fn attach_local_hardlink_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+        value: &str,
+        observed_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError>;
+
     async fn reconcile_rename_in_tx<'tx>(
         &self,
         tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
@@ -875,6 +891,37 @@ impl IdentityRepo for SqliteIdentityRepo {
             .await
             .map_err(|e| VoomError::database_context("commit", e))?;
         Ok(out)
+    }
+
+    async fn attach_local_hardlink_location_in_tx<'tx>(
+        &self,
+        tx: &mut sqlx::Transaction<'tx, sqlx::Sqlite>,
+        file_version_id: FileVersionId,
+        value: &str,
+        observed_at: OffsetDateTime,
+    ) -> Result<FileLocationId, VoomError> {
+        // Same guard as the alias-attach path: reject if an in-flight commit
+        // covers this FileVersion, so the hardlink attach cannot race past the
+        // commit safety gate's authorized closure.
+        if let Some((commit_id, offending_scope)) =
+            consult_pending_commit_lock_in_tx(tx, &LeaseScope::Version(file_version_id)).await?
+        {
+            return Err(VoomError::Conflict(format!(
+                "hardlink attach on file_version {file_version_id} blocked by in-flight \
+                 commit {commit_id} on offending scope {} {}",
+                offending_scope.type_str(),
+                offending_scope.id_u64(),
+            )));
+        }
+        insert_file_location(
+            tx,
+            file_version_id,
+            FileLocationKind::LocalPath,
+            value,
+            None,
+            observed_at,
+        )
+        .await
     }
 
     async fn reconcile_rename_in_tx<'tx>(
