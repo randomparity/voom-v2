@@ -38,9 +38,9 @@ pub mod ids {
     pub use crate::taxonomy::ids::{
         ArtifactCommitRecordId, ArtifactHandleId, ArtifactLocationId, ArtifactVerificationId,
         BackupId, BundleId, CommitId, EventId, EvidenceId, FileAssetId, FileLocationId,
-        FileVersionId, IssueId, JobId, LeaseId, MediaSnapshotId, MediaVariantId, MediaWorkId,
-        NodeId, PolicyDocumentId, PolicyInputSetId, PolicySyntheticTargetId, PolicyVersionId,
-        TicketId, UseLeaseId, WorkerId,
+        FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId, MediaSnapshotId,
+        MediaVariantId, MediaWorkId, NodeId, PolicyDocumentId, PolicyInputSetId,
+        PolicySyntheticTargetId, PolicyVersionId, TicketId, UseLeaseId, WorkerId,
     };
 }
 
@@ -88,8 +88,8 @@ pub use error::{ErrorCode, VoomError};
 pub use failure::{FailureClass, FailureRetryClass};
 pub use ids::{
     ArtifactHandleId, ArtifactLocationId, BackupId, BundleId, CommitId, EventId, EvidenceId,
-    FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId, MediaSnapshotId,
-    MediaVariantId, MediaWorkId, NodeId, PolicyDocumentId, PolicyInputSetId,
+    FileAssetId, FileLocationId, FileVersionId, IssueId, JobId, LeaseId, LibraryId, LibraryRootId,
+    MediaSnapshotId, MediaVariantId, MediaWorkId, NodeId, PolicyDocumentId, PolicyInputSetId,
     PolicySyntheticTargetId, PolicyVersionId, TicketId, UseLeaseId, WorkerId,
 };
 pub use issue::{IssuePriority, IssueSeverity};
