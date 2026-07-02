@@ -25,4 +25,5 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0017](0017-verify-artifact-dsl-operation.md) | `verify artifact` compiles and plans, execution wiring deferred |
 | [0018](0018-terminal-failure-issue-auto-open.md) | Terminal-failure tickets auto-open a `terminal_failure` issue in the transition transaction |
 | [0019](0019-commit-gate-lineage-commit-check.md) | Lineage-commit safety-gate check runs in the prepare transaction |
+| [0020](0020-eac3-audio-transcode-target.md) | E-AC-3 audio transcode target and deterministic audio bitrate |
 | [0022](0022-sidecar-role-classification.md) | Stem-prefix sidecar classification for V1 asset ingest |

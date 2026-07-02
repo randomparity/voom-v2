@@ -493,6 +493,17 @@ fn container_args_unsupported_container_is_error() {
 }
 
 #[test]
+fn audio_encoder_maps_supported_codecs_and_rejects_others() {
+    assert_eq!(audio_encoder("aac").unwrap(), "aac");
+    assert_eq!(audio_encoder("opus").unwrap(), "libopus");
+    assert_eq!(audio_encoder("eac3").unwrap(), "eac3");
+    assert!(matches!(
+        audio_encoder("flac").unwrap_err(),
+        FfmpegError::OutputFactsMismatch(_)
+    ));
+}
+
+#[test]
 fn scale_args_not_emitted_when_within_cap() {
     let profile = profile_1080p(); // max 1920x1080
     assert!(scale_args(&profile, 1280, 720).is_empty());
@@ -701,6 +712,53 @@ async fn audio_transcode_maps_all_streams_and_encodes_only_selected_audio_indexe
     assert!(args.contains("-c:a:0\nlibopus\n"));
     assert!(args.contains("-c:a:2\nlibopus\n"));
     assert!(!args.contains("-c:a:1\nlibopus\n"));
+    // opus default profile is 48 kbps/channel: stream 1 is 6-channel (288k);
+    // stream 3 reports no channel count and falls back to stereo (96k).
+    assert!(args.contains("-b:a:0\n288k\n"));
+    assert!(args.contains("-b:a:2\n96k\n"));
+}
+
+#[tokio::test]
+async fn eac3_transcode_5_1_emits_eac3_encoder_and_channel_scaled_bitrate() {
+    let dir = tempfile::tempdir().unwrap();
+    let args_path = dir.path().join("args.txt");
+    let ffmpeg = stub_bin(
+        dir.path(),
+        "ffmpeg",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+            args_path.display()
+        ),
+    );
+    let ffprobe = ffprobe_audio_stub(dir.path(), "matroska", "eac3", "eac3");
+    let input = dir.path().join("input.mkv");
+    let output = dir.path().join("out.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+
+    let probe = run_ffmpeg_transcode_audio(
+        &FfmpegConfig::new(
+            ffmpeg,
+            ffprobe,
+            "ffmpeg version test".to_owned(),
+            DEFAULT_PROCESS_TIMEOUT,
+        ),
+        &input,
+        &output,
+        &transcode_audio_request(dir.path(), &[1], "eac3"),
+    )
+    .await
+    .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    assert!(args.contains("-c:a:0\neac3\n"));
+    // eac3 default profile is 96 kbps/channel; a 5.1 (6-channel) source → 576k.
+    assert!(args.contains("-b:a:0\n576k\n"));
+    // The 6-channel (5.1) layout is preserved and verified in the output probe.
+    assert_eq!(
+        probe.selected_output_streams[0].channels,
+        Some(6),
+        "eac3 5.1 output must preserve six channels"
+    );
 }
 
 #[tokio::test]
@@ -885,7 +943,7 @@ fn transcode_audio_request(
         },
         audio: TranscodeAudioSettings {
             target_codec: target_codec.to_owned(),
-            profile: format!("default-{target_codec}"),
+            profile: voom_worker_protocol::AUDIO_PROFILE_DEFAULT.to_owned(),
         },
     }
 }

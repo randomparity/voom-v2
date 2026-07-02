@@ -27,12 +27,14 @@ pub use http::{
     route_policy,
 };
 pub use operations::audio::{
-    AudioDispositionFact, AudioExpectedFacts, AudioObservedFacts, AudioOutputStreamFact,
-    AudioStreamRef, EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER, ExtractAudioInput,
-    ExtractAudioOutput, ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus,
-    TRANSCODE_AUDIO_CODEC_AAC, TRANSCODE_AUDIO_CODEC_OPUS, TRANSCODE_AUDIO_CONTAINER,
-    TranscodeAudioInput, TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult,
-    TranscodeAudioSelection, TranscodeAudioSettings, TranscodeAudioStatus,
+    AUDIO_PROFILE_DEFAULT, AudioDispositionFact, AudioExpectedFacts, AudioObservedFacts,
+    AudioOutputStreamFact, AudioStreamRef, EXTRACT_AUDIO_CODEC, EXTRACT_AUDIO_CONTAINER,
+    ExtractAudioInput, ExtractAudioOutput, ExtractAudioRequest, ExtractAudioResult,
+    ExtractAudioStatus, TRANSCODE_AUDIO_CODEC_AAC, TRANSCODE_AUDIO_CODEC_EAC3,
+    TRANSCODE_AUDIO_CODEC_OPUS, TRANSCODE_AUDIO_CONTAINER, TranscodeAudioInput,
+    TranscodeAudioOutput, TranscodeAudioRequest, TranscodeAudioResult, TranscodeAudioSelection,
+    TranscodeAudioSettings, TranscodeAudioStatus, audio_target_bitrate_kbps_per_channel,
+    is_supported_transcode_audio_codec,
 };
 pub use operations::probe_file::{
     ExpectedFileFacts, ObservedFileFacts, ProbeFileRequest, ProbeFileResult, ProbeFileStatus,
