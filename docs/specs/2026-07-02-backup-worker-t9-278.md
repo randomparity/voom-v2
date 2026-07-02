@@ -15,10 +15,11 @@ backup evidence in `compliance report`.
    `POST /v1/operations` for `back_up_file`, copies a source file to a destination
    directory, returns `{destination_path, size_bytes, checksum}`, and shuts down on
    stdin EOF. An integration test spawns the real binary and asserts the contract.
-2. A missing source file, an unwritable destination, and a destination that already
-   contains the target each return a terminal `Error` frame with class
-   `BACKUP_FAILURE` (or a more specific I/O class for a missing source), never a
-   panic or a silent success.
+2. A missing source file and an unwritable destination each return a terminal
+   `Error` frame with class `BACKUP_FAILURE` (or a more specific I/O class for a
+   missing source), never a panic or a silent success. A destination that already
+   exists with a matching size+checksum is treated as an idempotent success (re-copy
+   short-circuit), not a clobber failure.
 3. Migration `0018_backups.sql` creates a `STRICT` `backups` table; the migration
    inventory test, embedded-count literal, and a schema-shape assertion all pass.
 4. `SqliteBackupRepo` inserts a `pending` record, transitions it to `verified` /
@@ -51,7 +52,7 @@ backup evidence in `compliance report`.
 ### Wire contract — `crates/voom-worker-protocol/src/operations/backup.rs`
 
 ```rust
-#[serde(deny_unknown_fields)] BackUpFileRequest { source_path: String, destination_dir: String }
+#[serde(deny_unknown_fields)] BackUpFileRequest { source_path: String, destination_path: String }
 #[serde(rename_all = "snake_case")] enum BackUpFileStatus { BackedUp }
 #[serde(deny_unknown_fields)] BackUpFileResult {
     status: BackUpFileStatus, provider: String, provider_version: String,
@@ -74,12 +75,19 @@ startup/watchdog pattern), `src/lib.rs`, `src/handler.rs` (+`_test`),
 
 Handler: reject `operation != BackUpFile` with `ProtocolError::UnknownOperation`;
 decode payload to `BackUpFileRequest` (decode failure → terminal `Error`,
-`MalformedWorkerResult`); ensure `destination_dir` exists, refuse to clobber an
-existing destination file, stream-copy source → `<destination_dir>/<source_file_name>`
-computing size + BLAKE3, return `BackUpFileResult`. Domain error enum
-`BackUpFileError { failure_class(), error_code(), payload(), Display, Error }`: missing
-source → `ArtifactUnavailable`; write/copy failure and destination-exists →
-`BackupFailure`.
+`MalformedWorkerResult`). The request carries a fully-qualified `destination_path`
+(the control plane builds it collision-free, see below), not just a directory. The
+handler creates the destination's parent dir, stream-copies source →
+`destination_path` computing size + BLAKE3, `fsync`s the destination file and its
+parent directory before returning (durability: a `verified` record must mean the
+bytes are on stable storage), and returns `BackUpFileResult`. **Idempotent re-copy:**
+if `destination_path` already exists, the handler reads it back and, when its
+size+checksum match the freshly-copied source, returns success (`BackedUp`) instead
+of failing — so a retried dispatch is a no-op, not a clobber error. A pre-existing
+destination whose bytes differ is a `BackupFailure` (refuse to overwrite a
+non-matching file). Domain error enum `BackUpFileError { failure_class(),
+error_code(), payload(), Display, Error }`: missing source → `ArtifactUnavailable`;
+copy/fsync failure and mismatched-existing-destination → `BackupFailure`.
 
 ### Durable records
 
@@ -113,6 +121,10 @@ CREATE TABLE backups (
 ) STRICT;
 CREATE INDEX backups_by_file_version ON backups (source_file_version_id, id DESC);
 CREATE INDEX backups_by_job ON backups (job_id, id DESC);
+-- Idempotency: at most one verified backup per (ticket, source version) so a
+-- retried operation reuses the existing copy instead of writing a duplicate row.
+CREATE UNIQUE INDEX backups_verified_key
+    ON backups (ticket_id, source_file_version_id) WHERE status = 'verified';
 ```
 
 `SqliteBackupRepo` in `crates/voom-store/src/repo/media/backups.rs` (template:
@@ -142,11 +154,23 @@ launching `voom-backup-worker` via `bundled_worker_command_from(…,
 `back_up_source_before_mutation(cp, backup_root, &selected, job_id, ticket_id,
 source_file_version_id) -> Result<(), VoomError>`:
 
-1. `insert_pending` backup record (own tx).
-2. dispatch backup worker (`BackUpFileRequest { source_path: selected.canonical_path,
-   destination_dir: backup_root }`).
-3. success → `mark_verified` (size/checksum/destination); failure → `mark_failed`
-   (class/code/message) then return `VoomError::BackupFailure(message)`.
+1. **Idempotency short-circuit:** if a `verified` backup already exists for
+   `(ticket_id, source_file_version_id)`, return `Ok(())` without re-copying. This is
+   the primary retry guard — the phase-barrier coordinator requeues tickets on
+   retriable failures (and `BackupFailure` is itself retriable), so `execute_*_core`
+   (and thus this helper) is re-entered on retry. Without the short-circuit a
+   transient upstream blip would re-run the backup and a duplicate would be written.
+2. **Collision-free destination:** the destination is
+   `<backup_root>/<source_file_version_id>/<source_basename>`, so distinct sources
+   that share a basename (common in a library) never map to the same path.
+3. `insert_pending` backup record (own tx).
+4. dispatch backup worker (`BackUpFileRequest { source_path: selected.canonical_path,
+   destination_path }`). The worker's own re-copy short-circuit (matching
+   size+checksum) makes a redundant dispatch safe even if step 1 races.
+5. success → `mark_verified` (size/checksum/destination); failure → `mark_failed`
+   (class/code/message) then return `VoomError::BackupFailure(message)`. The
+   `backups_verified_key` unique index is the durable backstop against duplicate
+   verified rows under concurrency.
 
 Called from each `execute_*_core` immediately after `source::select_source`, guarded
 by `if let Some(root) = &input.backup_root`. For testability the dispatcher is
@@ -158,10 +182,14 @@ execute functions, real impl wired in the `workflow.rs` adapters, fake in tests)
 `ComplianceReportData` (`cases/policy/compliance.rs`) gains `backups:
 Vec<BackupEvidence>`. `BackupEvidence` is a serializable view
 (`source_file_version_id, provider, destination_path, size_bytes, checksum, status,
-created_at`). `generate_compliance_report` collects the plan's referenced source file
-version ids and calls `SqliteBackupRepo::list_by_file_version` for each (or a batched
-list), sorted deterministically. `ControlPlane` gains a `pub(crate) backups:
-SqliteBackupRepo` field.
+created_at`). Evidence is keyed off the file versions resolved from the report's
+**input set** (`generate_compliance_report` already loads the durable input set and
+plans it), not off `ExecutionPlan` node fields — the plan is not assumed to carry
+`source_file_version_id`. The exact input-set → file-version accessor is confirmed
+during implementation; if the input set does not resolve to durable file-version ids
+at report time, evidence is scoped to the job's backups instead and this is recorded
+in the ADR consequences. Rows sorted deterministically (`created_at ASC, id ASC`).
+`ControlPlane` gains a `pub(crate) backups: SqliteBackupRepo` field.
 
 ### CLI
 
@@ -174,20 +202,37 @@ Insta test `crates/voom-cli/tests/backup_envelope.rs`.
 ## Test plan
 
 - Protocol: `backup_test.rs` — serde round-trip + `deny_unknown_fields` rejection.
-- Worker: handler unit tests (success, missing source, clobber refusal, bad payload)
-  + `observe/backup` copy+hash unit tests + `tests/backup_worker.rs` spawn contract.
+- Worker: handler unit tests (success, missing source, bad payload, idempotent
+  re-copy when destination already matches, mismatched-existing-destination →
+  `BackupFailure`) + `observe/backup` copy+hash unit tests + `tests/backup_worker.rs`
+  spawn contract.
 - Store: `backups_test.rs` — insert/transition/get/list/list_pending + CHECK
-  violations rejected.
+  violations rejected + `backups_verified_key` uniqueness rejects a duplicate
+  verified row.
 - Execute: control-plane test with an injected fake `BackUpFileDispatcher` — verified
   record on success; abort + `failed` record + `BACKUP_FAILURE` on dispatcher error;
-  no record without `--backup-root`.
+  no record without `--backup-root`; **retry idempotency** — re-running the helper for
+  the same `(ticket, source version)` short-circuits (no duplicate row, no clobber
+  abort); two sources sharing a basename get distinct destinations.
 - Report: evidence appears for a backed-up file version.
 - CLI: `backup_envelope.rs` list/show/not-found snapshots.
 - Recovery: a `pending` record with `finished_at IS NULL` is returned by
   `list_pending` (crash-recovery visibility).
 
+## Operational limitations (V1)
+
+- **No backup retention/cleanup.** Every `execute --backup-root` copies full source
+  files into the backup root; V1 does not prune, dedup across runs, or bound total
+  size. The operator owns the backup volume. This is a documented V1 limitation, not
+  a bug.
+- **Out-of-space is a fail-closed abort.** A full backup volume surfaces as a
+  `BackupFailure`, which (fail-closed) aborts the mutating operation and is recorded
+  on the ticket. This is intentional — a mutation must not proceed when its requested
+  backup cannot be written.
+
 ## Rollback / cleanup
 
 Additive migration, new crate, new table, new CLI command, new opt-in option — no
 data migration. Reverting removes the crate/table/command; no destructive change to
-existing rows.
+existing rows. Copied backup bytes under the operator's `--backup-root` are left in
+place (operator-managed, per the limitation above).

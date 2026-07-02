@@ -46,8 +46,12 @@ Two facts shape the design:
 `voom-verify-artifact-worker`.** It speaks the existing HTTP/NDJSON worker protocol
 (ADR 0002), handles `OperationKind::BackUpFile`, copies the source file to a
 destination directory on the local filesystem (the V1 target), computes size and a
-BLAKE3 checksum while copying, and emits one `Progress` frame plus a terminal
-`Result`/`Error` frame. It is a bundled `WorkerKind::Local` subprocess launched next
+BLAKE3 checksum while copying, `fsync`s the copy and its parent directory before
+reporting success (a `verified` record means the bytes are on stable storage), and
+emits one `Progress` frame plus a terminal `Result`/`Error` frame. The request
+carries a fully-qualified `destination_path`; if it already exists with a matching
+size+checksum the worker treats it as an idempotent success rather than a clobber
+error. It is a bundled `WorkerKind::Local` subprocess launched next
 to the running binary (override `VOOM_BACKUP_WORKER_BIN`), dispatched directly with a
 `BackUpFileDispatcher` trait exactly as verify-artifact is — not scheduled through a
 ticket/lease/worker-row. No new `OperationKind`, `WorkerKind`, `FailureClass`, or
@@ -71,7 +75,14 @@ size, checksum, provider, status, and — on failure — `failure_class`/`error_
 **4. Execute-path gate: an explicit `--backup-root <DIR>` option threaded through
 `ComplianceExecutionOptions`.** When set, a shared helper backs up the source of
 every mutating operation (remux, transcode-video, transcode-audio, extract-audio)
-*after source selection and before the worker dispatch*. The gate is **fail-closed**:
+*after source selection and before the worker dispatch*. Because the phase-barrier
+coordinator requeues tickets on retriable failures — and `BackupFailure` is itself
+retriable — the helper is **idempotent**: it short-circuits when a `verified` backup
+already exists for `(ticket_id, source_file_version_id)` (a partial-unique index is
+the durable backstop), and the destination path is namespaced by
+`source_file_version_id` so distinct same-basename sources never collide. Without
+this, a transient upstream retry would re-run the backup and clobber-fail. The gate
+is **fail-closed**:
 a backup failure writes a `failed` backup record and returns
 `VoomError::BackupFailure`, which aborts that operation and is recorded on the
 ticket's failure with `FailureClass::BackupFailure`. This is the first real
@@ -82,8 +93,9 @@ ticket's failure with `FailureClass::BackupFailure`. This is the first real
 planner.** `voom_plan::generate_compliance_report` stays pure (plan-only, so
 `report_hash` is unaffected). `ComplianceReportData` gains a `backups:
 Vec<BackupEvidence>` field populated by reading `SqliteBackupRepo` for the file
-versions the report's plan references. Evidence reflects durable state: empty before
-any backup runs, populated after an execute run with `--backup-root`.
+versions resolved from the report's durable input set (not from plan node fields).
+Evidence reflects durable state: empty before any backup runs, populated after an
+execute run with `--backup-root`.
 
 **6. `voom backup list [--limit] [--status] | show --backup-id` inspection**, read-side
 (`ControlPlane::open`, never migrates — ADR 0003), ordered `created_at ASC, id ASC`
@@ -109,6 +121,10 @@ envelope.
   source of truth; the operation's existing failure event carries the
   `BackupFailure` class when the gate aborts. Dedicated backup lifecycle events are a
   possible future refinement.
+- V1 has **no backup retention/cleanup**: copies accumulate under the operator's
+  `--backup-root`, and a full volume surfaces (fail-closed) as a `BackupFailure` that
+  aborts the mutation. The operator owns the backup volume. Retention/pruning is a
+  documented future concern.
 
 ## Considered & rejected
 
