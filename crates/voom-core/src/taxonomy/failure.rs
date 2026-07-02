@@ -8,9 +8,10 @@
 use crate::error::ErrorCode;
 use crate::issue::{IssuePriority, IssueSeverity};
 
-/// Twenty failure categories defined by the architectural spec's
-/// Failure taxonomy: ten retriable, five non-retriable, five
-/// operator-required. The retriability partition is enforced by
+/// Failure categories defined by the architectural spec's Failure
+/// taxonomy: ten retriable, six non-retriable, five operator-required
+/// (twenty-three in total, plus the two supervisor-introduced classes
+/// noted below). The retriability partition is enforced by
 /// `retry_class` below; any new variant requires extending all five
 /// methods or the compiler flags the missing arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -35,6 +36,12 @@ pub enum FailureClass {
     MissingCapability,
     MalformedWorkerResult,
     UserCancellation,
+    // The source media itself is structurally corrupt: the provider
+    // tool rejected the input bytes (as opposed to the tool failing
+    // transiently). Retrying the same file cannot succeed. Distinct
+    // from `MalformedWorkerResult`, which means the worker's *own
+    // result* was malformed, not the source. (#248.)
+    MalformedMedia,
     // Operator-required — execution cannot proceed until an operator
     // takes some action (re-evaluate evidence, resolve a closure,
     // approve a privileged step, etc.).
@@ -81,6 +88,7 @@ impl FailureClass {
         Self::MissingCapability,
         Self::MalformedWorkerResult,
         Self::UserCancellation,
+        Self::MalformedMedia,
         Self::StaleIdentityEvidence,
         Self::ClosureResolutionIncomplete,
         Self::BlockedByActiveUseLease,
@@ -111,7 +119,8 @@ impl FailureClass {
             | Self::PolicyValidationError
             | Self::MissingCapability
             | Self::MalformedWorkerResult
-            | Self::UserCancellation => FailureRetryClass::NonRetriable,
+            | Self::UserCancellation
+            | Self::MalformedMedia => FailureRetryClass::NonRetriable,
             Self::StaleIdentityEvidence
             | Self::ClosureResolutionIncomplete
             | Self::BlockedByActiveUseLease
@@ -182,6 +191,7 @@ impl FailureClass {
             Self::MissingCapability => ErrorCode::MissingCapability,
             Self::MalformedWorkerResult => ErrorCode::MalformedWorkerResult,
             Self::UserCancellation => ErrorCode::UserCancellation,
+            Self::MalformedMedia => ErrorCode::MalformedMedia,
             // Operator-required classes each carry their own ErrorCode.
             // Names diverge where the FailureClass predates the code:
             // `BlockedByActiveUseLease` maps to `ErrorCode::BlockedByUseLease`.
@@ -212,6 +222,7 @@ impl FailureClass {
             ErrorCode::MissingCapability => Some(Self::MissingCapability),
             ErrorCode::MalformedWorkerResult => Some(Self::MalformedWorkerResult),
             ErrorCode::UserCancellation => Some(Self::UserCancellation),
+            ErrorCode::MalformedMedia => Some(Self::MalformedMedia),
             ErrorCode::StaleIdentityEvidence => Some(Self::StaleIdentityEvidence),
             ErrorCode::ClosureResolutionIncomplete => Some(Self::ClosureResolutionIncomplete),
             ErrorCode::BlockedByUseLease => Some(Self::BlockedByActiveUseLease),

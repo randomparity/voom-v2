@@ -208,6 +208,7 @@ fn every_error_code_has_a_wire_string() {
         ErrorCode::PolicyExecutionError,
         ErrorCode::MissingCapability,
         ErrorCode::MalformedWorkerResult,
+        ErrorCode::MalformedMedia,
         ErrorCode::UserCancellation,
         ErrorCode::ApprovalRequired,
         ErrorCode::PriorityPolicyConflict,

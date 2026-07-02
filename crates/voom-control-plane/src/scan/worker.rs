@@ -104,7 +104,14 @@ impl ScanWorkerError {
         Self::new(failure_class, error_code, message, false, payload)
     }
 
-    pub(crate) fn is_ffprobe_exit(&self) -> bool {
+    /// A per-file probe fault the directory scan can survive: the file itself is
+    /// unprobeable (either a transient probe `exit` failure, or the permanent
+    /// `MalformedMedia` — structurally corrupt source, #248/#287), as opposed to
+    /// a worker-level fault (crash, protocol error) that should abort the group.
+    pub(crate) fn is_unprobeable_media(&self) -> bool {
+        if self.error_code == ErrorCode::MalformedMedia {
+            return true;
+        }
         self.error_code == ErrorCode::ExternalSystemUnavailable
             && self
                 .terminal_payload

@@ -206,6 +206,11 @@ pub(crate) async fn probe_staged_result(
         size_bytes: result.output.size_bytes,
         content_hash: result.output.content_hash.clone(),
         modified_at: None,
+        // Inode facts are a scan-time hardlink signal; a produced-artifact
+        // verification has no source file to stat, so they do not apply.
+        dev: None,
+        ino: None,
+        nlink: None,
     };
     let request = result_probe_request(staging_path, &expected)?;
     let probed = dispatcher.dispatch_result_probe(cp, request).await?;

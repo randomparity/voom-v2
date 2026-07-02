@@ -87,6 +87,9 @@ pub enum ErrorCode {
     MissingCapability,
     /// A worker result deserialized but didn't satisfy the contract.
     MalformedWorkerResult,
+    /// The source media is structurally corrupt: the provider tool rejected the
+    /// input bytes. Permanent — retrying the same file cannot succeed.
+    MalformedMedia,
     /// A user/operator cancelled the work in progress.
     UserCancellation,
     /// An operator approval is required before progress can continue.
@@ -143,6 +146,7 @@ impl ErrorCode {
         Self::PolicyExecutionError,
         Self::MissingCapability,
         Self::MalformedWorkerResult,
+        Self::MalformedMedia,
         Self::UserCancellation,
         Self::ApprovalRequired,
         Self::PriorityPolicyConflict,
@@ -188,6 +192,7 @@ impl ErrorCode {
             Self::PolicyExecutionError => "POLICY_EXECUTION_ERROR",
             Self::MissingCapability => "MISSING_CAPABILITY",
             Self::MalformedWorkerResult => "MALFORMED_WORKER_RESULT",
+            Self::MalformedMedia => "MALFORMED_MEDIA",
             Self::UserCancellation => "USER_CANCELLATION",
             Self::ApprovalRequired => "APPROVAL_REQUIRED",
             Self::PriorityPolicyConflict => "PRIORITY_POLICY_CONFLICT",

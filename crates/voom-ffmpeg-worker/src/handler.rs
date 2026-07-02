@@ -40,6 +40,10 @@ pub enum TranscodeVideoError {
         message: String,
         payload: serde_json::Value,
     },
+    MalformedMedia {
+        message: String,
+        payload: serde_json::Value,
+    },
     MalformedWorkerResult {
         message: String,
         payload: serde_json::Value,
@@ -59,6 +63,7 @@ impl TranscodeVideoError {
             Self::ArtifactUnavailable { .. } => FailureClass::ArtifactUnavailable,
             Self::ArtifactChecksumMismatch { .. } => FailureClass::ArtifactChecksumMismatch,
             Self::ExternalSystemUnavailable { .. } => FailureClass::ExternalSystemUnavailable,
+            Self::MalformedMedia { .. } => FailureClass::MalformedMedia,
         }
     }
 
@@ -77,6 +82,7 @@ impl TranscodeVideoError {
             | Self::ArtifactUnavailable { payload, .. }
             | Self::ArtifactChecksumMismatch { payload, .. }
             | Self::ExternalSystemUnavailable { payload, .. }
+            | Self::MalformedMedia { payload, .. }
             | Self::MalformedWorkerResult { payload, .. } => payload.clone(),
         }
     }
@@ -94,6 +100,9 @@ impl Display for TranscodeVideoError {
             }
             Self::ExternalSystemUnavailable { message, .. } => {
                 write!(f, "external system unavailable: {message}")
+            }
+            Self::MalformedMedia { message, .. } => {
+                write!(f, "malformed media: {message}")
             }
             Self::MalformedWorkerResult { message, .. } => {
                 write!(f, "malformed worker result: {message}")
@@ -945,6 +954,10 @@ impl From<FfmpegError> for TranscodeVideoError {
                     message,
                 }
             }
+            FfmpegError::MalformedMedia(message) => Self::MalformedMedia {
+                payload: serde_json::json!({"stage": "ffmpeg", "message": message}),
+                message,
+            },
             FfmpegError::OutputFactsMismatch(message) => Self::MalformedWorkerResult {
                 payload: serde_json::json!({"stage": "output_probe", "message": message}),
                 message,

@@ -52,7 +52,7 @@ async fn persists_discovered_file_and_media_snapshot_with_selected_worker() {
 
     let snapshot = cp
         .identity()
-        .get_media_snapshot(persisted.media_snapshot_id)
+        .get_media_snapshot(persisted.media_snapshot_id.unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -138,7 +138,7 @@ async fn persist_scan_assigns_stable_stream_ids() {
 
     let snapshot = cp
         .identity()
-        .get_media_snapshot(persisted.media_snapshot_id)
+        .get_media_snapshot(persisted.media_snapshot_id.unwrap())
         .await
         .unwrap()
         .unwrap();
@@ -191,6 +191,133 @@ async fn missing_or_retired_worker_id_is_rejected_without_replacement_worker() {
     assert!(state_transition_event_kinds(&cp).await.is_empty());
 }
 
+#[tokio::test]
+async fn two_hardlinks_resolve_to_one_asset_with_two_locations() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    // Two paths, same physical file: identical content and identical (dev, ino).
+    let first = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+    let second = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+
+    let a = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/a.mkv"),
+        &[],
+        &first,
+        &matching_probe_result(&first),
+    )
+    .await
+    .unwrap();
+    assert!(!a.hardlink);
+
+    let b = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/b.mkv"),
+        &[],
+        &second,
+        &matching_probe_result(&second),
+    )
+    .await
+    .unwrap();
+
+    // The hardlink resolves to the first asset/version, adding a location only.
+    assert!(b.hardlink);
+    assert_eq!(b.file_asset_id, a.file_asset_id);
+    assert_eq!(b.file_version_id, a.file_version_id);
+    assert_ne!(b.file_location_id, a.file_location_id);
+    assert!(b.media_snapshot_id.is_none());
+
+    assert_eq!(table_count(&cp, "file_assets").await, 1);
+    assert_eq!(table_count(&cp, "file_versions").await, 1);
+    assert_eq!(table_count(&cp, "file_locations").await, 2);
+    assert_eq!(table_count(&cp, "media_snapshots").await, 1);
+    assert_eq!(table_count(&cp, "scan_file_facts").await, 2);
+}
+
+#[tokio::test]
+async fn byte_identical_copy_on_a_different_inode_stays_a_distinct_asset() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    // Same content, DIFFERENT inode: a copy, not a hardlink.
+    let first = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 1);
+    let copy = candidate_facts_with_inode(123, "blake3:abc", 42, 8, 1);
+
+    persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/a.mkv"),
+        &[],
+        &first,
+        &matching_probe_result(&first),
+    )
+    .await
+    .unwrap();
+    let b = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/copy.mkv"),
+        &[],
+        &copy,
+        &matching_probe_result(&copy),
+    )
+    .await
+    .unwrap();
+
+    assert!(!b.hardlink);
+    assert_eq!(table_count(&cp, "file_assets").await, 2);
+    assert_eq!(table_count(&cp, "file_versions").await, 2);
+    assert_eq!(table_count(&cp, "scan_file_facts").await, 2);
+}
+
+#[tokio::test]
+async fn recycled_inode_with_different_content_does_not_collapse_identity() {
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    // Same (dev, ino) but DIFFERENT content — a recycled inode or in-place
+    // edit. The content guard must reject the hardlink attach.
+    let first = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 1);
+    let recycled = candidate_facts_with_inode(456, "blake3:xyz", 42, 7, 1);
+
+    persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/a.mkv"),
+        &[],
+        &first,
+        &matching_probe_result(&first),
+    )
+    .await
+    .unwrap();
+    let b = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/recycled.mkv"),
+        &[],
+        &recycled,
+        &matching_probe_result(&recycled),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !b.hardlink,
+        "different content must not alias onto the version"
+    );
+    assert_ne!(b.file_asset_id, first_asset(&cp).await);
+    assert_eq!(table_count(&cp, "file_assets").await, 2);
+    assert_eq!(table_count(&cp, "file_versions").await, 2);
+}
+
+async fn first_asset(cp: &crate::ControlPlane) -> voom_core::FileAssetId {
+    let id: i64 = sqlx::query_scalar("SELECT MIN(id) FROM file_assets")
+        .fetch_one(cp.pool_for_test())
+        .await
+        .unwrap();
+    voom_core::FileAssetId(u64::try_from(id).unwrap())
+}
+
 // `verify_probe_facts` AND-chains four equalities (pre/post size, pre/post
 // hash) into one content-drift error. A regression to a subset (e.g. dropping
 // a `&&` term) would still pass the integration drift test, which only mutates
@@ -232,6 +359,59 @@ fn verify_probe_facts_rejects_pre_probe_hash_mismatch() {
     let err = verify_probe_facts(&candidate, &result).unwrap_err();
     assert_eq!(err.status(), ScanReportFileStatus::FailedContentDrift);
     assert_eq!(err.failure_class(), FailureClass::ArtifactChecksumMismatch);
+}
+
+#[tokio::test]
+async fn hardlink_with_its_own_sidecars_attaches_them_to_the_bundle() {
+    use crate::scan::discovery::{SidecarCandidate, SidecarKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar_path = {
+        let path = dir.path().join("b.srt");
+        std::fs::write(&path, b"subtitle").unwrap();
+        std::fs::canonicalize(path).unwrap()
+    };
+    let (cp, _tmp) = cp_with_manual_clock(T0).await;
+    let worker = register_local_worker(&cp, "scan-worker").await;
+    // First path ingests the physical file with no sidecars.
+    let first = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+    persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/a.mkv"),
+        &[],
+        &first,
+        &matching_probe_result(&first),
+    )
+    .await
+    .unwrap();
+
+    // The hardlink at a different path carries its own sidecar. It must not be
+    // dropped: the hardlink resolves to the existing asset AND its sidecar is
+    // attached to that asset's bundle.
+    let second = candidate_facts_with_inode(123, "blake3:abc", 42, 7, 2);
+    let sidecars = vec![SidecarCandidate {
+        path: sidecar_path,
+        kind: SidecarKind::Subtitle,
+    }];
+    let hardlink = persist_scanned_media_snapshot(
+        &cp,
+        worker.id,
+        Path::new("/library/b.mkv"),
+        &sidecars,
+        &second,
+        &matching_probe_result(&second),
+    )
+    .await
+    .unwrap();
+
+    assert!(hardlink.hardlink);
+    assert_eq!(hardlink.sidecars.len(), 1);
+    assert_eq!(hardlink.sidecars[0].bundle_member_role, "external_subtitle");
+    assert!(hardlink.bundle_id.is_some());
+    // One physical primary (no second asset), plus the sidecar asset.
+    assert_eq!(table_count(&cp, "file_assets").await, 2);
+    assert_eq!(table_count(&cp, "file_versions").await, 2);
 }
 
 #[tokio::test]
@@ -336,6 +516,26 @@ fn candidate_facts(size_bytes: u64, content_hash: &str) -> ObservedCandidateFact
         size_bytes,
         content_hash: content_hash.to_owned(),
         modified_at: None,
+        dev: None,
+        ino: None,
+        nlink: None,
+    }
+}
+
+fn candidate_facts_with_inode(
+    size_bytes: u64,
+    content_hash: &str,
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+) -> ObservedCandidateFacts {
+    ObservedCandidateFacts {
+        size_bytes,
+        content_hash: content_hash.to_owned(),
+        modified_at: None,
+        dev: Some(dev),
+        ino: Some(ino),
+        nlink: Some(nlink),
     }
 }
 

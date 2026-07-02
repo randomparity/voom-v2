@@ -41,6 +41,10 @@ pub struct ScanSummary {
     pub ingested: u64,
     pub probed: u64,
     pub snapshots_recorded: u64,
+    /// Paths that resolved to an already-ingested physical file via matching
+    /// `(dev, ino)` inode facts (#249). Counted here, not in `ingested`: a
+    /// hardlink adds a `file_location`, not a new asset.
+    pub hardlinked: u64,
     pub skipped: u64,
     pub failed: u64,
 }
@@ -77,6 +81,9 @@ pub struct ScanSidecarReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanReportFileStatus {
     Scanned,
+    /// Resolved to an already-ingested physical file via matching `(dev, ino)`
+    /// inode facts: a new `file_location` on an existing asset, not a new asset.
+    ScannedHardlink,
     SkippedInaccessible,
     SkippedUnsupportedExtension,
     FailedContentDrift,
@@ -303,7 +310,7 @@ impl ControlPlane {
                 error,
                 ..
             } => {
-                if mode == discovery::ScanMode::Directory && error.is_ffprobe_exit() {
+                if mode == discovery::ScanMode::Directory && error.is_unprobeable_media() {
                     report.push_worker_error(candidate.path, &facts, worker_id, &error);
                     Ok(())
                 } else {
@@ -505,7 +512,7 @@ impl ScanCandidateOutcome {
     fn is_group_terminal(&self) -> bool {
         match self {
             Self::Probed { .. } => false,
-            Self::WorkerError { error, .. } => !error.is_ffprobe_exit(),
+            Self::WorkerError { error, .. } => !error.is_unprobeable_media(),
             Self::ObserveError { .. } | Self::ProbeRequestError { .. } => true,
         }
     }
@@ -630,9 +637,16 @@ impl ScanReportBuilder {
         worker_id: WorkerId,
         persisted: &persist::PersistedScan,
     ) {
-        self.report.summary.ingested += 1;
+        if persisted.hardlink {
+            // A hardlink adds a file_location to an existing asset — not a new
+            // ingest and not a new snapshot. Count it separately so per-run
+            // totals stay honest.
+            self.report.summary.hardlinked += 1;
+        } else {
+            self.report.summary.ingested += 1;
+            self.report.summary.snapshots_recorded += 1;
+        }
         self.report.summary.ingested += u64::try_from(persisted.sidecars.len()).unwrap_or(u64::MAX);
-        self.report.summary.snapshots_recorded += 1;
         self.report
             .files
             .push(Self::scanned_file_report(path, facts, worker_id, persisted));
@@ -776,11 +790,15 @@ impl ScanReportBuilder {
     ) -> ScanFileReport {
         ScanFileReport {
             path,
-            status: ScanReportFileStatus::Scanned,
+            status: if persisted.hardlink {
+                ScanReportFileStatus::ScannedHardlink
+            } else {
+                ScanReportFileStatus::Scanned
+            },
             file_asset_id: Some(persisted.file_asset_id),
             file_version_id: Some(persisted.file_version_id),
             file_location_id: Some(persisted.file_location_id),
-            media_snapshot_id: Some(persisted.media_snapshot_id),
+            media_snapshot_id: persisted.media_snapshot_id,
             content_hash: Some(facts.content_hash.clone()),
             size_bytes: Some(facts.size_bytes),
             probe_worker_id: Some(worker_id),

@@ -27,6 +27,7 @@ pub struct ScanSummaryData {
     pub ingested: u64,
     pub probed: u64,
     pub snapshots_recorded: u64,
+    pub hardlinked: u64,
     pub skipped: u64,
     pub failed: u64,
 }
@@ -170,6 +171,7 @@ impl From<ScanReport> for ScanData {
                 ingested: report.summary.ingested,
                 probed: report.summary.probed,
                 snapshots_recorded: report.summary.snapshots_recorded,
+                hardlinked: report.summary.hardlinked,
                 skipped: report.summary.skipped,
                 failed: report.summary.failed,
             },
@@ -261,6 +263,7 @@ fn mode_wire(mode: ScanMode) -> &'static str {
 fn status_wire(status: ScanReportFileStatus) -> &'static str {
     match status {
         ScanReportFileStatus::Scanned => "scanned",
+        ScanReportFileStatus::ScannedHardlink => "scanned_hardlink",
         ScanReportFileStatus::SkippedInaccessible => "skipped_inaccessible",
         ScanReportFileStatus::SkippedUnsupportedExtension => "skipped_unsupported_extension",
         ScanReportFileStatus::FailedContentDrift => "failed_content_drift",

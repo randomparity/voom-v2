@@ -95,6 +95,74 @@ fn ffprobe_config_version_probe_times_out_quickly() {
     assert_eq!(config.provider_version(), "unknown");
 }
 
+#[test]
+fn malformed_media_stderr_matches_structural_faults_only() {
+    assert!(is_malformed_media_stderr(
+        "clip.mkv: Invalid data found when processing input"
+    ));
+    assert!(is_malformed_media_stderr("moov atom not found"));
+    assert!(is_malformed_media_stderr("Error opening input file"));
+    // Transient / build-dependent diagnostics must NOT be treated as permanent.
+    assert!(!is_malformed_media_stderr("clip.mkv: End of file"));
+    assert!(!is_malformed_media_stderr("partial file"));
+    assert!(!is_malformed_media_stderr("Unknown format"));
+    assert!(!is_malformed_media_stderr(
+        "Could not find codec parameters"
+    ));
+    assert!(!is_malformed_media_stderr(""));
+}
+
+#[tokio::test]
+async fn nonzero_exit_with_malformed_signature_maps_to_malformed_media() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+    let media_path = dir.path().join("clip.mkv");
+    assert!(std::fs::write(&media_path, b"garbage").is_ok());
+    // A real-shaped ffprobe failure: non-zero exit, structural-fault stderr.
+    let ffprobe = write_fake_ffprobe(
+        dir.path(),
+        "echo 'clip.mkv: Invalid data found when processing input' 1>&2\nexit 1\n",
+    );
+    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, ffprobe.as_os_str())]);
+
+    let result = run_ffprobe_json(&media_path, &config).await;
+
+    assert!(
+        matches!(
+            result.as_ref().map_err(FfprobeError::failure_class),
+            Err(FailureClass::MalformedMedia)
+        ),
+        "expected MalformedMedia, got {result:?}"
+    );
+    assert!(matches!(
+        result.as_ref().map_err(FfprobeError::error_code),
+        Err(ErrorCode::MalformedMedia)
+    ));
+}
+
+#[tokio::test]
+async fn nonzero_exit_without_signature_stays_external_system_unavailable() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+    let media_path = dir.path().join("clip.mkv");
+    assert!(std::fs::write(&media_path, b"garbage").is_ok());
+    // A transient-looking failure (no structural-fault signature) stays retriable.
+    let ffprobe = write_fake_ffprobe(dir.path(), "echo 'clip.mkv: End of file' 1>&2\nexit 1\n");
+    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, ffprobe.as_os_str())]);
+
+    let result = run_ffprobe_json(&media_path, &config).await;
+
+    assert!(
+        matches!(
+            result.as_ref().map_err(FfprobeError::failure_class),
+            Err(FailureClass::ExternalSystemUnavailable)
+        ),
+        "expected ExternalSystemUnavailable, got {result:?}"
+    );
+}
+
 fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let script = format!(
         "#!/bin/sh\n\

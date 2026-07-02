@@ -383,7 +383,7 @@ async fn malformed_media_records_per_file_failure_without_execution_ticket() {
 
 #[tokio::test]
 #[ignore = "run with just chaos-e2e-ci; requires Chaos Librarian media tools"]
-async fn hardlinked_paths_scan_as_duplicate_candidates_with_shared_hash() {
+async fn hardlinked_paths_resolve_to_one_physical_file() {
     let chaos = ready_chaos();
     let ScannedChaosRun { scan, .. } = scan_materialized_scenario(
         &chaos,
@@ -392,17 +392,27 @@ async fn hardlinked_paths_scan_as_duplicate_candidates_with_shared_hash() {
     .await;
     assert_eq!(scan.status_code, Some(0), "stderr: {}", scan.stderr);
 
-    // Characterization of a known gap (#249): the scanner records no inode
-    // facts, so both hardlinked paths ingest as independent assets and the
-    // identical content hash is the only duplicate-candidate evidence. The
-    // upstream recipe expects same-inode detection; update this test when
-    // inode facts land.
-    assert_eq!(scan.json["data"]["summary"]["ingested"], 2);
+    // #249: the scanner records (dev, ino) inode facts, so two hardlinked paths
+    // resolve to one physical file — one asset ingested and the second path
+    // recorded as a hardlink (an added location), never a second asset. A
+    // byte-identical copy (distinct inode) would remain a separate asset.
+    assert_eq!(scan.json["data"]["summary"]["ingested"], 1);
+    assert_eq!(scan.json["data"]["summary"]["hardlinked"], 1);
     assert_eq!(scan.json["data"]["summary"]["failed"], 0);
     let files = scan.json["data"]["files"].as_array().unwrap();
     assert_eq!(files.len(), 2);
     assert_eq!(files[0]["content_hash"], files[1]["content_hash"]);
-    assert_ne!(files[0]["file_asset_id"], files[1]["file_asset_id"]);
+    // Both paths point at the same physical file: one asset/version, and the
+    // hardlink is flagged with the scanned_hardlink status.
+    assert_eq!(files[0]["file_asset_id"], files[1]["file_asset_id"]);
+    let statuses: std::collections::BTreeSet<&str> = files
+        .iter()
+        .map(|file| file["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["scanned", "scanned_hardlink"].into_iter().collect()
+    );
 }
 
 #[tokio::test]
