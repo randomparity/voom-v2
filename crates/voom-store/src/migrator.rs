@@ -73,6 +73,13 @@ const MIGRATION_0017_SQL: &str = include_str!("../../../migrations/0017_scan_fil
 /// compile time.
 const MIGRATION_0018_SQL: &str = include_str!("../../../migrations/0018_backups.sql");
 
+/// SQL for migration 0020 (Sprint 17 scheduling + safety policy CRUD, #281),
+/// embedded at compile time. Version 0019 is owned by a sibling branch (#280);
+/// the schema probe is count- and version-membership-based, not contiguity-based
+/// (see `schema.rs`), so a gap here is well-defined until the branches merge.
+const MIGRATION_0020_SQL: &str =
+    include_str!("../../../migrations/0020_scheduling_safety_policies.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -212,6 +219,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("backups"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0018_SQL),
+            false,
+        ),
+        Migration::new(
+            20,
+            Cow::Borrowed("scheduling_safety_policies"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0020_SQL),
             false,
         ),
     ]),

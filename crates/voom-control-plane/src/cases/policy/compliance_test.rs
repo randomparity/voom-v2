@@ -124,6 +124,7 @@ fn compliance_options_convert_paths_into_workflow_options_leaving_rest_default()
         audio_staging_root: PathBuf::from("/srv/audio/staging"),
         audio_target_dir: PathBuf::from("/srv/audio/out"),
         backup_root: None,
+        safety_policy_slug: None,
     };
 
     let converted = WorkflowExecutorOptions::from(options.clone());

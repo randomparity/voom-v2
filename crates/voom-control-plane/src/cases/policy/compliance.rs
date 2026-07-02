@@ -77,7 +77,7 @@ const BACKUP_EVIDENCE_LIMIT: u32 = 100;
 /// target ref (the planner keys real-file nodes on `TargetRef::FileVersion` —
 /// see `coordinator/planning.rs` / `executor/tickets.rs`). `BTreeSet` gives a
 /// deterministic ascending order for report evidence.
-fn plan_file_version_targets(
+pub(crate) fn plan_file_version_targets(
     plan: &voom_plan::ExecutionPlan,
 ) -> std::collections::BTreeSet<FileVersionId> {
     let mut ids = std::collections::BTreeSet::new();
@@ -305,9 +305,13 @@ pub struct ComplianceExecutionOptions {
     pub audio_target_dir: PathBuf,
     /// Opt-in backup-before-mutation destination root (`--backup-root`). `Some`
     /// backs up every mutating operation's source here before dispatch; `None`
-    /// disables the gate. The V1 trigger for the gate — T12 (#281) will later
-    /// source this from a durable safety policy instead. See ADR 0025.
+    /// disables the gate. A safety policy with `backup_required` drives this hook:
+    /// backup required with no root supplied fail-closes the run (ADR 0025/0028).
     pub backup_root: Option<PathBuf>,
+    /// Opt-in safety policy slug (`--safety-policy`). `Some` makes `execute` read
+    /// that durable safety policy and enforce it fail-closed before any dispatch
+    /// (ADR 0028); `None` leaves the manual execute path unchanged.
+    pub safety_policy_slug: Option<String>,
 }
 
 impl Default for ComplianceExecutionOptions {
@@ -321,6 +325,7 @@ impl Default for ComplianceExecutionOptions {
             audio_staging_root: defaults.artifact_roots.audio.staging_root,
             audio_target_dir: defaults.artifact_roots.audio.target_dir,
             backup_root: defaults.artifact_roots.backup_root,
+            safety_policy_slug: None,
         }
     }
 }
@@ -418,7 +423,12 @@ impl From<ComplianceExecutionOptions> for WorkflowExecutorOptions {
             audio_staging_root,
             audio_target_dir,
             backup_root,
+            safety_policy_slug,
         } = options;
+        // The safety policy slug is consumed by the pre-dispatch fail-closed gate
+        // (see `execute_compliance_policy_with_options`), not by the workflow
+        // executor; drop it here.
+        let _ = safety_policy_slug;
         // Each operation commits into a per-family working dir under its staging
         // root (the `OperationArtifactRoots::target_dir`), NOT the operator's
         // `--output-dir` (the `*_target_dir` fields here). Post-run promotion
@@ -693,6 +703,17 @@ impl ControlPlane {
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
             .map_err(no_partial)?;
+        if let Some(slug) = options.safety_policy_slug.clone() {
+            self.enforce_safety_policy(
+                &slug,
+                &report_data.plan,
+                policy_version_id,
+                input_set_id,
+                options.backup_root.is_some(),
+            )
+            .await
+            .map_err(no_partial)?;
+        }
         self.reject_dead_endpoint_operations(&report_data.plan, &registered, &live)
             .await
             .map_err(no_partial)?;

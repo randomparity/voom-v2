@@ -15,7 +15,9 @@ pub use media::{
     artifact_access_plans, artifacts, backups, bundles, commit_safety_gate, identity, scan_facts,
     use_leases,
 };
-pub use policy::{issues, policies, policy_inputs, video_profiles};
+pub use policy::{
+    issues, policies, policy_inputs, safety_policies, scheduling_policies, video_profiles,
+};
 
 pub use artifact_access_plans::{
     ArtifactAccessMode, ArtifactAccessPlan, ArtifactAccessPlanStatus, NewArtifactAccessPlan,
@@ -58,12 +60,20 @@ pub use policy_inputs::{
 pub use remote_idempotency::{
     IdempotencyOutcome, RemoteIdempotencyInput, RemoteMutationReplay, SqliteRemoteIdempotencyRepo,
 };
+pub use safety_policies::{
+    CommitMode, NewSafetyPolicy, SAFETY_POLICY_SCHEMA_VERSION, SafetyPolicy,
+    SqliteSafetyPolicyRepo, VerificationLevel,
+};
 pub use scheduler_decisions::{
     NewSchedulerDecision, SchedulerDecision, SchedulerDecisionFilter, SchedulerDecisionKind,
     SchedulerDecisionOutcome, SchedulerReasonCode, SchedulerRequestSource,
     SqliteSchedulerDecisionRepo,
 };
 pub use scheduler_node_limits::{SchedulerNodeLimit, SqliteSchedulerNodeLimitRepo};
+pub use scheduling_policies::{
+    NewSchedulingPolicy, SCHEDULING_POLICY_SCHEMA_VERSION, SchedulePriority, SchedulingPolicy,
+    SqliteSchedulingPolicyRepo,
+};
 pub use schema_meta::SqliteSchemaMetaRepo;
 pub use tickets::{NewTicket, SqliteTicketRepo, Ticket, TicketState};
 pub use use_leases::{

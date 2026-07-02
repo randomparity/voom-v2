@@ -839,6 +839,27 @@ impl SqliteArtifactRepo {
         rows.iter().map(row_to_commit_record).collect()
     }
 
+    /// `true` when any commit record for `source_file_version_id` is currently
+    /// in the recovery-required state — a durable "unrecovered prior mutation"
+    /// signal the safety gate consults (ADR 0028). Recovery-required is a live
+    /// state, so a later recovered/committed record clears it.
+    pub async fn has_recovery_required_for_source_version(
+        &self,
+        source_file_version_id: FileVersionId,
+    ) -> Result<bool, VoomError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM artifact_commit_records \
+             WHERE source_file_version_id = ? AND state = 'recovery_required'",
+        )
+        .bind(i64_from_u64(source_file_version_id.0))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            VoomError::database_context("artifact_commit_records recovery_required count", e)
+        })?;
+        Ok(count > 0)
+    }
+
     pub async fn record_verified_sidecar_commit_rows_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,

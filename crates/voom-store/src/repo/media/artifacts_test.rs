@@ -604,6 +604,20 @@ async fn commit_records_move_through_terminal_states() {
         recovery_required.recovery_reason.as_deref(),
         Some("operator must inspect target")
     );
+
+    // The safety gate consults this: a recovery-required commit for the source
+    // version is present; an unrelated version has none.
+    assert!(
+        repo.has_recovery_required_for_source_version(source_version_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .has_recovery_required_for_source_version(FileVersionId(999_999))
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]

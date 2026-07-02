@@ -299,6 +299,25 @@ impl SqliteBackupRepo {
         self.list_by_status(BackupStatus::Pending, limit).await
     }
 
+    /// The most recent backup for a source file version by `created_at` then
+    /// `id`, or `None`. The safety gate consults this for its latest-record
+    /// semantics (ADR 0028): a later verified backup supersedes an earlier
+    /// failed one, so a retried operation clears a prior-failure block.
+    pub async fn latest_by_file_version(
+        &self,
+        source_file_version_id: FileVersionId,
+    ) -> Result<Option<Backup>, VoomError> {
+        let row = sqlx::query(&format!(
+            "SELECT {BACKUP_COLS} FROM backups WHERE source_file_version_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ))
+        .bind(i64_from_u64(source_file_version_id.0))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("backups latest_by_file_version", e))?;
+        row.as_ref().map(row_to_backup).transpose()
+    }
+
     /// The verified backup for `(ticket, source version)`, if any. The
     /// idempotency short-circuit for the execute-path gate: when this returns
     /// `Some`, a retried operation reuses the existing copy.
