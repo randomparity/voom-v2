@@ -5,12 +5,12 @@ use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
-    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, LeaseCommand,
-    LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand,
-    SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
+    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, IssueCommand,
+    LeaseCommand, LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand,
+    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, backup, bundle, compliance, health, init, lease, library, node, plan, policy,
+    artifact, backup, bundle, compliance, health, init, issue, lease, library, node, plan, policy,
     profile, safety_policy, scan, scheduler, scheduling_policy, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
@@ -234,6 +234,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
             dispatch_scheduling_policy(&cli, command.clone()).await
         }
         Command::SafetyPolicy(ref command) => dispatch_safety_policy(&cli, command.clone()).await,
+        Command::Issue(ref command) => dispatch_issue(&cli, command.clone()).await,
         Command::Lease(ref command) => dispatch_lease(&cli, command.clone()).await,
     }
 }
@@ -309,6 +310,23 @@ async fn dispatch_safety_policy(cli: &Cli, command: SafetyPolicyCommand) -> Resu
     };
     Ok(Exit::from_run_code(
         safety_policy::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_issue(cli: &Cli, command: IssueCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("issue", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        issue::run(&cfg.database_url, local, command).await?,
     ))
 }
 
