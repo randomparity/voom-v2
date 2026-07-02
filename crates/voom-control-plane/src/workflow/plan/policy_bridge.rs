@@ -158,6 +158,7 @@ fn execution_operation(operation_kind: PlanOperationKind) -> Result<OperationKin
         PlanOperationKind::TranscodeVideo => Ok(OperationKind::TranscodeVideo),
         PlanOperationKind::TranscodeAudio => Ok(OperationKind::TranscodeAudio),
         PlanOperationKind::ExtractAudio => Ok(OperationKind::ExtractAudio),
+        PlanOperationKind::VerifyArtifact => Ok(OperationKind::VerifyArtifact),
         _ => Err(VoomError::PolicyExecution(format!(
             "unsupported execution operation {operation_kind}"
         ))),
