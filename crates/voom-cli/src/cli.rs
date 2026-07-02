@@ -99,6 +99,10 @@ pub enum Command {
     /// Acquire, release, force-release, and list manual use-lease locks.
     #[command(subcommand)]
     Lease(LeaseCommand),
+    /// Register, inspect, health-check, sync, and manage path mappings for
+    /// external systems.
+    #[command(subcommand)]
+    ExternalSystem(ExternalSystemCommand),
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -1311,5 +1315,161 @@ impl LogFormatArg {
             Self::Text => "text",
             Self::Json => "json",
         }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ExternalSystemCommand {
+    /// Register an external system (health starts unknown).
+    Register(ExternalSystemFields),
+    /// List active external systems.
+    List,
+    /// Show one external system by id.
+    Show {
+        #[arg(long)]
+        id: u64,
+    },
+    /// Probe and record an external system's health.
+    HealthCheck {
+        #[arg(long)]
+        id: u64,
+    },
+    /// Run a read-only sync against an external system.
+    Sync {
+        #[arg(long)]
+        id: u64,
+    },
+    /// Show the latest sync report for an external system.
+    SyncReport {
+        #[arg(long)]
+        id: u64,
+    },
+    /// Create, list, show, update, and delete path mappings.
+    #[command(subcommand)]
+    PathMapping(ExternalPathMappingCommand),
+}
+
+/// Fields for registering an external system. `connection_profile` and
+/// `rate_limit_config` are opaque JSON documents.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExternalSystemFields {
+    #[arg(long, value_enum)]
+    pub kind: ExternalSystemKindArg,
+    #[arg(long)]
+    pub display_name: String,
+    /// Opaque JSON connection profile (host, sections, …). Defaults to `{}`.
+    #[arg(long, default_value = "{}")]
+    pub connection_profile: String,
+    /// Reference to an out-of-band secret (never the secret itself).
+    #[arg(long, default_value = "")]
+    pub auth_ref: String,
+    /// Opaque JSON rate-limit config. Defaults to `{}`.
+    #[arg(long, default_value = "{}")]
+    pub rate_limit_config: String,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ExternalPathMappingCommand {
+    /// Create a path mapping for a system.
+    Create(ExternalPathMappingFields),
+    /// List active path mappings for a system.
+    List {
+        #[arg(long)]
+        system_id: u64,
+    },
+    /// Show one path mapping by id.
+    Show {
+        #[arg(long)]
+        id: u64,
+    },
+    /// Update mutable fields of a path mapping.
+    Update(ExternalPathMappingUpdateFields),
+    /// Delete (retire) a path mapping by id.
+    Delete {
+        #[arg(long)]
+        id: u64,
+    },
+}
+
+/// Fields for creating a path mapping.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExternalPathMappingFields {
+    #[arg(long)]
+    pub system_id: u64,
+    #[arg(long)]
+    pub internal_prefix: String,
+    #[arg(long)]
+    pub external_prefix: String,
+    #[arg(long, value_enum, default_value_t = PathVisibilityArg::ReadOnly)]
+    pub visibility: PathVisibilityArg,
+}
+
+/// Fields for a partial path-mapping update. Absent flags leave a field
+/// unchanged.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ExternalPathMappingUpdateFields {
+    #[arg(long)]
+    pub id: u64,
+    #[arg(long)]
+    pub internal_prefix: Option<String>,
+    #[arg(long)]
+    pub external_prefix: Option<String>,
+    #[arg(long, value_enum)]
+    pub visibility: Option<PathVisibilityArg>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum ExternalSystemKindArg {
+    Plex,
+    Jellyfin,
+    Emby,
+    Radarr,
+    Sonarr,
+    Bazarr,
+    S3,
+    Filesystem,
+    Custom,
+}
+
+impl ExternalSystemKindArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::external::systems::ExternalSystemKind {
+        use voom_store::repo::external::systems::ExternalSystemKind;
+        match self {
+            Self::Plex => ExternalSystemKind::Plex,
+            Self::Jellyfin => ExternalSystemKind::Jellyfin,
+            Self::Emby => ExternalSystemKind::Emby,
+            Self::Radarr => ExternalSystemKind::Radarr,
+            Self::Sonarr => ExternalSystemKind::Sonarr,
+            Self::Bazarr => ExternalSystemKind::Bazarr,
+            Self::S3 => ExternalSystemKind::S3,
+            Self::Filesystem => ExternalSystemKind::Filesystem,
+            Self::Custom => ExternalSystemKind::Custom,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum PathVisibilityArg {
+    ReadOnly,
+    ReadWrite,
+}
+
+impl PathVisibilityArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::external::path_mappings::PathVisibility {
+        use voom_store::repo::external::path_mappings::PathVisibility;
+        match self {
+            Self::ReadOnly => PathVisibility::ReadOnly,
+            Self::ReadWrite => PathVisibility::ReadWrite,
+        }
+    }
+}
+
+impl std::fmt::Display for PathVisibilityArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_store().as_str())
     }
 }

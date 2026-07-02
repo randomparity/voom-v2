@@ -147,3 +147,21 @@ fn commit_id_round_trips_through_json() {
     let back: CommitId = serde_json::from_str(&json).unwrap();
     assert_eq!(id, back);
 }
+
+#[test]
+fn external_system_id_display_and_json_match_public_id_contract() {
+    let id = ExternalSystemId(42);
+    assert_eq!(id.to_string(), "42");
+    assert_eq!(serde_json::to_string(&id).unwrap(), "42");
+    assert_eq!(serde_json::from_str::<ExternalSystemId>("42").unwrap(), id);
+}
+
+#[test]
+fn external_path_mapping_id_displays_inner_u64() {
+    assert_eq!(ExternalPathMappingId(7).to_string(), "7");
+}
+
+#[test]
+fn external_system_link_id_displays_inner_u64() {
+    assert_eq!(ExternalSystemLinkId(9).to_string(), "9");
+}

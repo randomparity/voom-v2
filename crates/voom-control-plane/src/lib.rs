@@ -27,6 +27,7 @@ use voom_store::repo::{
     backups::SqliteBackupRepo,
     bundles::SqliteBundleRepo,
     events::{EventFilter, EventRepo, EventRow, Page, SqliteEventRepo},
+    external::SqliteExternalSystemRepo,
     identity::SqliteIdentityRepo,
     issues::SqliteIssueRepo,
     jobs::{Job, JobFilter, SqliteJobRepo},
@@ -93,6 +94,10 @@ pub mod workers {
     };
 }
 
+pub mod external {
+    pub use crate::cases::external::sync::ExternalSyncReport;
+}
+
 pub use artifact::{
     ArtifactDetail, ArtifactInspectionState, ArtifactListInput, ArtifactListPage, ArtifactSummary,
     CommitArtifactCommandError, CommitArtifactInput, CommitArtifactPreMutationReport,
@@ -149,6 +154,7 @@ pub struct ControlPlane {
     pub(crate) libraries: SqliteLibraryRepo,
     pub(crate) scheduling_policies: SqliteSchedulingPolicyRepo,
     pub(crate) safety_policies: SqliteSafetyPolicyRepo,
+    pub(crate) external_systems: SqliteExternalSystemRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -184,6 +190,7 @@ impl std::fmt::Debug for ControlPlane {
             .field("libraries", &self.libraries)
             .field("scheduling_policies", &self.scheduling_policies)
             .field("safety_policies", &self.safety_policies)
+            .field("external_systems", &self.external_systems)
             .finish()
     }
 }
@@ -292,6 +299,7 @@ impl ControlPlane {
             libraries: SqliteLibraryRepo::new(pool.clone()),
             scheduling_policies: SqliteSchedulingPolicyRepo::new(pool.clone()),
             safety_policies: SqliteSafetyPolicyRepo::new(pool.clone()),
+            external_systems: SqliteExternalSystemRepo::new(pool.clone()),
             pool,
             clock,
             rng,

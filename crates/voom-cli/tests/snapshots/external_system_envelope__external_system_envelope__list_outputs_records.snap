@@ -1,0 +1,31 @@
+---
+source: crates/voom-cli/tests/external_system_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "external-system",
+  "status": "ok",
+  "data": {
+    "external_systems": [
+      {
+        "id": 1,
+        "kind": "filesystem",
+        "display_name": "Home",
+        "connection_profile": {},
+        "auth_ref": "",
+        "health_status": "unknown",
+        "rate_limit_config": {},
+        "created_at": "[ts]",
+        "retired_at": null,
+        "epoch": 0
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
