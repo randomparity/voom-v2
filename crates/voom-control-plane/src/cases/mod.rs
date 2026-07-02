@@ -125,6 +125,61 @@ pub(crate) async fn cp() -> (crate::ControlPlane, tempfile::NamedTempFile) {
     (cp, tmp)
 }
 
+/// A `terminal_failure` issue row, projected for the execution-case tests
+/// that assert the auto-open path stamped the right severity/priority/status.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TerminalFailureIssueRow {
+    pub id: i64,
+    pub severity: String,
+    pub priority: String,
+    pub priority_source: String,
+    pub status: String,
+    pub dedupe_key: Option<String>,
+}
+
+/// All `terminal_failure` issues in the store, oldest first.
+#[cfg(test)]
+pub(crate) async fn terminal_failure_issues(
+    cp: &crate::ControlPlane,
+) -> Vec<TerminalFailureIssueRow> {
+    sqlx::query_as::<_, (i64, String, String, String, String, Option<String>)>(
+        "SELECT id, severity, priority, priority_source, status, dedupe_key \
+         FROM issues WHERE kind = 'terminal_failure' ORDER BY id",
+    )
+    .fetch_all(cp.pool_for_test())
+    .await
+    .unwrap()
+    .into_iter()
+    .map(
+        |(id, severity, priority, priority_source, status, dedupe_key)| TerminalFailureIssueRow {
+            id,
+            severity,
+            priority,
+            priority_source,
+            status,
+            dedupe_key,
+        },
+    )
+    .collect()
+}
+
+/// `(link_type, target_id)` for an issue's links, ordered by `link_type`.
+#[cfg(test)]
+pub(crate) async fn issue_link_targets(
+    cp: &crate::ControlPlane,
+    issue_id: i64,
+) -> Vec<(String, i64)> {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT link_type, target_id FROM issue_links \
+         WHERE issue_id = ? ORDER BY link_type",
+    )
+    .bind(issue_id)
+    .fetch_all(cp.pool_for_test())
+    .await
+    .unwrap()
+}
+
 /// Builds a single-video mp4/h264 input set whose snapshot is transcodable to
 /// hevc, used by both the execute-path and dry-run-path resolution tests.
 #[cfg(test)]

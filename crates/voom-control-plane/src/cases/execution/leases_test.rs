@@ -7,7 +7,7 @@ use voom_store::repo::events::{EventFilter, EventRepo, Page};
 use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 
-use crate::cases::{count, cp};
+use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -602,4 +602,241 @@ async fn force_release_lease_rejects_whitespace_reason() {
     assert_eq!(count(&cp, EventKind::LeaseForceReleased).await, before);
     let still = cp.leases().get(lease.id).await.unwrap().unwrap();
     assert_eq!(still.state, voom_store::repo::leases::LeaseState::Held);
+}
+
+// --- terminal_failure issue auto-open (Issue Model + Failure taxonomy) -------
+
+/// The single `TicketFailedTerminal` event's `issue_id`. Panics if the store
+/// holds a number other than one terminal event.
+async fn only_terminal_issue_id(cp: &crate::ControlPlane) -> Option<voom_core::IssueId> {
+    let page = cp
+        .events()
+        .list(
+            EventFilter {
+                kind: Some(EventKind::TicketFailedTerminal),
+                ..EventFilter::default()
+            },
+            Page {
+                limit: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1, "expected exactly one terminal event");
+    let voom_events::Event::TicketFailedTerminal(payload) = &page.items[0].envelope.payload else {
+        panic!("expected TicketFailedTerminal payload");
+    };
+    payload.issue_id
+}
+
+fn expected_issue_id(row_id: i64) -> voom_core::IssueId {
+    voom_core::IssueId(u64::try_from(row_id).unwrap())
+}
+
+/// Retries exhausted on a retriable class: one `terminal_failure` issue at the
+/// taxonomy's medium/normal defaults, linked to both the ticket and its last
+/// lease, with its id stamped on the payload.
+#[tokio::test]
+async fn fail_lease_terminal_opens_retriable_exhausted_issue_linked_to_ticket_and_lease() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    cp.fail_lease(
+        lease.id,
+        "fatal".to_owned(),
+        FailureClass::WorkerTimeout,
+        T0 + TDuration::seconds(5),
+    )
+    .await
+    .unwrap();
+
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+    assert_eq!(issue.severity, "medium");
+    assert_eq!(issue.priority, "normal");
+    assert_eq!(issue.priority_source, "system");
+    assert_eq!(issue.status, "open");
+    assert_eq!(
+        only_terminal_issue_id(&cp).await,
+        Some(expected_issue_id(issue.id))
+    );
+    assert_eq!(
+        issue_link_targets(&cp, issue.id).await,
+        vec![
+            ("lease".to_owned(), i64::try_from(lease.id.0).unwrap()),
+            ("ticket".to_owned(), i64::try_from(t.id.0).unwrap()),
+        ]
+    );
+}
+
+/// A non-retriable class transitions terminally on the first failure even with
+/// attempts remaining, and opens a high/high issue.
+#[tokio::test]
+async fn fail_lease_non_retriable_opens_high_severity_terminal_failure_issue() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    cp.fail_lease(
+        lease.id,
+        "bad worker output".to_owned(),
+        FailureClass::MalformedWorkerResult,
+        T0 + TDuration::seconds(5),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
+    assert_eq!(count(&cp, EventKind::TicketFailedRetriable).await, 0);
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].severity, "high");
+    assert_eq!(issues[0].priority, "high");
+    assert_eq!(
+        only_terminal_issue_id(&cp).await,
+        Some(expected_issue_id(issues[0].id))
+    );
+}
+
+/// An operator-required class is terminal on the first failure and opens a
+/// high/high issue.
+#[tokio::test]
+async fn fail_lease_operator_required_opens_high_severity_terminal_failure_issue() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 3)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    cp.fail_lease(
+        lease.id,
+        "needs operator approval".to_owned(),
+        FailureClass::ApprovalRequired,
+        T0 + TDuration::seconds(5),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count(&cp, EventKind::TicketFailedTerminal).await, 1);
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].severity, "high");
+    assert_eq!(issues[0].priority, "high");
+    assert_eq!(
+        only_terminal_issue_id(&cp).await,
+        Some(expected_issue_id(issues[0].id))
+    );
+}
+
+/// Lease expiry with no retries remaining is a terminal transition too: it
+/// opens a `WorkerCrash` (retriable) issue linked to the ticket and lease.
+#[tokio::test]
+async fn expire_due_terminal_opens_issue_linked_to_ticket_and_lease() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 1)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(30),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    cp.expire_due(T0 + TDuration::seconds(60)).await.unwrap();
+
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+    assert_eq!(
+        issue.severity, "medium",
+        "WorkerCrash is retriable => medium"
+    );
+    assert_eq!(issue.priority, "normal");
+    assert_eq!(
+        only_terminal_issue_id(&cp).await,
+        Some(expected_issue_id(issue.id))
+    );
+    assert_eq!(
+        issue_link_targets(&cp, issue.id).await,
+        vec![
+            ("lease".to_owned(), i64::try_from(lease.id.0).unwrap()),
+            ("ticket".to_owned(), i64::try_from(t.id.0).unwrap()),
+        ]
+    );
+}
+
+/// Operator force-release without requeue is a `UserCancellation` (non-retriable)
+/// terminal transition that opens a high/high issue.
+#[tokio::test]
+async fn force_release_without_requeue_opens_terminal_failure_issue() {
+    let (cp, _tmp) = cp().await;
+    let t = cp.create_ticket(ticket("noop", 2)).await.unwrap();
+    cp.mark_ready_if_unblocked(t.id, T0).await.unwrap();
+    let w = cp.register_worker(worker("alpha")).await.unwrap();
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: t.id,
+            worker_id: w.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+    cp.force_release_lease(
+        lease.id,
+        "operator".to_owned(),
+        "manual cleanup".to_owned(),
+        false,
+        T0 + TDuration::seconds(5),
+    )
+    .await
+    .unwrap();
+
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+    assert_eq!(issue.severity, "high");
+    assert_eq!(issue.priority, "high");
+    assert_eq!(
+        only_terminal_issue_id(&cp).await,
+        Some(expected_issue_id(issue.id))
+    );
+    assert_eq!(
+        issue_link_targets(&cp, issue.id).await,
+        vec![
+            ("lease".to_owned(), i64::try_from(lease.id.0).unwrap()),
+            ("ticket".to_owned(), i64::try_from(t.id.0).unwrap()),
+        ]
+    );
 }

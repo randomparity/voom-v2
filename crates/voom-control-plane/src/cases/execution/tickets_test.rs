@@ -8,7 +8,7 @@ use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::TicketState;
 use voom_store::repo::workers::{NewWorker, WorkerKind};
 
-use crate::cases::cp;
+use crate::cases::{cp, issue_link_targets, terminal_failure_issues};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -223,7 +223,29 @@ async fn pre_lease_ambiguous_worker_selection_terminal_fails_immediately() {
         payload.reason,
         "ambiguous worker selection before lease acquisition"
     );
-    assert_eq!(payload.issue_id, None);
+
+    // The terminal transition opens exactly one operator-required
+    // terminal_failure issue, linked to the ticket only (no lease exists on
+    // the pre-lease path), and stamps its id on the payload.
+    let issues = terminal_failure_issues(&cp).await;
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+    assert_eq!(
+        payload.issue_id,
+        Some(voom_core::IssueId(u64::try_from(issue.id).unwrap()))
+    );
+    assert_eq!(issue.severity, "high");
+    assert_eq!(issue.priority, "high");
+    assert_eq!(issue.priority_source, "system");
+    assert_eq!(issue.status, "open");
+    assert_eq!(
+        issue.dedupe_key.as_deref(),
+        Some(format!("terminal_failure:ticket:{}", t.id.0).as_str())
+    );
+    assert_eq!(
+        issue_link_targets(&cp, issue.id).await,
+        vec![("ticket".to_owned(), i64::try_from(t.id.0).unwrap())]
+    );
 }
 
 #[tokio::test]

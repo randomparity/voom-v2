@@ -293,6 +293,16 @@ impl ControlPlane {
                 .await?;
             }
             TicketState::Failed => {
+                let issue_id = self
+                    .open_terminal_failure_issue_in_tx(
+                        tx,
+                        ticket.id,
+                        Some(lease.id),
+                        class,
+                        &reason,
+                        now,
+                    )
+                    .await?;
                 append_event(
                     &self.events,
                     tx,
@@ -305,7 +315,7 @@ impl ControlPlane {
                         max_attempts: ticket.max_attempts,
                         reason,
                         class,
-                        issue_id: None,
+                        issue_id: Some(issue_id),
                     }),
                 )
                 .await?;
@@ -389,6 +399,19 @@ impl ControlPlane {
                         "expire_due: ticket {ticket_id} missing from failed_expiries"
                     ))
                 })?;
+            // Per spec §10.2: lease-expiry terminal failures implicitly
+            // classify as WorkerCrash.
+            let reason = "lease expired with no retries remaining";
+            let issue_id = self
+                .open_terminal_failure_issue_in_tx(
+                    tx,
+                    ticket_id,
+                    Some(lease_id),
+                    FailureClass::WorkerCrash,
+                    reason,
+                    now,
+                )
+                .await?;
             append_event(
                 &self.events,
                 tx,
@@ -399,11 +422,9 @@ impl ControlPlane {
                     ticket_id: ticket_id.0,
                     attempt: failed.attempt,
                     max_attempts: failed.max_attempts,
-                    reason: "lease expired with no retries remaining".to_owned(),
-                    // Per spec §10.2: lease-expiry terminal failures
-                    // implicitly classify as WorkerCrash.
+                    reason: reason.to_owned(),
                     class: FailureClass::WorkerCrash,
-                    issue_id: None,
+                    issue_id: Some(issue_id),
                 }),
             )
             .await?;
@@ -471,6 +492,19 @@ impl ControlPlane {
             )
             .await?;
         } else {
+            // Per spec §10.2: operator-initiated terminal force-release
+            // implicitly classifies as UserCancellation.
+            let reason = "force-released without requeue";
+            let issue_id = self
+                .open_terminal_failure_issue_in_tx(
+                    &mut tx,
+                    outcome.lease.ticket_id,
+                    Some(outcome.lease.id),
+                    FailureClass::UserCancellation,
+                    reason,
+                    now,
+                )
+                .await?;
             append_event(
                 &self.events,
                 &mut tx,
@@ -481,12 +515,9 @@ impl ControlPlane {
                     ticket_id: outcome.lease.ticket_id.0,
                     attempt: outcome.attempt,
                     max_attempts: outcome.max_attempts,
-                    reason: "force-released without requeue".to_owned(),
-                    // Per spec §10.2: operator-initiated terminal
-                    // force-release implicitly classifies as
-                    // UserCancellation.
+                    reason: reason.to_owned(),
                     class: FailureClass::UserCancellation,
-                    issue_id: None,
+                    issue_id: Some(issue_id),
                 }),
             )
             .await?;

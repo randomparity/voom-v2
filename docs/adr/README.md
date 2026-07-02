@@ -23,3 +23,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0015](0015-control-plane-module-decomposition.md) | Decompose oversized control-plane modules along cohesion seams |
 | [0016](0016-worker-protocol-exact-version-match.md) | Worker protocol enforces an exact version match, no skew window |
 | [0017](0017-verify-artifact-dsl-operation.md) | `verify artifact` compiles and plans, execution wiring deferred |
+| [0018](0018-terminal-failure-issue-auto-open.md) | Terminal-failure tickets auto-open a `terminal_failure` issue in the transition transaction |
