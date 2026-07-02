@@ -78,7 +78,7 @@ impl NewVideoProfile {
             copy_compatible: self.copy_compatible,
         };
         voom_core::validate_profile_against_descriptor(&typed).map_err(VoomError::Config)?;
-        if !matches!(self.output_container.as_str(), "mkv" | "mp4") {
+        if !voom_core::is_supported_transcode_video_container(&self.output_container) {
             return Err(VoomError::Config(format!(
                 "output_container `{}` must be mkv or mp4",
                 self.output_container
@@ -273,18 +273,14 @@ impl SqliteVideoProfileRepo {
         now: OffsetDateTime,
     ) -> Result<Option<VideoProfile>, VoomError> {
         let ts = iso8601(now)?;
-        let affected = sqlx::query(
+        sqlx::query(
             "UPDATE video_profiles SET retired_at = ? WHERE name = ? AND retired_at IS NULL",
         )
         .bind(&ts)
         .bind(name)
         .execute(&self.pool)
         .await
-        .map_err(|e| VoomError::database_context("video_profiles retire", e))?
-        .rows_affected();
-        if affected == 0 && self.get_by_name(name).await?.is_none() {
-            return Ok(None);
-        }
+        .map_err(|e| VoomError::database_context("video_profiles retire", e))?;
         self.get_by_name(name).await
     }
 }

@@ -52,7 +52,7 @@ pub async fn run(
             version,
             definition,
         } => match parse_definition(&definition, local.clone())? {
-            Ok(definition) => emit_one(
+            Some(definition) => emit_one(
                 cp.create_scoring_profile(NewQualityScoringProfile {
                     name,
                     version,
@@ -61,7 +61,7 @@ pub async fn run(
                 .await,
                 local,
             ),
-            Err(code) => Ok(code),
+            None => Ok(1),
         },
         ScoringProfileCommand::List => list(&cp, local).await,
         ScoringProfileCommand::Show { name } => {
@@ -72,7 +72,7 @@ pub async fn run(
             version,
             definition,
         } => match parse_definition(&definition, local.clone())? {
-            Ok(definition) => emit_optional(
+            Some(definition) => emit_optional(
                 cp.update_scoring_profile(NewQualityScoringProfile {
                     name: name.clone(),
                     version,
@@ -82,7 +82,7 @@ pub async fn run(
                 &name,
                 local,
             ),
-            Err(code) => Ok(code),
+            None => Ok(1),
         },
         ScoringProfileCommand::Retire { name } => {
             emit_optional(cp.retire_scoring_profile(&name).await, &name, local)
@@ -90,11 +90,12 @@ pub async fn run(
     }
 }
 
-/// Parse the `--definition` JSON string. A syntax error is a bad argument
-/// (exit 1); object/scalar validation is left to the repository (`CONFIG_INVALID`).
-fn parse_definition(raw: &str, local: Local) -> io::Result<Result<Value, i32>> {
+/// Parse the `--definition` JSON string. `None` means a syntax error was already
+/// emitted as a bad argument (exit 1); object/scalar validation is left to the
+/// repository (`CONFIG_INVALID`).
+fn parse_definition(raw: &str, local: Local) -> io::Result<Option<Value>> {
     match serde_json::from_str::<Value>(raw) {
-        Ok(value) => Ok(Ok(value)),
+        Ok(value) => Ok(Some(value)),
         Err(err) => {
             emit_err(
                 COMMAND,
@@ -103,7 +104,7 @@ fn parse_definition(raw: &str, local: Local) -> io::Result<Result<Value, i32>> {
                 None,
                 Some(local),
             )?;
-            Ok(Err(1))
+            Ok(None)
         }
     }
 }
@@ -123,18 +124,22 @@ async fn list(cp: &ControlPlane, local: Local) -> io::Result<i32> {
     }
 }
 
+fn emit_profile(profile: QualityScoringProfile, local: Local) -> io::Result<i32> {
+    emit_ok(
+        COMMAND,
+        ScoringProfileWire::from(profile),
+        Some(local),
+        Vec::new(),
+    )
+    .map(|()| 0)
+}
+
 fn emit_one(
     result: Result<QualityScoringProfile, voom_core::VoomError>,
     local: Local,
 ) -> io::Result<i32> {
     match result {
-        Ok(profile) => emit_ok(
-            COMMAND,
-            ScoringProfileWire::from(profile),
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
+        Ok(profile) => emit_profile(profile, local),
         Err(err) => emit_voom_error(COMMAND, &err, local),
     }
 }
@@ -145,13 +150,7 @@ fn emit_optional(
     local: Local,
 ) -> io::Result<i32> {
     match result {
-        Ok(Some(profile)) => emit_ok(
-            COMMAND,
-            ScoringProfileWire::from(profile),
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
+        Ok(Some(profile)) => emit_profile(profile, local),
         Ok(None) => not_found(name, local),
         Err(err) => emit_voom_error(COMMAND, &err, local),
     }
