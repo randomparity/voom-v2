@@ -373,6 +373,49 @@ fn rejects_defaults_with_extra_tokens() {
 }
 
 #[test]
+fn accepts_defaults_where_track_filter() {
+    assert!(codes("policy \"p\" { phase a { defaults audio where lang in [eng] } }").is_empty());
+    assert!(codes("policy \"p\" { phase a { defaults subtitle where forced } }").is_empty());
+}
+
+#[test]
+fn rejects_defaults_where_unknown_filter() {
+    assert!(
+        codes("policy \"p\" { phase a { defaults audio where bogus } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
+fn rejects_defaults_where_invalid_language_code() {
+    assert!(
+        codes("policy \"p\" { phase a { defaults audio where lang in [english] } }")
+            .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
+fn accepts_order_tracks_where_track_filter() {
+    assert!(codes("policy \"p\" { phase a { order tracks where commentary } }").is_empty());
+}
+
+#[test]
+fn accepts_order_tracks_list_and_where_filter() {
+    assert!(
+        codes("policy \"p\" { phase a { order tracks [video, audio] where lang in [eng] } }")
+            .is_empty()
+    );
+}
+
+#[test]
+fn rejects_order_tracks_where_unknown_filter() {
+    assert!(
+        codes("policy \"p\" { phase a { order tracks where bogus } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_on_error_without_value() {
     assert!(
         codes("policy \"p\" { phase a { on_error: } }")

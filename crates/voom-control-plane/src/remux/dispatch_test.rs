@@ -17,6 +17,9 @@ fn validate_result_rejects_missing_kept_stream_id() {
         default_streams: Vec::new(),
         clear_default_streams: Vec::new(),
         track_order: vec![RemuxTrackGroup::Video],
+        head_streams: Vec::new(),
+        forced_streams: Vec::new(),
+        clear_forced_streams: Vec::new(),
     };
     let mut result = remux_result();
     result.kept_snapshot_stream_ids = Vec::new();
@@ -43,6 +46,9 @@ fn validate_result_rejects_mismatched_default_stream_order() {
         }],
         clear_default_streams: Vec::new(),
         track_order: vec![RemuxTrackGroup::Video],
+        head_streams: Vec::new(),
+        forced_streams: Vec::new(),
+        clear_forced_streams: Vec::new(),
     };
     let mut result = remux_result();
     result.default_snapshot_stream_ids = Vec::new();

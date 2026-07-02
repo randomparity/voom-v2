@@ -1,0 +1,7 @@
+policy "filter addressed tracks" {
+  phase normalize {
+    order tracks [video, audio, subtitle] where lang in [eng] and not commentary
+    defaults audio where lang in [eng] and not commentary
+    defaults subtitle where forced
+  }
+}

@@ -68,6 +68,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         source_path: "fixtures/policies/verify-artifact.voom",
         expected_json_path: "fixtures/compiled/verify-artifact.json",
     },
+    PolicyFixture {
+        source_path: "fixtures/policies/filter-addressed-tracks.voom",
+        expected_json_path: "fixtures/compiled/filter-addressed-tracks.json",
+    },
 ];
 
 const INVALID_POLICY_FIXTURES: &[PolicyFixture] = &[

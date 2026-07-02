@@ -18,6 +18,75 @@ fn compile_policy_preserves_sprint12_video_hevc_transcode() {
 }
 
 #[test]
+fn compile_policy_lowers_defaults_where_to_filter_addressed_default() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { defaults audio where lang in [eng] and not commentary } }",
+    )
+    .unwrap();
+
+    let CompiledOperation::SetDefaults {
+        target,
+        strategy,
+        filter: Some(TrackFilter::And { filters }),
+    } = &out.policy.phases[0].operations[0]
+    else {
+        unreachable!("expected filter-addressed default");
+    };
+
+    assert_eq!(*target, crate::TrackTarget::Audio);
+    // In filter mode the strategy is inert (ADR 0023): lowered to Preserve so
+    // an unresolved filter never applies a group-wide default.
+    assert_eq!(*strategy, crate::DefaultStrategy::Preserve);
+    assert_eq!(filters.len(), 2);
+}
+
+#[test]
+fn compile_policy_keeps_strategy_default_without_filter() {
+    let out = compile_policy("policy \"p\" { phase a { defaults audio first } }").unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].operations[0],
+        CompiledOperation::SetDefaults {
+            target: crate::TrackTarget::Audio,
+            strategy: crate::DefaultStrategy::First,
+            filter: None,
+        }
+    );
+}
+
+#[test]
+fn compile_policy_lowers_order_tracks_where_to_head_filter() {
+    let out = compile_policy(
+        "policy \"p\" { phase a { order tracks [video, audio] where lang in [eng] } }",
+    )
+    .unwrap();
+
+    let CompiledOperation::ReorderTracks {
+        targets,
+        head_filter: Some(TrackFilter::LanguageIn { values }),
+    } = &out.policy.phases[0].operations[0]
+    else {
+        unreachable!("expected head-filter reorder");
+    };
+
+    assert_eq!(targets.len(), 2);
+    assert_eq!(values, &["eng".to_owned()]);
+}
+
+#[test]
+fn compile_policy_keeps_group_order_without_head_filter() {
+    let out = compile_policy("policy \"p\" { phase a { order tracks [video, audio] } }").unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].operations[0],
+        CompiledOperation::ReorderTracks {
+            targets: vec![crate::TrackTarget::Video, crate::TrackTarget::Audio],
+            head_filter: None,
+        }
+    );
+}
+
+#[test]
 fn compile_policy_produces_phase_order() {
     let out = compile_policy("policy \"p\" { phase a {} phase b { depends_on: [a] } }").unwrap();
     assert_eq!(out.policy.phase_order, ["a", "b"]);

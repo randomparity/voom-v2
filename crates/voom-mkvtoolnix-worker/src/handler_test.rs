@@ -111,6 +111,9 @@ async fn handler_rejects_no_video_selection() {
         default_streams: vec![],
         clear_default_streams: vec![],
         track_order: vec![RemuxTrackGroup::Audio],
+        head_streams: vec![],
+        forced_streams: vec![],
+        clear_forced_streams: vec![],
     };
 
     let err = handle_remux(&request, &fixture.config).await.unwrap_err();
@@ -666,6 +669,9 @@ async fn request_for_paths(
             default_streams: vec![audio_ref("stream-1", 1)],
             clear_default_streams: vec![video_ref("stream-0", 0)],
             track_order: vec![RemuxTrackGroup::Video, RemuxTrackGroup::Audio],
+            head_streams: vec![],
+            forced_streams: vec![],
+            clear_forced_streams: vec![],
         },
     }
 }
