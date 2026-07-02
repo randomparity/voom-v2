@@ -125,7 +125,8 @@ fn reject_empty_audio(
     });
     if has_audio_source && !keeps_audio {
         return Err(VoomError::Config(
-            "remux keep would remove all audio; no audio track matched the filter".to_owned(),
+            "remux would leave the file with no audio; no audio track survived the track filters"
+                .to_owned(),
         ));
     }
     Ok(())

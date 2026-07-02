@@ -88,7 +88,7 @@ a variant is additive and outside the ADR 0013 deny-unknown-fields contract.
 applying all track actions and re-adding video: **if the source snapshot has at
 least one audio stream, the resulting keep set must retain at least one audio
 stream.** Otherwise it returns `VoomError::Config` with a specific message
-(`"remux keep would remove all audio; no audio track matched the filter"`).
+(`"remux would leave the file with no audio; no audio track survived the track filters"`).
 
 This is an invariant on the *result*, checked once, rather than a special case
 inside the `KeepTracks` arm. It is the last line of defense that builds the

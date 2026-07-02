@@ -234,7 +234,7 @@ fn keep_audio_untagged_kept_under_und_and_rejected_under_eng() {
         selection_from_payload_and_snapshot(&keep_audio_language_payload(&["eng"]), &snapshot)
             .unwrap_err();
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("remove all audio"), "{err}");
+    assert!(err.to_string().contains("no audio"), "{err}");
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn keep_audio_matching_zero_tracks_rejects_empty_audio() {
     let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("remove all audio"), "{err}");
+    assert!(err.to_string().contains("no audio"), "{err}");
 }
 
 #[test]

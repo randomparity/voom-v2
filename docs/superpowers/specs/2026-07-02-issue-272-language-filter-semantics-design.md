@@ -95,9 +95,9 @@ Files: `crates/voom-control-plane/src/remux/selection.rs` (+ `_test.rs`).
   tests.
 - After the track-actions loop and video re-add, if the source has ≥1 audio stream
   but the keep set has 0 audio streams, return
-  `VoomError::Config("remux keep would remove all audio; no audio track matched the filter")`.
+  `VoomError::Config("remux would leave the file with no audio; no audio track survived the track filters")`.
 - New tests (fixtures): `keep audio where language in ["fra"]` on an eng/spa file →
-  error (`ConfigInvalid`, "remove all audio"); a matching keep still succeeds; a
+  error (`ConfigInvalid`, "no audio"); a matching keep still succeeds; a
   video-only source (no audio) is unaffected; a zero-match subtitle keep is allowed.
 - Acceptance: no selection is ever returned with zero kept audio when the source
   had audio.
