@@ -16,6 +16,59 @@ use crate::workflow::plan::ticket_payload::WorkflowTicketPayload;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
+fn file_phase_view(
+    branch_id: &str,
+    phase_ordinal: u32,
+    outcome: &'static str,
+) -> super::FilePhaseSummaryView {
+    super::FilePhaseSummaryView {
+        phase_ordinal,
+        branch_id: branch_id.to_owned(),
+        outcome,
+        ticket_ids: Vec::new(),
+        produced_file_version_id: None,
+        produced_file_location_id: None,
+        artifact_handle_id: None,
+        reprobe_snapshot_id: None,
+    }
+}
+
+#[test]
+fn progress_counts_empty_is_all_zero() {
+    let counts = super::progress_counts(&[]);
+    assert_eq!(counts, super::ProgressCountsView::default());
+    assert_eq!(counts.total, 0);
+    assert_eq!(counts.remaining, 0);
+}
+
+#[test]
+fn progress_counts_buckets_latest_outcome_per_file() {
+    // Three distinct files: one committed, one blocked, one skipped. A file that
+    // advanced across phases is counted by its latest (highest-ordinal) row.
+    let file_phases = [
+        file_phase_view("a.mkv", 0, "skipped"),
+        file_phase_view("a.mkv", 1, "committed"), // latest wins for a.mkv
+        file_phase_view("b.mkv", 0, "blocked"),
+        file_phase_view("c.mkv", 0, "skipped"),
+    ];
+    let counts = super::progress_counts(&file_phases);
+    assert_eq!(counts.total, 3);
+    assert_eq!(counts.completed, 1);
+    assert_eq!(counts.failed, 1);
+    assert_eq!(counts.skipped, 1);
+    // Every file is terminal, so nothing is left outstanding.
+    assert_eq!(counts.remaining, 0);
+}
+
+#[test]
+fn progress_counts_skipped_is_not_remaining() {
+    // A skipped-because-compliant file is finished, not outstanding work.
+    let counts = super::progress_counts(&[file_phase_view("only.mkv", 0, "skipped")]);
+    assert_eq!(counts.total, 1);
+    assert_eq!(counts.skipped, 1);
+    assert_eq!(counts.remaining, 0);
+}
+
 #[test]
 fn compliance_execution_defaults_use_production_transcode_paths() {
     let workflow_defaults = WorkflowExecutorOptions::default();

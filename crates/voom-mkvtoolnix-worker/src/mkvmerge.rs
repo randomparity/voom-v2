@@ -240,7 +240,8 @@ pub fn build_mkvmerge_args(
     );
     args.push("--no-attachments".to_owned());
     extend_default_flags(&mut args, &request.selection, mapping)?;
-    if let Some(track_order) = track_order(&request.selection, &keep) {
+    extend_forced_flags(&mut args, &request.selection, mapping)?;
+    if let Some(track_order) = track_order(&request.selection, &keep, mapping) {
         args.push("--track-order".to_owned());
         args.push(track_order);
     }
@@ -398,12 +399,70 @@ fn extend_default_flags(
     Ok(())
 }
 
-fn track_order(selection: &RemuxSelection, keep: &[&MkvmergeTrack]) -> Option<String> {
-    if selection.track_order.is_empty() {
+fn extend_forced_flags(
+    args: &mut Vec<String>,
+    selection: &RemuxSelection,
+    mapping: &MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixError> {
+    let mut seen = BTreeSet::new();
+    for stream in &selection.forced_streams {
+        let id = mapping
+            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
+            .ok_or_else(|| {
+                MkvtoolnixError::ConfigInvalid(format!(
+                    "missing mkvmerge track id for provider stream index {}",
+                    stream.provider_stream_index
+                ))
+            })?;
+        seen.insert(id);
+        args.push("--forced-track-flag".to_owned());
+        args.push(format!("{id}:1"));
+    }
+    for stream in &selection.clear_forced_streams {
+        let id = mapping
+            .mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
+            .ok_or_else(|| {
+                MkvtoolnixError::ConfigInvalid(format!(
+                    "missing mkvmerge track id for provider stream index {}",
+                    stream.provider_stream_index
+                ))
+            })?;
+        if !seen.contains(&id) {
+            args.push("--forced-track-flag".to_owned());
+            args.push(format!("{id}:0"));
+        }
+    }
+    Ok(())
+}
+
+/// Build the `--track-order` value. `head_streams` (resolved through `mapping`
+/// and restricted to kept tracks) pin to the front, ahead of the `track_order`
+/// group order; any remaining kept tracks follow in mapping order. Returns
+/// `None` only when neither a head stream nor a group order is requested.
+fn track_order(
+    selection: &RemuxSelection,
+    keep: &[&MkvmergeTrack],
+    mapping: &MkvmergeTrackMapping,
+) -> Option<String> {
+    if selection.track_order.is_empty() && selection.head_streams.is_empty() {
         return None;
     }
+    let head_ids = selection
+        .head_streams
+        .iter()
+        .filter_map(|stream| {
+            mapping.mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
+        })
+        .collect::<Vec<_>>();
     let mut ordered = Vec::new();
     let mut used = BTreeSet::new();
+    for head_id in head_ids {
+        for track in keep {
+            if track.id == head_id && used.insert(track.id) {
+                ordered.push(format!("0:{}", track.id));
+            }
+        }
+    }
     for group in &selection.track_order {
         for track in keep {
             if track.kind.matches_group(*group) && used.insert(track.id) {

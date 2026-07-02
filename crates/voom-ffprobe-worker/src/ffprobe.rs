@@ -91,6 +91,11 @@ pub enum FfprobeError {
         message: String,
         payload: serde_json::Value,
     },
+    #[error("malformed media: {message}")]
+    MalformedMedia {
+        message: String,
+        payload: serde_json::Value,
+    },
     #[error("malformed worker result: {message}")]
     MalformedWorkerResult {
         message: String,
@@ -105,6 +110,7 @@ impl FfprobeError {
             Self::ArtifactUnavailable { .. } => FailureClass::ArtifactUnavailable,
             Self::ArtifactChecksumMismatch { .. } => FailureClass::ArtifactChecksumMismatch,
             Self::ExternalSystemUnavailable { .. } => FailureClass::ExternalSystemUnavailable,
+            Self::MalformedMedia { .. } => FailureClass::MalformedMedia,
             Self::MalformedWorkerResult { .. } => FailureClass::MalformedWorkerResult,
         }
     }
@@ -120,9 +126,31 @@ impl FfprobeError {
             Self::ArtifactUnavailable { payload, .. }
             | Self::ArtifactChecksumMismatch { payload, .. }
             | Self::ExternalSystemUnavailable { payload, .. }
+            | Self::MalformedMedia { payload, .. }
             | Self::MalformedWorkerResult { payload, .. } => payload.clone(),
         }
     }
+}
+
+/// Diagnostics that mean the *input bytes* are structurally unusable regardless
+/// of the ffprobe build — a permanent [`FailureClass::MalformedMedia`], not a
+/// transient tool failure. Deliberately narrow (precision over recall): a missed
+/// signature degrades to the pre-existing retriable `ExternalSystemUnavailable`,
+/// whereas a false positive would wrongly condemn a transient failure. See
+/// `docs/adr/0024`. Signatures like "End of file"/"partial file" (a file still
+/// being written) and "unknown format"/"could not find codec parameters" (a
+/// demuxer another build might have) are intentionally excluded.
+pub(crate) fn is_malformed_media_stderr(stderr: &str) -> bool {
+    const SIGNATURES: [&str; 4] = [
+        "invalid data found when processing input",
+        "moov atom not found",
+        "error opening input",
+        "header missing",
+    ];
+    let lowered = stderr.to_ascii_lowercase();
+    SIGNATURES
+        .iter()
+        .any(|signature| lowered.contains(signature))
 }
 
 pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Value, FfprobeError> {
@@ -148,17 +176,24 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
         .map_err(|err| external_system_unavailable("spawn", err.to_string()))?;
 
     if !output.status.success() {
-        return Err(external_system_unavailable(
-            "exit",
-            format!(
-                "ffprobe exited with status {}: {}",
-                output
-                    .status
-                    .code()
-                    .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = format!(
+            "ffprobe exited with status {}: {}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+            stderr.trim()
+        );
+        // A non-zero exit whose diagnostics name a structural input fault is a
+        // permanent MalformedMedia (the file cannot be probed on any retry); a
+        // signal kill or any other non-zero exit stays the transient
+        // ExternalSystemUnavailable. Signal kills carry no code and no matching
+        // stderr, so they take the transient branch.
+        if output.status.code().is_some() && is_malformed_media_stderr(&stderr) {
+            return Err(malformed_media("exit", message));
+        }
+        return Err(external_system_unavailable("exit", message));
     }
 
     serde_json::from_slice(&output.stdout).map_err(|err| {
@@ -440,6 +475,16 @@ impl From<WorkerError> for FfprobeError {
 
 fn external_system_unavailable(stage: &str, message: String) -> FfprobeError {
     FfprobeError::ExternalSystemUnavailable {
+        payload: serde_json::json!({
+            "stage": stage,
+            "message": message,
+        }),
+        message,
+    }
+}
+
+fn malformed_media(stage: &str, message: String) -> FfprobeError {
+    FfprobeError::MalformedMedia {
         payload: serde_json::json!({
             "stage": stage,
             "message": message,

@@ -94,6 +94,7 @@ pub fn voom_error_hint(err: &VoomError) -> Option<String> {
         | ErrorCode::PolicyExecutionError
         | ErrorCode::MissingCapability
         | ErrorCode::MalformedWorkerResult
+        | ErrorCode::MalformedMedia
         | ErrorCode::UserCancellation
         | ErrorCode::ApprovalRequired
         | ErrorCode::PriorityPolicyConflict

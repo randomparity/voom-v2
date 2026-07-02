@@ -6,4 +6,5 @@ pub mod backups;
 pub mod bundles;
 pub mod commit_safety_gate;
 pub mod identity;
+pub mod scan_facts;
 pub mod use_leases;

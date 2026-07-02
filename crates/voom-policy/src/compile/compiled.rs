@@ -82,10 +82,20 @@ pub enum CompiledOperation {
     },
     ReorderTracks {
         targets: Vec<TrackTarget>,
+        /// `order tracks … where <filter>` pins the single filter-selected track
+        /// to the head of the track order, ahead of the group order. Additive
+        /// since ADR 0023 (#277); absent ⇒ group-only ordering.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head_filter: Option<TrackFilter>,
     },
     SetDefaults {
         target: TrackTarget,
         strategy: DefaultStrategy,
+        /// `defaults … where <filter>` makes the single filter-selected track
+        /// the default for its group. Additive since ADR 0023 (#277); when
+        /// present, `strategy` is not consulted. Absent ⇒ strategy-only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TrackFilter>,
     },
     ClearTrackActions {
         target: TrackTarget,

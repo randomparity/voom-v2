@@ -5,7 +5,7 @@ fn all_contains_every_failure_class_once() {
     use std::collections::HashSet;
 
     let all = FailureClass::ALL;
-    assert_eq!(all.len(), 22);
+    assert_eq!(all.len(), 23);
     let unique = all.iter().copied().collect::<HashSet<_>>();
     assert_eq!(unique.len(), all.len());
     assert!(unique.contains(&FailureClass::WorkerTimeout));
@@ -22,6 +22,7 @@ fn all_contains_every_failure_class_once() {
     assert!(unique.contains(&FailureClass::PolicyValidationError));
     assert!(unique.contains(&FailureClass::MissingCapability));
     assert!(unique.contains(&FailureClass::MalformedWorkerResult));
+    assert!(unique.contains(&FailureClass::MalformedMedia));
     assert!(unique.contains(&FailureClass::UserCancellation));
     assert!(unique.contains(&FailureClass::StaleIdentityEvidence));
     assert!(unique.contains(&FailureClass::ClosureResolutionIncomplete));
@@ -65,6 +66,7 @@ fn retriable_partition_matches_spec() {
         FailureClass::MissingCapability,
         FailureClass::MalformedWorkerResult,
         FailureClass::UserCancellation,
+        FailureClass::MalformedMedia,
     ];
     for c in non_retriable {
         assert!(!c.is_retriable(), "{c:?} should not be retriable");
@@ -160,6 +162,29 @@ fn from_error_code_maps_failure_taxonomy_and_rejects_unclassified_codes() {
         Some(FailureClass::BlockedByActiveUseLease)
     );
     assert_eq!(FailureClass::from_error_code(ErrorCode::Internal), None);
+}
+
+#[test]
+fn malformed_media_is_non_retriable_and_round_trips_its_own_error_code() {
+    assert_eq!(
+        FailureClass::MalformedMedia.retry_class(),
+        FailureRetryClass::NonRetriable
+    );
+    assert!(!FailureClass::MalformedMedia.is_retriable());
+    assert_eq!(
+        FailureClass::MalformedMedia.into_error_code(),
+        ErrorCode::MalformedMedia
+    );
+    assert_eq!(
+        FailureClass::from_error_code(ErrorCode::MalformedMedia),
+        Some(FailureClass::MalformedMedia)
+    );
+    // Distinct from MalformedWorkerResult — a corrupt source is not a corrupt
+    // worker result.
+    assert_ne!(
+        FailureClass::MalformedMedia,
+        FailureClass::MalformedWorkerResult
+    );
 }
 
 #[test]

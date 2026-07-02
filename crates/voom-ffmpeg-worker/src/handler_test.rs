@@ -14,6 +14,24 @@ use crate::DEFAULT_PROCESS_TIMEOUT;
 
 use super::*;
 
+#[test]
+fn ffmpeg_malformed_media_maps_to_non_retriable_malformed_media() {
+    // The transient tool failures stay ExternalSystemUnavailable...
+    let transient: TranscodeVideoError = FfmpegError::FfmpegFailed("boom".to_owned()).into();
+    assert_eq!(
+        transient.failure_class(),
+        FailureClass::ExternalSystemUnavailable
+    );
+    assert!(transient.failure_class().is_retriable());
+    // ...while a structural-input fault surfaces the permanent MalformedMedia
+    // class + code (#248).
+    let malformed: TranscodeVideoError =
+        FfmpegError::MalformedMedia("Invalid data found when processing input".to_owned()).into();
+    assert_eq!(malformed.failure_class(), FailureClass::MalformedMedia);
+    assert_eq!(malformed.error_code(), ErrorCode::MalformedMedia);
+    assert!(!malformed.failure_class().is_retriable());
+}
+
 #[tokio::test]
 async fn missing_input_is_artifact_unavailable() {
     let dir = tempfile::tempdir().unwrap();

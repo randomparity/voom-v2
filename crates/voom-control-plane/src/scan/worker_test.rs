@@ -103,7 +103,35 @@ fn ffprobe_exit_terminal_error_is_continuable_probe_failure() {
         Some(serde_json::json!({"stage": "exit"})),
     );
 
-    assert!(err.is_ffprobe_exit());
+    assert!(err.is_unprobeable_media());
+}
+
+#[test]
+fn malformed_media_terminal_error_is_continuable_probe_failure() {
+    // A structurally-corrupt source (#248/#287) is a per-file fault the
+    // directory scan survives, regardless of the terminal payload stage.
+    let err = ScanWorkerError::terminal_error_for_test(
+        FailureClass::MalformedMedia,
+        ErrorCode::MalformedMedia,
+        "malformed media: ffprobe exited with status 1",
+        Some(serde_json::json!({"stage": "exit"})),
+    );
+
+    assert!(err.is_unprobeable_media());
+}
+
+#[test]
+fn worker_crash_terminal_error_is_not_continuable() {
+    // A worker-level fault (crash / protocol error) aborts the group rather
+    // than being recorded as a per-file skip.
+    let err = ScanWorkerError::terminal_error_for_test(
+        FailureClass::WorkerCrash,
+        ErrorCode::WorkerCrash,
+        "worker crash",
+        None,
+    );
+
+    assert!(!err.is_unprobeable_media());
 }
 
 #[tokio::test]
