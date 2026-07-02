@@ -1,4 +1,4 @@
-# 0017 — Terminal-failure tickets auto-open a `terminal_failure` issue in the transition transaction
+# 0018 — Terminal-failure tickets auto-open a `terminal_failure` issue in the transition transaction
 
 ## Status
 
