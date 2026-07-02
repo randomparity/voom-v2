@@ -326,7 +326,7 @@ impl Validator<'_> {
             .get(0..4)
             .is_some_and(|prefix| matches!(prefix, ["transcode", "audio", "to", "aac" | "opus"]))
         {
-            if self.validate_required_track_filter(statement, text, 4) {
+            if self.validate_optional_track_filter(statement, text, 4) {
                 self.validate_language_tokens(statement, text);
             }
             return;
@@ -656,7 +656,7 @@ impl Validator<'_> {
         let text = statement_text(statement);
         let tokens = words(text.as_ref());
         if tokens.get(0..2) == Some(&["extract", "audio"]) {
-            if self.validate_required_track_filter(statement, text.as_ref(), 2) {
+            if self.validate_optional_track_filter(statement, text.as_ref(), 2) {
                 self.validate_language_tokens(statement, text.as_ref());
             }
             return;
@@ -668,18 +668,33 @@ impl Validator<'_> {
         );
     }
 
-    fn validate_required_track_filter(
+    /// Validate a track filter the spec brackets as optional (`transcode audio`,
+    /// `extract audio`). A `where` clause, when present, must sit at
+    /// `where_index` and carry a valid filter; when absent, the operation
+    /// selects all audio tracks and no trailing tokens are permitted.
+    fn validate_optional_track_filter(
         &mut self,
         statement: &StatementAst,
         text: &str,
         where_index: usize,
     ) -> bool {
         let tokens = words(text);
-        if !text.contains(" where ") || tokens.get(where_index).copied() != Some("where") {
+        if !text.contains(" where ") {
+            if tokens.len() > where_index {
+                self.error(
+                    DiagnosticCode::UnknownPhaseStatementOrOperation,
+                    statement.span(),
+                    "operation does not accept extra arguments without `where`",
+                );
+                return false;
+            }
+            return true;
+        }
+        if tokens.get(where_index).copied() != Some("where") {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
-                "operation requires a track filter after `where`",
+                "track filter must follow the operation header",
             );
             return false;
         }

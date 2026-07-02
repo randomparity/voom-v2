@@ -177,3 +177,227 @@ fn compile_policy_preserves_quoted_tag_value_with_dot_as_string() {
         }
     );
 }
+
+// ---- Issue #271: V1 grammar conformance ----------------------------------
+//
+// Each production below is quoted verbatim from the DSL V1 grammar in
+// docs/specs/voom-control-plane-design.md (lines 640-692). The suite pins the
+// three forms fixed by #271 (`language == <token>`, the `media.*` field-path
+// root, and the optional `where` on transcode/extract audio) plus the
+// already-working productions, so grammar drift in either direction fails a
+// test. `verify artifact` is intentionally excluded — it remains a deferred
+// operation until #273.
+
+/// Diagnostic codes produced by a policy that fails to compile.
+fn compile_error_codes(source: &str) -> Vec<String> {
+    let err = compile_policy(source).unwrap_err();
+    err.diagnostics.into_iter().map(|d| d.code).collect()
+}
+
+/// Assert a policy body compiles with no diagnostics at all.
+fn assert_compiles_clean(body: &str) {
+    let source = format!("policy \"p\" {{ phase a {{ {body} }} }}");
+    let out = compile_policy(&source)
+        .unwrap_or_else(|err| panic!("`{body}` failed to compile: {:?}", err.diagnostics));
+    assert!(
+        out.diagnostics.is_empty(),
+        "`{body}` compiled with diagnostics: {:?}",
+        out.diagnostics
+    );
+}
+
+fn single_op(body: &str) -> CompiledOperation {
+    let source = format!("policy \"p\" {{ phase a {{ {body} }} }}");
+    compile_policy(&source)
+        .unwrap_or_else(|err| panic!("`{body}` failed to compile: {:?}", err.diagnostics))
+        .policy
+        .phases[0]
+        .operations[0]
+        .clone()
+}
+
+// Form 1 — `language == <quoted-token>` (track-filter).
+
+#[test]
+fn conformance_language_equals_lowers_to_single_language_in() {
+    assert_eq!(
+        single_op("keep audio where language == \"eng\""),
+        CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        }
+    );
+}
+
+#[test]
+fn conformance_language_equals_accepts_bare_token() {
+    assert_eq!(
+        single_op("keep audio where language == eng"),
+        CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        }
+    );
+}
+
+#[test]
+fn conformance_spec_example_language_equals_and_not_commentary() {
+    // The spec's own example (design doc line ~590).
+    let CompiledOperation::KeepTracks {
+        filter: Some(TrackFilter::And { filters }),
+        ..
+    } = single_op("keep audio where language == \"eng\" and not commentary")
+    else {
+        unreachable!("expected boolean track filter");
+    };
+    assert_eq!(filters.len(), 2);
+    assert_eq!(
+        filters[0],
+        TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }
+    );
+    assert!(matches!(filters[1], TrackFilter::Not { .. }));
+}
+
+#[test]
+fn conformance_language_equals_rejects_invalid_code() {
+    assert!(
+        compile_error_codes(
+            "policy \"p\" { phase a { keep audio where language == \"english\" } }"
+        )
+        .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+// Form 2 — `media.container` / `media.duration_millis` (condition).
+
+#[test]
+fn conformance_media_container_condition_compiles_and_lowers() {
+    let CompiledOperation::Conditional { condition, .. } =
+        single_op("when media.container == mkv { container mkv }")
+    else {
+        unreachable!("expected conditional");
+    };
+    assert_eq!(
+        condition,
+        CompiledCondition::FieldComparison {
+            path: vec!["media".to_owned(), "container".to_owned()],
+            op: crate::ComparisonOp::Eq,
+            value: crate::CompiledValue::String {
+                value: "mkv".to_owned(),
+            },
+        }
+    );
+}
+
+#[test]
+fn conformance_media_duration_millis_condition_compiles_and_lowers() {
+    let CompiledOperation::Conditional { condition, .. } =
+        single_op("when media.duration_millis > 1000 { container mkv }")
+    else {
+        unreachable!("expected conditional");
+    };
+    assert_eq!(
+        condition,
+        CompiledCondition::FieldComparison {
+            path: vec!["media".to_owned(), "duration_millis".to_owned()],
+            op: crate::ComparisonOp::Gt,
+            value: crate::CompiledValue::Number {
+                value: "1000".to_owned(),
+            },
+        }
+    );
+}
+
+#[test]
+fn conformance_unknown_media_field_still_rejected() {
+    assert!(
+        compile_error_codes(
+            "policy \"p\" { phase a { when media.bogus == mkv { container mkv } } }"
+        )
+        .contains(&"invalid_core_field_path".to_owned())
+    );
+}
+
+// Form 3 — optional `where` on `transcode audio` / `extract audio`.
+
+#[test]
+fn conformance_transcode_audio_without_where_selects_all() {
+    assert_eq!(
+        single_op("transcode audio to aac"),
+        CompiledOperation::TranscodeAudio {
+            target_codec: "aac".to_owned(),
+            container: "mkv".to_owned(),
+            filter: None,
+        }
+    );
+}
+
+#[test]
+fn conformance_extract_audio_without_where_selects_all() {
+    assert_eq!(
+        single_op("extract audio"),
+        CompiledOperation::ExtractAudio {
+            target_codec: "opus".to_owned(),
+            container: "ogg".to_owned(),
+            filter: None,
+        }
+    );
+}
+
+#[test]
+fn conformance_transcode_audio_with_where_still_lowers_filter() {
+    let CompiledOperation::TranscodeAudio {
+        filter: Some(filter),
+        ..
+    } = single_op("transcode audio to aac where language == \"eng\"")
+    else {
+        unreachable!("expected filter");
+    };
+    assert_eq!(
+        filter,
+        TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }
+    );
+}
+
+// Regression guard: #271 changes only transcode/extract audio. `keep`/`remove`
+// already accept an omitted `where` (pre-existing behavior, out of #271 scope);
+// this pins that #271 does not alter it.
+
+#[test]
+fn conformance_keep_audio_without_where_unchanged() {
+    assert_compiles_clean("keep audio");
+}
+
+// The already-working V1 productions still compile clean, so a regression in the
+// validator surfaces here too.
+
+#[test]
+fn conformance_working_v1_productions_compile_clean() {
+    for body in [
+        "container mkv",
+        "transcode video to hevc",
+        "keep audio where language in [eng, und]",
+        "keep subtitle where codec in [srt]",
+        "remove audio where commentary",
+        "keep audio where channels >= 6",
+        "keep attachment where font",
+        "keep subtitle where title contains \"Director\"",
+        "order tracks [video, audio, subtitle]",
+        "defaults audio first",
+        "defaults subtitle preserve",
+        "when exists audio { container mkv }",
+        "when count audio >= 2 { container mkv }",
+        "when video.codec == hevc { container mkv }",
+        "when video.width >= 1920 { container mkv }",
+    ] {
+        assert_compiles_clean(body);
+    }
+}

@@ -108,7 +108,9 @@ impl Validator<'_> {
         {
             return;
         }
-        for value in list_values(text) {
+        let mut values: Vec<String> = list_values(text).into_iter().map(str::to_owned).collect();
+        values.extend(language_equality_values(text));
+        for value in values {
             if value != "eng"
                 && value != "und"
                 && !(value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_lowercase()))
@@ -152,6 +154,21 @@ impl Validator<'_> {
     }
 }
 
+/// Language codes on the right-hand side of `lang|language == <token>` filters.
+/// `list_values` only reads bracketed `in [...]` lists, so the equality form
+/// needs its own extraction to be language-code validated.
+#[must_use]
+fn language_equality_values(text: &str) -> Vec<String> {
+    let tokens = words(text);
+    let mut values = Vec::new();
+    for window in tokens.windows(3) {
+        if matches!(window[0], "lang" | "language") && window[1] == "==" {
+            values.push(window[2].trim_matches('"').to_owned());
+        }
+    }
+    values
+}
+
 #[must_use]
 pub(super) fn is_reference_token(token: &str) -> bool {
     token
@@ -178,6 +195,7 @@ pub(super) fn is_valid_track_filter(text: &str) -> bool {
         ["lang" | "language" | "codec", "in", ..] => {
             !list_values(text).is_empty() && text_after_list(text).is_some_and(str::is_empty)
         }
+        ["lang" | "language", "==", value] => !value.is_empty(),
         ["channels", op, value] => is_comparison_op(op) && value.parse::<u64>().is_ok(),
         ["commentary" | "forced" | "default" | "font"] => true,
         ["title", "contains", ..] => {
@@ -241,6 +259,7 @@ fn is_core_field_root(root: &str) -> bool {
             | "attachment"
             | "attachments"
             | "container"
+            | "media"
             | "identity"
             | "quality"
             | "issue"
@@ -295,6 +314,7 @@ fn is_valid_core_field_path(root: &str, rest: &str) -> bool {
             matches!(parts.as_slice(), ["font" | "title" | "disposition"])
         }
         "container" => matches!(parts.as_slice(), ["name" | "value"]),
+        "media" => matches!(parts.as_slice(), ["container" | "duration_millis"]),
         "identity" => matches!(
             parts.as_slice(),
             ["title"
