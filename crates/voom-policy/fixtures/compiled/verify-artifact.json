@@ -1,0 +1,47 @@
+{
+  "policy_name": "verify artifact",
+  "slug": "verify-artifact",
+  "source_hash": "02a129f3a1e4cc040bf4ff4ebf46b5fa56c8c08cf88c69a183e51e3f067d16a3",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "normalize"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize",
+    "verify"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

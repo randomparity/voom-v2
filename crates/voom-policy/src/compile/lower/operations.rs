@@ -91,6 +91,9 @@ fn lower_operation(
                 filter: track_filter(text.as_ref()),
             })
         }
+        "verify" if tokens.get(1).copied() == Some("artifact") => {
+            Ok(CompiledOperation::VerifyArtifact)
+        }
         "when" => Ok(CompiledOperation::Conditional {
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
             operations: match statement {

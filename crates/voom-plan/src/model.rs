@@ -119,6 +119,7 @@ pub enum PlanOperationKind {
     TranscodeVideo,
     TranscodeAudio,
     ExtractAudio,
+    VerifyArtifact,
     Conditional,
     Rules,
 }
@@ -140,6 +141,7 @@ impl PlanOperationKind {
             Self::TranscodeVideo => "transcode_video",
             Self::TranscodeAudio => "transcode_audio",
             Self::ExtractAudio => "extract_audio",
+            Self::VerifyArtifact => "verify_artifact",
             Self::Conditional => "conditional",
             Self::Rules => "rules",
         }

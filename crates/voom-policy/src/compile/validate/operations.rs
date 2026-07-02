@@ -59,7 +59,8 @@ impl Validator<'_> {
             }
             "transcode" => self.validate_transcode_statement(statement),
             "extract" => self.validate_extract_statement(statement),
-            "synthesize" | "verify" => self.error(
+            "verify" => self.validate_verify_statement(statement),
+            "synthesize" => self.error(
                 DiagnosticCode::DeferredExecutionOperation,
                 statement.span(),
                 "execution operation is deferred to a later sprint",
@@ -666,6 +667,29 @@ impl Validator<'_> {
             statement.span(),
             "unsupported extract operation",
         );
+    }
+
+    /// Validate `verify artifact`. The spec production takes exactly the fixed
+    /// `artifact` target and no further arguments; any other shape is an unknown
+    /// operation rather than a deferred one.
+    pub(super) fn validate_verify_statement(&mut self, statement: &StatementAst) {
+        let text = statement_text(statement);
+        let tokens = words(text.as_ref());
+        if tokens.get(1).copied() != Some("artifact") {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "verify operation must use `verify artifact`",
+            );
+            return;
+        }
+        if tokens.len() > 2 {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "verify artifact does not accept extra arguments",
+            );
+        }
     }
 
     /// Validate a track filter the spec brackets as optional (`transcode audio`,
