@@ -1,0 +1,24 @@
+// Verify-heavy sample: an artifact verification gates every mutating phase, so
+// each committed output is re-probed before the next phase runs. Proves the
+// `verify artifact` operation (issue #273) composes with remux and transcode
+// across a dependency chain.
+policy "verify heavy normalize" {
+  phase normalize {
+    container mkv
+  }
+
+  phase verify_container {
+    depends_on: [normalize]
+    verify artifact
+  }
+
+  phase transcode {
+    depends_on: [verify_container]
+    transcode video to hevc
+  }
+
+  phase verify_transcode {
+    depends_on: [transcode]
+    verify artifact
+  }
+}
