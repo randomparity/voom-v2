@@ -23,6 +23,7 @@ fn scan_data_serializes_to_spec_shape_with_rows_and_failure_errors() {
                 "ingested": 1,
                 "probed": 1,
                 "snapshots_recorded": 1,
+                "hardlinked": 0,
                 "skipped": 1,
                 "failed": 1
             },
@@ -159,6 +160,7 @@ fn report_fixture() -> ScanReport {
             ingested: 1,
             probed: 1,
             snapshots_recorded: 1,
+            hardlinked: 0,
             skipped: 1,
             failed: 1,
         },

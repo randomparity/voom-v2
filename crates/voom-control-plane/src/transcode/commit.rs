@@ -197,6 +197,11 @@ fn result_probe_expected_facts(output: &TranscodeVideoObservedFacts) -> Observed
         size_bytes: output.size_bytes,
         content_hash: output.content_hash.clone(),
         modified_at: None,
+        // Inode facts are a scan-time hardlink signal and do not apply to a
+        // produced-artifact verification.
+        dev: None,
+        ino: None,
+        nlink: None,
     }
 }
 

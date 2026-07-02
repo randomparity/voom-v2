@@ -14,6 +14,7 @@ expression: json
       "ingested": 0,
       "probed": 0,
       "snapshots_recorded": 0,
+      "hardlinked": 0,
       "skipped": 0,
       "failed": 1
     },

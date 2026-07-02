@@ -57,10 +57,19 @@ async fn record_and_find_hardlink_by_dev_ino() {
     record_scan_fact_in_tx(&mut tx, location_id, 42, 7, 2, T0)
         .await
         .unwrap();
-    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7)
+    // A different path with the same (dev, ino) is a hardlink to the recorded
+    // location.
+    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/b.mkv")
         .await
         .unwrap()
-        .expect("same dev/ino resolves to the recorded location");
+        .expect("a different path with the same dev/ino resolves to the recorded location");
+    // The same path re-scanned is not a hardlink — it is excluded.
+    assert!(
+        find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/a.mkv")
+            .await
+            .unwrap()
+            .is_none()
+    );
     tx.commit().await.unwrap();
 
     assert_eq!(found.file_location_id, location_id);
@@ -80,14 +89,14 @@ async fn no_match_for_unknown_dev_ino_or_copy_on_different_inode() {
         .unwrap();
     // A byte-identical copy has the same hash but a different inode: no match.
     assert!(
-        find_live_hardlink_location_in_tx(&mut tx, 42, 8)
+        find_live_hardlink_location_in_tx(&mut tx, 42, 8, "/srv/copy.mkv")
             .await
             .unwrap()
             .is_none()
     );
     // A different device with the same inode number is also not a hardlink.
     assert!(
-        find_live_hardlink_location_in_tx(&mut tx, 99, 7)
+        find_live_hardlink_location_in_tx(&mut tx, 99, 7, "/srv/other.mkv")
             .await
             .unwrap()
             .is_none()
@@ -123,7 +132,7 @@ async fn attach_hardlink_adds_second_live_location_to_same_version() {
     assert_eq!(locations.len(), 2);
     // The lookup returns the earliest live location for the shared inode.
     let mut tx = pool.begin().await.unwrap();
-    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7)
+    let found = find_live_hardlink_location_in_tx(&mut tx, 42, 7, "/srv/c.mkv")
         .await
         .unwrap()
         .unwrap();

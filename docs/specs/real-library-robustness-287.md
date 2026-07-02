@@ -135,10 +135,14 @@ A small additive repo `SqliteScanFactsRepo` (new file under
 `voom-store/src/repo/`) exposes:
 
 - `record_in_tx(tx, file_location_id, dev, ino, nlink, observed_at)`
-- `find_live_location_by_dev_ino_in_tx(tx, dev, ino) -> Option<ScanFactMatch>`
-  — joins `file_locations` (live, `kind='local_path'`) to the owning live
-  `file_version` to return, for the same `(dev, ino)`: the prior location id,
-  its `file_version_id`, and the version's `content_hash` and `size_bytes`.
+- `find_live_hardlink_location_in_tx(tx, dev, ino, path) -> Option<ScanFactMatch>`
+  — joins `file_locations` (live, `kind='local_path'`, **`value != path`**) to
+  the owning live `file_version` to return, for the same `(dev, ino)` at a
+  *different* path: the prior location id, its `file_version_id`, and the
+  version's `content_hash` and `size_bytes`. Excluding the candidate's own path
+  scopes resolution to genuine hardlinks (distinct paths, one inode); a same-path
+  re-scan finds no match and takes the normal ingest path (issue #249 is about
+  hardlinked *paths*, not path-level re-scan idempotency, which is out of scope).
 
 ### Resolution (scan persist)
 

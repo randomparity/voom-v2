@@ -53,15 +53,19 @@ pub async fn record_scan_fact_in_tx(
     Ok(())
 }
 
-/// Find the earliest live local `file_location` sharing this `(dev, ino)` — a
-/// hardlink to the same physical file — along with its owning live
-/// `file_version`'s content identity. Returns `None` when no live local
-/// location shares the physical object (a first sighting, or a byte-identical
-/// copy on a different inode).
+/// Find the earliest live local `file_location` at a **different path** that
+/// shares this `(dev, ino)` — a hardlink to the same physical file — along with
+/// its owning live `file_version`'s content identity. `path` is the discovered
+/// candidate's own location value; excluding it scopes resolution to genuine
+/// hardlinks (distinct paths, one inode) and leaves same-path re-scans to the
+/// normal ingest path. Returns `None` when no other live local location shares
+/// the physical object (a first sighting, a same-path re-scan, or a
+/// byte-identical copy on a different inode).
 pub async fn find_live_hardlink_location_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     dev: u64,
     ino: u64,
+    path: &str,
 ) -> Result<Option<ScanFactMatch>, VoomError> {
     let row = sqlx::query(
         "SELECT sff.file_location_id, fl.file_version_id, fv.content_hash, fv.size_bytes \
@@ -69,6 +73,7 @@ pub async fn find_live_hardlink_location_in_tx(
          JOIN file_locations fl ON fl.id = sff.file_location_id \
          JOIN file_versions fv ON fv.id = fl.file_version_id \
          WHERE sff.dev = ? AND sff.ino = ? \
+           AND fl.value != ? \
            AND fl.retired_at IS NULL \
            AND fl.kind = 'local_path' \
            AND fv.retired_at IS NULL \
@@ -77,6 +82,7 @@ pub async fn find_live_hardlink_location_in_tx(
     )
     .bind(i64_from_u64(dev))
     .bind(i64_from_u64(ino))
+    .bind(path)
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| VoomError::database_context("scan_file_facts hardlink lookup", e))?;
