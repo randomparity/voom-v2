@@ -3,8 +3,10 @@
 //! artifact's durable location at the promoted path.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+use tokio::io::AsyncReadExt;
 use voom_core::{FileAssetId, FileLocationId, FileVersionId, JobId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::FilePhaseSummary;
@@ -102,21 +104,17 @@ async fn ensure_output_dir(output_dir: &Path) -> Result<PathBuf, VoomError> {
 
 /// Move a terminal artifact into its promoted destination, add-only.
 ///
-/// Fails on a live destination collision (mirrors the commit's no-replace
-/// contract). If the destination already exists but the source is gone, an
-/// earlier run promoted the bytes and crashed before repointing the location;
-/// that is treated as already-moved so a resume completes the repoint.
+/// A live foreign destination collision fails the run (mirrors the commit's
+/// no-replace contract). A destination that already holds this artifact's bytes
+/// is a resume of an interrupted promotion — recognised and repointed rather than
+/// failed: either the source is already gone (an earlier run promoted and crashed
+/// before repointing) or the source is still present and byte-equal to the
+/// destination (a cross-filesystem copy whose source removal or DB repoint did not
+/// complete). Cross-filesystem placement goes through a temp sibling so the
+/// destination is never observed partial.
 async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, VoomError> {
     match tokio::fs::symlink_metadata(dest).await {
-        Ok(_) => {
-            if tokio::fs::symlink_metadata(current).await.is_err() {
-                return Ok(dest.to_path_buf());
-            }
-            return Err(VoomError::Config(format!(
-                "promotion destination already exists: {}",
-                dest.display()
-            )));
-        }
+        Ok(dest_meta) => return resolve_existing_destination(current, dest, &dest_meta).await,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
             return Err(VoomError::Config(format!(
@@ -128,21 +126,140 @@ async fn move_terminal_artifact(current: &Path, dest: &Path) -> Result<PathBuf, 
     if tokio::fs::rename(current, dest).await.is_ok() {
         return Ok(dest.to_path_buf());
     }
-    // Cross-filesystem rename fails; fall back to copy + remove.
-    tokio::fs::copy(current, dest).await.map_err(|err| {
-        VoomError::Config(format!(
-            "copy terminal artifact {} -> {}: {err}",
-            current.display(),
+    // A failed rename (typically a cross-filesystem EXDEV) falls back to an atomic
+    // copy-into-place: stream into a temp sibling, then rename it over dest.
+    copy_into_place(current, dest).await?;
+    Ok(dest.to_path_buf())
+}
+
+/// Classify a pre-existing promotion destination: a resumed/interrupted promotion
+/// of this artifact (repoint) versus a genuine foreign collision (fail).
+async fn resolve_existing_destination(
+    current: &Path,
+    dest: &Path,
+    dest_meta: &std::fs::Metadata,
+) -> Result<PathBuf, VoomError> {
+    if tokio::fs::symlink_metadata(current).await.is_err() {
+        // Source gone: an earlier run promoted the bytes and crashed before the
+        // repoint. Resume completes the repoint.
+        return Ok(dest.to_path_buf());
+    }
+    if dest_meta.file_type().is_file() && files_have_equal_contents(current, dest).await? {
+        tracing::info!(
+            source = %current.display(),
+            destination = %dest.display(),
+            "recovered an interrupted cross-filesystem promotion; the source is \
+             already copied to the destination"
+        );
+        remove_promoted_source(current).await;
+        return Ok(dest.to_path_buf());
+    }
+    Err(VoomError::Config(format!(
+        "promotion destination already exists: {}",
+        dest.display()
+    )))
+}
+
+/// Whether two files hold identical bytes. Size-first (a cheap reject), then a
+/// chunked streaming compare so a multi-GB media artifact is never loaded whole.
+async fn files_have_equal_contents(a: &Path, b: &Path) -> Result<bool, VoomError> {
+    let len_a = tokio::fs::metadata(a)
+        .await
+        .map_err(|err| VoomError::Config(format!("stat {} to compare: {err}", a.display())))?
+        .len();
+    let len_b = tokio::fs::metadata(b)
+        .await
+        .map_err(|err| VoomError::Config(format!("stat {} to compare: {err}", b.display())))?
+        .len();
+    if len_a != len_b {
+        return Ok(false);
+    }
+    let mut file_a = tokio::fs::File::open(a)
+        .await
+        .map_err(|err| VoomError::Config(format!("open {} to compare: {err}", a.display())))?;
+    let mut file_b = tokio::fs::File::open(b)
+        .await
+        .map_err(|err| VoomError::Config(format!("open {} to compare: {err}", b.display())))?;
+    let mut buf_a = vec![0u8; 64 * 1024];
+    let mut buf_b = vec![0u8; 64 * 1024];
+    let mut remaining = len_a;
+    while remaining > 0 {
+        let chunk_len = remaining.min(buf_a.len() as u64);
+        let chunk = usize::try_from(chunk_len)
+            .map_err(|_| VoomError::Internal(format!("compare chunk {chunk_len} exceeds usize")))?;
+        file_a
+            .read_exact(&mut buf_a[..chunk])
+            .await
+            .map_err(|err| VoomError::Config(format!("read {} to compare: {err}", a.display())))?;
+        file_b
+            .read_exact(&mut buf_b[..chunk])
+            .await
+            .map_err(|err| VoomError::Config(format!("read {} to compare: {err}", b.display())))?;
+        if buf_a[..chunk] != buf_b[..chunk] {
+            return Ok(false);
+        }
+        remaining -= chunk_len;
+    }
+    Ok(true)
+}
+
+/// Hidden temp sibling for the copy fallback. A dotfile prefixed/suffixed out of
+/// the plain-filename destination namespace, so it can never equal another
+/// artifact's promoted destination in a shared output dir.
+fn promotion_temp_path(dest: &Path) -> Result<PathBuf, VoomError> {
+    let file_name = dest.file_name().ok_or_else(|| {
+        VoomError::Internal(format!(
+            "promotion destination has no file name: {}",
             dest.display()
         ))
     })?;
-    tokio::fs::remove_file(current).await.map_err(|err| {
-        VoomError::Config(format!(
-            "remove promoted source {}: {err}",
-            current.display()
-        ))
-    })?;
-    Ok(dest.to_path_buf())
+    let mut temp_name = OsString::from(".voom-promote.");
+    temp_name.push(file_name);
+    temp_name.push(".partial");
+    Ok(dest.with_file_name(temp_name))
+}
+
+/// Remove a promoted artifact's source once its bytes are safe at the
+/// destination. Best-effort: the promotion's commit is the durable location
+/// repoint, so a failed cleanup is logged, not fatal, and cannot wedge a resume.
+async fn remove_promoted_source(current: &Path) {
+    if let Err(err) = tokio::fs::remove_file(current).await {
+        tracing::warn!(
+            source = %current.display(),
+            error = %err,
+            "promoted terminal artifact is placed at its destination but removing \
+             the source failed; leaving an orphaned source in the working dir"
+        );
+    }
+}
+
+/// Place a terminal artifact at `dest` across filesystems without ever leaving a
+/// partial `dest`: stream into a hidden temp sibling on `dest`'s filesystem, then
+/// atomically `rename` it into place (an intra-filesystem rename is atomic). The
+/// source is removed best-effort afterward. Used when a direct `rename` fails
+/// (typically a cross-filesystem `EXDEV`).
+async fn copy_into_place(current: &Path, dest: &Path) -> Result<(), VoomError> {
+    let temp = promotion_temp_path(dest)?;
+    if let Err(err) = tokio::fs::copy(current, &temp).await {
+        // A partial copy may already exist at temp; remove it so no stray
+        // `.partial` dotfile is left in the operator's output dir.
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(VoomError::Config(format!(
+            "copy terminal artifact {} -> {}: {err}",
+            current.display(),
+            temp.display()
+        )));
+    }
+    if let Err(err) = tokio::fs::rename(&temp, dest).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(VoomError::Config(format!(
+            "place terminal artifact {} -> {}: {err}",
+            temp.display(),
+            dest.display()
+        )));
+    }
+    remove_promoted_source(current).await;
+    Ok(())
 }
 
 impl ControlPlane {
@@ -286,3 +403,7 @@ impl ControlPlane {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "promotion_test.rs"]
+mod tests;
