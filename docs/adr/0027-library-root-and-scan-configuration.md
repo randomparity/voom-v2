@@ -152,6 +152,14 @@ matched file belongs to exactly one root.
 - Migration `0019` and ADR `0027` are cross-agent-assigned (concurrent #281 owns
   `0020`/`0026`). The hand-rolled `MIGRATOR` tolerates the numbering.
 - No new events and no durable `Issue` row for the block (see rejected list).
+- **Root-overlap rejection is best-effort under V1's single-writer CLI, not
+  transactional.** `create_library_root` reads all roots, checks overlap in
+  Rust, then inserts in a separate transaction. Only the exact-`canonical_path`
+  UNIQUE index is atomic; two *concurrent* `library root add` of
+  overlapping-but-distinct paths could both pass the check (a TOCTOU window).
+  This is acceptable for the current single-invocation CLI against a single
+  SQLite writer. When concurrent writers arrive (API/daemon), move the check
+  into the insert's `BEGIN IMMEDIATE` transaction (an `_in_tx` overlap variant).
 
 ## Considered & rejected
 
