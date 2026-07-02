@@ -19,7 +19,7 @@ pub(crate) mod hash;
 pub(crate) mod persist;
 pub(crate) mod worker;
 
-pub use discovery::{ScanMode, is_supported_media_path, is_supported_sidecar_path};
+pub use discovery::{ScanMode, SidecarKind, classify_sidecar, is_supported_media_path};
 
 #[derive(Debug, Clone)]
 pub struct ScanPathInput {

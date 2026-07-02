@@ -128,6 +128,138 @@ fn write_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::path::Pat
     std::fs::canonicalize(path).unwrap()
 }
 
+#[test]
+fn classify_sidecar_maps_extensions_and_trailer_suffix() {
+    use std::path::Path;
+
+    assert_eq!(
+        classify_sidecar(Path::new("Movie.srt")),
+        Some(SidecarKind::Subtitle)
+    );
+    assert_eq!(
+        classify_sidecar(Path::new("Movie.SRT")),
+        Some(SidecarKind::Subtitle)
+    );
+    assert_eq!(
+        classify_sidecar(Path::new("Movie.nfo")),
+        Some(SidecarKind::Nfo)
+    );
+    for image in [
+        "Movie-poster.jpg",
+        "Movie.jpeg",
+        "Movie-fanart.PNG",
+        "art.webp",
+        "Movie.tbn",
+    ] {
+        assert_eq!(
+            classify_sidecar(Path::new(image)),
+            Some(SidecarKind::Poster),
+            "{image}"
+        );
+    }
+    assert_eq!(
+        classify_sidecar(Path::new("Movie-trailer.mkv")),
+        Some(SidecarKind::Trailer)
+    );
+    assert_eq!(
+        classify_sidecar(Path::new("Movie.trailer.mp4")),
+        Some(SidecarKind::Trailer)
+    );
+    // Plain media, unsupported extensions, and extensionless files are not sidecars.
+    assert_eq!(classify_sidecar(Path::new("Movie.mkv")), None);
+    assert_eq!(classify_sidecar(Path::new("notes.txt")), None);
+    assert_eq!(classify_sidecar(Path::new("art.bmp")), None);
+    assert_eq!(classify_sidecar(Path::new("README")), None);
+}
+
+#[tokio::test]
+async fn directory_discovery_attaches_v1_sidecar_kinds() {
+    let dir = tempfile::tempdir().unwrap();
+    let media = write_file(dir.path(), "Movie.mkv", b"media");
+    let nfo = write_file(dir.path(), "Movie.nfo", b"nfo");
+    let poster = write_file(dir.path(), "Movie-poster.jpg", b"poster");
+    let fanart = write_file(dir.path(), "Movie-fanart.png", b"fanart");
+    let trailer = write_file(dir.path(), "Movie-trailer.mkv", b"trailer");
+    let srt = write_file(dir.path(), "Movie.srt", b"subtitle");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert_eq!(
+        discovered.candidates.len(),
+        1,
+        "trailer must not be a candidate"
+    );
+    let candidate = &discovered.candidates[0];
+    assert_eq!(candidate.path, media);
+    let by_path: std::collections::BTreeMap<_, _> = candidate
+        .sidecars
+        .iter()
+        .map(|sidecar| (sidecar.path.clone(), sidecar.kind))
+        .collect();
+    assert_eq!(by_path.get(&nfo), Some(&SidecarKind::Nfo));
+    assert_eq!(by_path.get(&poster), Some(&SidecarKind::Poster));
+    assert_eq!(by_path.get(&fanart), Some(&SidecarKind::Poster));
+    assert_eq!(by_path.get(&trailer), Some(&SidecarKind::Trailer));
+    assert_eq!(by_path.get(&srt), Some(&SidecarKind::Subtitle));
+    assert_eq!(candidate.sidecars.len(), 5);
+    assert!(discovered.skipped.is_empty());
+}
+
+#[tokio::test]
+async fn orphan_trailer_without_base_media_is_skipped_not_ingested_as_primary() {
+    let dir = tempfile::tempdir().unwrap();
+    let trailer = write_file(dir.path(), "Lonely-trailer.mkv", b"trailer");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert!(discovered.candidates.is_empty());
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(discovered.skipped[0].path, trailer);
+    assert_eq!(
+        discovered.skipped[0].status,
+        FileScanStatus::UnsupportedExtension
+    );
+}
+
+#[tokio::test]
+async fn unsupported_image_extension_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let _media = write_file(dir.path(), "Movie.mkv", b"media");
+    let bmp = write_file(dir.path(), "Movie.bmp", b"bitmap");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    assert_eq!(discovered.candidates.len(), 1);
+    assert!(discovered.candidates[0].sidecars.is_empty());
+    assert_eq!(discovered.skipped.len(), 1);
+    assert_eq!(discovered.skipped[0].path, bmp);
+}
+
+#[tokio::test]
+async fn sidecar_attaches_to_longest_matching_stem_across_hyphen_separator() {
+    let dir = tempfile::tempdir().unwrap();
+    let shorter = write_file(dir.path(), "Movie.mkv", b"short");
+    let longer = write_file(dir.path(), "Movie.Part1.mkv", b"long");
+    let poster = write_file(dir.path(), "Movie.Part1-poster.jpg", b"poster");
+
+    let discovered = discover_path(dir.path()).await.unwrap();
+
+    let shorter = discovered
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path == shorter)
+        .unwrap();
+    let longer = discovered
+        .candidates
+        .iter()
+        .find(|candidate| candidate.path == longer)
+        .unwrap();
+    assert!(shorter.sidecars.is_empty());
+    assert_eq!(longer.sidecars.len(), 1);
+    assert_eq!(longer.sidecars[0].path, poster);
+    assert_eq!(longer.sidecars[0].kind, SidecarKind::Poster);
+}
+
 #[tokio::test]
 async fn directory_skipped_entries_are_returned_in_lexicographic_order() {
     let dir = tempfile::tempdir().unwrap();
