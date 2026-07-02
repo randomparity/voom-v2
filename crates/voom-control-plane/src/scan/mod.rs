@@ -11,6 +11,7 @@ use voom_core::{
 use voom_worker_protocol::{ExpectedFileFacts, ProbeFileRequest, ProbeFileResult};
 
 use crate::ControlPlane;
+use crate::cases::begin_immediate_tx;
 
 pub(crate) mod bootstrap;
 pub(crate) mod discovery;
@@ -194,11 +195,7 @@ impl ControlPlane {
     }
 
     async fn ensure_scan_worker(&self) -> Result<WorkerId, VoomError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|err| VoomError::database_context("scan worker bootstrap begin", err))?;
+        let mut tx = begin_immediate_tx(&self.pool).await?;
         let worker = bootstrap::ensure_builtin_ffprobe_worker_in_tx(self, &mut tx).await?;
         tx.commit()
             .await

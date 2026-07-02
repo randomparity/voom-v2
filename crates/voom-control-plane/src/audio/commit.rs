@@ -37,7 +37,7 @@ use crate::artifact::fs::{
     ArtifactFileFacts, canonical_new_leaf_no_symlink, promote_staged_add_only_with_temp,
     require_expected_staging_facts, unique_temp_sibling_path,
 };
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 use crate::scan::persist::{ObservedCandidateFacts, snapshot_with_stream_ids, verify_probe_facts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,11 +634,7 @@ fn result_probe_request(
 }
 
 async fn ensure_result_probe_worker(cp: &ControlPlane) -> Result<WorkerId, VoomError> {
-    let mut tx = cp
-        .pool
-        .begin()
-        .await
-        .map_err(|err| VoomError::database_context("audio result probe worker begin", err))?;
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let worker = crate::scan::bootstrap::ensure_builtin_ffprobe_worker_in_tx(cp, &mut tx).await?;
     tx.commit()
         .await
