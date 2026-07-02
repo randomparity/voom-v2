@@ -109,8 +109,8 @@ This fallback (copy → temp → atomic rename → best-effort remove `current`)
 extracted into a directly-callable private helper (e.g. `copy_into_place`) so it
 can be unit-tested on a single tmpdir without a real cross-FS mount: a test drives
 the helper and asserts `dest` holds `current`'s bytes, `current` is removed, and
-no `<dest>.voom-tmp` sibling remains. `move_terminal_artifact` tries `rename`
-first and calls this helper on failure.
+no `.voom-promote.<file_name>.partial` temp sibling remains. `move_terminal_artifact`
+tries `rename` first and calls this helper on failure.
 
 This makes D2's premise sound: any `dest` that exists is either a **complete**
 promoted copy of `current` or a genuinely foreign file — never a truncated copy of
