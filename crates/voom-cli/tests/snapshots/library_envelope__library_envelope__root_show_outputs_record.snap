@@ -1,0 +1,33 @@
+---
+source: crates/voom-cli/tests/library_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "library",
+  "status": "ok",
+  "data": {
+    "root_id": 1,
+    "library_id": 1,
+    "root_kind": "local_path",
+    "canonical_path": "[path]",
+    "display_path": "[path]",
+    "include_globs": [],
+    "exclude_globs": [],
+    "extension_allowlist": [],
+    "scan_mode": "manual_recursive",
+    "symlink_policy": "reject",
+    "hidden_file_policy": "ignore",
+    "stability_seconds": 0,
+    "debounce_seconds": 0,
+    "enabled": true,
+    "created_at": "[ts]",
+    "updated_at": "[ts]"
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

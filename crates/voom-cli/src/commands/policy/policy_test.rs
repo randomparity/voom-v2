@@ -35,6 +35,7 @@ fn policy_input_create_from_scan_command_parses() {
         Command::Policy(PolicyCommand::Input(PolicyInputCommand::CreateFromScan {
             slug,
             all,
+            root: _,
             file_version_id,
             media_snapshot_id,
             container,

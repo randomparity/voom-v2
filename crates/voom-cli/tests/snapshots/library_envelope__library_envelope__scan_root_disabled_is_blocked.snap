@@ -1,0 +1,25 @@
+---
+source: crates/voom-cli/tests/library_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scan",
+  "status": "error",
+  "data": {
+    "status": "blocked",
+    "reason": "root_disabled",
+    "library_id": 1,
+    "library_root_id": 1,
+    "canonical_path": "[path]"
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "BLOCKED",
+    "message": "library root 1 is blocked (root_disabled); not scanned"
+  }
+}

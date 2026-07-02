@@ -78,7 +78,8 @@ pub mod policy {
     };
     pub use crate::cases::policy::policies::PolicyMutationError;
     pub use crate::cases::policy::policy_inputs::{
-        PolicyInputFromScanInput, PolicyInputFromScanResult, WholeScanInput, WholeScanInputResult,
+        PolicyInputFromScanInput, PolicyInputFromScanResult, RootScopedScanInput,
+        RootScopedScanInputResult, WholeScanInput, WholeScanInputResult,
     };
 }
 
