@@ -1,0 +1,41 @@
+// The reference user's whole-library policy (issue #288 / #269 Workstream D).
+// It exercises the full V1(+V1.1) vocabulary the DSL work landed:
+//   MKV container + language-filtered keep + filter-addressed defaults/order
+//   (normalize), HEVC video profile (video), E-AC-3 5.1 plus a synthesized
+//   stereo downmix (audio), and an artifact verification (verify). Each phase
+//   depends on the prior so the barrier coordinator runs them in order.
+policy "reference user library normalize" {
+  metadata {
+    version: "1"
+    description: "mkv + hevc + eac3 5.1 + stereo downmix + language keep + verify"
+  }
+
+  config {
+    languages audio: [eng, und]
+    on_error: continue
+  }
+
+  phase normalize {
+    container mkv
+    keep audio where lang in [eng, und]
+    order tracks [video, audio, subtitle]
+    defaults audio where lang in [eng]
+    defaults subtitle where forced
+  }
+
+  phase video {
+    depends_on: [normalize]
+    transcode video to hevc
+  }
+
+  phase audio {
+    depends_on: [video]
+    transcode audio to eac3 where lang in [eng, und]
+    synthesize audio from channels >= 6 { codec aac  channels 2 }
+  }
+
+  phase verify {
+    depends_on: [audio]
+    verify artifact
+  }
+}
