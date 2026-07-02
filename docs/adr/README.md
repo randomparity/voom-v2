@@ -22,3 +22,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0014](0014-database-error-source-chain.md) | Preserve the `sqlx::Error` source chain in `VoomError::Database` |
 | [0015](0015-control-plane-module-decomposition.md) | Decompose oversized control-plane modules along cohesion seams |
 | [0016](0016-worker-protocol-exact-version-match.md) | Worker protocol enforces an exact version match, no skew window |
+| [0017](0017-verify-artifact-dsl-operation.md) | `verify artifact` compiles and plans, execution wiring deferred |
