@@ -72,6 +72,13 @@ pub(super) fn track_filter(text: &str) -> Option<TrackFilter> {
     filter_from_text(where_text)
 }
 
+/// Parse a bare track-filter clause (already extracted from its keyword, e.g.
+/// the text after `synthesize audio from`). Unlike [`track_filter`], it does not
+/// split on ` where `.
+pub(super) fn track_filter_clause(text: &str) -> Option<TrackFilter> {
+    filter_from_text(text.trim())
+}
+
 pub(super) fn compiled_value(text: &str) -> CompiledValue {
     let text = text.trim();
     if text.starts_with('"') && text.ends_with('"') {

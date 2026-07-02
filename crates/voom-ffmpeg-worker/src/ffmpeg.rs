@@ -406,6 +406,9 @@ pub async fn run_ffmpeg_transcode_audio(
     output: &Path,
     request: &TranscodeAudioRequest,
 ) -> Result<AudioOutputProbe, FfmpegError> {
+    if request.audio.add_track {
+        return run_ffmpeg_synthesize_audio(config, input, output, request).await;
+    }
     let source_streams = probe_audio_streams(config, input).await?;
     let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
     let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
@@ -466,6 +469,83 @@ pub async fn run_ffmpeg_transcode_audio(
         request,
         &probe,
     )?;
+    Ok(probe)
+}
+
+/// `synthesize audio` (ADR 0026, #276): keep every source stream (`-map 0 -c
+/// copy`) and *append* a downmixed companion (`-ac <target_channels>`) per
+/// selected source. Each companion is tagged with the request's (new) snapshot
+/// stream id so the output probe and lineage can identify the derived track.
+async fn run_ffmpeg_synthesize_audio(
+    config: &FfmpegConfig,
+    input: &Path,
+    output: &Path,
+    request: &TranscodeAudioRequest,
+) -> Result<AudioOutputProbe, FfmpegError> {
+    let target_channels = request.audio.target_channels.ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch("synthesize audio requires target_channels".to_owned())
+    })?;
+    let source_streams = probe_audio_streams(config, input).await?;
+    let selected = selected_source_streams(&source_streams, &request.selection.selected_streams)?;
+    let bitrate_kbps_per_channel = voom_worker_protocol::audio_target_bitrate_kbps_per_channel(
+        &request.audio.target_codec,
+        &request.audio.profile,
+    )
+    .ok_or_else(|| {
+        FfmpegError::OutputFactsMismatch(format!(
+            "no audio bitrate defined for codec `{}` profile `{}`",
+            request.audio.target_codec, request.audio.profile
+        ))
+    })?;
+    // Companions are appended after the copied originals, so their output audio
+    // ordinal starts at the original audio-stream count.
+    let original_audio_count = source_streams.len();
+
+    let mut command = Command::new(&config.ffmpeg_path);
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg("-n")
+        .arg("-i")
+        .arg(input)
+        .arg("-map")
+        .arg("0")
+        .arg("-c")
+        .arg("copy");
+    for (offset, source) in selected.iter().enumerate() {
+        let out_ordinal = original_audio_count + offset;
+        command
+            .arg("-map")
+            .arg(format!("0:{}", source.provider_stream_index))
+            .arg(format!("-c:a:{out_ordinal}"))
+            .arg(audio_encoder(&request.audio.target_codec)?)
+            .arg(format!("-ac:a:{out_ordinal}"))
+            .arg(target_channels.to_string())
+            .arg(format!("-b:a:{out_ordinal}"))
+            .arg(format!(
+                "{}k",
+                u64::from(bitrate_kbps_per_channel) * target_channels
+            ));
+        append_audio_metadata(&mut command, out_ordinal, source);
+    }
+    command
+        .arg("-map_metadata")
+        .arg("0")
+        .arg("-f")
+        .arg(audio_container_format(&request.output.container)?)
+        .arg(output)
+        .kill_on_drop(true);
+
+    run_ffmpeg_command(config, command).await?;
+    let probe = probe_audio_output(
+        config,
+        output,
+        &request.output.container,
+        &request.selection.selected_streams,
+        Some(&request.audio.target_codec),
+    )
+    .await?;
+    verify_synthesize_audio_probe(&selected, request, target_channels, &probe)?;
     Ok(probe)
 }
 
@@ -1064,6 +1144,57 @@ fn verify_transcode_audio_probe(
             ));
         }
         verify_preserved_audio_metadata(source, output)?;
+    }
+    Ok(())
+}
+
+/// Verify a `synthesize audio` output (ADR 0026). Unlike the transcode verifier,
+/// the companion's channel count is expected to *differ* from the source (it is
+/// a downmix): each synthesized stream must carry the requested snapshot id and
+/// target codec, exactly `target_channels` channels, and preserve the source
+/// language.
+fn verify_synthesize_audio_probe(
+    selected_sources: &[SourceAudioFact],
+    request: &TranscodeAudioRequest,
+    target_channels: u64,
+    probe: &AudioOutputProbe,
+) -> Result<(), FfmpegError> {
+    let selected_refs = &request.selection.selected_streams;
+    if probe.selected_output_streams.len() != selected_refs.len() {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "synthesized output stream count mismatch".to_owned(),
+        ));
+    }
+    let observed_ids: Vec<&str> = probe
+        .selected_output_streams
+        .iter()
+        .map(|stream| stream.snapshot_stream_id.as_str())
+        .collect();
+    let expected_ids: Vec<&str> = selected_refs
+        .iter()
+        .map(|stream| stream.snapshot_stream_id.as_str())
+        .collect();
+    if observed_ids != expected_ids {
+        return Err(FfmpegError::OutputFactsMismatch(
+            "synthesized output stream order mismatch".to_owned(),
+        ));
+    }
+    for (source, output) in selected_sources.iter().zip(&probe.selected_output_streams) {
+        if output.codec != request.audio.target_codec {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "synthesized audio codec mismatch".to_owned(),
+            ));
+        }
+        if output.channels != Some(target_channels) {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "synthesized audio channel count is not the requested downmix".to_owned(),
+            ));
+        }
+        if source.language != output.language {
+            return Err(FfmpegError::OutputFactsMismatch(
+                "synthesized audio language was not preserved".to_owned(),
+            ));
+        }
     }
     Ok(())
 }

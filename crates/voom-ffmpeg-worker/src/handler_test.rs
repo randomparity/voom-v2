@@ -335,6 +335,23 @@ async fn transcode_audio_rejects_unknown_profile_before_ffmpeg() {
 }
 
 #[tokio::test]
+async fn synthesize_audio_without_target_channels_is_config_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("input.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+    let mut request =
+        transcode_audio_request(dir.path(), &input, audio_expected(&input).await, "aac");
+    request.audio.add_track = true;
+    request.audio.target_channels = None;
+
+    let err = handle_transcode_audio(&request, &config(dir.path()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+}
+
+#[tokio::test]
 async fn extract_audio_output_path_outside_staging_root_is_config_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("input.mkv");
@@ -752,6 +769,8 @@ fn transcode_audio_request(
         audio: TranscodeAudioSettings {
             target_codec: target_codec.to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+            add_track: false,
+            target_channels: None,
         },
     }
 }

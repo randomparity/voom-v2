@@ -63,6 +63,16 @@ pub enum StatementAst {
         settings: Vec<SettingAst>,
         span: crate::SourceSpan,
     },
+    /// A `synthesize audio from <track-filter> { codec … channels … }`
+    /// statement. The brace body is a list of space-separated `key value`
+    /// pairs (not colon settings): `codec aac`, `channels 2`. The header holds
+    /// everything before the `{`, e.g. `synthesize audio from codec in ["eac3"]`.
+    SynthesizeInline {
+        keyword: Spanned<String>,
+        header: String,
+        settings: Vec<SettingAst>,
+        span: crate::SourceSpan,
+    },
 }
 
 impl StatementAst {
@@ -71,7 +81,8 @@ impl StatementAst {
         match self {
             Self::Raw { span, .. }
             | Self::Block { span, .. }
-            | Self::TranscodeInline { span, .. } => *span,
+            | Self::TranscodeInline { span, .. }
+            | Self::SynthesizeInline { span, .. } => *span,
         }
     }
 
@@ -80,7 +91,8 @@ impl StatementAst {
         match self {
             Self::Raw { keyword, .. }
             | Self::Block { keyword, .. }
-            | Self::TranscodeInline { keyword, .. } => keyword,
+            | Self::TranscodeInline { keyword, .. }
+            | Self::SynthesizeInline { keyword, .. } => keyword,
         }
     }
 }

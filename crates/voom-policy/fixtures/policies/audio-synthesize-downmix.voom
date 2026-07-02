@@ -1,0 +1,5 @@
+policy "audio synthesize downmix" {
+  phase normalize {
+    synthesize audio from channels >= 6 { codec aac  channels 2 }
+  }
+}

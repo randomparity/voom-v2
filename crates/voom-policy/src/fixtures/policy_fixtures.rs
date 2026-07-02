@@ -65,6 +65,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         expected_json_path: "fixtures/compiled/audio-transcode-eac3.json",
     },
     PolicyFixture {
+        source_path: "fixtures/policies/audio-synthesize-downmix.voom",
+        expected_json_path: "fixtures/compiled/audio-synthesize-downmix.json",
+    },
+    PolicyFixture {
         source_path: "fixtures/policies/verify-artifact.voom",
         expected_json_path: "fixtures/compiled/verify-artifact.json",
     },

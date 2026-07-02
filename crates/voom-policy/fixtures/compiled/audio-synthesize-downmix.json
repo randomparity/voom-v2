@@ -1,0 +1,39 @@
+{
+  "policy_name": "audio synthesize downmix",
+  "slug": "audio-synthesize-downmix",
+  "source_hash": "97df685043d1c758304bdb3a1021507f93bc3ccfca6620b7df632417ae96e21b",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "normalize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "synthesize_audio",
+          "target_codec": "aac",
+          "container": "mkv",
+          "target_channels": 2,
+          "filter": {
+            "type": "channels",
+            "op": "gte",
+            "value": 6
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "normalize"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

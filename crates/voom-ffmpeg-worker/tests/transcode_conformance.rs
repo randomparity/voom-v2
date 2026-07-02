@@ -969,6 +969,8 @@ async fn eac3_transcode_preserves_5_1_channels() {
         audio: TranscodeAudioSettings {
             target_codec: "eac3".to_owned(),
             profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+            add_track: false,
+            target_channels: None,
         },
     };
 

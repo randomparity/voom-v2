@@ -769,6 +769,38 @@ schema, wire (`RemuxSelection.head_streams` / `forced_streams` /
 the compiler edges land first; filter resolution, the single-match diagnostic,
 and the deferred forced DSL land with the planner work.
 
+#### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
+
+Audio can be *added* as a new track derived from an existing one, not only
+re-encoded in place. One additive production; every existing form is unchanged:
+
+```text
+synthesize audio from <track-filter> { codec aac|opus|eac3  channels <number> }
+```
+
+- The `from <track-filter>` clause selects the **source** audio stream(s); the
+  block body sets the companion's target `codec` and `channels`. For the common
+  "5.1 + stereo" layout, `synthesize audio from codec in ["eac3"]
+  { codec aac  channels 2 }` adds a stereo AAC companion beside the existing
+  E-AC-3 5.1 track. One companion is added per selected source stream.
+- Unlike `transcode audio` (which **replaces** matched streams), `synthesize`
+  **adds** a stream: the source track is preserved and the downmixed companion
+  is appended. `channels` is a positive integer (typically `2` for stereo, `1`
+  for mono); it must be **fewer** than the source stream's channel count (a
+  downmix), else the file is blocked at plan time.
+- The compiler validates only the *shape* (codec ∈ {aac, opus, eac3}, positive
+  integer channels, valid source filter). Filter resolution to a concrete source
+  stream and the downmix-direction check are planner concerns, resolved against
+  snapshot facts.
+- This rides the existing `transcode_audio` operation kind end-to-end via an
+  add-track mode on the plan payload and worker request; no new
+  `OperationKind` and no worker-capability vocabulary change. The ffmpeg worker
+  emits `-ac <number>` for the appended stream and its verifier allows the
+  target channel count for synthesized streams while still enforcing channel
+  preservation for `transcode audio`. The synthesized stream is registered as a
+  new snapshot audio stream whose lineage parent is the source stream. See
+  ADR 0026 for the payload/wire fields, verifier rules, and the ownership split.
+
 Example scheduling policy shape:
 
 ```text

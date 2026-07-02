@@ -60,11 +60,7 @@ impl Validator<'_> {
             "transcode" => self.validate_transcode_statement(statement),
             "extract" => self.validate_extract_statement(statement),
             "verify" => self.validate_verify_statement(statement),
-            "synthesize" => self.error(
-                DiagnosticCode::DeferredExecutionOperation,
-                statement.span(),
-                "execution operation is deferred to a later sprint",
-            ),
+            "synthesize" => self.validate_synthesize_statement(statement),
             _ => self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
@@ -343,7 +339,7 @@ impl Validator<'_> {
                 };
                 self.validate_inline_video_profile(statement, codec, settings);
             }
-            StatementAst::Block { .. } => self.error(
+            StatementAst::Block { .. } | StatementAst::SynthesizeInline { .. } => self.error(
                 DiagnosticCode::UnsupportedTranscodeShape,
                 statement.span(),
                 "transcode does not take a nested statement block",
@@ -724,6 +720,144 @@ impl Validator<'_> {
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "verify artifact does not accept extra arguments",
+            );
+        }
+    }
+
+    /// Validate `synthesize audio from <track-filter> { codec … channels … }`
+    /// (ADR 0026, #276). Only the block form is accepted; the header must be
+    /// `synthesize audio from <valid-filter>` and the body must set exactly a
+    /// supported `codec` and a positive-integer `channels`. The compiler
+    /// validates shape only; downmix direction is a planner concern.
+    pub(super) fn validate_synthesize_statement(&mut self, statement: &StatementAst) {
+        let StatementAst::SynthesizeInline {
+            header, settings, ..
+        } = statement
+        else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "synthesize operation must use `synthesize audio from <track-filter> { codec … channels … }`",
+            );
+            return;
+        };
+        self.validate_synthesize_header(statement, header);
+        self.validate_synthesize_body(statement, settings);
+    }
+
+    fn validate_synthesize_header(&mut self, statement: &StatementAst, header: &str) {
+        let tokens = words(header);
+        if tokens.get(0..3) != Some(&["synthesize", "audio", "from"]) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "synthesize operation must use `synthesize audio from <track-filter>`",
+            );
+            return;
+        }
+        let Some((_, filter)) = header.split_once(" from ") else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "synthesize requires a source track filter after `from`",
+            );
+            return;
+        };
+        let filter = filter.trim();
+        if filter.is_empty() {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "synthesize requires a source track filter after `from`",
+            );
+            return;
+        }
+        if !is_valid_track_filter(filter) {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                statement.span(),
+                "unknown track filter predicate",
+            );
+            return;
+        }
+        if let Some(pos) = header.find(" from ") {
+            self.validate_language_tokens(statement, &header[pos..]);
+        }
+    }
+
+    fn validate_synthesize_body(
+        &mut self,
+        statement: &StatementAst,
+        settings: &[crate::SettingAst],
+    ) {
+        let span = statement.span();
+        let mut codec = None;
+        let mut channels = None;
+        let mut seen = BTreeSet::new();
+        for setting in settings {
+            let key = setting.key.value.as_str();
+            if !seen.insert(key.to_owned()) {
+                self.error(
+                    DiagnosticCode::UnknownPhaseStatementOrOperation,
+                    span,
+                    format!("duplicate synthesize setting `{key}`"),
+                );
+                continue;
+            }
+            match key {
+                "codec" => codec = Some(&setting.value),
+                "channels" => channels = Some(&setting.value),
+                _ => self.error(
+                    DiagnosticCode::UnknownPhaseStatementOrOperation,
+                    span,
+                    format!("unknown synthesize setting `{key}` (expected codec or channels)"),
+                ),
+            }
+        }
+        self.validate_synthesize_codec(span, codec);
+        self.validate_synthesize_channels(span, channels);
+    }
+
+    fn validate_synthesize_codec(&mut self, span: SourceSpan, codec: Option<&ExprAst>) {
+        let Some(codec) = codec else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                span,
+                "synthesize requires a `codec`",
+            );
+            return;
+        };
+        let value = match codec {
+            ExprAst::Identifier(value) | ExprAst::String(value) => value.value.as_str(),
+            _ => "",
+        };
+        if !matches!(value, "aac" | "opus" | "eac3") {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                span,
+                "synthesize codec must be aac, opus, or eac3",
+            );
+        }
+    }
+
+    fn validate_synthesize_channels(&mut self, span: SourceSpan, channels: Option<&ExprAst>) {
+        let Some(channels) = channels else {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                span,
+                "synthesize requires a `channels` count",
+            );
+            return;
+        };
+        let valid = matches!(
+            channels,
+            ExprAst::Number(value) if value.value.parse::<u64>().is_ok_and(|count| count > 0)
+        );
+        if !valid {
+            self.error(
+                DiagnosticCode::UnknownPhaseStatementOrOperation,
+                span,
+                "synthesize channels must be a positive integer",
             );
         }
     }

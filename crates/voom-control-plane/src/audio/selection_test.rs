@@ -210,6 +210,37 @@ fn transcode_untagged_language_selects_under_und_and_excludes_under_eng() {
     assert!(err.to_string().contains("zero streams"), "{err}");
 }
 
+#[test]
+fn transcode_selection_rejects_synthesize_payload_with_clear_message() {
+    // Synthesis compiles and plans, but its execute path is not wired yet
+    // (ADR 0026): the transcode path must fail loud with a self-explanatory
+    // message rather than run the source through replace-in-place transcode.
+    let mut payload = payload(
+        "synthesize_audio",
+        "aac",
+        "mkv",
+        &json!({"type": "channels", "op": "gte", "value": 6}),
+    );
+    payload["target_channels"] = json!(2);
+    let snapshot = snapshot_with_streams(vec![audio(
+        "a-1",
+        1,
+        "eac3",
+        Some("eng"),
+        Some("Main"),
+        Some(false),
+    )]);
+
+    let err = transcode_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("synthesize_audio execution is not yet supported"),
+        "{err}"
+    );
+}
+
 fn transcode_payload(filter: &Value) -> Value {
     payload("transcode_audio", "aac", "mkv", filter)
 }

@@ -37,6 +37,10 @@ pub enum AudioPlanningBlock {
     MultipleMatches,
     NoVideo,
     UnsupportedMediaShape,
+    /// `synthesize audio` target channel count is not a downmix (>= the source
+    /// stream's channel count, or zero). Synthesis only adds a *downmixed*
+    /// companion. See ADR 0026 (#276).
+    SynthesisNotDownmix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +231,35 @@ pub fn transcode_audio_shape(
     } else {
         AudioPlanShape::Planned
     }
+}
+
+/// Plan shape for `synthesize audio` (ADR 0026, #276). Synthesis *adds* a
+/// downmixed companion per selected source stream, so it is never a `NoOp`. It
+/// is blocked when the filter matches nothing, when a selected source has no
+/// known channel count, or when the target channel count is not a downmix
+/// (zero, or ≥ the source's channels).
+#[must_use]
+pub fn synthesize_audio_shape(
+    snapshot: &MediaSnapshotInput,
+    target_channels: u64,
+    filter: Option<&TrackFilter>,
+) -> AudioPlanShape {
+    let selected = match selected_audio_streams(snapshot, filter) {
+        Ok(selected) => selected,
+        Err(block) => return AudioPlanShape::Blocked(block),
+    };
+    if selected.is_empty() {
+        return AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches);
+    }
+    for stream in &selected {
+        let Some(channels) = stream.channels else {
+            return AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts);
+        };
+        if target_channels == 0 || target_channels >= u64::from(channels) {
+            return AudioPlanShape::Blocked(AudioPlanningBlock::SynthesisNotDownmix);
+        }
+    }
+    AudioPlanShape::Planned
 }
 
 #[must_use]
