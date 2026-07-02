@@ -54,6 +54,16 @@ impl ControlPlane {
         Ok(lease)
     }
 
+    /// List every live manual lock, ordered by id. Read-only (no event).
+    /// Backs `voom lease list`; callers derive each lock's age from
+    /// `acquired_at`.
+    ///
+    /// # Errors
+    /// Propagates repo read errors.
+    pub async fn list_manual_locks(&self) -> Result<Vec<UseLease>, VoomError> {
+        self.use_leases.list_live_manual_locks().await
+    }
+
     /// Heartbeat a use lease — extends `expires_at` by the original TTL.
     /// Emits no event in Sprint 1 (per sprint-1 design §9.2 last paragraph:
     /// heartbeat volume is too high; `last_heartbeat_at` is the observable).

@@ -1,0 +1,35 @@
+---
+source: crates/voom-cli/tests/lease_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "lease",
+  "status": "ok",
+  "data": {
+    "locks": [
+      {
+        "id": 1,
+        "kind": "manual_lock",
+        "scope_type": "asset",
+        "scope_id": 1,
+        "issuer_kind": "user",
+        "issuer_ref": "operator-alice",
+        "blocking_mode": "blocking",
+        "ttl_bound": false,
+        "acquired_at": "[ts]",
+        "expires_at": null,
+        "released_at": null,
+        "release_reason": null,
+        "epoch": 0,
+        "age_seconds": 0
+      }
+    ]
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

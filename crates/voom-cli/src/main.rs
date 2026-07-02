@@ -6,11 +6,11 @@ use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
     ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, IssueCommand,
-    LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand,
-    SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
+    LeaseCommand, LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand,
+    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, backup, bundle, compliance, health, init, issue, library, node, plan, policy,
+    artifact, backup, bundle, compliance, health, init, issue, lease, library, node, plan, policy,
     profile, safety_policy, scan, scheduler, scheduling_policy, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
@@ -235,7 +235,25 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         }
         Command::SafetyPolicy(ref command) => dispatch_safety_policy(&cli, command.clone()).await,
         Command::Issue(ref command) => dispatch_issue(&cli, command.clone()).await,
+        Command::Lease(ref command) => dispatch_lease(&cli, command.clone()).await,
     }
+}
+
+async fn dispatch_lease(cli: &Cli, command: LeaseCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("lease", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        lease::run(&cfg.database_url, local, command).await?,
+    ))
 }
 
 async fn dispatch_library(cli: &Cli, command: LibraryCommand) -> Result<Exit> {
