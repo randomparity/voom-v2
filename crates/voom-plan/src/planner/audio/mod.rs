@@ -11,7 +11,7 @@ pub use payload::{
 pub use selection::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    selected_audio_streams, stream_facts, transcode_audio_shape,
+    selected_audio_streams, stream_facts, synthesize_audio_shape, transcode_audio_shape,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
@@ -32,6 +32,7 @@ pub(super) fn plan_transcode(
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
+        target_channels: None,
     }
     .into_value();
     let observed_state = audio_observed_state(snapshot, filter);
@@ -81,6 +82,7 @@ pub(super) fn plan_extract(
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
+        target_channels: None,
     }
     .into_value();
     let observed_state = audio_observed_state(snapshot, filter);
@@ -103,6 +105,64 @@ pub(super) fn plan_extract(
                 (NodeStatus::Blocked, message.to_owned(), None, Some(code))
             }
         };
+
+    let plan = OperationPlan::new(
+        operation_kind,
+        payload,
+        observed_state,
+        status,
+        status_reason,
+        capability,
+    );
+    let plan = with_optional_diagnostic(plan, diagnostic, phase_name, snapshot, operation_kind);
+    with_untagged_language_warning(plan, phase_name, snapshot, filter, operation_kind)
+}
+
+pub(super) fn plan_synthesize(
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    target_codec: &str,
+    container: &str,
+    target_channels: u64,
+    filter: Option<&TrackFilter>,
+) -> OperationPlan {
+    // Synthesis rides the transcode_audio operation kind and worker capability
+    // (ADR 0026); the plan payload's `type` carries the add-track distinction.
+    let operation_kind = PlanOperationKind::TranscodeAudio;
+    let payload = AudioOperationPayload {
+        operation_type: AudioOperationType::SynthesizeAudio,
+        target_codec: target_codec.to_owned(),
+        container: container.to_owned(),
+        source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
+        filter: filter.cloned(),
+        target_channels: Some(target_channels),
+    }
+    .into_value();
+    let observed_state = audio_observed_state(snapshot, filter);
+    let (status, status_reason, capability, diagnostic) = match synthesize_audio_shape(
+        snapshot,
+        target_channels,
+        filter,
+    ) {
+        AudioPlanShape::NoOp => (
+            NodeStatus::NoOp,
+            "synthesize audio adds a companion track and produced no change".to_owned(),
+            None,
+            None,
+        ),
+        AudioPlanShape::Planned => (
+            NodeStatus::Planned,
+            format!(
+                "a {target_channels}-channel {target_codec} companion track will be synthesized in {container}"
+            ),
+            Some("transcode_audio".to_owned()),
+            None,
+        ),
+        AudioPlanShape::Blocked(block) => {
+            let (code, message) = audio_block_diagnostic(block, operation_kind);
+            (NodeStatus::Blocked, message.to_owned(), None, Some(code))
+        }
+    };
 
     let plan = OperationPlan::new(
         operation_kind,
@@ -247,6 +307,10 @@ fn audio_block_diagnostic(
         AudioPlanningBlock::UnsupportedMediaShape => (
             PlanningDiagnosticCode::UnsupportedMediaShape,
             "media shape is not supported by audio planning",
+        ),
+        AudioPlanningBlock::SynthesisNotDownmix => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "synthesize audio target channel count must be fewer than the source (a downmix)",
         ),
     }
 }

@@ -35,10 +35,12 @@ use voom_store::repo::{
     policies::SqlitePolicyRepo,
     policy_inputs::SqlitePolicyInputRepo,
     remote_idempotency::SqliteRemoteIdempotencyRepo,
+    safety_policies::SqliteSafetyPolicyRepo,
     scheduler_decisions::{
         SchedulerDecision, SchedulerDecisionFilter, SqliteSchedulerDecisionRepo,
     },
     scheduler_node_limits::SqliteSchedulerNodeLimitRepo,
+    scheduling_policies::SqliteSchedulingPolicyRepo,
     tickets::SqliteTicketRepo,
     use_leases::SqliteUseLeaseRepo,
     video_profiles::{SqliteVideoProfileRepo, VideoProfile},
@@ -144,6 +146,8 @@ pub struct ControlPlane {
     pub(crate) workflow_summaries: SqliteWorkflowSummaryRepo,
     pub(crate) backups: SqliteBackupRepo,
     pub(crate) libraries: SqliteLibraryRepo,
+    pub(crate) scheduling_policies: SqliteSchedulingPolicyRepo,
+    pub(crate) safety_policies: SqliteSafetyPolicyRepo,
 }
 
 impl std::fmt::Debug for ControlPlane {
@@ -177,6 +181,8 @@ impl std::fmt::Debug for ControlPlane {
             .field("workflow_summaries", &self.workflow_summaries)
             .field("backups", &self.backups)
             .field("libraries", &self.libraries)
+            .field("scheduling_policies", &self.scheduling_policies)
+            .field("safety_policies", &self.safety_policies)
             .finish()
     }
 }
@@ -283,6 +289,8 @@ impl ControlPlane {
             workflow_summaries: SqliteWorkflowSummaryRepo::new(pool.clone()),
             backups: SqliteBackupRepo::new(pool.clone()),
             libraries: SqliteLibraryRepo::new(pool.clone()),
+            scheduling_policies: SqliteSchedulingPolicyRepo::new(pool.clone()),
+            safety_policies: SqliteSafetyPolicyRepo::new(pool.clone()),
             pool,
             clock,
             rng,

@@ -1,11 +1,72 @@
 use voom_policy::{MediaSnapshotInput, TargetKind, TargetRef, TrackFilter};
 
+use voom_policy::ComparisonOp;
+
 use super::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
     SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    stream_facts, transcode_audio_shape,
+    stream_facts, synthesize_audio_shape, transcode_audio_shape,
 };
 use crate::planner::audio::AUDIO_TRANSCODE_CONTAINER;
+
+fn surround_fact() -> SnapshotAudioStreamFact {
+    SnapshotAudioStreamFact {
+        codec: Some("eac3".to_owned()),
+        channels: Some(6),
+        ..audio_fact(Some(false))
+    }
+}
+
+#[test]
+fn synthesize_audio_shape_plans_stereo_downmix_of_surround_source() {
+    // The 5.1 + stereo companion case (#276): a 6-channel source downmixed to 2.
+    let snapshot = snapshot_with_audio_facts(vec![surround_fact()]);
+    assert_eq!(
+        synthesize_audio_shape(&snapshot, 2, None),
+        AudioPlanShape::Planned
+    );
+}
+
+#[test]
+fn synthesize_audio_shape_blocks_when_target_is_not_a_downmix() {
+    let snapshot = snapshot_with_audio_facts(vec![surround_fact()]);
+    // Equal channel count is not a downmix.
+    assert_eq!(
+        synthesize_audio_shape(&snapshot, 6, None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::SynthesisNotDownmix)
+    );
+    // An upmix (more channels than the source) is likewise rejected.
+    assert_eq!(
+        synthesize_audio_shape(&snapshot, 8, None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::SynthesisNotDownmix)
+    );
+}
+
+#[test]
+fn synthesize_audio_shape_blocks_when_filter_matches_nothing() {
+    let snapshot = snapshot_with_audio_facts(vec![surround_fact()]);
+    let filter = TrackFilter::Channels {
+        op: ComparisonOp::Gte,
+        value: 8,
+    };
+    assert_eq!(
+        synthesize_audio_shape(&snapshot, 2, Some(&filter)),
+        AudioPlanShape::Blocked(AudioPlanningBlock::ZeroMatches)
+    );
+}
+
+#[test]
+fn synthesize_audio_shape_blocks_when_source_channels_unknown() {
+    let stream = SnapshotAudioStreamFact {
+        channels: None,
+        ..surround_fact()
+    };
+    let snapshot = snapshot_with_audio_facts(vec![stream]);
+    assert_eq!(
+        synthesize_audio_shape(&snapshot, 2, None),
+        AudioPlanShape::Blocked(AudioPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
 
 #[test]
 fn stream_facts_parse_audio_streams_with_disposition_commentary() {

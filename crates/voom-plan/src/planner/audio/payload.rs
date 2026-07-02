@@ -12,6 +12,9 @@ pub struct AudioOperationPayload {
     pub container: String,
     pub source_media_snapshot_id: Option<u64>,
     pub filter: Option<TrackFilter>,
+    /// Target channel count for a `synthesize_audio` downmix (ADR 0026, #276).
+    /// `None` for transcode/extract, which preserve the source channel count.
+    pub target_channels: Option<u64>,
 }
 
 impl AudioOperationPayload {
@@ -24,6 +27,9 @@ impl AudioOperationPayload {
         );
         object.insert("target_codec".to_owned(), Value::String(self.target_codec));
         object.insert("container".to_owned(), Value::String(self.container));
+        if let Some(target_channels) = self.target_channels {
+            object.insert("target_channels".to_owned(), Value::from(target_channels));
+        }
         if let Some(source_media_snapshot_id) = self.source_media_snapshot_id {
             object.insert(
                 "source_media_snapshot_id".to_owned(),
@@ -46,6 +52,7 @@ impl AudioOperationPayload {
         let operation_type = match object.get("type").and_then(Value::as_str) {
             Some("transcode_audio") => AudioOperationType::TranscodeAudio,
             Some("extract_audio") => AudioOperationType::ExtractAudio,
+            Some("synthesize_audio") => AudioOperationType::SynthesizeAudio,
             Some(other) => {
                 return Err(AudioPayloadError::new(format!(
                     "audio payload type `{other}` is unsupported"
@@ -78,6 +85,17 @@ impl AudioOperationPayload {
                 AudioPayloadError::new(format!("audio payload `filter` is invalid: {err}"))
             })?),
         };
+        let target_channels = match object.get("target_channels") {
+            Some(Value::Null) | None => None,
+            Some(value) => Some(value.as_u64().filter(|count| *count > 0).ok_or_else(|| {
+                AudioPayloadError::new("audio payload `target_channels` must be a positive integer")
+            })?),
+        };
+        if operation_type == AudioOperationType::SynthesizeAudio && target_channels.is_none() {
+            return Err(AudioPayloadError::new(
+                "synthesize_audio payload requires `target_channels`",
+            ));
+        }
 
         Ok(Self {
             operation_type,
@@ -85,6 +103,7 @@ impl AudioOperationPayload {
             container: container.to_owned(),
             source_media_snapshot_id: Some(source_media_snapshot_id),
             filter,
+            target_channels,
         })
     }
 }
@@ -93,6 +112,8 @@ impl AudioOperationPayload {
 pub enum AudioOperationType {
     TranscodeAudio,
     ExtractAudio,
+    /// Add a downmixed companion track derived from the source (ADR 0026, #276).
+    SynthesizeAudio,
 }
 
 impl AudioOperationType {
@@ -100,6 +121,7 @@ impl AudioOperationType {
         match self {
             Self::TranscodeAudio => "transcode_audio",
             Self::ExtractAudio => "extract_audio",
+            Self::SynthesizeAudio => "synthesize_audio",
         }
     }
 }
@@ -124,3 +146,7 @@ impl std::fmt::Display for AudioPayloadError {
 }
 
 impl std::error::Error for AudioPayloadError {}
+
+#[cfg(test)]
+#[path = "payload_test.rs"]
+mod tests;

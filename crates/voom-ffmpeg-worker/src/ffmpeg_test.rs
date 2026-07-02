@@ -907,9 +907,77 @@ async fn audio_extraction_writes_source_language_and_title_metadata_when_present
     assert!(args.contains("-metadata:s:a:0\ntitle=Main\n"));
 }
 
+#[tokio::test]
+async fn synthesize_audio_appends_downmixed_companion_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let args_path = dir.path().join("args.txt");
+    let ffmpeg = stub_bin(
+        dir.path(),
+        "ffmpeg",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf output > \"$last\"\n",
+            args_path.display()
+        ),
+    );
+    let ffprobe = ffprobe_synthesize_stub(dir.path());
+    let input = dir.path().join("input.mkv");
+    let output = dir.path().join("out.mkv");
+    tokio::fs::write(&input, b"input").await.unwrap();
+
+    let probe = run_ffmpeg_transcode_audio(
+        &FfmpegConfig::new(
+            ffmpeg,
+            ffprobe,
+            "ffmpeg version test".to_owned(),
+            DEFAULT_PROCESS_TIMEOUT,
+        ),
+        &input,
+        &output,
+        &synthesize_audio_request(dir.path()),
+    )
+    .await
+    .unwrap();
+
+    let args = std::fs::read_to_string(args_path).unwrap();
+    // Every source stream is copied, and the source is re-mapped once more to
+    // encode the appended companion at audio ordinal 2 (after the two sources).
+    assert!(args.contains("-map\n0\n"));
+    assert!(args.contains("-c\ncopy\n"));
+    assert!(args.contains("-map\n0:1\n"));
+    assert!(args.contains("-c:a:2\naac\n"));
+    // Downmix to stereo; aac default profile is 64 kbps/channel → 128k.
+    assert!(args.contains("-ac:a:2\n2\n"));
+    assert!(args.contains("-b:a:2\n128k\n"));
+    assert!(args.contains("-metadata:s:a:2\nsnapshot_stream_id=synth-1\n"));
+    // The companion carries the downmixed channel count, not the source's six.
+    assert_eq!(probe.selected_output_streams[0].channels, Some(2));
+    assert_eq!(probe.selected_output_streams[0].codec, "aac");
+}
+
 // ---------------------------------------------------------------------------
 // Audio helpers
 // ---------------------------------------------------------------------------
+
+fn synthesize_audio_request(root: &Path) -> TranscodeAudioRequest {
+    let mut request = transcode_audio_request(root, &[1], "aac");
+    request.audio.add_track = true;
+    request.audio.target_channels = Some(2);
+    // The selection's snapshot id is the NEW derived companion track id, not
+    // the source stream's id.
+    request.selection.selected_streams[0].snapshot_stream_id = "synth-1".to_owned();
+    request
+}
+
+/// ffprobe stub for synthesis: a 5.1 source (index 1) plus the stereo companion
+/// (index 4) tagged with the new snapshot id, so the output probe resolves the
+/// appended downmixed stream.
+fn ffprobe_synthesize_stub(dir: &Path) -> PathBuf {
+    stub_bin(
+        dir,
+        "ffprobe",
+        "#!/bin/sh\ncat <<'JSON'\n{\"format\":{\"format_name\":\"matroska\"},\"streams\":[{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"eac3\",\"channels\":6,\"tags\":{\"language\":\"eng\",\"title\":\"Main\"},\"disposition\":{\"default\":1,\"forced\":0,\"comment\":0}},{\"index\":4,\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"channels\":2,\"tags\":{\"language\":\"eng\",\"snapshot_stream_id\":\"synth-1\"}}]}\nJSON\n",
+    )
+}
 
 fn transcode_audio_request(
     root: &Path,
@@ -944,6 +1012,8 @@ fn transcode_audio_request(
         audio: TranscodeAudioSettings {
             target_codec: target_codec.to_owned(),
             profile: voom_worker_protocol::AUDIO_PROFILE_DEFAULT.to_owned(),
+            add_track: false,
+            target_channels: None,
         },
     }
 }

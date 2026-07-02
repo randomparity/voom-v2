@@ -365,6 +365,7 @@ fn combined_execution_options(root: &Path) -> ComplianceExecutionOptions {
         audio_staging_root: root.join("stage"),
         audio_target_dir: root.join("out/audio"),
         backup_root: None,
+        safety_policy_slug: None,
     }
 }
 

@@ -1,0 +1,34 @@
+---
+source: crates/voom-cli/tests/safety_policy_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "safety-policy",
+  "status": "ok",
+  "data": {
+    "id": 1,
+    "slug": "conservative",
+    "display_name": "Permissive",
+    "schema_version": 1,
+    "auto_execute_operations": [
+      "extract_audio"
+    ],
+    "backup_required": false,
+    "approval_required": false,
+    "allowed_commit_modes": [
+      "add_only"
+    ],
+    "verification_level": "none",
+    "block_on_failed_records": false,
+    "block_on_recovery_required_records": false,
+    "created_at": "[ts]",
+    "updated_at": "[ts]"
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}

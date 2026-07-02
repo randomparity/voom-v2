@@ -1,0 +1,19 @@
+---
+source: crates/voom-cli/tests/scheduling_policy_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scheduling-policy",
+  "status": "error",
+  "data": null,
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": {
+    "code": "CONFIG_INVALID",
+    "message": "config error: copy_window \"8am-4pm\" must be HH:MM-HH:MM (24-hour), e.g. 00:00-08:00"
+  }
+}

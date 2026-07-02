@@ -78,6 +78,181 @@ pub enum Command {
     /// Manage libraries and their roots (durable scan configuration).
     #[command(subcommand)]
     Library(LibraryCommand),
+    /// Manage durable scheduling policy records.
+    #[command(subcommand)]
+    SchedulingPolicy(SchedulingPolicyCommand),
+    /// Manage durable safety policy records.
+    #[command(subcommand)]
+    SafetyPolicy(SafetyPolicyCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SchedulingPolicyCommand {
+    /// Create a scheduling policy.
+    Create {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        priority: SchedulePriorityArg,
+        /// Optional copy window as `HH:MM-HH:MM` (24-hour).
+        #[arg(long)]
+        copy_window: Option<String>,
+        #[arg(long)]
+        large_jobs_night_only: bool,
+        #[arg(long)]
+        pause_on_degraded_node: bool,
+    },
+    /// List scheduling policies.
+    List,
+    /// Show one scheduling policy by slug.
+    Show {
+        #[arg(long)]
+        slug: String,
+    },
+    /// Replace every mutable field of an existing scheduling policy.
+    Update {
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        display_name: String,
+        #[arg(long)]
+        priority: SchedulePriorityArg,
+        #[arg(long)]
+        copy_window: Option<String>,
+        #[arg(long)]
+        large_jobs_night_only: bool,
+        #[arg(long)]
+        pause_on_degraded_node: bool,
+    },
+    /// Delete a scheduling policy by slug.
+    Delete {
+        #[arg(long)]
+        slug: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SafetyPolicyCommand {
+    /// Create a safety policy.
+    Create(SafetyPolicyFields),
+    /// List safety policies.
+    List,
+    /// Show one safety policy by slug.
+    Show {
+        #[arg(long)]
+        slug: String,
+    },
+    /// Replace every mutable field of an existing safety policy.
+    Update(SafetyPolicyFields),
+    /// Delete a safety policy by slug.
+    Delete {
+        #[arg(long)]
+        slug: String,
+    },
+}
+
+/// The full mutable field set of a safety policy, shared by `create` and the
+/// full-replace `update`. Booleans default to false (absent flag) and the two
+/// list-valued flags are repeatable.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "CLI mirror of the safety policy's four independent spec-mandated toggles"
+)]
+#[derive(clap::Args, Debug, Clone)]
+pub struct SafetyPolicyFields {
+    #[arg(long)]
+    pub slug: String,
+    #[arg(long)]
+    pub display_name: String,
+    /// Operation kinds the daemon may auto-execute (repeatable). Wire tokens,
+    /// e.g. `remux`, `transcode_video`.
+    #[arg(long = "auto-execute-operation")]
+    pub auto_execute_operations: Vec<String>,
+    #[arg(long)]
+    pub backup_required: bool,
+    #[arg(long)]
+    pub approval_required: bool,
+    /// Allowed commit modes (repeatable).
+    #[arg(long = "allowed-commit-mode")]
+    pub allowed_commit_modes: Vec<CommitModeArg>,
+    #[arg(long, default_value_t = VerificationLevelArg::None)]
+    pub verification_level: VerificationLevelArg,
+    #[arg(long)]
+    pub block_on_failed_records: bool,
+    #[arg(long)]
+    pub block_on_recovery_required_records: bool,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum SchedulePriorityArg {
+    NewestFirst,
+    OldestFirst,
+    SmallestFirst,
+    LargestFirst,
+}
+
+impl SchedulePriorityArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::scheduling_policies::SchedulePriority {
+        use voom_store::repo::scheduling_policies::SchedulePriority;
+        match self {
+            Self::NewestFirst => SchedulePriority::NewestFirst,
+            Self::OldestFirst => SchedulePriority::OldestFirst,
+            Self::SmallestFirst => SchedulePriority::SmallestFirst,
+            Self::LargestFirst => SchedulePriority::LargestFirst,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum CommitModeArg {
+    AddOnly,
+    Replace,
+    Delete,
+    Archive,
+}
+
+impl CommitModeArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::safety_policies::CommitMode {
+        use voom_store::repo::safety_policies::CommitMode;
+        match self {
+            Self::AddOnly => CommitMode::AddOnly,
+            Self::Replace => CommitMode::Replace,
+            Self::Delete => CommitMode::Delete,
+            Self::Archive => CommitMode::Archive,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum VerificationLevelArg {
+    None,
+    QuickDecode,
+    Full,
+}
+
+impl VerificationLevelArg {
+    #[must_use]
+    pub const fn to_store(self) -> voom_store::repo::safety_policies::VerificationLevel {
+        use voom_store::repo::safety_policies::VerificationLevel;
+        match self {
+            Self::None => VerificationLevel::None,
+            Self::QuickDecode => VerificationLevel::QuickDecode,
+            Self::Full => VerificationLevel::Full,
+        }
+    }
+}
+
+impl std::fmt::Display for VerificationLevelArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_store().as_str())
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -444,6 +619,14 @@ pub enum ComplianceCommand {
         staging_root: Option<std::path::PathBuf>,
         #[arg(long)]
         output_dir: Option<std::path::PathBuf>,
+        /// Slug of a safety policy to enforce fail-closed before dispatch. When
+        /// omitted the manual execute path is unchanged.
+        #[arg(long)]
+        safety_policy: Option<String>,
+        /// Backup-before-mutation destination root. Required when the safety
+        /// policy sets `backup_required`.
+        #[arg(long)]
+        backup_root: Option<std::path::PathBuf>,
     },
 }
 

@@ -10,7 +10,8 @@ use super::super::compiled::{
     CompiledOperation, CompiledRule, DefaultStrategy, RuleMatchMode, TrackTarget,
 };
 use super::conditions::{
-    compiled_value, condition_from_text, strip_quotes, track_filter, track_target,
+    compiled_value, condition_from_text, strip_quotes, track_filter, track_filter_clause,
+    track_target,
 };
 
 pub(super) fn lower_operations(
@@ -33,6 +34,12 @@ fn lower_operation(
     } = statement
     {
         return Ok(lower_transcode_inline(header, settings));
+    }
+    if let StatementAst::SynthesizeInline {
+        header, settings, ..
+    } = statement
+    {
+        return Ok(lower_synthesize(header, settings));
     }
     let text = statement_text(statement);
     let tokens = words(text.as_ref());
@@ -111,7 +118,9 @@ fn lower_operation(
             condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
             operations: match statement {
                 StatementAst::Block { statements, .. } => lower_operations(source, statements)?,
-                StatementAst::Raw { .. } | StatementAst::TranscodeInline { .. } => Vec::new(),
+                StatementAst::Raw { .. }
+                | StatementAst::TranscodeInline { .. }
+                | StatementAst::SynthesizeInline { .. } => Vec::new(),
             },
         }),
         "rules" => Ok(CompiledOperation::Rules {
@@ -149,6 +158,35 @@ fn lower_transcode_inline(header: &str, settings: &[crate::SettingAst]) -> Compi
         container,
         profile: crate::VideoProfileRef::Inline(inline),
         resolved_profile: None,
+    }
+}
+
+/// Lower `synthesize audio from <filter> { codec … channels … }` (ADR 0026).
+/// The validator has already checked the shape, so defaults here only guard a
+/// diagnostics-bearing compile: `codec` and `channels` are always present in a
+/// clean policy.
+fn lower_synthesize(header: &str, settings: &[crate::SettingAst]) -> CompiledOperation {
+    let mut target_codec = "aac".to_owned();
+    let mut target_channels = 2u64;
+    for setting in settings {
+        match setting.key.value.as_str() {
+            "codec" => target_codec = expr_scalar_string(&setting.value),
+            "channels" => {
+                if let Ok(value) = expr_scalar_string(&setting.value).parse::<u64>() {
+                    target_channels = value;
+                }
+            }
+            _ => {}
+        }
+    }
+    let filter = header
+        .split_once(" from ")
+        .and_then(|(_, filter)| track_filter_clause(filter));
+    CompiledOperation::SynthesizeAudio {
+        target_codec,
+        container: "mkv".to_owned(),
+        target_channels,
+        filter,
     }
 }
 

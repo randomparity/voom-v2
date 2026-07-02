@@ -78,6 +78,19 @@ fn extract_audio_deserializes_from_stable_wire_name() {
 }
 
 #[test]
+fn from_wire_round_trips_every_variant_and_rejects_unknown() {
+    for operation in OperationKind::ALL {
+        assert_eq!(
+            OperationKind::from_wire(operation.as_str()),
+            Some(*operation)
+        );
+    }
+    assert_eq!(OperationKind::from_wire("unknown_op"), None);
+    assert_eq!(OperationKind::from_wire("ScanLibrary"), None);
+    assert_eq!(OperationKind::from_wire(""), None);
+}
+
+#[test]
 fn unknown_string_fails_to_deserialize() {
     let res: Result<OperationKind, _> = serde_json::from_str("\"unknown_op\"");
     assert!(res.is_err(), "unknown_op should not deserialize");

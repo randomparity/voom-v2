@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn transcode_audio_settings_default_add_track_and_omit_target_channels() {
+    // A transcode request (no synthesize fields) still deserializes: add_track
+    // defaults false and target_channels absent (ADR 0013 additive evolution).
+    let settings: TranscodeAudioSettings = serde_json::from_value(serde_json::json!({
+        "target_codec": "aac",
+        "profile": "default"
+    }))
+    .unwrap();
+    assert!(!settings.add_track);
+    assert_eq!(settings.target_channels, None);
+    // Both synthesize fields are skipped on the wire when defaulted, so the
+    // transcode request shape is unchanged.
+    let value = serde_json::to_value(&settings).unwrap();
+    assert!(value.get("target_channels").is_none());
+    assert!(value.get("add_track").is_none());
+}
+
+#[test]
+fn synthesize_audio_settings_round_trip_add_track_and_channels() {
+    let settings = TranscodeAudioSettings {
+        target_codec: "aac".to_owned(),
+        profile: "default".to_owned(),
+        add_track: true,
+        target_channels: Some(2),
+    };
+    let value = serde_json::to_value(&settings).unwrap();
+    assert_eq!(value["add_track"], true);
+    assert_eq!(value["target_channels"], 2);
+    let parsed: TranscodeAudioSettings = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, settings);
+}
+
+#[test]
 fn transcode_audio_request_serializes_selected_streams_wire_shape() {
     let request = TranscodeAudioRequest {
         input: TranscodeAudioInput {
@@ -33,6 +66,8 @@ fn transcode_audio_request_serializes_selected_streams_wire_shape() {
         audio: TranscodeAudioSettings {
             target_codec: "opus".to_owned(),
             profile: "default-opus".to_owned(),
+            add_track: false,
+            target_channels: None,
         },
     };
 

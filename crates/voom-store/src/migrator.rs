@@ -77,6 +77,11 @@ const MIGRATION_0018_SQL: &str = include_str!("../../../migrations/0018_backups.
 /// embedded at compile time.
 const MIGRATION_0019_SQL: &str = include_str!("../../../migrations/0019_libraries.sql");
 
+/// SQL for migration 0020 (Sprint 17 scheduling + safety policy CRUD, #281),
+/// embedded at compile time.
+const MIGRATION_0020_SQL: &str =
+    include_str!("../../../migrations/0020_scheduling_safety_policies.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -223,6 +228,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("libraries"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0019_SQL),
+            false,
+        ),
+        Migration::new(
+            20,
+            Cow::Borrowed("scheduling_safety_policies"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0020_SQL),
             false,
         ),
     ]),

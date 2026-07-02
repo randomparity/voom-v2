@@ -36,6 +36,15 @@ pub fn transcode_selection_from_payload_and_snapshot(
     snapshot: &MediaSnapshot,
 ) -> Result<TranscodeAudioSelectionPlan, VoomError> {
     let payload = parse_payload(payload)?;
+    if payload.operation_type == AudioOperationType::SynthesizeAudio {
+        // Synthesis compiles and plans (ADR 0026) but the execute path that
+        // builds a downmix worker request and registers the derived track's
+        // lineage is not wired yet. Fail loud and clearly rather than silently
+        // running the source through the replace-in-place transcode path.
+        return Err(VoomError::Config(
+            "synthesize_audio execution is not yet supported".to_owned(),
+        ));
+    }
     if payload.operation_type != AudioOperationType::TranscodeAudio {
         return Err(VoomError::Config(
             "audio transcode payload type must be transcode_audio".to_owned(),
@@ -141,6 +150,10 @@ fn audio_block_error(block: AudioPlanningBlock) -> VoomError {
         AudioPlanningBlock::UnsupportedMediaShape => {
             VoomError::Config("audio selector is unsupported for this media shape".to_owned())
         }
+        AudioPlanningBlock::SynthesisNotDownmix => VoomError::Config(
+            "synthesize audio target channel count must be fewer than the source (a downmix)"
+                .to_owned(),
+        ),
     }
 }
 

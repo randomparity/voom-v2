@@ -6,11 +6,12 @@ use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
     ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, LibraryCommand,
-    NodeCommand, PlanCommand, PolicyCommand, ProfileCommand, SchedulerCommand, WorkerCommand,
+    NodeCommand, PlanCommand, PolicyCommand, ProfileCommand, SafetyPolicyCommand, SchedulerCommand,
+    SchedulingPolicyCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, backup, bundle, compliance, health, init, library, node, plan, policy, profile, scan,
-    scheduler, version, worker,
+    artifact, backup, bundle, compliance, health, init, library, node, plan, policy, profile,
+    safety_policy, scan, scheduler, scheduling_policy, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -229,6 +230,10 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Bundle(ref command) => dispatch_bundle(&cli, command.clone()).await,
         Command::Backup(ref command) => dispatch_backup(&cli, command.clone()).await,
         Command::Library(ref command) => dispatch_library(&cli, command.clone()).await,
+        Command::SchedulingPolicy(ref command) => {
+            dispatch_scheduling_policy(&cli, command.clone()).await
+        }
+        Command::SafetyPolicy(ref command) => dispatch_safety_policy(&cli, command.clone()).await,
     }
 }
 
@@ -246,6 +251,46 @@ async fn dispatch_library(cli: &Cli, command: LibraryCommand) -> Result<Exit> {
     };
     Ok(Exit::from_run_code(
         library::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_scheduling_policy(cli: &Cli, command: SchedulingPolicyCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err(
+                "scheduling-policy",
+                err.code(),
+                err.to_string(),
+                None,
+                None,
+            )?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        scheduling_policy::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_safety_policy(cli: &Cli, command: SafetyPolicyCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("safety-policy", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        safety_policy::run(&cfg.database_url, local, command).await?,
     ))
 }
 
@@ -442,14 +487,20 @@ async fn dispatch_compliance(cli: &Cli, command: ComplianceCommand) -> Result<Ex
             input_set_id,
             staging_root,
             output_dir,
+            safety_policy,
+            backup_root,
         } => {
             compliance::execute(
                 &cfg.database_url,
                 local,
-                policy_version_id,
-                input_set_id,
-                staging_root,
-                output_dir,
+                compliance::ExecuteArgs {
+                    policy_version_id,
+                    input_set_id,
+                    staging_root,
+                    output_dir,
+                    safety_policy,
+                    backup_root,
+                },
             )
             .await?
         }

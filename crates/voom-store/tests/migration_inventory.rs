@@ -40,6 +40,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0017_scan_file_facts.sql",
     "0018_backups.sql",
     "0019_libraries.sql",
+    "0020_scheduling_safety_policies.sql",
 ];
 
 fn workspace_root() -> PathBuf {

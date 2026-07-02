@@ -435,6 +435,23 @@ impl<'a> PlanBuilder<'a> {
                     filter.as_ref(),
                 ),
             ),
+            CompiledOperation::SynthesizeAudio {
+                target_codec,
+                container,
+                target_channels,
+                filter,
+            } => self.push_operation_plan(
+                phase_name,
+                snapshot,
+                audio::plan_synthesize(
+                    phase_name,
+                    snapshot,
+                    target_codec,
+                    container,
+                    *target_channels,
+                    filter.as_ref(),
+                ),
+            ),
             CompiledOperation::VerifyArtifact => {
                 self.push_operation_plan(phase_name, snapshot, plan_verify_artifact(snapshot));
             }
@@ -1149,7 +1166,12 @@ fn operation_kind(operation: &CompiledOperation) -> PlanOperationKind {
         CompiledOperation::SetTag { .. } => PlanOperationKind::SetTag,
         CompiledOperation::DeleteTag { .. } => PlanOperationKind::DeleteTag,
         CompiledOperation::TranscodeVideo { .. } => PlanOperationKind::TranscodeVideo,
-        CompiledOperation::TranscodeAudio { .. } => PlanOperationKind::TranscodeAudio,
+        // Synthesis rides the transcode_audio operation kind end-to-end (ADR 0026,
+        // Option B) so no new voom_core OperationKind or control-plane routing is
+        // needed; the plan payload's `type` distinguishes the add-track mode.
+        CompiledOperation::TranscodeAudio { .. } | CompiledOperation::SynthesizeAudio { .. } => {
+            PlanOperationKind::TranscodeAudio
+        }
         CompiledOperation::ExtractAudio { .. } => PlanOperationKind::ExtractAudio,
         CompiledOperation::VerifyArtifact => PlanOperationKind::VerifyArtifact,
         CompiledOperation::Conditional { .. } => PlanOperationKind::Conditional,

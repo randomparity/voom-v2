@@ -1,0 +1,27 @@
+---
+source: crates/voom-cli/tests/scheduling_policy_envelope.rs
+expression: json
+---
+{
+  "schema_version": "0",
+  "command": "scheduling-policy",
+  "status": "ok",
+  "data": {
+    "id": 1,
+    "slug": "home",
+    "display_name": "Renamed",
+    "schema_version": 1,
+    "priority": "largest_first",
+    "copy_window": null,
+    "large_jobs_night_only": false,
+    "pause_on_degraded_node": true,
+    "created_at": "[ts]",
+    "updated_at": "[ts]"
+  },
+  "local": {
+    "db_url": "[db-url]",
+    "config_path": "[config-path]"
+  },
+  "warnings": [],
+  "error": null
+}
