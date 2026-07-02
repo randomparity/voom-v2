@@ -1,3 +1,4 @@
+pub mod backup;
 pub(crate) mod common;
 mod execution;
 mod media;

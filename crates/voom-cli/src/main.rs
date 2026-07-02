@@ -5,12 +5,12 @@ use anyhow::Result;
 use clap::Parser;
 use serde::Serialize;
 use voom_cli::cli::{
-    ArtifactCommand, BundleCommand, Cli, Command, ComplianceCommand, NodeCommand, PlanCommand,
-    PolicyCommand, ProfileCommand, SchedulerCommand, WorkerCommand,
+    ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, NodeCommand,
+    PlanCommand, PolicyCommand, ProfileCommand, SchedulerCommand, WorkerCommand,
 };
 use voom_cli::commands::{
-    artifact, bundle, compliance, health, init, node, plan, policy, profile, scan, scheduler,
-    version, worker,
+    artifact, backup, bundle, compliance, health, init, node, plan, policy, profile, scan,
+    scheduler, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -227,6 +227,7 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
         Command::Scan { ref path } => dispatch_scan(&cli, path).await,
         Command::Bundle(ref command) => dispatch_bundle(&cli, command.clone()).await,
+        Command::Backup(ref command) => dispatch_backup(&cli, command.clone()).await,
     }
 }
 
@@ -363,6 +364,23 @@ async fn dispatch_bundle(cli: &Cli, command: BundleCommand) -> Result<Exit> {
     };
     Ok(Exit::from_run_code(
         bundle::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_backup(cli: &Cli, command: BackupCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err("backup", err.code(), err.to_string(), None, None)?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        backup::run(&cfg.database_url, local, command).await?,
     ))
 }
 
