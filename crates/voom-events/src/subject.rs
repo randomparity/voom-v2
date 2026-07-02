@@ -32,6 +32,8 @@ pub enum SubjectType {
     AssetUseLease,
     // M3 Phase 2 — commit safety gate.
     CommitIntent,
+    // Sprint 17 T15 — external systems.
+    ExternalSystem,
 }
 
 impl SubjectType {
@@ -56,6 +58,7 @@ impl SubjectType {
             Self::MediaSnapshot => "media_snapshot",
             Self::AssetUseLease => "asset_use_lease",
             Self::CommitIntent => "commit_intent",
+            Self::ExternalSystem => "external_system",
         }
     }
 
@@ -90,6 +93,7 @@ impl SubjectType {
             "media_snapshot" => Self::MediaSnapshot,
             "asset_use_lease" => Self::AssetUseLease,
             "commit_intent" => Self::CommitIntent,
+            "external_system" => Self::ExternalSystem,
             other => {
                 return Err(VoomError::database(format!(
                     "events.subject_type {other:?} not in SubjectType vocab"

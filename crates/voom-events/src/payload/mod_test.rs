@@ -118,6 +118,11 @@ fn _event_variants_are_exhaustive(e: &Event) {
         Event::CommitAbortedPostMutation(_) => {}
         Event::CommitRecoveryRequired(_) => {}
         Event::CommitForcedOverride(_) => {}
+        Event::ExternalSystemRegistered(_) => {}
+        Event::ExternalSystemHealthChanged(_) => {}
+        Event::ExternalSystemLinked(_) => {}
+        Event::ExternalSystemUnlinked(_) => {}
+        Event::ExternalSystemSynced(_) => {}
     }
 }
 
@@ -870,6 +875,39 @@ fn event_kind_matches_serde_tag() {
             reason: "r".to_owned(),
             bypass: Vec::new(),
             recorded_at: OffsetDateTime::UNIX_EPOCH,
+        }),
+        Event::ExternalSystemRegistered(ExternalSystemRegisteredPayload {
+            external_system_id: 1,
+            kind: "filesystem".to_owned(),
+            display_name: "local".to_owned(),
+            health_status: "unknown".to_owned(),
+        }),
+        Event::ExternalSystemHealthChanged(ExternalSystemHealthChangedPayload {
+            external_system_id: 1,
+            previous: "unknown".to_owned(),
+            current: "healthy".to_owned(),
+        }),
+        Event::ExternalSystemLinked(ExternalSystemLinkedPayload {
+            external_system_id: 1,
+            link_id: 1,
+            target_type: "media_work".to_owned(),
+            target_id: 1,
+            external_ref: "ref".to_owned(),
+        }),
+        Event::ExternalSystemUnlinked(ExternalSystemUnlinkedPayload {
+            external_system_id: 1,
+            link_id: 1,
+            target_type: "media_work".to_owned(),
+            target_id: 1,
+            external_ref: "ref".to_owned(),
+        }),
+        Event::ExternalSystemSynced(ExternalSystemSyncedPayload {
+            external_system_id: 1,
+            outcome: "ok".to_owned(),
+            links_recorded: 0,
+            links_retired: 0,
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            finished_at: OffsetDateTime::UNIX_EPOCH,
         }),
     ];
 

@@ -4,6 +4,7 @@
 mod artifact;
 mod commit;
 mod execution;
+mod external_system;
 mod media_identity;
 mod policy;
 mod system;
@@ -13,6 +14,7 @@ mod workers;
 pub use artifact::*;
 pub use commit::*;
 pub use execution::*;
+pub use external_system::*;
 pub use media_identity::*;
 pub use policy::*;
 pub use system::*;
@@ -219,6 +221,16 @@ pub enum Event {
     CommitRecoveryRequired(CommitRecoveryRequiredPayload),
     #[serde(rename = "commit.forced_override")]
     CommitForcedOverride(CommitForcedOverridePayload),
+    #[serde(rename = "external_system.registered")]
+    ExternalSystemRegistered(ExternalSystemRegisteredPayload),
+    #[serde(rename = "external_system.health_changed")]
+    ExternalSystemHealthChanged(ExternalSystemHealthChangedPayload),
+    #[serde(rename = "external_system.linked")]
+    ExternalSystemLinked(ExternalSystemLinkedPayload),
+    #[serde(rename = "external_system.unlinked")]
+    ExternalSystemUnlinked(ExternalSystemUnlinkedPayload),
+    #[serde(rename = "external_system.synced")]
+    ExternalSystemSynced(ExternalSystemSyncedPayload),
 }
 
 impl Event {
@@ -320,6 +332,11 @@ impl Event {
             Self::CommitAbortedPostMutation(_) => EventKind::CommitAbortedPostMutation,
             Self::CommitRecoveryRequired(_) => EventKind::CommitRecoveryRequired,
             Self::CommitForcedOverride(_) => EventKind::CommitForcedOverride,
+            Self::ExternalSystemRegistered(_) => EventKind::ExternalSystemRegistered,
+            Self::ExternalSystemHealthChanged(_) => EventKind::ExternalSystemHealthChanged,
+            Self::ExternalSystemLinked(_) => EventKind::ExternalSystemLinked,
+            Self::ExternalSystemUnlinked(_) => EventKind::ExternalSystemUnlinked,
+            Self::ExternalSystemSynced(_) => EventKind::ExternalSystemSynced,
         }
     }
 }
