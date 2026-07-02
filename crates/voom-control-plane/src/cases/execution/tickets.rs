@@ -186,6 +186,10 @@ impl ControlPlane {
         now: OffsetDateTime,
     ) -> Result<(), VoomError> {
         if terminal {
+            // No lease exists on the pre-lease selection-failure path.
+            let issue_id = self
+                .open_terminal_failure_issue_in_tx(tx, ticket.id, None, class, reason, now)
+                .await?;
             append_event(
                 &self.events,
                 tx,
@@ -198,7 +202,7 @@ impl ControlPlane {
                     max_attempts: ticket.max_attempts,
                     reason: reason.to_owned(),
                     class,
-                    issue_id: None,
+                    issue_id: Some(issue_id),
                 }),
             )
             .await
