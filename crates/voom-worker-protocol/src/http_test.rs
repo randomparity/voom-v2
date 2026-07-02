@@ -834,6 +834,53 @@ async fn server_closes_connection_when_request_head_never_completes() {
     drop(running);
 }
 
+#[tokio::test]
+async fn handshake_rejects_mismatched_agreed_version() {
+    // A well-formed 200 whose `agreed` does not echo `offered` must be rejected:
+    // ADR-0016 is an exact match, so the client defends the server->client
+    // direction even though a conforming server never emits this.
+    let offered = voom_core::PROTOCOL_VERSION;
+    let agreed = offered + 1;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 4096];
+        let _ = stream.read(&mut buf).await.unwrap();
+        let body = format!("{{\"agreed\":{agreed}}}");
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+    });
+
+    let client = HttpClient::new(addr);
+    let err = client.handshake(offered).await.unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ProtocolError::UnsupportedProtocolVersion { offered: o, expected: e }
+                if *o == offered && *e == agreed
+        ),
+        "expected UnsupportedProtocolVersion, got {err:?}"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn handshake_accepts_matching_agreed_version() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls, None)).await;
+    let client = HttpClient::new(addr);
+    let resp = client.handshake(voom_core::PROTOCOL_VERSION).await.unwrap();
+    assert_eq!(resp.agreed, voom_core::PROTOCOL_VERSION);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
 #[test]
 fn status_code_dependency_stays_used() {
     assert_eq!(StatusCode::OK.as_u16(), 200);

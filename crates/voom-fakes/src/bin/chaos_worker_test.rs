@@ -105,3 +105,32 @@ fn baseline_body_has_progress_then_result() {
 fn malformed_body_is_not_valid_progress_json() {
     assert!(serde_json::from_slice::<serde_json::Value>(&malformed_body()).is_err());
 }
+
+fn version_headers(value: &str) -> Vec<(String, String)> {
+    vec![(PROTOCOL_VERSION_HEADER.to_owned(), value.to_owned())]
+}
+
+#[test]
+fn enforce_version_accepts_current_version() {
+    let headers = version_headers(&voom_core::PROTOCOL_VERSION.to_string());
+    assert!(enforce_version(&headers).is_ok());
+}
+
+#[test]
+fn enforce_version_rejects_wrong_version() {
+    let headers = version_headers(&(voom_core::PROTOCOL_VERSION + 1).to_string());
+    let err = enforce_version(&headers).unwrap_err();
+    assert!(matches!(
+        err,
+        ProtocolError::UnsupportedProtocolVersion { offered, expected }
+            if offered == voom_core::PROTOCOL_VERSION + 1
+                && expected == voom_core::PROTOCOL_VERSION
+    ));
+}
+
+#[test]
+fn enforce_version_rejects_missing_header() {
+    let headers: Vec<(String, String)> = Vec::new();
+    let err = enforce_version(&headers).unwrap_err();
+    assert!(matches!(err, ProtocolError::InvalidPayload { .. }));
+}

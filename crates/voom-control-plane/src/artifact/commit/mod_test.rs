@@ -402,6 +402,43 @@ async fn recover_commit_repromotes_when_target_absent() {
 }
 
 #[tokio::test]
+async fn recover_commit_errors_when_target_stat_fails_non_absent() {
+    let (cp, _db, dir) = fixture().await;
+    let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;
+    let install = dir.path().join("install");
+    std::fs::create_dir(&install).unwrap();
+    let target = install.join("target.bin");
+
+    // Fail after prepare: a recovery-required record exists, target never installed.
+    commit_artifact_with_hooks(
+        &cp,
+        CommitArtifactInput {
+            artifact_handle_id: staged.artifact_handle_id,
+            target_path: target.clone(),
+        },
+        &FailAfterPrepare,
+    )
+    .await
+    .unwrap_err();
+    assert!(!target.exists());
+
+    // Replace the intermediate directory with a regular file so stat'ing the
+    // target fails with ENOTDIR (kind != NotFound). This must surface loudly,
+    // not be mistaken for an absent target and re-promoted.
+    std::fs::remove_dir_all(&install).unwrap();
+    std::fs::write(&install, b"x").unwrap();
+
+    let err = cp
+        .recover_commit(staged.artifact_handle_id)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::CommitFailure);
+    // The occupying file was not clobbered by a spurious fresh-install attempt.
+    assert_eq!(std::fs::read(&install).unwrap(), b"x");
+}
+
+#[tokio::test]
 async fn recover_commit_without_recovery_required_is_conflict() {
     let (cp, _db, dir) = fixture().await;
     let staged = stage_and_verify_bytes(&cp, dir.path(), b"source bytes").await;

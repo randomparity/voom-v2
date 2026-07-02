@@ -21,7 +21,7 @@ use voom_worker_protocol::{
 use crate::ControlPlane;
 use crate::artifact::bootstrap::ensure_builtin_verify_artifact_worker_in_tx;
 use crate::artifact::worker::{BundledWorkerProcess, VerifyWorkerError};
-use crate::cases::{append_event, begin_tx, commit_tx};
+use crate::cases::{append_event, begin_immediate_tx, begin_tx, commit_tx};
 
 #[derive(Debug)]
 pub struct VerifyArtifactInput {
@@ -278,7 +278,7 @@ async fn record_verification_started(
     location_id: ArtifactLocationId,
     path: &str,
 ) -> Result<WorkerId, VoomError> {
-    let mut tx = begin_tx(&cp.pool).await?;
+    let mut tx = begin_immediate_tx(&cp.pool).await?;
     let worker = ensure_builtin_verify_artifact_worker_in_tx(cp, &mut tx).await?;
     let now = cp.clock().now();
     append_event(
