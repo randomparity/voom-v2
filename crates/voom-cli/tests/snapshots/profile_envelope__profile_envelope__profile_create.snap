@@ -8,11 +8,11 @@ expression: json
   "status": "ok",
   "data": {
     "profile": {
-      "id": "vp-hevc-archive",
-      "name": "hevc-archive",
+      "id": "vp-home-hevc",
+      "name": "home-hevc",
       "target_codec": "hevc",
       "encoder": "libx265",
-      "crf": 18,
+      "crf": 20,
       "preset": "slow",
       "tune": null,
       "codec_profile": "main10",

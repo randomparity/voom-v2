@@ -59,6 +59,127 @@ mod profile_envelope {
         insta::assert_json_snapshot!("profile_show_hevc_archive", json);
     }
 
+    #[tokio::test]
+    async fn create_then_show_round_trips_and_derives_codec() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "home-hevc",
+                "--encoder",
+                "libx265",
+                "--crf",
+                "20",
+                "--preset",
+                "slow",
+                "--codec-profile",
+                "main10",
+                "--pixel-format",
+                "yuv420p10le",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let mut json = envelope(out.stdout);
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["profile"]["target_codec"], "hevc");
+        assert_eq!(json["data"]["profile"]["id"], "vp-home-hevc");
+        redact_local(&mut json);
+        insta::assert_json_snapshot!("profile_create", json);
+    }
+
+    #[tokio::test]
+    async fn create_invalid_field_is_config_error() {
+        let seeded = seed().await;
+        let out = profile_command(&seeded.url)
+            .args([
+                "create",
+                "--name",
+                "bad",
+                "--encoder",
+                "libx265",
+                "--crf",
+                "60",
+                "--preset",
+                "slow",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        let json = envelope(out.stdout);
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["error"]["code"], "CONFIG_INVALID");
+    }
+
+    #[tokio::test]
+    async fn update_replaces_fields() {
+        let seeded = seed().await;
+        create_home(&seeded.url);
+        let out = profile_command(&seeded.url)
+            .args([
+                "update",
+                "--name",
+                "home-hevc",
+                "--encoder",
+                "libsvtav1",
+                "--crf",
+                "32",
+                "--preset",
+                "8",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        let json = envelope(out.stdout);
+        assert_eq!(json["data"]["profile"]["target_codec"], "av1");
+        assert_eq!(json["data"]["profile"]["crf"], 32);
+    }
+
+    #[tokio::test]
+    async fn retire_hides_from_list() {
+        let seeded = seed().await;
+        create_home(&seeded.url);
+        let retire = profile_command(&seeded.url)
+            .args(["retire", "--name", "home-hevc"])
+            .output()
+            .unwrap();
+        assert_eq!(retire.status.code(), Some(0));
+        let json = envelope(retire.stdout);
+        assert!(json["data"]["profile"]["retired_at"].is_string());
+
+        let list = profile_command(&seeded.url)
+            .args(["list"])
+            .output()
+            .unwrap();
+        let json = envelope(list.stdout);
+        let names: Vec<&str> = json["data"]["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"home-hevc"));
+    }
+
+    fn create_home(url: &str) {
+        let status = profile_command(url)
+            .args([
+                "create",
+                "--name",
+                "home-hevc",
+                "--encoder",
+                "libx265",
+                "--crf",
+                "20",
+                "--preset",
+                "slow",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
     struct Seeded {
         _tmp: NamedTempFile,
         url: String,

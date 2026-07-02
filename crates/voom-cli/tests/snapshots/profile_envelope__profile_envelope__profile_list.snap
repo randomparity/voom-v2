@@ -22,7 +22,8 @@ expression: json
         "max_width": 1920,
         "max_height": 1080,
         "output_container": "mp4",
-        "copy_compatible": true
+        "copy_compatible": true,
+        "retired_at": null
       },
       {
         "id": "vp-av1-archive",
@@ -38,7 +39,8 @@ expression: json
         "max_width": null,
         "max_height": null,
         "output_container": "mkv",
-        "copy_compatible": false
+        "copy_compatible": false,
+        "retired_at": null
       },
       {
         "id": "vp-default-av1",
@@ -54,7 +56,8 @@ expression: json
         "max_width": null,
         "max_height": null,
         "output_container": "mkv",
-        "copy_compatible": false
+        "copy_compatible": false,
+        "retired_at": null
       },
       {
         "id": "vp-default-hevc",
@@ -70,7 +73,8 @@ expression: json
         "max_width": null,
         "max_height": null,
         "output_container": "mkv",
-        "copy_compatible": false
+        "copy_compatible": false,
+        "retired_at": null
       },
       {
         "id": "vp-hevc-1080p",
@@ -86,7 +90,8 @@ expression: json
         "max_width": 1920,
         "max_height": 1080,
         "output_container": "mp4",
-        "copy_compatible": true
+        "copy_compatible": true,
+        "retired_at": null
       },
       {
         "id": "vp-hevc-archive",
@@ -102,7 +107,8 @@ expression: json
         "max_width": null,
         "max_height": null,
         "output_container": "mkv",
-        "copy_compatible": false
+        "copy_compatible": false,
+        "retired_at": null
       }
     ]
   },

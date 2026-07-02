@@ -23,6 +23,8 @@ pub struct LibraryData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_scoring_profile_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -36,6 +38,7 @@ impl From<Library> for LibraryData {
             media_kind: library.media_kind.as_str().to_owned(),
             description: library.description,
             enabled: library.enabled,
+            default_scoring_profile_name: library.default_scoring_profile_name,
             created_at: format_iso8601(library.created_at),
             updated_at: format_iso8601(library.updated_at),
         }
@@ -102,6 +105,18 @@ pub async fn run(database_url: &str, local: Local, command: LibraryCommand) -> i
             local,
         ),
         LibraryCommand::Remove { library_id } => remove(&cp, local, LibraryId(library_id)).await,
+        LibraryCommand::SetDefaultScoringProfile {
+            library_id,
+            scoring_profile,
+            clear,
+        } => {
+            let profile = if clear { None } else { scoring_profile };
+            emit_library(
+                cp.set_library_default_scoring_profile(LibraryId(library_id), profile.as_deref())
+                    .await,
+                local,
+            )
+        }
         LibraryCommand::Root(command) => root::run(&cp, local, command).await,
     }
 }

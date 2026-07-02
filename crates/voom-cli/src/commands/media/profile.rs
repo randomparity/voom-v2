@@ -1,12 +1,15 @@
 use std::io;
 
 use serde::Serialize;
+use voom_control_plane::ControlPlane;
 use voom_core::ErrorCode;
-use voom_store::repo::video_profiles::VideoProfile;
+use voom_store::repo::video_profiles::{NewVideoProfile, VideoProfile};
 
-use crate::cli::ProfileCommand;
+use crate::cli::{ProfileCommand, VideoProfileFields};
 use crate::commands::common::{emit_voom_error, open_control_plane};
 use crate::envelope::{Local, emit_err, emit_ok};
+
+const COMMAND: &str = "profile";
 
 #[derive(Debug, Serialize)]
 struct ListData {
@@ -34,23 +37,34 @@ struct ProfileData {
     max_height: Option<u32>,
     output_container: String,
     copy_compatible: bool,
+    retired_at: Option<String>,
 }
 
 pub async fn run(database_url: &str, local: Local, command: ProfileCommand) -> io::Result<i32> {
-    match command {
-        ProfileCommand::List => list(database_url, local).await,
-        ProfileCommand::Show { name } => show(database_url, local, &name).await,
-    }
-}
-
-async fn list(database_url: &str, local: Local) -> io::Result<i32> {
-    let cp = match open_control_plane("profile", database_url, &local).await? {
+    let cp = match open_control_plane(COMMAND, database_url, &local).await? {
         Ok(cp) => cp,
         Err(code) => return Ok(code),
     };
+    match command {
+        ProfileCommand::List => list(&cp, local).await,
+        ProfileCommand::Show { name } => show(&cp, local, &name).await,
+        ProfileCommand::Create(fields) => {
+            emit_one(cp.create_video_profile(fields.into()).await, local)
+        }
+        ProfileCommand::Update(fields) => {
+            let name = fields.name.clone();
+            emit_optional(cp.update_video_profile(fields.into()).await, &name, local)
+        }
+        ProfileCommand::Retire { name } => {
+            emit_optional(cp.retire_video_profile(&name).await, &name, local)
+        }
+    }
+}
+
+async fn list(cp: &ControlPlane, local: Local) -> io::Result<i32> {
     match cp.list_video_profiles().await {
         Ok(profiles) => emit_ok(
-            "profile",
+            COMMAND,
             ListData {
                 profiles: profiles.into_iter().map(ProfileData::from).collect(),
             },
@@ -58,36 +72,76 @@ async fn list(database_url: &str, local: Local) -> io::Result<i32> {
             Vec::new(),
         )
         .map(|()| 0),
-        Err(err) => emit_voom_error("profile", &err, local),
+        Err(err) => emit_voom_error(COMMAND, &err, local),
     }
 }
 
-async fn show(database_url: &str, local: Local, name: &str) -> io::Result<i32> {
-    let cp = match open_control_plane("profile", database_url, &local).await? {
-        Ok(cp) => cp,
-        Err(code) => return Ok(code),
-    };
+async fn show(cp: &ControlPlane, local: Local, name: &str) -> io::Result<i32> {
     match cp.get_video_profile(name).await {
-        Ok(Some(profile)) => emit_ok(
-            "profile",
-            ProfileEnvelopeData {
-                profile: ProfileData::from(profile),
-            },
-            Some(local),
-            Vec::new(),
-        )
-        .map(|()| 0),
-        Ok(None) => {
-            emit_err(
-                "profile",
-                ErrorCode::NotFound.as_str(),
-                format!("profile show: name={name} not found"),
-                None,
-                Some(local),
-            )?;
-            Ok(2)
+        Ok(Some(profile)) => emit_profile(profile, local),
+        Ok(None) => not_found(name, local),
+        Err(err) => emit_voom_error(COMMAND, &err, local),
+    }
+}
+
+fn emit_one(result: Result<VideoProfile, voom_core::VoomError>, local: Local) -> io::Result<i32> {
+    match result {
+        Ok(profile) => emit_profile(profile, local),
+        Err(err) => emit_voom_error(COMMAND, &err, local),
+    }
+}
+
+fn emit_optional(
+    result: Result<Option<VideoProfile>, voom_core::VoomError>,
+    name: &str,
+    local: Local,
+) -> io::Result<i32> {
+    match result {
+        Ok(Some(profile)) => emit_profile(profile, local),
+        Ok(None) => not_found(name, local),
+        Err(err) => emit_voom_error(COMMAND, &err, local),
+    }
+}
+
+fn emit_profile(profile: VideoProfile, local: Local) -> io::Result<i32> {
+    emit_ok(
+        COMMAND,
+        ProfileEnvelopeData {
+            profile: ProfileData::from(profile),
+        },
+        Some(local),
+        Vec::new(),
+    )
+    .map(|()| 0)
+}
+
+fn not_found(name: &str, local: Local) -> io::Result<i32> {
+    emit_err(
+        COMMAND,
+        ErrorCode::NotFound.as_str(),
+        format!("profile {name:?} not found"),
+        None,
+        Some(local),
+    )?;
+    Ok(2)
+}
+
+impl From<VideoProfileFields> for NewVideoProfile {
+    fn from(fields: VideoProfileFields) -> Self {
+        Self {
+            name: fields.name,
+            encoder: fields.encoder,
+            crf: fields.crf,
+            preset: fields.preset,
+            tune: fields.tune,
+            codec_profile: fields.codec_profile,
+            codec_level: fields.codec_level,
+            pixel_format: fields.pixel_format,
+            max_width: fields.max_width,
+            max_height: fields.max_height,
+            output_container: fields.output_container,
+            copy_compatible: fields.copy_compatible,
         }
-        Err(err) => emit_voom_error("profile", &err, local),
     }
 }
 
@@ -108,6 +162,7 @@ impl From<VideoProfile> for ProfileData {
             max_height: profile.max_height,
             output_container: profile.output_container,
             copy_compatible: profile.copy_compatible,
+            retired_at: profile.retired_at.map(voom_core::format_iso8601),
         }
     }
 }

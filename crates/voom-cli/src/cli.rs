@@ -48,9 +48,12 @@ pub enum Command {
     /// Register and manage execution nodes.
     #[command(subcommand)]
     Node(NodeCommand),
-    /// Inspect seeded video encode profiles.
+    /// Manage durable video encode profiles.
     #[command(subcommand)]
     Profile(ProfileCommand),
+    /// Manage durable quality scoring profiles.
+    #[command(subcommand)]
+    ScoringProfile(ScoringProfileCommand),
     /// Register and inspect workers.
     #[command(subcommand)]
     Worker(WorkerCommand),
@@ -491,6 +494,18 @@ pub enum LibraryCommand {
         #[arg(long)]
         library_id: u64,
     },
+    /// Set or clear a library's default quality scoring profile.
+    SetDefaultScoringProfile {
+        #[arg(long)]
+        library_id: u64,
+        /// Scoring profile name to set as the default. Omit with `--clear` to
+        /// remove the default.
+        #[arg(long, required_unless_present = "clear", conflicts_with = "clear")]
+        scoring_profile: Option<String>,
+        /// Clear the library's default scoring profile.
+        #[arg(long)]
+        clear: bool,
+    },
     /// Manage library roots.
     #[command(subcommand)]
     Root(LibraryRootCommand),
@@ -860,10 +875,82 @@ pub enum NodeCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ProfileCommand {
-    /// List the seeded video encode profiles.
+    /// List the active video encode profiles.
     List,
     /// Show one video encode profile by name.
     Show {
+        #[arg(long)]
+        name: String,
+    },
+    /// Create a durable video encode profile. The target codec is derived from
+    /// the encoder; every field is validated against the encoder's capabilities.
+    Create(VideoProfileFields),
+    /// Replace every mutable field of an existing video encode profile.
+    Update(VideoProfileFields),
+    /// Soft-retire a video encode profile (hidden from `list`, still resolvable).
+    Retire {
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct VideoProfileFields {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub encoder: String,
+    #[arg(long)]
+    pub crf: u8,
+    #[arg(long)]
+    pub preset: String,
+    #[arg(long)]
+    pub tune: Option<String>,
+    #[arg(long)]
+    pub codec_profile: Option<String>,
+    #[arg(long)]
+    pub codec_level: Option<String>,
+    #[arg(long)]
+    pub pixel_format: Option<String>,
+    #[arg(long)]
+    pub max_width: Option<u32>,
+    #[arg(long)]
+    pub max_height: Option<u32>,
+    #[arg(long, default_value = "mkv")]
+    pub output_container: String,
+    #[arg(long)]
+    pub copy_compatible: bool,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ScoringProfileCommand {
+    /// Create a quality scoring profile. `--definition` is a JSON object.
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+        #[arg(long, default_value = "{}")]
+        definition: String,
+    },
+    /// List active quality scoring profiles.
+    List,
+    /// Show one quality scoring profile by name.
+    Show {
+        #[arg(long)]
+        name: String,
+    },
+    /// Replace an existing quality scoring profile's version and definition.
+    Update {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 1)]
+        version: u32,
+        #[arg(long, default_value = "{}")]
+        definition: String,
+    },
+    /// Soft-retire a quality scoring profile (hidden from `list`, still resolvable).
+    Retire {
         #[arg(long)]
         name: String,
     },

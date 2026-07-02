@@ -7,11 +7,12 @@ use serde::Serialize;
 use voom_cli::cli::{
     ArtifactCommand, BackupCommand, BundleCommand, Cli, Command, ComplianceCommand, IssueCommand,
     LeaseCommand, LibraryCommand, NodeCommand, PlanCommand, PolicyCommand, ProfileCommand,
-    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, WorkerCommand,
+    SafetyPolicyCommand, SchedulerCommand, SchedulingPolicyCommand, ScoringProfileCommand,
+    WorkerCommand,
 };
 use voom_cli::commands::{
     artifact, backup, bundle, compliance, health, init, issue, lease, library, node, plan, policy,
-    profile, safety_policy, scan, scheduler, scheduling_policy, version, worker,
+    profile, safety_policy, scan, scheduler, scheduling_policy, scoring_profile, version, worker,
 };
 use voom_cli::envelope::{Local, emit_err, emit_ok};
 use voom_cli::logging;
@@ -223,6 +224,9 @@ async fn dispatch(cli: Cli) -> Result<Exit> {
         Command::Policy(ref command) => dispatch_policy(&cli, command.clone()).await,
         Command::Node(ref command) => dispatch_node(&cli, command.clone()).await,
         Command::Profile(ref command) => dispatch_profile(&cli, command.clone()).await,
+        Command::ScoringProfile(ref command) => {
+            dispatch_scoring_profile(&cli, command.clone()).await
+        }
         Command::Worker(ref command) => dispatch_worker(&cli, command.clone()).await,
         Command::Scheduler(ref command) => dispatch_scheduler(&cli, command.clone()).await,
         Command::Artifact(ref command) => dispatch_artifact(&cli, command.clone()).await,
@@ -399,6 +403,29 @@ async fn dispatch_profile(cli: &Cli, command: ProfileCommand) -> Result<Exit> {
     };
     Ok(Exit::from_run_code(
         profile::run(&cfg.database_url, local, command).await?,
+    ))
+}
+
+async fn dispatch_scoring_profile(cli: &Cli, command: ScoringProfileCommand) -> Result<Exit> {
+    let cfg = match resolve_cfg(cli) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            voom_cli::envelope::emit_err(
+                "scoring-profile",
+                err.code(),
+                err.to_string(),
+                None,
+                None,
+            )?;
+            return Ok(Exit::Failure);
+        }
+    };
+    let local = Local {
+        db_url: cfg.database_url.clone(),
+        config_path: cfg.config_path.display().to_string(),
+    };
+    Ok(Exit::from_run_code(
+        scoring_profile::run(&cfg.database_url, local, command).await?,
     ))
 }
 
