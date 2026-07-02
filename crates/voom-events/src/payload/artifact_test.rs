@@ -796,6 +796,7 @@ fn artifact_commit_completed_payload_round_trip() {
         result_file_version_id: 31,
         result_file_location_id: 32,
         target_path: "/media/final.bin".to_owned(),
+        gate_evaluated_lease_ids: vec![7, 9],
     };
     let json = serde_json::to_value(Event::ArtifactCommitCompleted(p.clone())).unwrap();
     assert_eq!(json["kind"], "artifact.commit_completed");
@@ -805,6 +806,28 @@ fn artifact_commit_completed_payload_round_trip() {
         Event::ArtifactCommitCompleted(p).kind(),
         EventKind::ArtifactCommitCompleted
     );
+}
+
+#[test]
+fn artifact_commit_completed_payload_defaults_missing_gate_lease_ids() {
+    // Records written before #270 lack `gate_evaluated_lease_ids`; the
+    // `#[serde(default)]` contract decodes them to an empty vec. Drop the key
+    // from a serialized payload and confirm it round-trips to empty.
+    let mut value = serde_json::to_value(ArtifactCommitCompletedPayload {
+        commit_record_id: 30,
+        artifact_handle_id: 10,
+        result_file_version_id: 31,
+        result_file_location_id: 32,
+        target_path: "/media/final.bin".to_owned(),
+        gate_evaluated_lease_ids: vec![1, 2],
+    })
+    .unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("gate_evaluated_lease_ids");
+    let back: ArtifactCommitCompletedPayload = serde_json::from_value(value).unwrap();
+    assert!(back.gate_evaluated_lease_ids.is_empty());
 }
 
 #[test]
@@ -952,6 +975,7 @@ fn artifact_commit_completed_payload_rejects_unknown_field() {
         result_file_version_id: 31,
         result_file_location_id: 32,
         target_path: "/media/final.bin".to_owned(),
+        gate_evaluated_lease_ids: Vec::new(),
     });
 }
 

@@ -487,6 +487,9 @@ async fn finalize_sidecar_commit(
             result_file_version_id: sidecar.file_version_id.0,
             result_file_location_id: sidecar.file_location_id.0,
             target_path: prepared.target_path.display().to_string(),
+            // The audio sidecar extract commit is a separate path that does not
+            // yet run the commit safety gate (#270 scope; follow-up filed).
+            gate_evaluated_lease_ids: Vec::new(),
         }),
     )
     .await?;

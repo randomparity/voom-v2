@@ -98,6 +98,13 @@ pub struct ArtifactCommitCompletedPayload {
     pub result_file_version_id: u64,
     pub result_file_location_id: u64,
     pub target_path: String,
+    /// Use-lease ids the commit safety gate evaluated against the affected
+    /// scope at prepare time (none blocked, or the commit would not have
+    /// completed). Audit trail for #270. `#[serde(default)]` per the
+    /// durable-payload evolution contract (ADR 0013): records written before
+    /// this field decode to an empty vec.
+    #[serde(default)]
+    pub gate_evaluated_lease_ids: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

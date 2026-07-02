@@ -708,12 +708,14 @@ mod abort_list;
 mod authorize;
 mod codecs;
 mod finalize;
+mod lineage_commit;
 mod prepare;
 mod scope;
 
 pub use abort_list::{AbortOutcome, abort_destructive_commit, list_pending_commit_intents};
 pub use authorize::{AuthorizeOutcome, authorize_destructive_commit};
 pub use finalize::{FinalizeOutcome, finalize_destructive_commit};
+pub use lineage_commit::{LineageCommitLeaseCheck, check_lineage_commit_leases_in_tx};
 pub use prepare::{PrepareOutcome, prepare_destructive_commit};
 
 #[cfg(test)]

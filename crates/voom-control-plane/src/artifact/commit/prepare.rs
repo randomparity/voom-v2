@@ -7,6 +7,7 @@ use voom_core::{ArtifactHandleId, ArtifactLocationId, FileAssetId, FileVersionId
 use voom_events::Event;
 use voom_events::payload::{ArtifactCommitFailedPreMutationPayload, ArtifactCommitStartedPayload};
 use voom_store::repo::artifacts::{ArtifactVerification, NewArtifactCommitRecord};
+use voom_store::repo::check_lineage_commit_leases_in_tx;
 use voom_store::repo::identity::IdentityRepo;
 
 use voom_artifact::commit_pipeline::{
@@ -72,6 +73,12 @@ async fn prepare_commit_in_tx(
         &context,
     )
     .await?;
+    // Commit safety gate: a blocking use lease live at commit time on the
+    // affected scope fails the commit here, inside the host transaction and
+    // before any irreversible filesystem mutation (design §1187–1190). Any
+    // gate-check error is fail-closed — the commit does not proceed.
+    let gate_evaluated_lease_ids =
+        check_commit_safety_gate(cp, tx, &source, &verified_staging.context, now).await?;
     let paths = prepare_commit_paths(&input.target_path, &source.handle, &verified_staging).await?;
 
     let target_path_string = paths.target_path.display().to_string();
@@ -128,7 +135,41 @@ async fn prepare_commit_in_tx(
         temp_path: paths.temp_path,
         expected_facts: paths.expected_facts,
         promotion_started_at: now,
+        gate_evaluated_lease_ids,
     })
+}
+
+/// Consult the commit safety gate for a lineage commit. Returns the use-lease
+/// ids the gate evaluated (for the audit event) when no blocking lease is
+/// live, or a pre-mutation failure when one is (`BlockedByUseLease`) or when
+/// the check itself fails (fail-closed).
+async fn check_commit_safety_gate(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source: &CommitSourceFacts,
+    context: &PreMutationContext,
+    now: time::OffsetDateTime,
+) -> Result<Vec<voom_core::UseLeaseId>, PrepareCommitError> {
+    let check = check_lineage_commit_leases_in_tx(
+        tx,
+        &cp.identity,
+        source.source_file_asset_id,
+        source.source_file_version_id,
+        now,
+    )
+    .await
+    .map_err(|err| pre_mutation_error(context, &err))?;
+    if let Some((lease_id, scope)) = check.blocking {
+        return Err(pre_mutation_error(
+            context,
+            &VoomError::BlockedByUseLease(format!(
+                "commit blocked by active use lease {lease_id} on {} {}",
+                scope.type_str(),
+                scope.id_u64()
+            )),
+        ));
+    }
+    Ok(check.evaluated_lease_ids)
 }
 
 #[derive(Debug)]
