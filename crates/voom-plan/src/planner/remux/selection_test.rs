@@ -83,47 +83,61 @@ fn remux_stream_facts_missing_stream_id_blocks_planning() {
 }
 
 #[test]
-fn remux_language_filter_missing_fact_blocks_planning() {
-    let stream = SnapshotStreamFact {
-        snapshot_stream_id: "stream-0".to_owned(),
-        provider_stream_index: 0,
-        kind: TrackTarget::Audio,
-        codec_name: Some("aac".to_owned()),
-        language: None,
-        channels: Some(2),
-        title: None,
-        mime_type: None,
-        filename: None,
-        is_default: false,
-        is_forced: false,
-    };
+fn remux_language_filter_untagged_matches_as_und() {
+    // A missing language tag is treated as `und` (ISO 639-2 undetermined) rather
+    // than blocking planning (ADR 0021, issue #272): excluded by a non-`und` value
+    // set, kept by `und`.
+    let untagged = audio_stream(None);
 
-    let err = evaluate_filter(
-        &TrackFilter::LanguageIn {
-            values: vec!["eng".to_owned()],
-        },
-        &stream,
-    )
-    .unwrap_err();
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            &untagged,
+        ),
+        Ok(false)
+    );
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["und".to_owned()],
+            },
+            &untagged,
+        ),
+        Ok(true)
+    );
+}
 
-    assert_eq!(err, RemuxPlanningBlock::InsufficientSnapshotFacts);
+#[test]
+fn remux_language_filter_explicit_und_matches_like_untagged() {
+    let explicit_und = audio_stream(Some("und"));
+
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["und".to_owned()],
+            },
+            &explicit_und,
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            },
+            &explicit_und,
+        ),
+        Ok(false)
+    );
 }
 
 #[test]
 fn remux_or_returns_true_before_later_insufficient_child() {
-    let stream = SnapshotStreamFact {
-        snapshot_stream_id: "stream-0".to_owned(),
-        provider_stream_index: 0,
-        kind: TrackTarget::Audio,
-        codec_name: Some("aac".to_owned()),
-        language: None,
-        channels: Some(2),
-        title: None,
-        mime_type: None,
-        filename: None,
-        is_default: false,
-        is_forced: false,
-    };
+    // A title-less stream makes `title contains` insufficient; `Or` must return
+    // true from the matching codec child without surfacing the later block.
+    let stream = audio_stream(None);
 
     let matched = evaluate_filter(
         &TrackFilter::Or {
@@ -131,8 +145,8 @@ fn remux_or_returns_true_before_later_insufficient_child() {
                 TrackFilter::CodecIn {
                     values: vec!["aac".to_owned()],
                 },
-                TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
+                TrackFilter::TitleContains {
+                    value: "main".to_owned(),
                 },
             ],
         },
@@ -145,19 +159,9 @@ fn remux_or_returns_true_before_later_insufficient_child() {
 
 #[test]
 fn remux_and_evaluates_later_missing_facts_after_false_child() {
-    let stream = SnapshotStreamFact {
-        snapshot_stream_id: "stream-0".to_owned(),
-        provider_stream_index: 0,
-        kind: TrackTarget::Audio,
-        codec_name: Some("aac".to_owned()),
-        language: None,
-        channels: Some(2),
-        title: None,
-        mime_type: None,
-        filename: None,
-        is_default: false,
-        is_forced: false,
-    };
+    // A title-less stream makes `title contains` insufficient; `And` must surface
+    // that block even though an earlier child already evaluated false.
+    let stream = audio_stream(None);
 
     let err = evaluate_filter(
         &TrackFilter::And {
@@ -165,8 +169,8 @@ fn remux_and_evaluates_later_missing_facts_after_false_child() {
                 TrackFilter::CodecIn {
                     values: vec!["flac".to_owned()],
                 },
-                TrackFilter::LanguageIn {
-                    values: vec!["eng".to_owned()],
+                TrackFilter::TitleContains {
+                    value: "main".to_owned(),
                 },
             ],
         },
@@ -251,6 +255,22 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
     let matched = evaluate_filter(&TrackFilter::Font, &stream).unwrap();
 
     assert!(!matched);
+}
+
+fn audio_stream(language: Option<&str>) -> SnapshotStreamFact {
+    SnapshotStreamFact {
+        snapshot_stream_id: "stream-0".to_owned(),
+        provider_stream_index: 0,
+        kind: TrackTarget::Audio,
+        codec_name: Some("aac".to_owned()),
+        language: language.map(str::to_owned),
+        channels: Some(2),
+        title: None,
+        mime_type: None,
+        filename: None,
+        is_default: false,
+        is_forced: false,
+    }
 }
 
 fn snapshot_with_streams(streams: &serde_json::Value) -> MediaSnapshotInput {
