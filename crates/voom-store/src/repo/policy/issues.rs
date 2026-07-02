@@ -1,6 +1,6 @@
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{IssueId, VoomError};
+use voom_core::{IssueId, IssuePriority, IssueSeverity, LeaseId, TicketId, VoomError};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, u64_from_i64};
@@ -63,6 +63,23 @@ pub enum PolicyIssueMutationKind {
 pub struct PolicyIssueMutation {
     pub kind: PolicyIssueMutationKind,
     pub row: PolicyIssueRow,
+}
+
+/// Everything needed to open the one `terminal_failure` issue for a ticket's
+/// terminal transition. Severity and priority are supplied by the caller
+/// (derived from the failure's `FailureClass` in the control plane) so the
+/// store stays free of taxonomy knowledge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalFailureIssueDraft {
+    pub ticket_id: TicketId,
+    /// Last lease held for the ticket, if any. The pre-lease selection
+    /// failure path has no lease, so this is `None` there.
+    pub lease_id: Option<LeaseId>,
+    pub severity: IssueSeverity,
+    pub priority: IssuePriority,
+    pub priority_reason: String,
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +234,104 @@ impl SqliteIssueRepo {
 
         rows.iter().map(row_to_policy_issue).collect()
     }
+
+    /// Open the single `terminal_failure` issue for a ticket's terminal
+    /// transition and return its id, inserting `issue_links` for the ticket
+    /// and (when present) its last lease. Idempotent: the dedupe key is
+    /// derived solely from the ticket id, so a re-run of the same terminal
+    /// transaction returns the existing issue id without inserting a
+    /// duplicate row or duplicate links. A ticket reaches `failed` at most
+    /// once, so under normal operation exactly one issue is opened per
+    /// terminal transition (spec: Issue Model + Failure taxonomy).
+    ///
+    /// # Errors
+    /// Propagates database errors from the issue insert, the dedupe lookup on
+    /// conflict, and the `issue_links` inserts.
+    pub async fn open_terminal_failure_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        draft: TerminalFailureIssueDraft,
+        now: OffsetDateTime,
+    ) -> Result<IssueId, VoomError> {
+        let dedupe_key = terminal_failure_dedupe_key(draft.ticket_id);
+        let timestamp = iso8601(now)?;
+        let inserted = sqlx::query(
+            "INSERT INTO issues \
+             (kind, severity, priority, priority_source, priority_reason, status, \
+              suppressed_until, title, body, created_at, updated_at, resolved_at, dedupe_key) \
+             VALUES ('terminal_failure', ?, ?, 'system', ?, 'open', \
+                     NULL, ?, ?, ?, ?, NULL, ?)",
+        )
+        .bind(draft.severity.as_str())
+        .bind(draft.priority.as_str())
+        .bind(&draft.priority_reason)
+        .bind(&draft.title)
+        .bind(&draft.body)
+        .bind(&timestamp)
+        .bind(&timestamp)
+        .bind(&dedupe_key)
+        .execute(&mut **tx)
+        .await;
+
+        let issue_id = match inserted {
+            Ok(result) => IssueId(u64_from_i64(result.last_insert_rowid())),
+            Err(err) => {
+                let Some(existing) = select_terminal_failure_id(tx, &dedupe_key).await? else {
+                    return Err(VoomError::database_context(
+                        "terminal_failure issue insert",
+                        err,
+                    ));
+                };
+                return Ok(existing);
+            }
+        };
+
+        insert_issue_link(tx, issue_id, "ticket", draft.ticket_id.0, &timestamp).await?;
+        if let Some(lease_id) = draft.lease_id {
+            insert_issue_link(tx, issue_id, "lease", lease_id.0, &timestamp).await?;
+        }
+        Ok(issue_id)
+    }
+}
+
+fn terminal_failure_dedupe_key(ticket_id: TicketId) -> String {
+    format!("terminal_failure:ticket:{}", ticket_id.0)
+}
+
+async fn select_terminal_failure_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    dedupe_key: &str,
+) -> Result<Option<IssueId>, VoomError> {
+    let id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM issues WHERE kind = 'terminal_failure' AND dedupe_key = ?",
+    )
+    .bind(dedupe_key)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("terminal_failure issue select", e))?;
+    Ok(id.map(|id| IssueId(u64_from_i64(id))))
+}
+
+async fn insert_issue_link(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    issue_id: IssueId,
+    link_kind: &str,
+    target_id: u64,
+    timestamp: &str,
+) -> Result<(), VoomError> {
+    sqlx::query(
+        "INSERT INTO issue_links (issue_id, link_type, target_type, target_id, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(i64_from_u64(issue_id.0))
+    .bind(link_kind)
+    .bind(link_kind)
+    .bind(i64_from_u64(target_id))
+    .bind(timestamp)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| VoomError::database_context("issue_link insert", e))?;
+    Ok(())
 }
 
 #[derive(Debug)]

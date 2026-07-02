@@ -2,7 +2,7 @@
 
 Status: Draft
 Issue: [#270](https://github.com/randomparity/voom-v2/issues/270) (part of epic #269, Workstream A)
-Related ADR: `docs/adr/0017-commit-gate-lineage-commit-check.md`
+Related ADR: `docs/adr/0019-commit-gate-lineage-commit-check.md`
 
 ## Problem
 

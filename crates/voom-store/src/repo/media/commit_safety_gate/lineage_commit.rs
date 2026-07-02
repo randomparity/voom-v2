@@ -8,7 +8,7 @@
 //! primitive that path needs: a clock-aware blocking-lease check that runs on
 //! the caller's (host commit) transaction, with no nested gate transaction.
 //!
-//! See `docs/adr/0017-commit-gate-lineage-commit-check.md` and
+//! See `docs/adr/0019-commit-gate-lineage-commit-check.md` and
 //! `docs/specs/commit-safety-gate-wiring-270.md`.
 
 use std::collections::BTreeSet;

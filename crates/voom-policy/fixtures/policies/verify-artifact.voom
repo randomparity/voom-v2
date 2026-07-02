@@ -1,0 +1,10 @@
+policy "verify artifact" {
+  phase normalize {
+    container mkv
+  }
+
+  phase verify {
+    depends_on: [normalize]
+    verify artifact
+  }
+}

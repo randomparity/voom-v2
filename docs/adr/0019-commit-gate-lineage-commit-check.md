@@ -1,4 +1,4 @@
-# 0017 — Lineage-commit safety-gate check runs in the prepare transaction
+# 0019 — Lineage-commit safety-gate check runs in the prepare transaction
 
 ## Status
 
