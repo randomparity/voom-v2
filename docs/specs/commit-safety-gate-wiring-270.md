@@ -160,9 +160,10 @@ did not block — the audit trail (design §1245–1248). The field is
 struct keeps `deny_unknown_fields`.
 
 The audio **sidecar** extract commit (`audio/commit.rs::finalize_sidecar_commit`)
-shares this payload; it is a separate commit path not in this issue's scope. It
-populates the new field as empty and does not yet run the gate — documented
-limitation, follow-up filed.
+shares this payload; it is a separate commit path wired to the same gate as a
+follow-up (#296). Its `prepare_sidecar_commit` consults
+`check_lineage_commit_leases_in_tx` before the pending commit record and records
+the evaluated lease ids in the same completed-event field.
 
 ## Acceptance criteria
 

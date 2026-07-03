@@ -2,7 +2,7 @@ use super::*;
 
 use serde_json::json;
 use sqlx::Row;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use voom_core::ErrorCode;
 use voom_core::rng_test_support::FrozenRng;
 use voom_store::repo::artifacts::{ArtifactVerificationStatus, NewArtifactVerification};
@@ -10,6 +10,9 @@ use voom_store::repo::bundles::NewAssetBundle;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::identity::{MediaWorkKind, NewMediaVariant, NewMediaWork};
 use voom_store::repo::workers::{NewWorker, WorkerKind};
+use voom_store::repo::{
+    BlockingMode, IssuerKind, LeaseScope, NewUseLease, UseLeaseKind, UseLeaseReleaseReason,
+};
 use voom_worker_protocol::{
     ExtractAudioResult, ExtractAudioStatus, TranscodeAudioResult, TranscodeAudioStatus,
 };
@@ -196,6 +199,263 @@ async fn sidecar_commit_emits_standard_artifact_commit_events() {
         completed["result_file_location_id"],
         report.result_file_location_id.unwrap().0
     );
+}
+
+#[tokio::test]
+async fn blocking_use_lease_fails_sidecar_commit_before_target_is_written() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"sidecar").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result_with_bytes(b"sidecar"),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    let lease = acquire_blocking_lease(&cp, source.file_version_id).await;
+    let target_path = dir.path().join("blocked-target.ogg");
+
+    let err = commit_audio_extract_sidecar(
+        &cp,
+        sidecar_input(
+            &staged,
+            verification,
+            &source,
+            bundle.id,
+            &staging_path,
+            &target_path,
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::BlockedByUseLease);
+    assert!(
+        err.to_string().contains(&lease.id.0.to_string()),
+        "error {err} must name the blocking lease {}",
+        lease.id.0
+    );
+    assert!(
+        !target_path.exists(),
+        "sidecar commit must not install the target when blocked"
+    );
+    // Fails before the pending commit record and its started event.
+    assert_eq!(artifact_commit_record_count(&cp).await, 0);
+    assert_eq!(event_count(&cp, "artifact.commit_started").await, 0);
+    assert_eq!(event_count(&cp, "artifact.commit_completed").await, 0);
+}
+
+#[tokio::test]
+async fn released_lease_records_evaluated_ids_and_commits_sidecar() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"sidecar").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result_with_bytes(b"sidecar"),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    let lease = acquire_blocking_lease(&cp, source.file_version_id).await;
+    cp.use_leases()
+        .release(
+            lease.id,
+            UseLeaseReleaseReason::Released,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+
+    let report = commit_audio_extract_sidecar(
+        &cp,
+        sidecar_input(
+            &staged,
+            verification,
+            &source,
+            bundle.id,
+            &staging_path,
+            &dir.path().join("released-target.ogg"),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    // A released lease is terminal, so the gate evaluates no live leases.
+    let completed = latest_event_payload(&cp, "artifact.commit_completed").await;
+    assert_eq!(completed["gate_evaluated_lease_ids"], json!([]));
+}
+
+#[tokio::test]
+async fn advisory_lease_is_recorded_in_sidecar_commit_event() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"sidecar").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result_with_bytes(b"sidecar"),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    let lease = cp
+        .use_leases()
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Scan,
+            scope: LeaseScope::Version(source.file_version_id),
+            issuer_kind: IssuerKind::Worker,
+            issuer_ref: "scanner".to_owned(),
+            blocking_mode: BlockingMode::Advisory,
+            ttl: Some(Duration::seconds(3600)),
+            acquired_at: OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap();
+
+    let report = commit_audio_extract_sidecar(
+        &cp,
+        sidecar_input(
+            &staged,
+            verification,
+            &source,
+            bundle.id,
+            &staging_path,
+            &dir.path().join("advisory-target.ogg"),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    let completed = latest_event_payload(&cp, "artifact.commit_completed").await;
+    let evaluated: Vec<u64> = completed["gate_evaluated_lease_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    assert!(
+        evaluated.contains(&lease.id.0),
+        "advisory lease {} must appear in gate_evaluated_lease_ids {evaluated:?}",
+        lease.id.0
+    );
+}
+
+#[tokio::test]
+async fn ttl_expired_lease_does_not_block_sidecar_commit() {
+    let (cp, _db, dir) = fixture().await;
+    let source = seed_source(&cp, dir.path().join("source.mkv"), b"source").await;
+    let bundle = seed_bundle(&cp).await;
+    let staging_path = dir.path().join("staged.ogg");
+    std::fs::write(&staging_path, b"sidecar").unwrap();
+    let staged = record_staged_audio_extract(
+        &cp,
+        &extract_input(source.file_version_id),
+        source.file_location_id,
+        &staging_path,
+        &extract_selection(),
+        &extract_result_with_bytes(b"sidecar"),
+    )
+    .await
+    .unwrap();
+    let verification = record_successful_verification(&cp, &staged, &staging_path).await;
+
+    // Acquired an hour ago with a 1s TTL — expired against the control-plane
+    // clock, but never swept (release_reason still NULL).
+    cp.use_leases()
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(source.file_version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "watcher".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(1)),
+            acquired_at: OffsetDateTime::now_utc() - Duration::hours(1),
+        })
+        .await
+        .unwrap();
+
+    let report = commit_audio_extract_sidecar(
+        &cp,
+        sidecar_input(
+            &staged,
+            verification,
+            &source,
+            bundle.id,
+            &staging_path,
+            &dir.path().join("expired-target.ogg"),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, ArtifactCommitState::Committed);
+    let completed = latest_event_payload(&cp, "artifact.commit_completed").await;
+    assert_eq!(completed["gate_evaluated_lease_ids"], json!([]));
+}
+
+async fn acquire_blocking_lease(
+    cp: &crate::ControlPlane,
+    version_id: FileVersionId,
+) -> voom_store::repo::UseLease {
+    cp.use_leases()
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "watcher".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(Duration::seconds(3600)),
+            acquired_at: OffsetDateTime::now_utc(),
+        })
+        .await
+        .unwrap()
+}
+
+fn sidecar_input(
+    staged: &StagedAudioArtifact,
+    verification_id: ArtifactVerificationId,
+    source: &SeededSource,
+    source_bundle_id: voom_core::ids::BundleId,
+    staging_path: &std::path::Path,
+    target_path: &std::path::Path,
+) -> CommitAudioExtractSidecarInput {
+    CommitAudioExtractSidecarInput {
+        artifact_handle_id: staged.artifact_handle_id,
+        verification_id,
+        source_file_version_id: source.file_version_id,
+        source_bundle_id,
+        role: voom_plan::audio::AudioBundleRole::ExternalAudio,
+        staging_path: staging_path.to_path_buf(),
+        target_path: target_path.to_path_buf(),
+        output: observed(
+            u64::try_from(b"sidecar".len()).unwrap(),
+            &blake3_checksum(b"sidecar"),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
