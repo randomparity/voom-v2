@@ -28,3 +28,13 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0020](0020-eac3-audio-transcode-target.md) | E-AC-3 audio transcode target and deterministic audio bitrate |
 | [0021](0021-language-filter-untagged-and-zero-match-semantics.md) | Language-filter semantics for untagged tracks and zero-match keeps |
 | [0022](0022-sidecar-role-classification.md) | Stem-prefix sidecar classification for V1 asset ingest |
+| [0023](0023-filter-addressed-track-defaults-and-ordering.md) | Filter-addressed track defaults, track-level ordering, and forced flag |
+| [0024](0024-malformed-media-and-hardlink-facts.md) | Malformed-media failure class and hardlink inode facts |
+| [0025](0025-backup-worker-and-backup-before-mutation-gate.md) | Real backup worker, durable backup records, and a backup-before-mutation gate |
+| [0026](0026-audio-synthesis-downmix.md) | Audio track synthesis (downmix companion) |
+| [0027](0027-library-root-and-scan-configuration.md) | Library and library-root configuration, root-scoped scan, and fail-closed disabled roots |
+| [0028](0028-scheduling-and-safety-policy-crud.md) | Scheduling policy and safety policy CRUD, and the fail-closed safety gate |
+| [0029](0029-external-system-registration-health-and-sync.md) | External-system registration, health, path mappings, and read-only sync |
+| [0030](0030-issue-action-cli.md) | Issue action CLI: operator read + transition surface |
+| [0031](0031-keyset-cursor-pagination.md) | Keyset cursor pagination for durable-row inspection commands |
+| [0032](0032-video-and-quality-scoring-profile-management.md) | Video profile and quality-scoring profile management |
