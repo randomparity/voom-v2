@@ -11,7 +11,8 @@ use voom_artifact::commit_pipeline::{
 };
 use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId, BundleId};
 use voom_core::{
-    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, VoomError, WorkerId,
+    ArtifactHandleId, ArtifactLocationId, FileLocationId, FileVersionId, UseLeaseId, VoomError,
+    WorkerId,
 };
 use voom_events::payload::{
     ArtifactCommitCompletedPayload, ArtifactCommitRecoveryRequiredPayload,
@@ -24,7 +25,8 @@ use voom_store::repo::artifacts::{
     NewArtifactHandle, NewArtifactLocation, NewSidecarArtifactCommit,
 };
 use voom_store::repo::bundles::{BundleMemberRole, NewBundleMember};
-use voom_store::repo::identity::MediaSnapshot;
+use voom_store::repo::check_lineage_commit_leases_in_tx;
+use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
 use voom_worker_protocol::{
     AudioObservedFacts, AudioOutputStreamFact, ExpectedFileFacts, ExtractAudioResult,
     ProbeFileRequest, ProbeFileResult, TranscodeAudioResult,
@@ -372,6 +374,7 @@ struct PreparedSidecarCommit {
     target_path: PathBuf,
     temp_path: PathBuf,
     expected_facts: ArtifactFileFacts,
+    gate_evaluated_lease_ids: Vec<UseLeaseId>,
 }
 
 async fn prepare_sidecar_commit(
@@ -391,6 +394,12 @@ async fn prepare_sidecar_commit(
         require_expected_staging_facts(&input.staging_path, &reported_facts).await?;
     let mut tx = begin_tx(&cp.pool).await?;
     let now = cp.clock().now();
+    // Commit safety gate: a blocking use lease live at commit time on the
+    // source lineage fails the sidecar commit here, before the pending commit
+    // record and before any filesystem mutation. The evaluated lease ids are
+    // recorded in the completed event. Any gate-check error is fail-closed.
+    let gate_evaluated_lease_ids =
+        check_sidecar_commit_gate(cp, &mut tx, input.source_file_version_id, now).await?;
     let pending_input = NewArtifactCommitRecord {
         artifact_handle_id: input.artifact_handle_id,
         source_file_version_id: input.source_file_version_id,
@@ -436,7 +445,46 @@ async fn prepare_sidecar_commit(
         target_path,
         temp_path,
         expected_facts,
+        gate_evaluated_lease_ids,
     })
+}
+
+/// Consult the commit safety gate for the audio sidecar extract commit. Returns
+/// the use-lease ids the gate evaluated (recorded in the completed event) when
+/// no blocking lease is live; a blocking lease fails the commit with
+/// `BlockedByUseLease` before any filesystem mutation, and any gate-check error
+/// is fail-closed.
+async fn check_sidecar_commit_gate(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source_file_version_id: FileVersionId,
+    now: time::OffsetDateTime,
+) -> Result<Vec<UseLeaseId>, VoomError> {
+    let Some(source) = cp
+        .identity
+        .get_file_version_in_tx(tx, source_file_version_id)
+        .await?
+    else {
+        return Err(VoomError::NotFound(format!(
+            "file_versions {source_file_version_id} missing"
+        )));
+    };
+    let check = check_lineage_commit_leases_in_tx(
+        tx,
+        &cp.identity,
+        source.file_asset_id,
+        source_file_version_id,
+        now,
+    )
+    .await?;
+    if let Some((lease_id, scope)) = check.blocking {
+        return Err(VoomError::BlockedByUseLease(format!(
+            "audio sidecar commit blocked by active use lease {lease_id} on {} {}",
+            scope.type_str(),
+            scope.id_u64()
+        )));
+    }
+    Ok(check.evaluated_lease_ids)
 }
 
 async fn promote_sidecar(prepared: &PreparedSidecarCommit) -> Result<(), VoomError> {
@@ -492,9 +540,11 @@ async fn finalize_sidecar_commit(
             result_file_version_id: sidecar.file_version_id.0,
             result_file_location_id: sidecar.file_location_id.0,
             target_path: prepared.target_path.display().to_string(),
-            // The audio sidecar extract commit is a separate path that does not
-            // yet run the commit safety gate (#270 scope; follow-up filed).
-            gate_evaluated_lease_ids: Vec::new(),
+            gate_evaluated_lease_ids: prepared
+                .gate_evaluated_lease_ids
+                .iter()
+                .map(|id| id.0)
+                .collect(),
         }),
     )
     .await?;
