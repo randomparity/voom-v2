@@ -15,8 +15,8 @@ use crate::artifact::commit::finalize::{
     finalize_commit, report_from_record, update_commit_report_in_tx,
 };
 use crate::artifact::commit::prepare::{
-    PreMutationContext, PrepareCommitError, read_commit_source_facts, read_verified_staging_facts,
-    require_expected_facts,
+    PreMutationContext, PrepareCommitError, evaluate_commit_safety_gate, read_commit_source_facts,
+    read_verified_staging_facts, require_expected_facts,
 };
 use crate::artifact::commit::promote::promote_prepared;
 use crate::artifact::commit::{
@@ -70,6 +70,19 @@ pub(super) async fn recover_commit_inner(
         read_verified_staging_facts(cp, &mut tx, artifact_handle_id, &target_path, &context)
             .await
             .map_err(recovery_read_error)?;
+    // Re-evaluate the commit safety gate before re-promoting: a blocking use
+    // lease acquired while the commit sat in `recovery_required` must block the
+    // re-drive, fail-closed, before any irreversible filesystem mutation. The
+    // check runs on this host transaction, mirroring the initial prepare (#297,
+    // ADR 0019, design §1187–1190).
+    let gate_evaluated_lease_ids = evaluate_commit_safety_gate(
+        cp,
+        &mut tx,
+        source.source_file_asset_id,
+        source.source_file_version_id,
+        cp.clock().now(),
+    )
+    .await?;
     commit_tx(tx).await?;
 
     let staging_path = PathBuf::from(&verified_staging.staging.value);
@@ -127,10 +140,7 @@ pub(super) async fn recover_commit_inner(
         temp_path,
         expected_facts: expected_facts.clone(),
         promotion_started_at: cp.clock().now(),
-        // Recovery re-drives a commit that already passed the gate at its
-        // original prepare; it does not re-evaluate the gate (out of scope,
-        // documented in the spec/ADR), so no leases are recorded here.
-        gate_evaluated_lease_ids: Vec::new(),
+        gate_evaluated_lease_ids,
     };
 
     let promotion = if already_installed {

@@ -150,24 +150,43 @@ async fn check_commit_safety_gate(
     context: &PreMutationContext,
     now: time::OffsetDateTime,
 ) -> Result<Vec<voom_core::UseLeaseId>, PrepareCommitError> {
-    let check = check_lineage_commit_leases_in_tx(
+    evaluate_commit_safety_gate(
+        cp,
         tx,
-        &cp.identity,
         source.source_file_asset_id,
         source.source_file_version_id,
         now,
     )
     .await
-    .map_err(|err| pre_mutation_error(context, &err))?;
+    .map_err(|err| pre_mutation_error(context, &err))
+}
+
+/// Run the lineage commit safety gate on the caller's transaction. Returns the
+/// use-lease ids the gate evaluated when no blocking lease is live,
+/// `BlockedByUseLease` when one is, or the underlying storage error (fail-closed)
+/// when the check itself fails. Callers treat any error as fail-closed — the
+/// commit must not proceed.
+pub(super) async fn evaluate_commit_safety_gate(
+    cp: &ControlPlane,
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    source_file_asset_id: FileAssetId,
+    source_file_version_id: FileVersionId,
+    now: time::OffsetDateTime,
+) -> Result<Vec<voom_core::UseLeaseId>, VoomError> {
+    let check = check_lineage_commit_leases_in_tx(
+        tx,
+        &cp.identity,
+        source_file_asset_id,
+        source_file_version_id,
+        now,
+    )
+    .await?;
     if let Some((lease_id, scope)) = check.blocking {
-        return Err(pre_mutation_error(
-            context,
-            &VoomError::BlockedByUseLease(format!(
-                "commit blocked by active use lease {lease_id} on {} {}",
-                scope.type_str(),
-                scope.id_u64()
-            )),
-        ));
+        return Err(VoomError::BlockedByUseLease(format!(
+            "commit blocked by active use lease {lease_id} on {} {}",
+            scope.type_str(),
+            scope.id_u64()
+        )));
     }
     Ok(check.evaluated_lease_ids)
 }
