@@ -203,9 +203,9 @@ async fn run_phase_b_gate_in_tx(
         return Ok(Err(result));
     }
 
-    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure_authorized).await?;
+    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure_authorized, now).await?;
     if let Some((lease_id, lease_scope)) =
-        first_blocking_overlap_in_tx(tx, &closure_authorized).await?
+        first_blocking_overlap_in_tx(tx, &closure_authorized, now).await?
     {
         let result = abort_pending_intent_in_tx(
             tx,

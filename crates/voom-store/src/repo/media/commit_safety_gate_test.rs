@@ -877,6 +877,88 @@ async fn prepare_phase_a_advisory_lease_does_not_block() {
 }
 
 #[tokio::test]
+async fn prepare_phase_a_ttl_expired_lease_does_not_block() {
+    // A TTL-bound blocking lease past its `expires_at` must not block a
+    // destructive commit even before cleanup has swept it (design
+    // §1235-1241). The sibling `blocked_by_use_lease` test proves the
+    // same lease blocks while still in-window at T0+1s.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let leases = SqliteUseLeaseRepo::new(pool.clone());
+    // 60s TTL acquired at T0 → expires at T0+60s.
+    leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::Playback,
+            scope: LeaseScope::Version(seeded.version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: Some(time::Duration::seconds(60)),
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    // Evaluate well past expiry; the row still has release_reason = NULL.
+    let outcome = prepare_destructive_commit(
+        gate(&pool, &identity, &events, &resolver),
+        delete_target_for(seeded.location_id),
+        T0 + time::Duration::seconds(120),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, PrepareOutcome::Pending(_)),
+        "expired TTL lease must not block: {outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_phase_a_manual_lock_blocks_regardless_of_time() {
+    // A manual lock is not TTL-bound (`ttl_bound = 0`), so the TTL
+    // freshness clause never expires it — it blocks until terminal even
+    // far in the future.
+    let (pool, _tmp) = fresh_pool().await;
+    let seeded = seed_location(&pool, "/srv/x").await;
+    let leases = SqliteUseLeaseRepo::new(pool.clone());
+    leases
+        .acquire(NewUseLease {
+            kind: UseLeaseKind::ManualLock,
+            scope: LeaseScope::Version(seeded.version_id),
+            issuer_kind: IssuerKind::User,
+            issuer_ref: "alice".to_owned(),
+            blocking_mode: BlockingMode::Blocking,
+            ttl: None,
+            acquired_at: T0,
+        })
+        .await
+        .unwrap();
+
+    let identity = SqliteIdentityRepo::new(pool.clone());
+    let events = SqliteEventRepo::new(pool.clone());
+    let resolver =
+        crate::test_support::FailingAliasResolver::new(std::iter::empty::<FileVersionId>());
+
+    let outcome = prepare_destructive_commit(
+        gate(&pool, &identity, &events, &resolver),
+        delete_target_for(seeded.location_id),
+        T0 + time::Duration::days(365),
+    )
+    .await
+    .unwrap();
+    let result = match outcome {
+        PrepareOutcome::Blocked { result, .. } => result,
+        PrepareOutcome::Pending(i) => panic!("expected Blocked, got Pending({i:?})"),
+    };
+    assert!(matches!(result, CommitGateResult::BlockedByUseLease { .. }));
+}
+
+#[tokio::test]
 async fn prepare_phase_a_blocked_by_stale_evidence_lands_aborted_row_plus_event() {
     let (pool, _tmp) = fresh_pool().await;
     let seeded = seed_location(&pool, "/srv/x").await;

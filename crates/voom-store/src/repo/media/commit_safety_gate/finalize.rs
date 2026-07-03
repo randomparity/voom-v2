@@ -271,6 +271,7 @@ async fn finalize_applied_inner(
         permit.closure_authorized(),
         &snapshot,
         observed,
+        now,
     )
     .await?;
 
@@ -527,6 +528,10 @@ impl PhaseCTripWireReason {
 ///    fire AND (1) did not. `ClosureGrew` is the dominant signal
 ///    inside the combined case; the gate returns
 ///    `BlockedByClosureGrew`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Phase C recheck needs the full execution context plus the clock for TTL-aware lease evaluation; splitting would scatter the trip-wire contract"
+)]
 async fn run_phase_c_trip_wires_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     identity_repo: &dyn IdentityRepo,
@@ -535,6 +540,7 @@ async fn run_phase_c_trip_wires_in_tx(
     closure_authorized: &AffectedScopeClosure,
     snapshot: &[TargetRowEpochTriple],
     observed: Option<&AffectedScopeClosure>,
+    now: OffsetDateTime,
 ) -> Result<PhaseCRecheck, VoomError> {
     // Step 1: recompute closure. A retired target now appears as
     // closure drift (Phase B walker semantics). The force-path bypass
@@ -587,8 +593,8 @@ async fn run_phase_c_trip_wires_in_tx(
     // Step 4: blocking-lease re-evaluation. Evaluated against the
     // merged closure so a lease scoped to a caller-observed-only alias
     // still counts as a fresh blocking lease.
-    let evaluated_at_finalize = list_blocking_leases_in_tx(tx, &closure_final).await?;
-    let first_fresh_lease = first_blocking_overlap_in_tx(tx, &closure_final).await?;
+    let evaluated_at_finalize = list_blocking_leases_in_tx(tx, &closure_final, now).await?;
+    let first_fresh_lease = first_blocking_overlap_in_tx(tx, &closure_final, now).await?;
     let fresh_lease_ids = evaluated_at_finalize;
 
     // Stale target epoch is the dominant signal — fires regardless of

@@ -3,7 +3,7 @@ use super::{
     AffectedScopeClosure, AliasResolutionError, AliasResolver, BTreeSet, BundleId, BypassKind,
     ClosureWarning, CommitId, CommitTarget, EvidenceDrift, EvidenceId, EvidenceRevalidationResult,
     FileAssetId, FileLocationId, FileVersionId, IdentityEvidenceTarget, IdentityRepo, JsonValue,
-    LeaseScope, Row, UseLeaseId, VoomError, i64_from_u64, u64_from_i64,
+    LeaseScope, OffsetDateTime, Row, UseLeaseId, VoomError, i64_from_u64, iso8601, u64_from_i64,
 };
 
 /// Resolve the destructive target into the set of `FileLocation` rows
@@ -163,12 +163,15 @@ pub(super) async fn build_closure(
 /// Read every live blocking use-lease whose scope_*_id column matches a
 /// member of `closure`. Returns the list of `UseLeaseId`s evaluated
 /// (used as `CommitIntent.evaluated_lease_ids` on the success path).
+/// Clock-aware: a TTL-bound lease past its `expires_at` relative to
+/// `now` is treated as expired and excluded even before cleanup runs.
 pub(super) async fn list_blocking_leases_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     closure: &AffectedScopeClosure,
+    now: OffsetDateTime,
 ) -> Result<Vec<UseLeaseId>, VoomError> {
     let mut ids: Vec<UseLeaseId> = Vec::new();
-    let raw_rows = blocking_lease_rows_in_tx(tx, closure).await?;
+    let raw_rows = blocking_lease_rows_in_tx(tx, closure, now).await?;
     for (id, _) in raw_rows {
         ids.push(id);
     }
@@ -178,24 +181,27 @@ pub(super) async fn list_blocking_leases_in_tx(
 /// First overlap between a live blocking use-lease and `closure`. The
 /// return shape carries both the lease id and the lease's scope so the
 /// abort payload can report the offending scope without a second
-/// lookup.
+/// lookup. Clock-aware via `now` — see `list_blocking_leases_in_tx`.
 pub(super) async fn first_blocking_overlap_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     closure: &AffectedScopeClosure,
+    now: OffsetDateTime,
 ) -> Result<Option<(UseLeaseId, LeaseScope)>, VoomError> {
-    Ok(blocking_lease_rows_in_tx(tx, closure)
+    Ok(blocking_lease_rows_in_tx(tx, closure, now)
         .await?
         .into_iter()
         .next())
 }
 
 /// Underlying query: returns every (`lease_id`, scope) pair where the
-/// lease is live (`release_reason IS NULL`), blocking, and its scope
-/// matches a member of `closure`. Ordered by `id ASC` so the
-/// "first overlap" path is deterministic across test runs.
+/// lease is live (`release_reason IS NULL`), not TTL-expired against
+/// `now`, blocking, and its scope matches a member of `closure`.
+/// Ordered by `id ASC` so the "first overlap" path is deterministic
+/// across test runs.
 async fn blocking_lease_rows_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     closure: &AffectedScopeClosure,
+    now: OffsetDateTime,
 ) -> Result<Vec<(UseLeaseId, LeaseScope)>, VoomError> {
     if closure.file_assets.is_empty()
         && closure.bundles.is_empty()
@@ -212,16 +218,22 @@ async fn blocking_lease_rows_in_tx(
         .map_err(|e| VoomError::Internal(format!("encode closure.file_versions: {e}")))?;
     let locations_json = serde_json::to_string(&closure.file_locations)
         .map_err(|e| VoomError::Internal(format!("encode closure.file_locations: {e}")))?;
+    let now_iso = iso8601(now)?;
 
     // SQLite `json_each` produces one row per element of the bound JSON
     // array; the UNION ALL across the four scope columns is the
     // four-granularity overlap check. `release_reason IS NULL`
-    // restricts to live leases; `blocking_mode = 'blocking'` honors the
-    // durable distinction between blocking and advisory.
+    // restricts to live leases; the `ttl_bound`/`expires_at` clause
+    // drops TTL-bound leases past `now` even before cleanup has swept
+    // them (design §1235-1241) while manual locks (`ttl_bound = 0`) and
+    // in-window TTL leases still block; `blocking_mode = 'blocking'`
+    // honors the durable distinction between blocking and advisory.
     let rows = sqlx::query(
         "SELECT id, scope_asset_id, scope_bundle_id, scope_version_id, scope_location_id \
          FROM asset_use_leases \
-         WHERE release_reason IS NULL AND blocking_mode = 'blocking' AND ( \
+         WHERE release_reason IS NULL \
+           AND (ttl_bound = 0 OR expires_at IS NULL OR expires_at >= ?) \
+           AND blocking_mode = 'blocking' AND ( \
              scope_asset_id    IN (SELECT value FROM json_each(?)) \
           OR scope_bundle_id   IN (SELECT value FROM json_each(?)) \
           OR scope_version_id  IN (SELECT value FROM json_each(?)) \
@@ -229,6 +241,7 @@ async fn blocking_lease_rows_in_tx(
          ) \
          ORDER BY id ASC",
     )
+    .bind(&now_iso)
     .bind(&assets_json)
     .bind(&bundles_json)
     .bind(&versions_json)
