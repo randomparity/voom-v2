@@ -347,6 +347,7 @@ pub async fn prepare_destructive_commit(
         &target,
         &accepted_evidence_ids,
         &bypass_set,
+        now,
     )
     .await;
     let walk = match walk_outcome {
@@ -452,6 +453,7 @@ async fn run_phase_a_gate_in_tx(
     target: &CommitTarget,
     accepted_evidence_ids: &[EvidenceId],
     bypass: &BTreeSet<BypassKind>,
+    now: OffsetDateTime,
 ) -> Result<Result<GateWalkOk, GateWalkAbort>, VoomError> {
     // Step 1: closure walk on the gate's IMMEDIATE tx.
     let closure = match build_closure(
@@ -474,8 +476,8 @@ async fn run_phase_a_gate_in_tx(
     };
 
     // Step 2: blocking-lease check.
-    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure).await?;
-    if let Some((lease_id, lease_scope)) = first_blocking_overlap_in_tx(tx, &closure).await? {
+    let evaluated_lease_ids = list_blocking_leases_in_tx(tx, &closure, now).await?;
+    if let Some((lease_id, lease_scope)) = first_blocking_overlap_in_tx(tx, &closure, now).await? {
         return Ok(Err(GateWalkAbort {
             closure_initial: closure,
             abort: PhaseAAbort::UseLease {
