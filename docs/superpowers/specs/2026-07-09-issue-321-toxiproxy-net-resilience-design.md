@@ -102,13 +102,14 @@ HttpClient ──TCP──▶ Toxiproxy proxy (127.0.0.1:<ephemeral>) ──TCP�
 
 **Execution model.** The harness runs the `net_resilience` test binary
 **single-threaded** (`cargo test ... -- --ignored --test-threads=1`). The suite
-is five short tests; serializing them is cheap and removes every cross-test
-race by construction — in particular the ephemeral-port-reuse race that would
-otherwise let one test's freed Toxiproxy `listen` port be re-bound by a
-concurrent test (see scenario 4). Unique proxy names + per-test upstream
-servers remain as defense-in-depth. The `just`/script harness starts a fresh
-`toxiproxy-server` per invocation and kills it on exit, so cross-run state is
-always clean; a panicked test leaking a uniquely named proxy is harmless.
+is five short tests; serializing them is cheap and removes cross-test races by
+construction. Unique proxy names + per-test upstream servers remain as
+defense-in-depth. No scenario depends on a freed ephemeral port staying unbound
+(scenarios 3–4 use a `reset_peer` toxic injected directly at the proxy — see
+§4.3), so there is no port-reuse race to serialize against in the first place.
+The `just`/script harness starts a fresh `toxiproxy-server` per invocation and
+kills it on exit, so cross-run state is always clean; a panicked test leaking a
+uniquely named proxy is harmless.
 
 ### 4.2 Timeout control
 
@@ -121,12 +122,18 @@ duration.
 
 ### 4.3 Scenarios (first harness — high-signal, one per contract path)
 
-| # | Fault | Client call | Client config | Expected result |
+All toxics use `stream: "downstream"` (server→client direction), i.e. they act
+on the bytes flowing back to the client — the path whose stall/reset/latency the
+client's read deadline and transport error handling actually govern. Direction
+is pinned explicitly so a future edit cannot silently swap which path is
+exercised.
+
+| # | Fault (`stream: downstream`) | Client call | Client config | Expected result |
 |---|---|---|---|---|
 | 1 | `timeout` toxic (`timeout=0`, data stops) | `handshake` | `with_timeouts(500ms, 500ms)` | `ProtocolError::Timeout` |
 | 2 | `timeout` toxic (`timeout=0`, data stops) | `dispatch` before response line | `with_timeouts(500ms, 500ms)` | `ProtocolError::Timeout` |
 | 3 | `reset_peer` toxic (`timeout=0`, immediate RST) | `handshake` | `with_timeouts(2s, 2s)` | `ProtocolError::InvalidPayload` whose `detail` begins `request:` |
-| 4 | **dead upstream** — proxy is up, but its `upstream` points at a bound-then-dropped port (nothing listening) | `handshake` | `with_timeouts(2s, 2s)` | `ProtocolError::InvalidPayload` whose `detail` begins `request:` |
+| 4 | `reset_peer` toxic (`timeout=0`, immediate RST) | `dispatch` before response line | `with_timeouts(2s, 2s)` | `ProtocolError::InvalidPayload` whose `detail` begins `request:` |
 | 5 | `latency` toxic (fixed **200 ms**) | `handshake` | `with_timeouts(2s, 2s)` (dispatch deadline irrelevant) | `Ok(HandshakeResponse)` with `agreed == offered` |
 
 **Why these assertions, precisely.** The client's contract maps a connection
@@ -134,18 +141,23 @@ fault (connect/transport error from `client.request(..).await`) to
 `ProtocolError::InvalidPayload { detail: "request: …" }` and a deadline expiry to
 `ProtocolError::Timeout` (`client.rs`). So:
 
-- Scenarios 1–2 assert `Timeout` — the hang-until-deadline path.
+- Scenarios 1–2 assert `Timeout` — the hang-until-deadline path, on the
+  handshake and dispatch deadlines respectively.
 - Scenarios 3–4 assert **not `Timeout`, and specifically `InvalidPayload` whose
-  `detail` starts with `request:`**. The variant alone already separates
-  "prompt connection fault" from "hung until deadline", so no wall-clock
-  threshold is asserted (an `elapsed < deadline` check adds no signal and a
-  tight bound flakes under CI load). The `request:` prefix disambiguates the
-  overloaded `InvalidPayload` (which also covers encode/build/body errors) so
-  the test cannot pass on an unrelated payload error. Scenario 4 uses a **dead
-  upstream** rather than a deleted proxy so it never depends on a freed
-  ephemeral `listen` port being unbound — the client always connects to a live
-  proxy; the proxy's failure to reach its dead upstream is what the client
-  observes.
+  `detail` starts with `request:`**, using a `reset_peer` toxic on the handshake
+  and dispatch paths respectively. The variant alone already separates "prompt
+  connection fault" from "hung until deadline", so no wall-clock threshold is
+  asserted (an `elapsed < deadline` check adds no signal and a tight bound flakes
+  under CI load). The `request:` prefix disambiguates the overloaded
+  `InvalidPayload` (which also covers encode/build/body errors) so the test
+  cannot pass on an unrelated payload error. `reset_peer` is chosen over a
+  "dead upstream / refused connection" mechanism because it injects the RST
+  directly at the proxy and therefore **depends on no ephemeral port staying
+  unbound** — a bound-then-dropped port is itself a freed port the kernel may
+  reassign, so a refused-connection scenario would merely relocate the
+  port-reuse race rather than remove it. Splitting reset across handshake (3)
+  and dispatch (4) also covers both distinct connection-fault code paths in the
+  client (`handshake`'s and `dispatch`'s `request().await`).
 - Scenario 5 encodes intent (AGENTS.md Rule 9): a 200 ms injected latency
   against a ≥2 s deadline leaves ~1.8 s of margin, so it does not flake under
   jitter yet trips if a future change tightens the handshake deadline below the
@@ -154,10 +166,10 @@ fault (connect/transport error from `client.request(..).await`) to
   (`agreed == offered`), so a regression that breaks the handshake path — not
   just an over-aggressive deadline — also fails it.
 
-If TDD observes that `hyper` surfaces an RST or dead-upstream as a
-distinct-but-reasonable variant/detail, the test records the observed value and
-this table is updated to match; the invariant is that a connection fault yields
-a **typed, non-`Timeout`, non-hanging** error, never a hang or a panic.
+If TDD observes that `hyper` surfaces an RST as a distinct-but-reasonable
+variant/detail, the test records the observed value and this table is updated to
+match; the invariant is that a connection fault yields a **typed, non-`Timeout`,
+non-hanging** error, never a hang or a panic.
 
 ### 4.4 Toxiproxy control helper
 
@@ -166,18 +178,26 @@ A small test-only struct (no production surface):
 ```rust
 struct Toxiproxy { base: String, http: reqwest::Client }
 impl Toxiproxy {
-    fn from_env() -> Self;                 // TOXIPROXY_ADDR, default 127.0.0.1:8474
+    fn from_env() -> Self;                 // requires TOXIPROXY_ADDR — no default
     async fn create_proxy(&self, name, upstream: SocketAddr) -> SocketAddr; // resolved listen
     async fn add_toxic(&self, name, toxic: serde_json::Value);
     async fn delete_proxy(&self, name);
 }
 ```
 
-If the Toxiproxy server is unreachable when these `#[ignore]`d tests are
-explicitly invoked, the helper **fails loud** (panics with an actionable
-message pointing at `just net-resilience`) rather than skipping — a missing
-server under explicit invocation is a setup error, not a skip condition
-(AGENTS.md Rule 12). `#[ignore]` is what keeps them out of `just test`.
+`from_env` **requires** the `TOXIPROXY_ADDR` environment variable and panics
+with an actionable message ("set TOXIPROXY_ADDR or run `just net-resilience`")
+when it is unset. It deliberately has **no `127.0.0.1:8474` default**: the
+wrong-server guard must be a property of the code path, not of one entry point.
+`#[ignore]` permits a developer to run `cargo test --ignored` directly, bypassing
+the shell harness; without a default, that direct path also fails loud instead
+of silently driving whatever foreign toxiproxy happens to sit on the well-known
+8474 port. The `scripts/net-resilience.sh` harness is the sole thing that sets
+`TOXIPROXY_ADDR`, and it points it only at a server the script itself started
+(§4.5). If the address is set but the server is unreachable, the helper likewise
+**fails loud** rather than skipping — a missing server under explicit invocation
+is a setup error, not a skip condition (AGENTS.md Rule 12). `#[ignore]` is what
+keeps these tests out of `just test`.
 
 ### 4.5 Provisioning
 
