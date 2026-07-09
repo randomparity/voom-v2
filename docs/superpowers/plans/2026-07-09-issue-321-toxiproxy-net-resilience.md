@@ -48,23 +48,30 @@ TDD note: these are `#[ignore]`d integration tests against an external process, 
 **Toxiproxy control helper (test-only, in the test file):**
 - `fn toxiproxy_base() -> String` — read `TOXIPROXY_ADDR` (no default); panic with "set TOXIPROXY_ADDR or run `just net-resilience`" when unset.
 - `struct Toxiproxy { base: String, http: reqwest::Client }` with:
-  - `async fn create_proxy(&self, name: &str, upstream: SocketAddr) -> SocketAddr` — `POST {base}/proxies` with `{"name", "listen":"127.0.0.1:0", "upstream":"<upstream>", "enabled":true}`; parse the resolved `listen` from the JSON response and return it as a `SocketAddr`.
+  - `async fn create_proxy(&self, name: &str, upstream: SocketAddr) -> SocketAddr` — **idempotent**: first issue a best-effort `DELETE {base}/proxies/{name}` (ignore its status) to clear any proxy leaked by a prior panicking run, then `POST {base}/proxies` with `{"name", "listen":"127.0.0.1:0", "upstream":"<upstream>", "enabled":true}`; parse the resolved `listen` from the JSON response and return it as a `SocketAddr`. The pre-delete prevents a `409 Conflict` from a stale same-named proxy poisoning the manual TDD loop (Task 1 iterates against a long-lived toxiproxy where an asserting-failing test unwinds before its end-of-test cleanup).
   - `async fn add_toxic(&self, name: &str, toxic: serde_json::Value)` — `POST {base}/proxies/{name}/toxics` with the given body (each caller sets `type`, `stream:"downstream"`, `toxicity:1.0`, `attributes`).
   - `async fn delete_proxy(&self, name: &str)` — `DELETE {base}/proxies/{name}` (best-effort cleanup at end of test).
   - On any non-success HTTP status or transport error, panic with the status/body (fail loud — a broken control call must not look like a passing scenario).
 - Reachability: the first `create_proxy` call naturally fails loud if the server is unreachable; optionally add a `GET {base}/version` assertion in a shared setup helper for a clearer message.
 
-**Upstream server helper — must be RE-IMPLEMENTED, not imported.** `crates/voom-worker-protocol/src/http_test.rs` is a `#[cfg(test)]` **private** module (it opens with `use super::*`); an integration test at `tests/net_resilience.rs` compiles as a **separate crate** and can only see the library's public API, so `running_server`/`creds`/`request`/`operation_handler` **cannot be imported** — copy/re-implement equivalents locally in the test file. This needs **no `src/` change**: every required type is publicly re-exported. Bring into scope:
+**Upstream server helper — must be RE-IMPLEMENTED, not imported.** `crates/voom-worker-protocol/src/http_test.rs` is a `#[cfg(test)]` **private** module (it opens with `use super::*`); an integration test at `tests/net_resilience.rs` compiles as a **separate crate** and can only see the library's public API, so `running_server`/`creds`/`request`/`operation_handler` **cannot be imported** — copy/re-implement equivalents locally in the test file. This needs **no `src/` change** and **no `Cargo.toml` change beyond the `reqwest` dev-dep**: every required type is publicly re-exported, and `secrecy`/`time` are already normal deps of `voom-worker-protocol` (so an integration test can use them). Bring into scope:
 ```rust
 use voom_worker_protocol::{
     HttpServer, HttpClient, ClientHandle, ServerHandle, ServerRunning,
-    OperationHandler, OperationRequest, OperationResponse, OperationKind,
-    ProtocolError, WorkerCredentials, HandshakeResponse,
+    OperationHandler, OperationDispatch, OperationRequest, OperationResponse,
+    OperationKind, ProtocolError, WorkerCredentials, HandshakeResponse,
 };
 use voom_core::{PROTOCOL_VERSION, LeaseId, WorkerId};
+use secrecy::SecretString;      // WorkerCredentials.secret has no constructor
+use time::OffsetDateTime;       // OperationResponse.accepted_at
 use std::net::SocketAddr;
 ```
-The `ClientHandle`/`ServerHandle` traits are required in scope to call `client.handshake()`/`client.dispatch()`/`server.serve()`. Build the upstream as `HttpServer::new(creds, handler).serve("127.0.0.1:0")`, returning the bound `SocketAddr` and `ServerRunning` handle; provide a local `creds()`, an `OperationHandler` returning a valid `OperationResponse`, and a `request(...)` builder, all modeled on (not imported from) `http_test.rs`. Offer `PROTOCOL_VERSION` so scenario 5's handshake yields `agreed == offered`.
+The `ClientHandle`/`ServerHandle` traits are required in scope to call `client.handshake()`/`client.dispatch()`/`server.serve()`. Build the upstream as `HttpServer::new(creds, handler).serve("127.0.0.1:0")`, returning the bound `SocketAddr` and `ServerRunning` handle. Provide, all modeled on (not imported from) `http_test.rs`:
+- `creds()` → a `WorkerCredentials { worker_id: WorkerId(..), worker_epoch: .., secret: SecretString::from("..") }`;
+- an `OperationHandler` (`Arc<dyn Fn(OperationRequest) -> Pin<Box<dyn Future<Output = Result<OperationDispatch, ProtocolError>> + Send>> + Send + Sync>`) whose Ok value is `OperationDispatch::buffered(OperationResponse { lease_id, accepted_at: OffsetDateTime::from_unix_timestamp(..).unwrap() }, body)` (the handler fires only in the dispatch scenarios; a minimal buffered response is sufficient);
+- a `request(lease_id, payload)` builder producing an `OperationRequest` (with `OperationKind::ProbeFile`).
+
+Offer `PROTOCOL_VERSION` so scenario 5's handshake yields `agreed == offered`. (Handshake is served by `HttpServer`'s negotiation route, not the operation handler, so scenarios 1/3/5 never invoke the handler.)
 
 **Scenarios (spec §4.3 — one `#[ignore]`d `#[tokio::test]` each, unique proxy name):**
 - [ ] **Scenario 1 — handshake timeout.** Start server; create proxy; `add_toxic(type:"timeout", attributes:{timeout:0}, stream:"downstream")`; `HttpClient::with_timeouts(proxy_addr, 500ms, 500ms)`; assert `handshake(PROTOCOL_VERSION)` returns `Err(ProtocolError::Timeout { .. })`.
