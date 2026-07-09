@@ -131,10 +131,10 @@ exercised.
 | # | Fault (`stream: downstream`) | Client call | Client config | Expected result |
 |---|---|---|---|---|
 | 1 | `timeout` toxic (`timeout=0`, data stops) | `handshake` | `with_timeouts(500ms, 500ms)` | `ProtocolError::Timeout` |
-| 2 | `timeout` toxic (`timeout=0`, data stops) | `dispatch` before response line | `with_timeouts(500ms, 500ms)` | `ProtocolError::Timeout` |
+| 2 | `timeout` toxic (`timeout=0`, data stops) | `dispatch` (response head blocked) | `with_timeouts(500ms, 500ms)` | `ProtocolError::Timeout` |
 | 3 | `reset_peer` toxic (`timeout=0`, immediate RST) | `handshake` | `with_timeouts(2s, 2s)` | `ProtocolError::InvalidPayload` whose `detail` begins `request:` |
 | 4 | `reset_peer` toxic (`timeout=0`, immediate RST) | `dispatch` before response line | `with_timeouts(2s, 2s)` | `ProtocolError::InvalidPayload` whose `detail` begins `request:` |
-| 5 | `latency` toxic (fixed **200 ms**) | `handshake` | `with_timeouts(2s, 2s)` (dispatch deadline irrelevant) | `Ok(HandshakeResponse)` with `agreed == offered` |
+| 5 | `latency` toxic (fixed **200 ms**) | `handshake` | `HttpClient::new` (production `DEFAULT_HANDSHAKE_TIMEOUT`, 10 s) | `Ok(HandshakeResponse)` with `agreed == offered` |
 
 **Why these assertions, precisely.** The client's contract maps a connection
 fault (connect/transport error from `client.request(..).await`) to
@@ -142,7 +142,17 @@ fault (connect/transport error from `client.request(..).await`) to
 `ProtocolError::Timeout` (`client.rs`). So:
 
 - Scenarios 1–2 assert `Timeout` — the hang-until-deadline path, on the
-  handshake and dispatch deadlines respectively.
+  handshake and dispatch deadlines respectively. Note a precise limit of
+  scenario 2: a full-downstream `timeout` toxic blocks **all** server→client
+  bytes, including the HTTP response head, so the client hangs at
+  `client.request(..).await` (which awaits the head) and the `dispatch_timeout`
+  wrapper fires there — it does **not** reach `read_response_line`. Scenario 2
+  therefore verifies that the *dispatch deadline* (distinct constant and method
+  from scenario 1's handshake deadline) bounds a stalled response, not the
+  response-line-read seam specifically. Covering the "head arrives, then the
+  response line stalls" sub-path needs a head-through-then-stall toxic
+  (`bandwidth` rate 0 after N bytes, or `data_limit`) and is a deliberate future
+  extension, kept out of this first high-signal cut (AGENTS.md Rule 3).
 - Scenarios 3–4 assert **not `Timeout`, and specifically `InvalidPayload` whose
   `detail` starts with `request:`**, using a `reset_peer` toxic on the handshake
   and dispatch paths respectively. The variant alone already separates "prompt
@@ -158,13 +168,18 @@ fault (connect/transport error from `client.request(..).await`) to
   port-reuse race rather than remove it. Splitting reset across handshake (3)
   and dispatch (4) also covers both distinct connection-fault code paths in the
   client (`handshake`'s and `dispatch`'s `request().await`).
-- Scenario 5 encodes intent (AGENTS.md Rule 9): a 200 ms injected latency
-  against a ≥2 s deadline leaves ~1.8 s of margin, so it does not flake under
-  jitter yet trips if a future change tightens the handshake deadline below the
-  injected latency. It is a **combined liveness+latency** assertion: it requires
-  the in-process `HttpServer` to complete a real handshake through the proxy
-  (`agreed == offered`), so a regression that breaks the handshake path — not
-  just an over-aggressive deadline — also fails it.
+- Scenario 5 encodes intent (AGENTS.md Rule 9). It uses the **default-constructed
+  client** (`HttpClient::new`, production `DEFAULT_HANDSHAKE_TIMEOUT` = 10 s), not
+  `with_timeouts`, precisely so the assertion is tied to the *production* deadline
+  rather than a synthetic one: a 200 ms injected latency completes with a wide
+  (~9.8 s) margin, so the test does not flake under CI jitter, and it would trip
+  only if a future change tightened `DEFAULT_HANDSHAKE_TIMEOUT` below the injected
+  latency. It is a **combined liveness+latency** assertion — it requires the
+  in-process `HttpServer` to complete a real handshake through the proxy
+  (`agreed == offered`), so a regression that breaks the handshake path, not just
+  an over-aggressive deadline, also fails it. (Because a latency toxic delays but
+  does not stop data, driving it against the real 10 s deadline stays fast; the
+  short `with_timeouts` used by the fault scenarios is unnecessary here.)
 
 If TDD observes that `hyper` surfaces an RST as a distinct-but-reasonable
 variant/detail, the test records the observed value and this table is updated to
@@ -207,13 +222,16 @@ keeps these tests out of `just test`.
   on `PATH` (local default) or, when `NET_RESILIENCE_DOWNLOAD=1` (CI), downloads
   the pinned release asset and verifies it against the checked-in SHA256 for
   that platform before use;
-- picks the control-API address as follows: honor `TOXIPROXY_ADDR` if set;
-  otherwise use `127.0.0.1:8474`, but **fail loud before starting** if that
-  address is already listening (`nc -z` / `/dev/tcp` probe). This prevents the
-  silent-wrong-server failure mode where a pre-existing toxiproxy on the default
-  port answers the readiness probe: the script would run the suite against a
-  server it did not start and cannot reap. The operator resolves the collision
-  by stopping the other server or exporting a free `TOXIPROXY_ADDR`;
+- picks the control-API address — `TOXIPROXY_ADDR` if set, otherwise
+  `127.0.0.1:8474` — and then, **for whichever address was chosen**, fails loud
+  before starting if it is already listening (`nc -z` / `/dev/tcp` probe). The
+  probe runs unconditionally on the resolved address, not only on the default
+  branch, so an operator who points `TOXIPROXY_ADDR` at a busy or stale address
+  gets the same actionable collision message as the default-port case. This
+  prevents the silent-wrong-server failure mode where a pre-existing toxiproxy
+  answers the readiness probe and the script runs the suite against a server it
+  did not start and cannot reap. The operator resolves the collision by stopping
+  the other server or choosing a free `TOXIPROXY_ADDR`;
 - starts the server bound to the chosen address, then confirms readiness by
   polling `/version` **only after** the just-spawned PID is alive, so readiness
   is attributed to the script's own server;
@@ -247,9 +265,15 @@ dependency" decision, and the "harness only, no production change" boundary.
   server process is always reaped.
 - **Done always maps to a green suite.** Either (1) all five scenarios pass
   against the current `HttpClient`, or (2) a scenario surfaced a real client
-  defect, a follow-up issue was filed, and *that specific scenario* is
-  `#[ignore]`d with the issue link in its attribute reason — so an unexplained
-  red scenario is never a valid end state.
+  defect, a follow-up issue was filed, and *that specific scenario* is excluded
+  from the harness run by a `--skip <test_name>` filter added to the
+  `cargo test` line in `scripts/net-resilience.sh`, with a comment naming the
+  follow-up issue. `#[ignore]` cannot serve as the quarantine: every test in this
+  file is already `#[ignore]`d and the harness opts them in with `--ignored`, so
+  `--ignored` *runs* ignored tests — adding another `#[ignore]` would not exclude
+  the scenario. `--skip` is the mechanism compatible with `--ignored`; it keeps
+  the harness green while the defect is tracked, and removing the `--skip` line
+  is the single visible step that re-arms the scenario once the defect is fixed.
 - `just ci` is unchanged and does not run these tests.
 - The new workflow runs on dispatch and weekly, opening a tracking issue on
   scheduled failure (mirroring `chaos-e2e.yml`).
