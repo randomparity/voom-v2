@@ -39,7 +39,7 @@
 
 Where it fits: the core deliverable — the executable resilience contract. Everything else provisions or schedules it.
 
-TDD note: these are `#[ignore]`d integration tests against an external process, so the red→green loop is driven by a **locally running toxiproxy**, not `just test`. Before/while implementing, install it (`brew install toxiproxy` on macOS, or download the pinned binary) and start it: `toxiproxy-server &` (listens on `127.0.0.1:8474`), then run `TOXIPROXY_ADDR=127.0.0.1:8474 cargo test -p voom-worker-protocol --test net_resilience -- --ignored --test-threads=1 --nocapture`. Once Task 2 lands, `just net-resilience` does this end-to-end. Write each scenario as a failing/observing test first, run it, then pin the asserted variant to observed behavior per spec §4.3.
+TDD note: these are `#[ignore]`d integration tests against an external process, so the red→green loop is driven by a **locally running toxiproxy**, not `just test`. Before/while implementing, install it (`brew install toxiproxy` on macOS, or download the pinned binary) and start it: `toxiproxy-server &` (listens on `127.0.0.1:8474`), then run `TOXIPROXY_ADDR=127.0.0.1:8474 cargo test -p voom-worker-protocol --test net_resilience -- --ignored --test-threads=1 --nocapture`. Once Task 3 lands, `just net-resilience` does this end-to-end; until then (during Tasks 1–2) the only working invocation is the raw `cargo test ... --ignored` command above with a manually started toxiproxy. Write each scenario as a failing/observing test first, run it, then pin the asserted variant to observed behavior per spec §4.3.
 
 **Files:**
 - Modify: `crates/voom-worker-protocol/Cargo.toml`
@@ -54,13 +54,23 @@ TDD note: these are `#[ignore]`d integration tests against an external process, 
   - On any non-success HTTP status or transport error, panic with the status/body (fail loud — a broken control call must not look like a passing scenario).
 - Reachability: the first `create_proxy` call naturally fails loud if the server is unreachable; optionally add a `GET {base}/version` assertion in a shared setup helper for a clearer message.
 
-**Upstream server helper:** reuse the pattern from `crates/voom-worker-protocol/src/http_test.rs` (`running_server`) — build `HttpServer::new(creds, handler)` and `.serve("127.0.0.1:0")`, returning the bound `SocketAddr` and the `ServerRunning` handle. `creds()`, an `OperationHandler` that returns a valid streaming/one-shot `OperationResponse`, `HandshakeRequest`/offered version, and `request(...)` builders mirror the existing `http_test.rs` helpers. Offer `voom_core::PROTOCOL_VERSION` so scenario 5's handshake yields `agreed == offered`.
+**Upstream server helper — must be RE-IMPLEMENTED, not imported.** `crates/voom-worker-protocol/src/http_test.rs` is a `#[cfg(test)]` **private** module (it opens with `use super::*`); an integration test at `tests/net_resilience.rs` compiles as a **separate crate** and can only see the library's public API, so `running_server`/`creds`/`request`/`operation_handler` **cannot be imported** — copy/re-implement equivalents locally in the test file. This needs **no `src/` change**: every required type is publicly re-exported. Bring into scope:
+```rust
+use voom_worker_protocol::{
+    HttpServer, HttpClient, ClientHandle, ServerHandle, ServerRunning,
+    OperationHandler, OperationRequest, OperationResponse, OperationKind,
+    ProtocolError, WorkerCredentials, HandshakeResponse,
+};
+use voom_core::{PROTOCOL_VERSION, LeaseId, WorkerId};
+use std::net::SocketAddr;
+```
+The `ClientHandle`/`ServerHandle` traits are required in scope to call `client.handshake()`/`client.dispatch()`/`server.serve()`. Build the upstream as `HttpServer::new(creds, handler).serve("127.0.0.1:0")`, returning the bound `SocketAddr` and `ServerRunning` handle; provide a local `creds()`, an `OperationHandler` returning a valid `OperationResponse`, and a `request(...)` builder, all modeled on (not imported from) `http_test.rs`. Offer `PROTOCOL_VERSION` so scenario 5's handshake yields `agreed == offered`.
 
 **Scenarios (spec §4.3 — one `#[ignore]`d `#[tokio::test]` each, unique proxy name):**
 - [ ] **Scenario 1 — handshake timeout.** Start server; create proxy; `add_toxic(type:"timeout", attributes:{timeout:0}, stream:"downstream")`; `HttpClient::with_timeouts(proxy_addr, 500ms, 500ms)`; assert `handshake(PROTOCOL_VERSION)` returns `Err(ProtocolError::Timeout { .. })`.
 - [ ] **Scenario 2 — dispatch timeout (response head blocked).** Same toxic; `dispatch(creds, key, request)`; assert `Err(ProtocolError::Timeout { .. })`. Document in a comment that the toxic blocks the response head, so the deadline fires at `request().await` (validates the dispatch-deadline wrapper, not `read_response_line`).
-- [ ] **Scenario 3 — handshake reset.** `add_toxic(type:"reset_peer", attributes:{timeout:0}, stream:"downstream")`; `with_timeouts(2s, 2s)`; assert `handshake` returns `Err(ProtocolError::InvalidPayload { detail })` with `detail.starts_with("request:")`. If observed variant/detail differs, record the observed value and update the assertion + spec table (spec permits this; the invariant is typed, non-`Timeout`, non-hanging).
-- [ ] **Scenario 4 — dispatch reset.** Same `reset_peer` toxic; `dispatch`; assert `Err(ProtocolError::InvalidPayload { detail })` with `detail.starts_with("request:")` (same recording rule).
+- [ ] **Scenario 3 — handshake reset.** `add_toxic(type:"reset_peer", attributes:{timeout:0}, stream:"downstream")`; `with_timeouts(2s, 2s)`; assert `handshake` returns an `Err`. **Assert the invariant first:** the error is **not** `ProtocolError::Timeout` and is a typed `ProtocolError::InvalidPayload { .. }` (proves a prompt connection fault, not a hang). Then **tighten** to `detail.starts_with("request:")` — the expected seam per `client.rs` (the `request().await` mapping). If observed detail differs (e.g. `body:` when the RST lands during response-body collection), record the observed value and update the tightening; the invariant (typed, non-`Timeout`, non-hanging) is the hard assertion, the prefix is the refinement.
+- [ ] **Scenario 4 — dispatch reset.** Same `reset_peer` toxic; `dispatch`; same assertion shape: not `Timeout`, is `InvalidPayload { .. }` (invariant), tightened to `detail.starts_with("request:")` with the same record-and-update rule.
 - [ ] **Scenario 5 — latency tolerance (liveness).** `add_toxic(type:"latency", attributes:{latency:200, jitter:0}, stream:"downstream")`; use `HttpClient::new(proxy_addr)` (production 10 s handshake deadline); assert `handshake` returns `Ok(resp)` with `resp.agreed == PROTOCOL_VERSION`.
 - [ ] Each test deletes its proxy and shuts down its server at the end.
 
