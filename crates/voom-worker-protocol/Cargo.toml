@@ -27,6 +27,7 @@ time = { workspace = true, features = ["serde", "parsing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "sync"] }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 trybuild.workspace = true
 

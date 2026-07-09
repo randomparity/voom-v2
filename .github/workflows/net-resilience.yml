@@ -1,0 +1,57 @@
+name: net-resilience
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly run on the default branch so this otherwise dispatch-only job
+    # cannot silently rot (Mondays 06:00 UTC).
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: net-resilience-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  net-resilience:
+    name: net-resilience
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+
+      - name: Run network-resilience suite
+        # The recipe downloads + SHA256-verifies the pinned toxiproxy-server,
+        # starts it, runs the #[ignore]d suite, and reaps the server.
+        run: just net-resilience-ci
+
+  notify-failure:
+    name: notify failure
+    needs: net-resilience
+    # Only on scheduled runs: a manual dispatch already shows its result to
+    # the operator who triggered it.
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Scheduled net-resilience run failed" \
+            --body "The weekly scheduled net-resilience workflow failed. Run: $RUN_URL"

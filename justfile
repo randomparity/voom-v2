@@ -156,3 +156,11 @@ chaos-e2e-local-script-test:
 # Run an extended local-only Chaos Librarian wall-clock soak.
 chaos-e2e-soak:
     CHAOS_DURATION=${CHAOS_DURATION:-2h} CHAOS_SPEED=${CHAOS_SPEED:-10x} CHAOS_PRESERVE_OUTPUT=1 ./scripts/chaos-e2e-local.sh
+
+# Run the opt-in Toxiproxy network-resilience suite (server from PATH). Not part of `just ci`.
+net-resilience *ARGS:
+    ./scripts/net-resilience.sh {{ARGS}}
+
+# Hermetic net-resilience run: download + SHA256-verify the pinned toxiproxy-server. Used by CI.
+net-resilience-ci *ARGS:
+    NET_RESILIENCE_DOWNLOAD=1 ./scripts/net-resilience.sh {{ARGS}}

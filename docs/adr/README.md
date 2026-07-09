@@ -38,3 +38,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0030](0030-issue-action-cli.md) | Issue action CLI: operator read + transition surface |
 | [0031](0031-keyset-cursor-pagination.md) | Keyset cursor pagination for durable-row inspection commands |
 | [0032](0032-video-and-quality-scoring-profile-management.md) | Video profile and quality-scoring profile management |
+| [0033](0033-toxiproxy-network-resilience-harness.md) | Toxiproxy network-resilience harness at the worker-protocol boundary |
