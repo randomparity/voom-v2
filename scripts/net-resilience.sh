@@ -68,7 +68,7 @@ resolve_server_bin() {
     return
   fi
 
-  local platform expected cache_dir bin url actual
+  local platform expected cache_dir bin url actual tmp
   platform="$(detect_platform)"
   if ! expected="$(sha_for_platform "$platform")"; then
     echo "no pinned SHA256 for platform: $platform" >&2
@@ -80,16 +80,25 @@ resolve_server_bin() {
   if [[ ! -x "$bin" ]] || [[ "$(sha256_of "$bin")" != "$expected" ]]; then
     url="https://github.com/Shopify/toxiproxy/releases/download/v${toxiproxy_version}/toxiproxy-server-${platform}"
     echo "==> downloading toxiproxy-server ${toxiproxy_version} (${platform})" >&2
-    curl -fsSL "$url" -o "$bin"
-    actual="$(sha256_of "$bin")"
-    if [[ "$actual" != "$expected" ]]; then
-      echo "SHA256 mismatch for $bin" >&2
-      echo "  expected $expected" >&2
-      echo "  actual   $actual" >&2
-      rm -f "$bin"
+    # Download to a unique temp file, verify, then atomically rename into place
+    # so an interrupted or concurrent download can never leave a torn binary at
+    # the cache path.
+    tmp="$(mktemp "${bin}.XXXXXX")"
+    if ! curl -fsSL "$url" -o "$tmp"; then
+      rm -f "$tmp"
+      echo "download failed: $url" >&2
       exit 1
     fi
-    chmod +x "$bin"
+    actual="$(sha256_of "$tmp")"
+    if [[ "$actual" != "$expected" ]]; then
+      echo "SHA256 mismatch for $url" >&2
+      echo "  expected $expected" >&2
+      echo "  actual   $actual" >&2
+      rm -f "$tmp"
+      exit 1
+    fi
+    chmod +x "$tmp"
+    mv -f "$tmp" "$bin"
   fi
   echo "$bin"
 }
