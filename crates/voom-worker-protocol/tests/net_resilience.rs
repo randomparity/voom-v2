@@ -84,15 +84,10 @@ impl Toxiproxy {
     }
 
     /// Add a toxic to `proxy`. `attributes` carries the toxic-specific fields.
-    async fn add_toxic(
-        &self,
-        proxy: &str,
-        toxic_name: &str,
-        toxic_type: &str,
-        attributes: serde_json::Value,
-    ) {
+    /// Each proxy carries exactly one toxic, so the toxic name is just its type.
+    async fn add_toxic(&self, proxy: &str, toxic_type: &str, attributes: serde_json::Value) {
         let body = serde_json::json!({
-            "name": toxic_name,
+            "name": toxic_type,
             "type": toxic_type,
             "stream": "downstream",
             "toxicity": 1.0,
@@ -197,13 +192,8 @@ async fn handshake_timeout_yields_timeout_error() {
     let tp = Toxiproxy::new();
     let name = "net-resilience-handshake-timeout";
     let proxy = tp.create_proxy(name, upstream).await;
-    tp.add_toxic(
-        name,
-        "stall",
-        "timeout",
-        serde_json::json!({ "timeout": 0 }),
-    )
-    .await;
+    tp.add_toxic(name, "timeout", serde_json::json!({ "timeout": 0 }))
+        .await;
 
     let client = HttpClient::with_timeouts(proxy, SHORT, SHORT);
     let err = client.handshake(PROTOCOL_VERSION).await.unwrap_err();
@@ -226,21 +216,12 @@ async fn dispatch_timeout_yields_timeout_error() {
     let tp = Toxiproxy::new();
     let name = "net-resilience-dispatch-timeout";
     let proxy = tp.create_proxy(name, upstream).await;
-    tp.add_toxic(
-        name,
-        "stall",
-        "timeout",
-        serde_json::json!({ "timeout": 0 }),
-    )
-    .await;
+    tp.add_toxic(name, "timeout", serde_json::json!({ "timeout": 0 }))
+        .await;
 
     let client = HttpClient::with_timeouts(proxy, SHORT, SHORT);
     let err = client
-        .dispatch(
-            &creds(),
-            "net-resilience-dispatch-timeout",
-            request(LeaseId(1)),
-        )
+        .dispatch(&creds(), name, request(LeaseId(1)))
         .await
         .unwrap_err();
     assert!(
@@ -259,13 +240,8 @@ async fn handshake_reset_yields_connection_error_not_timeout() {
     let tp = Toxiproxy::new();
     let name = "net-resilience-handshake-reset";
     let proxy = tp.create_proxy(name, upstream).await;
-    tp.add_toxic(
-        name,
-        "rst",
-        "reset_peer",
-        serde_json::json!({ "timeout": 0 }),
-    )
-    .await;
+    tp.add_toxic(name, "reset_peer", serde_json::json!({ "timeout": 0 }))
+        .await;
 
     let client = HttpClient::with_timeouts(proxy, LENIENT, LENIENT);
     let err = client.handshake(PROTOCOL_VERSION).await.unwrap_err();
@@ -282,21 +258,12 @@ async fn dispatch_reset_yields_connection_error_not_timeout() {
     let tp = Toxiproxy::new();
     let name = "net-resilience-dispatch-reset";
     let proxy = tp.create_proxy(name, upstream).await;
-    tp.add_toxic(
-        name,
-        "rst",
-        "reset_peer",
-        serde_json::json!({ "timeout": 0 }),
-    )
-    .await;
+    tp.add_toxic(name, "reset_peer", serde_json::json!({ "timeout": 0 }))
+        .await;
 
     let client = HttpClient::with_timeouts(proxy, LENIENT, LENIENT);
     let err = client
-        .dispatch(
-            &creds(),
-            "net-resilience-dispatch-reset",
-            request(LeaseId(1)),
-        )
+        .dispatch(&creds(), name, request(LeaseId(1)))
         .await
         .unwrap_err();
     assert_connection_error(&err);
@@ -317,7 +284,6 @@ async fn latency_under_deadline_succeeds() {
     let proxy = tp.create_proxy(name, upstream).await;
     tp.add_toxic(
         name,
-        "slow",
         "latency",
         serde_json::json!({ "latency": 200, "jitter": 0 }),
     )
