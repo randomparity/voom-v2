@@ -37,7 +37,7 @@ jobs:
         run: cargo install --locked cargo-deny cargo-audit
 
       - name: Install ast-grep
-        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9  # v2.82.1
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907  # v2.82.8
         with:
           tool: ast-grep
 
@@ -70,7 +70,7 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@8b3c737da4b541bf0fb5a3e0488ff20535badac9  # v2.82.1
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907  # v2.82.8
         with:
           tool: cargo-llvm-cov
 
