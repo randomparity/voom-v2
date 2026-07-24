@@ -5,12 +5,12 @@ policy "published grammar tracks" {
   }
 
   phase select {
-    keep audio where (language == "eng" and channels >= 2) or default
     remove audio where commentary
-    keep subtitle where language in ["eng", "und"] or forced
+    keep audio where (language == "eng" and channels >= 2) or default
     remove subtitle where title contains "Signs" and not forced
-    keep attachment where font
+    keep subtitle where language in ["eng", "und"] or forced
     remove attachment where not font
+    keep attachment where font
   }
 
   phase layout {

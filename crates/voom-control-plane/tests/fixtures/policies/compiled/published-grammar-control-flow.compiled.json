@@ -165,8 +165,12 @@
         "name": "completed inspect"
       },
       "skip_if": {
-        "type": "predicate",
-        "name": "when not exists audio"
+        "type": "not",
+        "inner": {
+          "type": "exists",
+          "target": "audio",
+          "filter": null
+        }
       },
       "on_error": "abort",
       "operations": [
@@ -237,15 +241,10 @@
         "name": "modified normalize"
       },
       "skip_if": {
-        "type": "field_comparison",
-        "path": [
-          "when"
-        ],
+        "type": "count",
+        "target": "audio",
         "op": "lt",
-        "value": {
-          "type": "number",
-          "value": "2"
-        }
+        "value": 2
       },
       "on_error": null,
       "operations": [

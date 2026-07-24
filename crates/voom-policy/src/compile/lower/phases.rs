@@ -132,11 +132,9 @@ fn phase_skip_if(controls: &[StatementAst]) -> Option<CompiledCondition> {
         .find(|control| control.keyword().value == "skip")
         .map(|control| {
             let text = statement_text(control);
-            condition_from_text(
-                text.trim_start_matches("skip")
-                    .trim_start_matches("when")
-                    .trim(),
-            )
+            let condition = text.strip_prefix("skip").unwrap_or(text.as_ref()).trim();
+            let condition = condition.strip_prefix("when").unwrap_or(condition).trim();
+            condition_from_text(condition)
         })
 }
 
