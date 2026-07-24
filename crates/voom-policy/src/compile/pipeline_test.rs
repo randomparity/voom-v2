@@ -605,6 +605,17 @@ fn conformance_published_rule_header_lowers_condition_and_operations() {
     );
 }
 
+#[test]
+fn conformance_published_rule_header_accepts_escaped_quotes_in_name() {
+    let CompiledOperation::Rules { rules, .. } =
+        single_op(r#"rules first { rule "has \"named\" audio" when exists audio {} }"#)
+    else {
+        unreachable!("expected rules operation");
+    };
+
+    assert_eq!(rules[0].name, r#"has \"named\" audio"#);
+}
+
 // ---- Issue #292: spec/impl divergence — `order tracks` target list and
 // optional `where` on keep/remove --------------------------------------------
 //

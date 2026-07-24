@@ -6,10 +6,10 @@ policy "published grammar control flow" {
 
   phase inspect {
     on_error: continue
-    when (media.container != mkv or video.codec != hevc) and video.width >= 1280 {
+    when (not media.container == mkv or not video.codec == hevc) and video.width >= 1280 {
       container mkv
     }
-    when media.duration_millis >= 1000 and video.height >= 720 {
+    when media.duration_millis != 0 and video.height >= 720 {
       container mkv
     }
     when video.height <= 2160 and video.bitrate > 1000000 {
@@ -23,7 +23,7 @@ policy "published grammar control flow" {
     skip when not exists audio
     on_error: abort
     rules first {
-      rule "transcode video" when video.codec != hevc {
+      rule "transcode video" when not video.codec == hevc {
         transcode video to hevc
       }
       rule "retain container" when media.container == mkv {

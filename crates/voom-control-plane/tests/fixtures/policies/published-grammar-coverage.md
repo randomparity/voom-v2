@@ -56,17 +56,27 @@ and Japanese commentary AAC.
   successful artifact verification; ffprobe proves codecs and channel counts,
   and hashes distinguish every sidecar.
 
-### F1 — control-flow source
+### F1 — control-flow input set
 
-An MP4 containing 1920x1080 H.264 video above 1 Mbps, duration above one
-second, two audio tracks, and two subtitle tracks.
+The set contains:
 
-- Expected mutation: the matching conditional remuxes to MKV, the first-rule
-  phase transcodes video to HEVC, and the all-rules phase applies all matching
-  track actions.
-- Oracle: per-file VOOM phase summaries prove skip/rule decisions,
-  `completed` and `modified` gating, partial-failure truthfulness, resume
-  stability, committed outputs, and successful artifact verification.
+- a passing MP4 with 1920x1080 H.264 video above 1 Mbps, duration above one
+  second, two audio tracks, and two subtitle tracks;
+- a file that deterministically fails one `on_error: continue` phase while the
+  passing file remains in the same execution batch;
+- variants where `inspect` completes without mutation and where `normalize`
+  completes without mutation; and
+- a persisted execution interrupted after each gating predecessor, then
+  resumed from the same durable state.
+
+- Expected mutation: for the passing source, the matching conditional remuxes
+  to MKV, the first-rule phase transcodes video to HEVC, and the all-rules phase
+  applies all matching track actions. The deliberate failure never prevents
+  successful-file commits.
+- Oracle: per-file VOOM phase summaries prove skip/rule decisions, true and
+  false `completed` and `modified` gates, and identical decisions after resume.
+  The batch report and exit status identify partial failure while retaining the
+  successful file's committed output and artifact-verification result.
 
 ## Structure and control matrix
 
@@ -115,7 +125,7 @@ test without changing the canonical policy text.
 | O15 | bare `extract audio` | A | A1 | #99 |
 | O16 | `extract audio where ...` | A | A1 | existing |
 | O17 | `verify artifact` | C,T,A,F | all | #334 |
-| O18 | `defaults audio|subtitle where ...` | T | T1 | #332 |
+| O18 | `defaults audio\|subtitle where ...` | T | T1 | #332 |
 | O19 | `order tracks [<targets>] where ...` | T | T1 | #332 |
 | O20 | `order tracks where ...` | T | T1 | #332 |
 | O21 | `synthesize audio from ... { ... }` | A | A1 | #333 |
@@ -128,8 +138,8 @@ acceptance before their listed issues land.
 
 | ID | Published condition or alternative | Policy | Input | Owner |
 |---|---|---|---|---|
-| C01 | `video.codec <op> <token>` | F | F1 | existing |
-| C02 | `media.container <op> <token>` | F | F1 | existing |
+| C01 | `video.codec == <token>` | F | F1 | existing |
+| C02 | `media.container == <token>` | F | F1 | existing |
 | C03 | `media.duration_millis <op> <number>` | F | F1 | existing |
 | C04 | `video.width <op> <number>` | T,F | T1,F1 | existing |
 | C05 | `video.height <op> <number>` | F | F1 | existing |
