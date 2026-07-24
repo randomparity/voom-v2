@@ -1,7 +1,7 @@
 {
   "policy_name": "production-normalize-reduced",
   "slug": "production-normalize-reduced",
-  "source_hash": "1c96f738e64d92047f6422d16b440029da9ce575ffb7d2292736e3d641fd3a4f",
+  "source_hash": "86bf44b489ca99c48171185194166cdefebebd67cca7d0fa403ea824770c577f",
   "schema_version": 2,
   "metadata": {
     "profile": "production",

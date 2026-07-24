@@ -1,0 +1,24 @@
+policy "published grammar core" {
+  metadata {
+    requires_tools: [ffmpeg, ffprobe, mkvtoolnix]
+  }
+
+  config {
+    languages: ["eng", "und"]
+    on_error: abort
+  }
+
+  phase containerize {
+    container mkv
+  }
+
+  phase encode {
+    depends_on: [containerize]
+    transcode video to hevc using profile "default-hevc"
+  }
+
+  phase verify {
+    depends_on: [encode]
+    verify artifact
+  }
+}

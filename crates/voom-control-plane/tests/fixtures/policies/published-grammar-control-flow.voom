@@ -1,0 +1,56 @@
+policy "published grammar control flow" {
+  config {
+    languages: ["eng", "und"]
+    on_error: continue
+  }
+
+  phase inspect {
+    on_error: continue
+    when (media.container != mkv or video.codec != hevc) and video.width >= 1280 {
+      container mkv
+    }
+    when media.duration_millis >= 1000 and video.height >= 720 {
+      container mkv
+    }
+    when video.height <= 2160 and video.bitrate > 1000000 {
+      container mkv
+    }
+  }
+
+  phase normalize {
+    depends_on: [inspect]
+    run_if completed inspect
+    skip when not exists audio
+    on_error: abort
+    rules first {
+      rule "transcode video" when video.codec != hevc {
+        transcode video to hevc
+      }
+      rule "retain container" when media.container == mkv {
+        container mkv
+      }
+    }
+  }
+
+  phase organize {
+    depends_on: [normalize]
+    run_if modified normalize
+    skip when count audio < 2
+    rules all {
+      rule "retain subtitles" when exists subtitle {
+        keep subtitle
+      }
+      rule "default audio" when count audio >= 2 {
+        defaults audio first
+      }
+      rule "retain forced subtitles" when count subtitle > 1 {
+        keep subtitle where forced or default
+      }
+    }
+  }
+
+  phase verify {
+    depends_on: [organize]
+    verify artifact
+  }
+}

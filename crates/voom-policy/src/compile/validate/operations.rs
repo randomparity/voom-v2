@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::text::{
-    is_single_value, list_values, quoted_value, setting_value, statement_text, text_after_list,
-    text_after_quoted_value, words,
+    is_single_value, list_values, quoted_value, rule_header, setting_value, statement_text,
+    text_after_list, text_after_quoted_value, words,
 };
 use crate::{DiagnosticCode, ExprAst, SourceSpan, StatementAst};
 
@@ -943,14 +943,28 @@ impl Validator<'_> {
                     );
                     continue;
                 }
-                let StatementAst::Block { statements, .. } = rule else {
+                let StatementAst::Block {
+                    name: Some(header),
+                    statements,
+                    ..
+                } = rule
+                else {
                     self.error(
                         DiagnosticCode::UnknownPhaseStatementOrOperation,
                         rule.span(),
-                        "rule must be a block",
+                        "rule must use `rule <quoted-name> when <condition> { ... }`",
                     );
                     continue;
                 };
+                let Some((_name, condition)) = rule_header(&header.value) else {
+                    self.error(
+                        DiagnosticCode::UnknownPhaseStatementOrOperation,
+                        rule.span(),
+                        "rule must use `rule <quoted-name> when <condition> { ... }`",
+                    );
+                    continue;
+                };
+                self.validate_condition_expression(rule, condition);
                 for nested in statements {
                     self.validate_nested_operation(nested, tag_effects);
                 }

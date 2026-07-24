@@ -31,7 +31,7 @@ impl Validator<'_> {
         self.validate_condition_expression(statement, condition);
     }
 
-    fn validate_condition_expression(&mut self, statement: &StatementAst, text: &str) {
+    pub(super) fn validate_condition_expression(&mut self, statement: &StatementAst, text: &str) {
         self.validate_field_paths(statement, text);
         if !self.is_valid_condition_expression(statement, text) {
             self.error(
@@ -108,7 +108,10 @@ impl Validator<'_> {
         {
             return;
         }
-        let mut values: Vec<String> = list_values(text).into_iter().map(str::to_owned).collect();
+        let mut values: Vec<String> = list_values(text)
+            .into_iter()
+            .map(|value| value.trim_matches('"').to_owned())
+            .collect();
         values.extend(language_equality_values(text));
         for value in values {
             if value != "eng"

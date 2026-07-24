@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::text::{list_values, quoted_value, statement_text, text_after_quoted_value, words};
+use crate::text::{
+    list_values, quoted_value, rule_header, statement_text, text_after_quoted_value, words,
+};
 use crate::{
     DiagnosticCode, DiagnosticStage, ExprAst, PolicyDiagnostic, SourceSpan, StatementAst,
     line_column,
@@ -238,30 +240,20 @@ fn lower_rules(
     let mut rules = Vec::with_capacity(statements.len());
     for rule in statements {
         let StatementAst::Block {
-            name, statements, ..
+            name: Some(header),
+            statements,
+            ..
         } = rule
         else {
             return Err(vec![unknown_operation(source, rule.span())]);
         };
-        let mut condition = None;
-        let mut operations = Vec::new();
-        for nested in statements {
-            if nested.keyword().value == "when" {
-                let text = statement_text(nested);
-                condition = Some(condition_from_text(text.trim_start_matches("when").trim()));
-                if let StatementAst::Block { statements, .. } = nested {
-                    operations.extend(lower_operations(source, statements)?);
-                }
-            } else {
-                operations.push(lower_operation(source, nested)?);
-            }
-        }
+        let Some((name, condition)) = rule_header(&header.value) else {
+            return Err(vec![unknown_operation(source, rule.span())]);
+        };
         rules.push(CompiledRule {
-            name: name
-                .as_ref()
-                .map_or_else(String::new, |name| strip_quotes(&name.value)),
-            condition,
-            operations,
+            name,
+            condition: Some(condition_from_text(condition)),
+            operations: lower_operations(source, statements)?,
         });
     }
     Ok(rules)

@@ -1,0 +1,47 @@
+policy "published grammar tracks" {
+  config {
+    languages: ["eng", "und"]
+    on_error: abort
+  }
+
+  phase select {
+    keep audio where (language == "eng" and channels >= 2) or default
+    remove audio where commentary
+    keep subtitle where language in ["eng", "und"] or forced
+    remove subtitle where title contains "Signs" and not forced
+    keep attachment where font
+    remove attachment where not font
+  }
+
+  phase layout {
+    depends_on: [select]
+    order tracks [video, audio, subtitle, attachment]
+    order tracks [video, audio, subtitle, attachment] where default
+    order tracks where forced
+    defaults audio first
+    defaults subtitle best
+    defaults audio where language == "eng"
+    defaults subtitle where forced
+  }
+
+  phase alternate_defaults {
+    depends_on: [layout]
+    when video.width < 640 {
+      remove subtitle
+    }
+    when video.width < 1280 {
+      defaults audio none
+    }
+    when exists subtitle {
+      defaults subtitle best
+    }
+    when count subtitle >= 1 {
+      defaults subtitle preserve
+    }
+  }
+
+  phase verify {
+    depends_on: [alternate_defaults]
+    verify artifact
+  }
+}

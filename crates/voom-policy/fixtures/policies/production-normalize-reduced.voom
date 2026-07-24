@@ -20,10 +20,8 @@ policy "production-normalize-reduced" {
       set_tag "audio_profile" identity.title
     }
     rules first {
-      rule "remove-commentary" {
-        when exists audio where commentary {
-          remove audio where commentary
-        }
+      rule "remove-commentary" when exists audio where commentary {
+        remove audio where commentary
       }
     }
   }

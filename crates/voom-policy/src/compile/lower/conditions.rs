@@ -156,7 +156,7 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
                 && text_after_list(text).is_some_and(str::is_empty) =>
         {
             Some(TrackFilter::LanguageIn {
-                values: list_values(text).into_iter().map(str::to_owned).collect(),
+                values: list_values(text).into_iter().map(strip_quotes).collect(),
             })
         }
         ["lang" | "language", "==", value] if !value.is_empty() => Some(TrackFilter::LanguageIn {
@@ -167,7 +167,7 @@ fn filter_from_text(text: &str) -> Option<TrackFilter> {
                 && text_after_list(text).is_some_and(str::is_empty) =>
         {
             Some(TrackFilter::CodecIn {
-                values: list_values(text).into_iter().map(str::to_owned).collect(),
+                values: list_values(text).into_iter().map(strip_quotes).collect(),
             })
         }
         ["channels", op, value] => Some(TrackFilter::Channels {

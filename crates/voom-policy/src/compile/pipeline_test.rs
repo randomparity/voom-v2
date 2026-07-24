@@ -300,6 +300,28 @@ fn conformance_language_equals_lowers_to_single_language_in() {
 }
 
 #[test]
+fn conformance_quoted_filter_lists_lower_without_quote_characters() {
+    assert_eq!(
+        single_op("keep audio where language in [\"eng\", \"und\"]"),
+        CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned(), "und".to_owned()],
+            }),
+        }
+    );
+    assert_eq!(
+        single_op("keep audio where codec in [\"aac\", \"eac3\"]"),
+        CompiledOperation::KeepTracks {
+            target: crate::TrackTarget::Audio,
+            filter: Some(TrackFilter::CodecIn {
+                values: vec!["aac".to_owned(), "eac3".to_owned()],
+            }),
+        }
+    );
+}
+
+#[test]
 fn conformance_language_equals_accepts_bare_token() {
     assert_eq!(
         single_op("keep audio where language == eng"),
@@ -556,6 +578,31 @@ fn conformance_working_v1_productions_compile_clean() {
     ] {
         assert_compiles_clean(body);
     }
+}
+
+#[test]
+fn conformance_published_rule_header_lowers_condition_and_operations() {
+    let CompiledOperation::Rules { mode, rules } =
+        single_op("rules first { rule \"has audio\" when exists audio { container mkv } }")
+    else {
+        unreachable!("expected rules operation");
+    };
+    assert_eq!(mode, crate::RuleMatchMode::First);
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].name, "has audio");
+    assert_eq!(
+        rules[0].condition,
+        Some(CompiledCondition::Exists {
+            target: crate::TrackTarget::Audio,
+            filter: None,
+        })
+    );
+    assert_eq!(
+        rules[0].operations,
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }]
+    );
 }
 
 // ---- Issue #292: spec/impl divergence — `order tracks` target list and
