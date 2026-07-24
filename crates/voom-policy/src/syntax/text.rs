@@ -74,7 +74,7 @@ pub(crate) fn text_after_quoted_value(text: &str) -> Option<&str> {
 }
 
 #[must_use]
-pub(crate) fn rule_header(text: &str) -> Option<(String, &str)> {
+pub(crate) fn rule_header(text: &str) -> Option<(&str, &str)> {
     let text = text.trim();
     if !text.starts_with('"') {
         return None;
@@ -84,7 +84,7 @@ pub(crate) fn rule_header(text: &str) -> Option<(String, &str)> {
     if condition.is_empty() {
         None
     } else {
-        Some((name.to_owned(), condition))
+        Some((name, condition))
     }
 }
 

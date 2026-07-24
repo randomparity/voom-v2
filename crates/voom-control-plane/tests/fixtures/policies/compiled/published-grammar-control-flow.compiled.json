@@ -1,0 +1,344 @@
+{
+  "policy_name": "published grammar control flow",
+  "slug": "published-grammar-control-flow",
+  "source_hash": "2fa979aef65145026d5e0ae926415dee3c854fe2e91ceac553272a5225dcbb0b",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {
+    "languages": "languages: [\"eng\", \"und\"]",
+    "on_error": "on_error: continue"
+  },
+  "phases": [
+    {
+      "name": "inspect",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": "continue",
+      "operations": [
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "and",
+            "conditions": [
+              {
+                "type": "or",
+                "conditions": [
+                  {
+                    "type": "not",
+                    "inner": {
+                      "type": "field_comparison",
+                      "path": [
+                        "media",
+                        "container"
+                      ],
+                      "op": "eq",
+                      "value": {
+                        "type": "string",
+                        "value": "mkv"
+                      }
+                    }
+                  },
+                  {
+                    "type": "not",
+                    "inner": {
+                      "type": "field_comparison",
+                      "path": [
+                        "video",
+                        "codec"
+                      ],
+                      "op": "eq",
+                      "value": {
+                        "type": "string",
+                        "value": "hevc"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "width"
+                ],
+                "op": "gte",
+                "value": {
+                  "type": "number",
+                  "value": "1280"
+                }
+              }
+            ]
+          },
+          "operations": [
+            {
+              "type": "set_container",
+              "container": "mkv"
+            }
+          ]
+        },
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "and",
+            "conditions": [
+              {
+                "type": "field_comparison",
+                "path": [
+                  "media",
+                  "duration_millis"
+                ],
+                "op": "ne",
+                "value": {
+                  "type": "number",
+                  "value": "0"
+                }
+              },
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "height"
+                ],
+                "op": "gte",
+                "value": {
+                  "type": "number",
+                  "value": "720"
+                }
+              }
+            ]
+          },
+          "operations": [
+            {
+              "type": "set_container",
+              "container": "mkv"
+            }
+          ]
+        },
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "and",
+            "conditions": [
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "height"
+                ],
+                "op": "lte",
+                "value": {
+                  "type": "number",
+                  "value": "2160"
+                }
+              },
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "bitrate"
+                ],
+                "op": "gt",
+                "value": {
+                  "type": "number",
+                  "value": "1000000"
+                }
+              }
+            ]
+          },
+          "operations": [
+            {
+              "type": "set_container",
+              "container": "mkv"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "normalize",
+      "depends_on": [
+        "inspect"
+      ],
+      "run_if": {
+        "type": "predicate",
+        "name": "completed inspect"
+      },
+      "skip_if": {
+        "type": "predicate",
+        "name": "when not exists audio"
+      },
+      "on_error": "abort",
+      "operations": [
+        {
+          "type": "rules",
+          "mode": "first",
+          "rules": [
+            {
+              "name": "transcode video",
+              "condition": {
+                "type": "not",
+                "inner": {
+                  "type": "field_comparison",
+                  "path": [
+                    "video",
+                    "codec"
+                  ],
+                  "op": "eq",
+                  "value": {
+                    "type": "string",
+                    "value": "hevc"
+                  }
+                }
+              },
+              "operations": [
+                {
+                  "type": "transcode_video",
+                  "target_codec": "hevc",
+                  "container": "mkv",
+                  "profile": {
+                    "named": "default-hevc"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "retain container",
+              "condition": {
+                "type": "field_comparison",
+                "path": [
+                  "media",
+                  "container"
+                ],
+                "op": "eq",
+                "value": {
+                  "type": "string",
+                  "value": "mkv"
+                }
+              },
+              "operations": [
+                {
+                  "type": "set_container",
+                  "container": "mkv"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "organize",
+      "depends_on": [
+        "normalize"
+      ],
+      "run_if": {
+        "type": "predicate",
+        "name": "modified normalize"
+      },
+      "skip_if": {
+        "type": "field_comparison",
+        "path": [
+          "when"
+        ],
+        "op": "lt",
+        "value": {
+          "type": "number",
+          "value": "2"
+        }
+      },
+      "on_error": null,
+      "operations": [
+        {
+          "type": "rules",
+          "mode": "all",
+          "rules": [
+            {
+              "name": "retain subtitles",
+              "condition": {
+                "type": "exists",
+                "target": "subtitle",
+                "filter": null
+              },
+              "operations": [
+                {
+                  "type": "keep_tracks",
+                  "target": "subtitle",
+                  "filter": null
+                }
+              ]
+            },
+            {
+              "name": "default audio",
+              "condition": {
+                "type": "count",
+                "target": "audio",
+                "op": "gte",
+                "value": 2
+              },
+              "operations": [
+                {
+                  "type": "set_defaults",
+                  "target": "audio",
+                  "strategy": "first"
+                }
+              ]
+            },
+            {
+              "name": "retain forced subtitles",
+              "condition": {
+                "type": "count",
+                "target": "subtitle",
+                "op": "gt",
+                "value": 1
+              },
+              "operations": [
+                {
+                  "type": "keep_tracks",
+                  "target": "subtitle",
+                  "filter": {
+                    "type": "or",
+                    "filters": [
+                      {
+                        "type": "forced"
+                      },
+                      {
+                        "type": "default"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "organize"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "inspect",
+    "normalize",
+    "organize",
+    "verify"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

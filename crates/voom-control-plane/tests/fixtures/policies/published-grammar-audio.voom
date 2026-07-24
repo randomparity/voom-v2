@@ -44,7 +44,7 @@ policy "published grammar audio" {
 
   phase filtered_extract {
     depends_on: [companion_eac3]
-    extract audio where codec in ["aac"]
+    extract audio where codec in ["aac"] and commentary
   }
 
   phase all_extracts {
