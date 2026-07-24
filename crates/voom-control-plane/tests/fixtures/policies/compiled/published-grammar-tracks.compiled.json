@@ -1,7 +1,7 @@
 {
   "policy_name": "published grammar tracks",
   "slug": "published-grammar-tracks",
-  "source_hash": "e5b4a5ae1ce6f7c4a09c7d98e1a7cd305e906f2ef08339ac0bc5e591d7575a6d",
+  "source_hash": "d3bdffa685ceb08baa8c860c97e5661edac72d6f171cd5c95a13fefbc685f50d",
   "schema_version": 2,
   "metadata": {},
   "config": {
@@ -109,7 +109,7 @@
       ]
     },
     {
-      "name": "layout",
+      "name": "group_order",
       "depends_on": [
         "select"
       ],
@@ -125,7 +125,18 @@
             "subtitle",
             "attachment"
           ]
-        },
+        }
+      ]
+    },
+    {
+      "name": "default_head",
+      "depends_on": [
+        "group_order"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
         {
           "type": "reorder_tracks",
           "targets": [
@@ -137,14 +148,36 @@
           "head_filter": {
             "type": "default"
           }
-        },
+        }
+      ]
+    },
+    {
+      "name": "forced_head",
+      "depends_on": [
+        "default_head"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
         {
           "type": "reorder_tracks",
           "targets": [],
           "head_filter": {
             "type": "forced"
           }
-        },
+        }
+      ]
+    },
+    {
+      "name": "defaults",
+      "depends_on": [
+        "forced_head"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
         {
           "type": "set_defaults",
           "target": "audio",
@@ -179,7 +212,7 @@
     {
       "name": "alternate_defaults",
       "depends_on": [
-        "layout"
+        "defaults"
       ],
       "run_if": null,
       "skip_if": null,
@@ -279,7 +312,10 @@
   ],
   "phase_order": [
     "select",
-    "layout",
+    "group_order",
+    "default_head",
+    "forced_head",
+    "defaults",
     "alternate_defaults",
     "verify"
   ],

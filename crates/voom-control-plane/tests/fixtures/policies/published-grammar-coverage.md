@@ -33,19 +33,23 @@ track.
 ### T1 — track-rich source
 
 T1a is a 1920x1080 MKV containing H.264 video; default English 5.1 E-AC-3,
-English commentary AAC, and untagged stereo audio; forced English, untagged,
-and titled English `Signs` subtitles; one font attachment and one non-font
-attachment. T1b has the same tracks and attachments at 1024x576. T1c has the
-same tracks and attachments at 512x288. The one default disposition belongs
-to the English audio track, so the filtered head-order operation has exactly
-one match.
+English stereo AAC, English commentary AAC, and untagged stereo audio; forced
+English, untagged, and titled English `Signs` subtitles; one font attachment
+and one non-font attachment. Its initial track order is non-default English
+audio, video, `Signs` subtitle, default English audio, untagged subtitle,
+commentary audio, then forced English subtitle. T1b has the same tracks and
+attachments at 1024x576. T1c has the same tracks and attachments at 512x288.
+The one default disposition belongs to the 5.1 English audio track, so the
+filtered head-order operation has exactly one match.
 
 - Expected mutation: remove the commentary, non-preferred subtitle, and
-  non-font attachment; retain the selected tracks; then set deterministic
-  order and defaults. T1a leaves `best` as the final subtitle strategy over two
-  surviving subtitles. T1b separately makes `none` the final audio strategy
-  and `preserve` the final subtitle strategy over those same two subtitles.
-  T1c exercises the bare conditional removal and leaves no subtitle tracks.
+  non-font attachment; retain the two selected English audio tracks and two
+  selected subtitles; then apply group, default-head, and forced-head ordering
+  in separate committed phases before setting deterministic defaults. T1a
+  leaves `best` as the final subtitle strategy over two surviving subtitles.
+  T1b separately makes `none` the final audio strategy and `preserve` the final
+  subtitle strategy over those same two subtitles. T1c exercises the bare
+  conditional removal and leaves no subtitle tracks.
 - Oracle: the VOOM report records a committed remux and successful artifact
   verification; mkvtoolnix-compatible JSON proves the exact surviving track
   order, dispositions, languages, titles, and attachment MIME types.
@@ -53,7 +57,7 @@ one match.
 ### A1 — multi-audio source
 
 An MKV containing H.264 video, default English 5.1 E-AC-3, English stereo AAC,
-and Japanese commentary AAC.
+untagged stereo AAC, and Japanese commentary AAC.
 
 - Expected mutation: exercise all three transcode targets, add stereo AAC,
   Opus, and E-AC-3 downmix companions, and extract both a filtered sidecar and
@@ -136,14 +140,14 @@ test without changing the canonical policy text.
 | O10 | `remove audio where ...` | T | T1a | English commentary audio is removed before keep | #331 |
 | O11 | `remove subtitle` with and without filter | T | T1a,T1c | `Signs` is removed; T1c removes all remaining subtitles | #331 |
 | O12 | `remove attachment where ...` | T | T1a | non-font attachment is removed before keep | #331 |
-| O13 | `order tracks [<track-target>, ...]` | T | T1a | final kind order is video, audio, subtitle, attachment | existing |
+| O13 | `order tracks [<track-target>, ...]` | T | T1a | group-order phase changes kind order to video, audio, subtitle, attachment | existing |
 | O14 | defaults `first`, `best`, `none`, `preserve` | T | T1a,T1b | exact final default dispositions differ by variant | #336 |
 | O15 | bare `extract audio` | A | A1 | one sidecar exists for every selected audio track | #99 |
 | O16 | `extract audio where ...` | A | A1 | one commentary AAC sidecar exists | existing |
 | O17 | `verify artifact` | C,T,A,F | all | each successful file records verified artifact facts | #334 |
 | O18 | `defaults audio\|subtitle where ...` | T | T1a | named filtered tracks become defaults | #332 |
-| O19 | `order tracks [<targets>] where ...` | T | T1a | sole default audio is first within grouped order | #332 |
-| O20 | `order tracks where ...` | T | T1a | sole forced subtitle is first | #332 |
+| O19 | `order tracks [<targets>] where ...` | T | T1a | default-head phase moves sole default audio ahead of non-default audio | #332 |
+| O20 | `order tracks where ...` | T | T1a | forced-head phase moves sole forced subtitle to the head | #332 |
 | O21 | synthesize target `codec aac` | A | A1 | added stereo AAC companion is present | #333 |
 | O22 | synthesize target `codec opus` | A | A1 | added stereo Opus companion is present | #333 |
 | O23 | synthesize target `codec eac3` | A | A1 | added stereo E-AC-3 companion is present | #333 |

@@ -13,11 +13,23 @@ policy "published grammar tracks" {
     keep attachment where font
   }
 
-  phase layout {
+  phase group_order {
     depends_on: [select]
     order tracks [video, audio, subtitle, attachment]
+  }
+
+  phase default_head {
+    depends_on: [group_order]
     order tracks [video, audio, subtitle, attachment] where default
+  }
+
+  phase forced_head {
+    depends_on: [default_head]
     order tracks where forced
+  }
+
+  phase defaults {
+    depends_on: [forced_head]
     defaults audio first
     defaults subtitle best
     defaults audio where language == "eng"
@@ -25,7 +37,7 @@ policy "published grammar tracks" {
   }
 
   phase alternate_defaults {
-    depends_on: [layout]
+    depends_on: [defaults]
     when video.width < 640 {
       remove subtitle
     }
