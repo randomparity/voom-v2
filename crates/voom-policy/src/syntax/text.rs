@@ -65,16 +65,12 @@ pub(crate) fn setting_value(text: &str) -> Option<&str> {
 
 #[must_use]
 pub(crate) fn quoted_value(text: &str) -> Option<String> {
-    let start = text.find('"')?;
-    let end = text[start + 1..].find('"')?;
-    Some(text[start + 1..start + 1 + end].to_owned())
+    quoted_value_and_rest(text).map(|(value, _)| value.to_owned())
 }
 
 #[must_use]
 pub(crate) fn text_after_quoted_value(text: &str) -> Option<&str> {
-    let start = text.find('"')?;
-    let end = text[start + 1..].find('"')?;
-    Some(text[start + 1 + end + 1..].trim())
+    quoted_value_and_rest(text).map(|(_, rest)| rest)
 }
 
 #[must_use]
@@ -83,12 +79,12 @@ pub(crate) fn rule_header(text: &str) -> Option<(String, &str)> {
     if !text.starts_with('"') {
         return None;
     }
-    let name = quoted_value(text)?;
-    let condition = text_after_quoted_value(text)?.strip_prefix("when ")?.trim();
+    let (name, rest) = quoted_value_and_rest(text)?;
+    let condition = rest.strip_prefix("when ")?.trim();
     if condition.is_empty() {
         None
     } else {
-        Some((name, condition))
+        Some((name.to_owned(), condition))
     }
 }
 
@@ -162,6 +158,13 @@ fn quoted_text_end(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn quoted_value_and_rest(text: &str) -> Option<(&str, &str)> {
+    let start = text.find('"')?;
+    let quoted = &text[start..];
+    let end = quoted_text_end(quoted)?;
+    Some((&quoted[1..end - 1], quoted[end..].trim()))
 }
 
 fn split_outside_quotes<'a>(text: &'a str, delimiter: &str) -> Vec<&'a str> {
