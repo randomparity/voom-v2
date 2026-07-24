@@ -33,17 +33,19 @@ track.
 ### T1 — track-rich source
 
 T1a is a 1920x1080 MKV containing H.264 video; default English 5.1 E-AC-3,
-Japanese commentary AAC, and untagged stereo audio; forced English, default
-untagged, and titled Spanish `Signs` subtitles; one font attachment and one
-non-font attachment. T1b has the same tracks and attachments at 1024x576.
-The Spanish `Signs` subtitle is removed, leaving the English and `und`
-subtitles in both variants.
+English commentary AAC, and untagged stereo audio; forced English, untagged,
+and titled English `Signs` subtitles; one font attachment and one non-font
+attachment. T1b has the same tracks and attachments at 1024x576. T1c has the
+same tracks and attachments at 512x288. The one default disposition belongs
+to the English audio track, so the filtered head-order operation has exactly
+one match.
 
 - Expected mutation: remove the commentary, non-preferred subtitle, and
   non-font attachment; retain the selected tracks; then set deterministic
   order and defaults. T1a leaves `best` as the final subtitle strategy over two
   surviving subtitles. T1b separately makes `none` the final audio strategy
   and `preserve` the final subtitle strategy over those same two subtitles.
+  T1c exercises the bare conditional removal and leaves no subtitle tracks.
 - Oracle: the VOOM report records a committed remux and successful artifact
   verification; mkvtoolnix-compatible JSON proves the exact surviving track
   order, dispositions, languages, titles, and attachment MIME types.
@@ -120,31 +122,31 @@ test without changing the canonical policy text.
 
 ## Operation matrix
 
-| ID | Published production or alternative | Policy | Input | Owner |
-|---|---|---|---|---|
-| O01 | `container mkv` | C,F | C1,F1 | existing |
-| O02 | `transcode video to hevc` | F | F1 | existing |
-| O03 | video `using profile <quoted-name>` | C | C1 | existing |
-| O04 | `transcode audio to aac` without filter | A | A1 | existing |
-| O05 | `transcode audio to opus where ...` | A | A1 | existing |
-| O06 | `transcode audio to eac3 where ...` | A | A1 | existing |
-| O07 | `keep audio where ...` | T | T1 | #331 |
-| O08 | `keep subtitle` with and without filter | T,F | T1,F1 | #331 |
-| O09 | `keep attachment where ...` | T | T1 | #331 |
-| O10 | `remove audio where ...` | T | T1 | #331 |
-| O11 | `remove subtitle` with and without filter | T | T1 | #331 |
-| O12 | `remove attachment where ...` | T | T1 | #331 |
-| O13 | `order tracks [<track-target>, ...]` | T | T1 | existing |
-| O14 | defaults `first`, `best`, `none`, `preserve` | T | T1 | #336 |
-| O15 | bare `extract audio` | A | A1 | #99 |
-| O16 | `extract audio where ...` | A | A1 | existing |
-| O17 | `verify artifact` | C,T,A,F | all | #334 |
-| O18 | `defaults audio\|subtitle where ...` | T | T1 | #332 |
-| O19 | `order tracks [<targets>] where ...` | T | T1 | #332 |
-| O20 | `order tracks where ...` | T | T1 | #332 |
-| O21 | synthesize target `codec aac` | A | A1 | #333 |
-| O22 | synthesize target `codec opus` | A | A1 | #333 |
-| O23 | synthesize target `codec eac3` | A | A1 | #333 |
+| ID | Published production or alternative | Policy | Input | Execution witness | Owner |
+|---|---|---|---|---|---|
+| O01 | `container mkv` | C,F | C1,F1 | output container changes from MP4 to Matroska | existing |
+| O02 | `transcode video to hevc` | F | F1a | video codec changes from H.264 to HEVC | existing |
+| O03 | video `using profile <quoted-name>` | C | C1 | plan resolves `default-hevc`; output is HEVC | existing |
+| O04 | `transcode audio to aac` without filter | A | A1 | every original audio track becomes AAC | existing |
+| O05 | `transcode audio to opus where ...` | A | A1 | selected English and untagged tracks become Opus | existing |
+| O06 | `transcode audio to eac3 where ...` | A | A1 | selected surround track becomes E-AC-3 | existing |
+| O07 | `keep audio where ...` | T | T1a | untagged audio is absent after selection | #331 |
+| O08 | `keep subtitle` with and without filter | T,F | T1a,F1a | only selected subtitle tracks survive | #331 |
+| O09 | `keep attachment where ...` | T | T1a | only the font attachment survives | #331 |
+| O10 | `remove audio where ...` | T | T1a | English commentary audio is removed before keep | #331 |
+| O11 | `remove subtitle` with and without filter | T | T1a,T1c | `Signs` is removed; T1c removes all remaining subtitles | #331 |
+| O12 | `remove attachment where ...` | T | T1a | non-font attachment is removed before keep | #331 |
+| O13 | `order tracks [<track-target>, ...]` | T | T1a | final kind order is video, audio, subtitle, attachment | existing |
+| O14 | defaults `first`, `best`, `none`, `preserve` | T | T1a,T1b | exact final default dispositions differ by variant | #336 |
+| O15 | bare `extract audio` | A | A1 | one sidecar exists for every selected audio track | #99 |
+| O16 | `extract audio where ...` | A | A1 | one commentary AAC sidecar exists | existing |
+| O17 | `verify artifact` | C,T,A,F | all | each successful file records verified artifact facts | #334 |
+| O18 | `defaults audio\|subtitle where ...` | T | T1a | named filtered tracks become defaults | #332 |
+| O19 | `order tracks [<targets>] where ...` | T | T1a | sole default audio is first within grouped order | #332 |
+| O20 | `order tracks where ...` | T | T1a | sole forced subtitle is first | #332 |
+| O21 | synthesize target `codec aac` | A | A1 | added stereo AAC companion is present | #333 |
+| O22 | synthesize target `codec opus` | A | A1 | added stereo Opus companion is present | #333 |
+| O23 | synthesize target `codec eac3` | A | A1 | added stereo E-AC-3 companion is present | #333 |
 
 The owner column is intentionally honest about published forms outside this
 campaign. Their presence records the contract; it does not claim execution

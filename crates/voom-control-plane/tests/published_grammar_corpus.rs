@@ -214,10 +214,16 @@ fn assert_complete_matrix(matrix: &str) {
                 .unwrap_or_else(|| panic!("missing matrix row {id}"));
             let row = row.replace(r"\|", "");
             let cells: Vec<_> = row.split('|').map(str::trim).collect();
-            assert_eq!(cells.len(), 7, "matrix row {id} must have five cells");
+            let expected_cells = if prefix == 'O' { 8 } else { 7 };
+            assert_eq!(
+                cells.len(),
+                expected_cells,
+                "matrix row {id} has the wrong number of cells"
+            );
             assert!(
-                cells[1..6].iter().all(|cell| !cell.is_empty()),
-                "matrix row {id} has an empty cell"
+                cells[1..cells.len() - 1]
+                    .iter()
+                    .all(|cell| !cell.is_empty())
             );
         }
     }
@@ -227,6 +233,12 @@ fn assert_complete_matrix(matrix: &str) {
         assert!(
             matrix.contains(&format!("### {input} —")),
             "matrix is missing generated input {input}"
+        );
+    }
+    for track_variant in ["T1a", "T1b", "T1c"] {
+        assert!(
+            matrix.contains(track_variant),
+            "matrix is missing observable track variant {track_variant}"
         );
     }
 }

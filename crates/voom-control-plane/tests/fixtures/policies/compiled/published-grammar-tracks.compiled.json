@@ -1,7 +1,7 @@
 {
   "policy_name": "published grammar tracks",
   "slug": "published-grammar-tracks",
-  "source_hash": "bf6da9683895c9b2b63fff2ef1830538c6aa07808572c18b6d146d5baac2c157",
+  "source_hash": "e5b4a5ae1ce6f7c4a09c7d98e1a7cd305e906f2ef08339ac0bc5e591d7575a6d",
   "schema_version": 2,
   "metadata": {},
   "config": {
@@ -16,6 +16,13 @@
       "skip_if": null,
       "on_error": null,
       "operations": [
+        {
+          "type": "remove_tracks",
+          "target": "audio",
+          "filter": {
+            "type": "commentary"
+          }
+        },
         {
           "type": "keep_tracks",
           "target": "audio",
@@ -46,9 +53,21 @@
         },
         {
           "type": "remove_tracks",
-          "target": "audio",
+          "target": "subtitle",
           "filter": {
-            "type": "commentary"
+            "type": "and",
+            "filters": [
+              {
+                "type": "title_contains",
+                "value": "Signs"
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "forced"
+                }
+              }
+            ]
           }
         },
         {
@@ -72,21 +91,12 @@
         },
         {
           "type": "remove_tracks",
-          "target": "subtitle",
+          "target": "attachment",
           "filter": {
-            "type": "and",
-            "filters": [
-              {
-                "type": "title_contains",
-                "value": "Signs"
-              },
-              {
-                "type": "not",
-                "inner": {
-                  "type": "forced"
-                }
-              }
-            ]
+            "type": "not",
+            "inner": {
+              "type": "font"
+            }
           }
         },
         {
@@ -94,16 +104,6 @@
           "target": "attachment",
           "filter": {
             "type": "font"
-          }
-        },
-        {
-          "type": "remove_tracks",
-          "target": "attachment",
-          "filter": {
-            "type": "not",
-            "inner": {
-              "type": "font"
-            }
           }
         }
       ]

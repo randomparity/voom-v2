@@ -100,6 +100,35 @@ fn compile_policy_topologically_sorts_phase_order() {
 }
 
 #[test]
+fn compile_policy_lowers_negated_exists_phase_skip_condition() {
+    let out = compile_policy("policy \"p\" { phase a { skip when not exists audio } }").unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].skip_if,
+        Some(CompiledCondition::Not {
+            inner: Box::new(CompiledCondition::Exists {
+                target: crate::TrackTarget::Audio,
+                filter: None,
+            }),
+        })
+    );
+}
+
+#[test]
+fn compile_policy_lowers_count_phase_skip_condition() {
+    let out = compile_policy("policy \"p\" { phase a { skip when count audio < 2 } }").unwrap();
+
+    assert_eq!(
+        out.policy.phases[0].skip_if,
+        Some(CompiledCondition::Count {
+            target: crate::TrackTarget::Audio,
+            op: crate::ComparisonOp::Lt,
+            value: 2,
+        })
+    );
+}
+
+#[test]
 fn compile_policy_preserves_boolean_track_filters() {
     let out =
         compile_policy("policy \"p\" { phase a { keep audio where lang in [eng] or commentary } }")
