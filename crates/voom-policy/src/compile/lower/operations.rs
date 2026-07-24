@@ -251,7 +251,7 @@ fn lower_rules(
             return Err(vec![unknown_operation(source, rule.span())]);
         };
         rules.push(CompiledRule {
-            name,
+            name: name.to_owned(),
             condition: Some(condition_from_text(condition)),
             operations: lower_operations(source, statements)?,
         });

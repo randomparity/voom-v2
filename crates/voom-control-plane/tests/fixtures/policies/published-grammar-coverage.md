@@ -33,14 +33,17 @@ track.
 ### T1 — track-rich source
 
 T1a is a 1920x1080 MKV containing H.264 video; default English 5.1 E-AC-3,
-Japanese commentary AAC, and untagged stereo audio; one forced English
-subtitle; one font attachment and one non-font attachment. T1b is a 1024x576
-variant with the forced English subtitle plus a titled Spanish subtitle.
+Japanese commentary AAC, and untagged stereo audio; forced English, default
+untagged, and titled Spanish `Signs` subtitles; one font attachment and one
+non-font attachment. T1b has the same tracks and attachments at 1024x576.
+The Spanish `Signs` subtitle is removed, leaving the English and `und`
+subtitles in both variants.
 
 - Expected mutation: remove the commentary, non-preferred subtitle, and
   non-font attachment; retain the selected tracks; then set deterministic
-  order and defaults. T1a exercises `best`; T1b separately exercises `none`
-  and `preserve`, so no strategy overwrites another strategy's oracle.
+  order and defaults. T1a leaves `best` as the final subtitle strategy over two
+  surviving subtitles. T1b separately makes `none` the final audio strategy
+  and `preserve` the final subtitle strategy over those same two subtitles.
 - Oracle: the VOOM report records a committed remux and successful artifact
   verification; mkvtoolnix-compatible JSON proves the exact surviving track
   order, dispositions, languages, titles, and attachment MIME types.
@@ -54,8 +57,9 @@ and Japanese commentary AAC.
   Opus, and E-AC-3 downmix companions, and extract both a filtered sidecar and
   the selected bare-extract set without output collisions.
 - Oracle: the VOOM report records committed audio phases, sidecar lineage, and
-  successful artifact verification; ffprobe proves codecs and channel counts,
-  and hashes distinguish every sidecar.
+  successful artifact verification. The filtered extract selects only the
+  commentary AAC track; ffprobe proves codecs and channel counts, and hashes
+  distinguish every sidecar.
 
 ### F1 — control-flow input set
 

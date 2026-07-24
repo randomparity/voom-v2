@@ -1,0 +1,227 @@
+{
+  "policy_name": "published grammar audio",
+  "slug": "published-grammar-audio",
+  "source_hash": "ef3c00e99f6686729f795644f431419429c6181cd343f142a661b03087f5864d",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {
+    "languages": "languages: [\"eng\", \"und\"]",
+    "on_error": "on_error: abort"
+  },
+  "phases": [
+    {
+      "name": "aac",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "aac",
+          "container": "mkv",
+          "filter": null
+        }
+      ]
+    },
+    {
+      "name": "opus",
+      "depends_on": [
+        "aac"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "opus",
+          "container": "mkv",
+          "filter": {
+            "type": "and",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng",
+                  "und"
+                ]
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "commentary"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "eac3",
+      "depends_on": [
+        "opus"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_audio",
+          "target_codec": "eac3",
+          "container": "mkv",
+          "filter": {
+            "type": "channels",
+            "op": "gte",
+            "value": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "companion_aac",
+      "depends_on": [
+        "eac3"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "synthesize_audio",
+          "target_codec": "aac",
+          "container": "mkv",
+          "target_channels": 2,
+          "filter": {
+            "type": "channels",
+            "op": "gte",
+            "value": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "companion_opus",
+      "depends_on": [
+        "companion_aac"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "synthesize_audio",
+          "target_codec": "opus",
+          "container": "mkv",
+          "target_channels": 2,
+          "filter": {
+            "type": "channels",
+            "op": "gte",
+            "value": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "companion_eac3",
+      "depends_on": [
+        "companion_opus"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "synthesize_audio",
+          "target_codec": "eac3",
+          "container": "mkv",
+          "target_channels": 2,
+          "filter": {
+            "type": "channels",
+            "op": "gte",
+            "value": 6
+          }
+        }
+      ]
+    },
+    {
+      "name": "filtered_extract",
+      "depends_on": [
+        "companion_eac3"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "extract_audio",
+          "target_codec": "opus",
+          "container": "ogg",
+          "filter": {
+            "type": "and",
+            "filters": [
+              {
+                "type": "codec_in",
+                "values": [
+                  "aac"
+                ]
+              },
+              {
+                "type": "commentary"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "all_extracts",
+      "depends_on": [
+        "filtered_extract"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "extract_audio",
+          "target_codec": "opus",
+          "container": "ogg",
+          "filter": null
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "all_extracts"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "aac",
+    "opus",
+    "eac3",
+    "companion_aac",
+    "companion_opus",
+    "companion_eac3",
+    "filtered_extract",
+    "all_extracts",
+    "verify"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

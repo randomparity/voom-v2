@@ -29,13 +29,11 @@ policy "published grammar tracks" {
     when video.width < 640 {
       remove subtitle
     }
-    when video.width < 1280 {
-      defaults audio none
-    }
-    when count subtitle == 1 {
+    when exists subtitle {
       defaults subtitle best
     }
-    when count subtitle > 1 {
+    when video.width < 1280 and count subtitle >= 2 {
+      defaults audio none
       defaults subtitle preserve
     }
   }

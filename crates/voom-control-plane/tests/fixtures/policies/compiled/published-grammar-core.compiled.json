@@ -1,0 +1,93 @@
+{
+  "policy_name": "published grammar core",
+  "slug": "published-grammar-core",
+  "source_hash": "b6fbf7626c16e529afa9d2cbea44b96537ebd21d8b8683e38392d2f6e15d6b32",
+  "schema_version": 2,
+  "metadata": {
+    "requires_tools": [
+      "ffmpeg",
+      "ffprobe",
+      "mkvtoolnix"
+    ]
+  },
+  "config": {
+    "languages": "languages: [\"eng\", \"und\"]",
+    "on_error": "on_error: abort"
+  },
+  "phases": [
+    {
+      "name": "containerize",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "set_container",
+          "container": "mkv"
+        }
+      ]
+    },
+    {
+      "name": "encode",
+      "depends_on": [
+        "containerize"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "transcode_video",
+          "target_codec": "hevc",
+          "container": "mkv",
+          "profile": {
+            "named": "default-hevc"
+          }
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "encode"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "containerize",
+    "encode",
+    "verify"
+  ],
+  "warnings": [
+    {
+      "code": "metadata_requires_tools_deferred",
+      "severity": "warning",
+      "stage": "validate",
+      "span": {
+        "start": 51,
+        "end": 65
+      },
+      "location": {
+        "line": 3,
+        "column": 5
+      },
+      "message": "metadata requires_tools is not represented as worker capabilities in Sprint 4",
+      "suggestion": null,
+      "related": []
+    }
+  ],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

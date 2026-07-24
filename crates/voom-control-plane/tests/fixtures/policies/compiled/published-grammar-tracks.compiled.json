@@ -1,0 +1,292 @@
+{
+  "policy_name": "published grammar tracks",
+  "slug": "published-grammar-tracks",
+  "source_hash": "bf6da9683895c9b2b63fff2ef1830538c6aa07808572c18b6d146d5baac2c157",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {
+    "languages": "languages: [\"eng\", \"und\"]",
+    "on_error": "on_error: abort"
+  },
+  "phases": [
+    {
+      "name": "select",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "audio",
+          "filter": {
+            "type": "or",
+            "filters": [
+              {
+                "type": "and",
+                "filters": [
+                  {
+                    "type": "language_in",
+                    "values": [
+                      "eng"
+                    ]
+                  },
+                  {
+                    "type": "channels",
+                    "op": "gte",
+                    "value": 2
+                  }
+                ]
+              },
+              {
+                "type": "default"
+              }
+            ]
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "audio",
+          "filter": {
+            "type": "commentary"
+          }
+        },
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "or",
+            "filters": [
+              {
+                "type": "language_in",
+                "values": [
+                  "eng",
+                  "und"
+                ]
+              },
+              {
+                "type": "forced"
+              }
+            ]
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "and",
+            "filters": [
+              {
+                "type": "title_contains",
+                "value": "Signs"
+              },
+              {
+                "type": "not",
+                "inner": {
+                  "type": "forced"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "keep_tracks",
+          "target": "attachment",
+          "filter": {
+            "type": "font"
+          }
+        },
+        {
+          "type": "remove_tracks",
+          "target": "attachment",
+          "filter": {
+            "type": "not",
+            "inner": {
+              "type": "font"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "layout",
+      "depends_on": [
+        "select"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "reorder_tracks",
+          "targets": [
+            "video",
+            "audio",
+            "subtitle",
+            "attachment"
+          ]
+        },
+        {
+          "type": "reorder_tracks",
+          "targets": [
+            "video",
+            "audio",
+            "subtitle",
+            "attachment"
+          ],
+          "head_filter": {
+            "type": "default"
+          }
+        },
+        {
+          "type": "reorder_tracks",
+          "targets": [],
+          "head_filter": {
+            "type": "forced"
+          }
+        },
+        {
+          "type": "set_defaults",
+          "target": "audio",
+          "strategy": "first"
+        },
+        {
+          "type": "set_defaults",
+          "target": "subtitle",
+          "strategy": "best"
+        },
+        {
+          "type": "set_defaults",
+          "target": "audio",
+          "strategy": "preserve",
+          "filter": {
+            "type": "language_in",
+            "values": [
+              "eng"
+            ]
+          }
+        },
+        {
+          "type": "set_defaults",
+          "target": "subtitle",
+          "strategy": "preserve",
+          "filter": {
+            "type": "forced"
+          }
+        }
+      ]
+    },
+    {
+      "name": "alternate_defaults",
+      "depends_on": [
+        "layout"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "field_comparison",
+            "path": [
+              "video",
+              "width"
+            ],
+            "op": "lt",
+            "value": {
+              "type": "number",
+              "value": "640"
+            }
+          },
+          "operations": [
+            {
+              "type": "remove_tracks",
+              "target": "subtitle",
+              "filter": null
+            }
+          ]
+        },
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "exists",
+            "target": "subtitle",
+            "filter": null
+          },
+          "operations": [
+            {
+              "type": "set_defaults",
+              "target": "subtitle",
+              "strategy": "best"
+            }
+          ]
+        },
+        {
+          "type": "conditional",
+          "condition": {
+            "type": "and",
+            "conditions": [
+              {
+                "type": "field_comparison",
+                "path": [
+                  "video",
+                  "width"
+                ],
+                "op": "lt",
+                "value": {
+                  "type": "number",
+                  "value": "1280"
+                }
+              },
+              {
+                "type": "count",
+                "target": "subtitle",
+                "op": "gte",
+                "value": 2
+              }
+            ]
+          },
+          "operations": [
+            {
+              "type": "set_defaults",
+              "target": "audio",
+              "strategy": "none"
+            },
+            {
+              "type": "set_defaults",
+              "target": "subtitle",
+              "strategy": "preserve"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "verify",
+      "depends_on": [
+        "alternate_defaults"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "verify_artifact"
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "select",
+    "layout",
+    "alternate_defaults",
+    "verify"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}
