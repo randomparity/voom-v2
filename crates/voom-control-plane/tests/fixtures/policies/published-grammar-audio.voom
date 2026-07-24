@@ -18,7 +18,7 @@ policy "published grammar audio" {
     transcode audio to eac3 where channels >= 6
   }
 
-  phase companion {
+  phase companion_aac {
     depends_on: [eac3]
     synthesize audio from channels >= 6 {
       codec aac
@@ -26,8 +26,24 @@ policy "published grammar audio" {
     }
   }
 
+  phase companion_opus {
+    depends_on: [companion_aac]
+    synthesize audio from channels >= 6 {
+      codec opus
+      channels 2
+    }
+  }
+
+  phase companion_eac3 {
+    depends_on: [companion_opus]
+    synthesize audio from channels >= 6 {
+      codec eac3
+      channels 2
+    }
+  }
+
   phase filtered_extract {
-    depends_on: [companion]
+    depends_on: [companion_eac3]
     extract audio where codec in ["aac"]
   }
 

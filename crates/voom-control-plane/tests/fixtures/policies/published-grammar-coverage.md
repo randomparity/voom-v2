@@ -32,14 +32,15 @@ track.
 
 ### T1 — track-rich source
 
-An MKV containing H.264 video; default English 5.1 E-AC-3, Japanese commentary
-AAC, and untagged stereo audio; forced English and titled Spanish subtitles;
-one font attachment and one non-font attachment. A 720p variant and a two-
-subtitle variant exercise the alternate condition branches.
+T1a is a 1920x1080 MKV containing H.264 video; default English 5.1 E-AC-3,
+Japanese commentary AAC, and untagged stereo audio; one forced English
+subtitle; one font attachment and one non-font attachment. T1b is a 1024x576
+variant with the forced English subtitle plus a titled Spanish subtitle.
 
 - Expected mutation: remove the commentary, non-preferred subtitle, and
   non-font attachment; retain the selected tracks; then set deterministic
-  order and defaults.
+  order and defaults. T1a exercises `best`; T1b separately exercises `none`
+  and `preserve`, so no strategy overwrites another strategy's oracle.
 - Oracle: the VOOM report records a committed remux and successful artifact
   verification; mkvtoolnix-compatible JSON proves the exact surviving track
   order, dispositions, languages, titles, and attachment MIME types.
@@ -49,25 +50,34 @@ subtitle variant exercise the alternate condition branches.
 An MKV containing H.264 video, default English 5.1 E-AC-3, English stereo AAC,
 and Japanese commentary AAC.
 
-- Expected mutation: exercise all three audio targets, add one stereo AAC
-  downmix, and extract both a filtered sidecar and the selected bare-extract
-  set without output collisions.
+- Expected mutation: exercise all three transcode targets, add stereo AAC,
+  Opus, and E-AC-3 downmix companions, and extract both a filtered sidecar and
+  the selected bare-extract set without output collisions.
 - Oracle: the VOOM report records committed audio phases, sidecar lineage, and
   successful artifact verification; ffprobe proves codecs and channel counts,
   and hashes distinguish every sidecar.
 
 ### F1 — control-flow input set
 
-The set contains:
+The set contains these exact cases:
 
-- a passing MP4 with 1920x1080 H.264 video above 1 Mbps, duration above one
-  second, two audio tracks, and two subtitle tracks;
-- a file that deterministically fails one `on_error: continue` phase while the
-  passing file remains in the same execution batch;
-- variants where `inspect` completes without mutation and where `normalize`
-  completes without mutation; and
-- a persisted execution interrupted after each gating predecessor, then
-  resumed from the same durable state.
+- F1a `modify.mp4`: 1920x1080 H.264 video at 2 Mbps, duration 2000 ms, two
+  audio tracks, and two subtitle tracks. `inspect` modifies, `normalize`
+  completes and modifies, and `organize` runs.
+- F1b `already-normalized.mkv`: the same facts except Matroska and HEVC.
+  `inspect` completes without mutation, `normalize` runs because `completed`
+  is true but completes without mutation, and `organize` does not run because
+  `modified` is false.
+- F1c `fail.mp4`: byte-identical media facts to F1a. Before the same two-file
+  batch containing F1a and F1c starts, create the exact final `fail.mkv`
+  destination with different bytes. The existing-target commit guard makes
+  F1c's `inspect` remux fail deterministically; its dependent phases do not
+  run, while F1a continues and commits.
+- Resume F1a after two durable boundaries: first after the `inspect` per-file
+  summary is committed and before `normalize` dispatch, then after the
+  `normalize` summary is committed and before `organize` dispatch. The #330
+  coordinator test stops the driver at each named boundary, reopens the same
+  database, and resumes the same job rather than compiling or planning anew.
 
 - Expected mutation: for the passing source, the matching conditional remuxes
   to MKV, the first-rule phase transcodes video to HEVC, and the all-rules phase
@@ -128,7 +138,9 @@ test without changing the canonical policy text.
 | O18 | `defaults audio\|subtitle where ...` | T | T1 | #332 |
 | O19 | `order tracks [<targets>] where ...` | T | T1 | #332 |
 | O20 | `order tracks where ...` | T | T1 | #332 |
-| O21 | `synthesize audio from ... { ... }` | A | A1 | #333 |
+| O21 | synthesize target `codec aac` | A | A1 | #333 |
+| O22 | synthesize target `codec opus` | A | A1 | #333 |
+| O23 | synthesize target `codec eac3` | A | A1 | #333 |
 
 The owner column is intentionally honest about published forms outside this
 campaign. Their presence records the contract; it does not claim execution
