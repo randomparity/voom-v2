@@ -556,6 +556,9 @@ impl<'a> Parser<'a> {
         if current_keyword == "skip" && candidate == "when" {
             return false;
         }
+        if current_keyword == "rule" && candidate == "when" {
+            return false;
+        }
         matches!(
             candidate,
             "depends_on"

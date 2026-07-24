@@ -296,15 +296,24 @@ fn rejects_nested_tag_operation_conflict_in_same_phase() {
 
 #[test]
 fn accepts_rules_first_mode() {
-    let diagnostics = codes("policy \"p\" { phase a { rules first { rule \"r\" {} } } }");
+    let diagnostics =
+        codes("policy \"p\" { phase a { rules first { rule \"r\" when exists audio {} } } }");
 
     assert!(!diagnostics.contains(&"invalid_rule_match_mode".to_owned()));
 }
 
 #[test]
+fn rejects_unpublished_nested_rule_condition() {
+    assert!(
+        codes("policy \"p\" { phase a { rules first { rule \"r\" { when exists audio {} } } } }")
+            .contains(&"unknown_phase_statement_or_operation".to_owned())
+    );
+}
+
+#[test]
 fn rejects_rules_with_extra_mode_tokens() {
     assert!(
-        codes("policy \"p\" { phase a { rules first all { rule \"r\" {} } } }")
+        codes("policy \"p\" { phase a { rules first all { rule \"r\" when exists audio {} } } }")
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
@@ -434,8 +443,10 @@ fn rejects_on_error_with_extra_tokens() {
 #[test]
 fn rejects_unsupported_transcode_inside_rule_block() {
     assert!(
-        codes("policy \"p\" { phase a { rules first { rule \"r\" { transcode video to vp9 } } } }")
-            .contains(&"unsupported_transcode_shape".to_owned())
+        codes(
+            "policy \"p\" { phase a { rules first { rule \"r\" when exists audio { transcode video to vp9 } } } }"
+        )
+        .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
 

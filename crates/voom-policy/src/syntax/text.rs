@@ -78,6 +78,21 @@ pub(crate) fn text_after_quoted_value(text: &str) -> Option<&str> {
 }
 
 #[must_use]
+pub(crate) fn rule_header(text: &str) -> Option<(String, &str)> {
+    let text = text.trim();
+    if !text.starts_with('"') {
+        return None;
+    }
+    let name = quoted_value(text)?;
+    let condition = text_after_quoted_value(text)?.strip_prefix("when ")?.trim();
+    if condition.is_empty() {
+        None
+    } else {
+        Some((name, condition))
+    }
+}
+
+#[must_use]
 pub(crate) fn is_single_value(text: &str) -> bool {
     let text = text.trim();
     if text.starts_with('"') {

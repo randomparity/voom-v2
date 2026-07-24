@@ -1,0 +1,43 @@
+policy "published grammar audio" {
+  config {
+    languages: ["eng", "und"]
+    on_error: abort
+  }
+
+  phase aac {
+    transcode audio to aac
+  }
+
+  phase opus {
+    depends_on: [aac]
+    transcode audio to opus where language in ["eng", "und"] and not commentary
+  }
+
+  phase eac3 {
+    depends_on: [opus]
+    transcode audio to eac3 where channels >= 6
+  }
+
+  phase companion {
+    depends_on: [eac3]
+    synthesize audio from channels >= 6 {
+      codec aac
+      channels 2
+    }
+  }
+
+  phase filtered_extract {
+    depends_on: [companion]
+    extract audio where codec in ["aac"]
+  }
+
+  phase all_extracts {
+    depends_on: [filtered_extract]
+    extract audio
+  }
+
+  phase verify {
+    depends_on: [all_extracts]
+    verify artifact
+  }
+}
