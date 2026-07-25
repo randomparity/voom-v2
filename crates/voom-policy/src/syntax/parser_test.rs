@@ -75,6 +75,21 @@ fn parses_multiple_metadata_settings_separated_by_spaces() {
 }
 
 #[test]
+fn parses_config_as_typed_settings() {
+    let ast = parse_policy_source(
+        "policy \"p\" { config { languages: [\"eng\", \"und\"] on_error: continue } \
+         phase inspect {} }",
+    )
+    .unwrap();
+
+    assert_eq!(ast.config.len(), 2);
+    assert_eq!(ast.config[0].key.value, "languages");
+    assert!(matches!(ast.config[0].value, ExprAst::List { .. }));
+    assert_eq!(ast.config[1].key.value, "on_error");
+    assert!(matches!(ast.config[1].value, ExprAst::Identifier(_)));
+}
+
+#[test]
 fn parses_transcode_inline_settings_body() {
     let src = "policy \"p\" { phase a { transcode video to av1 { encoder: libsvtav1 crf: 28 preset: 6 } } }";
     let ast = parse_policy_source(src).unwrap();

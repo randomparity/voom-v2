@@ -95,17 +95,7 @@ impl ControlPlane {
             .ok_or_else(|| {
                 VoomError::NotFound(format!("policy version {policy_version_id} not found"))
             })?;
-        let mut policy: voom_policy::CompiledPolicy = serde_json::from_value(version.compiled_json)
-            .map_err(|e| {
-                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
-            })?;
-        if policy.source_hash != version.source_hash
-            || policy.schema_version != version.schema_version
-        {
-            return Err(VoomError::PlanGeneration(format!(
-                "stored compiled policy identity mismatch for policy version {policy_version_id}"
-            )));
-        }
+        let mut policy = deserialize_stored_compiled_policy(&version)?;
         // Resolve profile references before the pure planner; shared with the
         // execute path for dry-run/execute parity.
         resolve_profiles_in_policy(self, &mut policy).await?;
@@ -127,6 +117,24 @@ impl ControlPlane {
             },
         )
     }
+}
+
+pub(crate) fn deserialize_stored_compiled_policy(
+    version: &voom_store::repo::PolicyVersion,
+) -> Result<voom_policy::CompiledPolicy, VoomError> {
+    let mut policy: voom_policy::CompiledPolicy =
+        serde_json::from_value(version.compiled_json.clone()).map_err(|error| {
+            VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {error}"))
+        })?;
+    if policy.source_hash != version.source_hash || policy.schema_version != version.schema_version
+    {
+        return Err(VoomError::PlanGeneration(format!(
+            "stored compiled policy identity mismatch for policy version {}",
+            version.id
+        )));
+    }
+    policy.apply_execution_defaults();
+    Ok(policy)
 }
 
 pub(crate) fn input_set_to_draft(input: PolicyInputSet) -> PolicyInputSetDraft {

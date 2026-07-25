@@ -466,7 +466,7 @@ fn policy_with_on_error(
         source_hash: "src-hash-onerr".to_owned(),
         schema_version: 2,
         metadata: std::collections::BTreeMap::new(),
-        config: std::collections::BTreeMap::new(),
+        config: voom_policy::CompiledConfig::default(),
         phases: vec![voom_policy::CompiledPhase {
             name: "normalize".to_owned(),
             depends_on: Vec::new(),
@@ -892,15 +892,46 @@ async fn resume_phase_barrier_rejects_unknown_prior_job() {
 #[tokio::test]
 async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
     let (cp, _tmp) = cp().await;
-    // A phase-level (not policy-level) on_error: continue is the deferred case the
-    // resolve-time guard rejects. No committed fixture carries one, so author it
-    // inline.
-    let source = "policy \"on-error-guard\" {\n  \
-        phase normalize {\n    on_error: continue\n    container mkv\n  }\n}\n";
+    let source = "policy \"on-error-guard\" {\n  config {\n    \
+        languages: [\"eng\"]\n    on_error: continue\n  }\n  \
+        phase normalize {\n    container mkv\n  }\n  \
+        phase finalize {\n    depends_on: [normalize]\n    on_error: abort\n  }\n}\n";
     let created = cp
         .create_policy_document("on-error-guard", source)
         .await
         .unwrap();
+    let mut legacy = created.version.compiled_json;
+    legacy["config"] = json!({
+        "languages": "languages audio: [eng]",
+        "on_error": "on_error continue"
+    });
+    legacy["phases"][0]["on_error"] = Value::Null;
+    // Simulate a row created by an older binary. Production rows are immutable
+    // after insertion, including across binary upgrades.
+    sqlx::query("DROP TRIGGER policy_versions_are_immutable")
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE policy_versions SET compiled_json = ? WHERE id = ?")
+        .bind(serde_json::to_string(&legacy).unwrap())
+        .bind(i64::try_from(created.version.id.0).unwrap())
+        .execute(&cp.pool)
+        .await
+        .unwrap();
+    let stored = cp
+        .get_policy_version(created.version.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let loaded = cp.compiled_policy_for_version(&stored).await.unwrap();
+    assert_eq!(
+        loaded.phases[0].on_error,
+        Some(voom_policy::ErrorStrategy::Continue)
+    );
+    assert_eq!(
+        loaded.phases[1].on_error,
+        Some(voom_policy::ErrorStrategy::Abort)
+    );
     let v = seed_version(&cp, "/lib/o/movie.mkv", "hash-o1", reprobe_payload("h264")).await;
     let s = latest_snapshot(&cp, v).await;
     let input = cp

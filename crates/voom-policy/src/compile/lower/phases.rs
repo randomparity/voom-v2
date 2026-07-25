@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::text::{dependency_values, setting_value, statement_text};
 use crate::{ExprAst, PolicyAst, PolicyDiagnostic, StatementAst};
 
-use super::super::compiled::{CompiledCondition, CompiledPhase, ErrorStrategy};
+use super::super::compiled::{CompiledCondition, CompiledConfig, CompiledPhase, ErrorStrategy};
 use super::conditions::condition_from_text;
 use super::operations::lower_operations;
 
@@ -32,17 +32,26 @@ pub(super) fn metadata_map(settings: &[crate::SettingAst]) -> BTreeMap<String, s
         .collect()
 }
 
-pub(super) fn config_map(statements: &[StatementAst]) -> BTreeMap<String, serde_json::Value> {
-    statements
-        .iter()
-        .map(|statement| {
-            let text = statement_text(statement);
-            (
-                statement.keyword().value.clone(),
-                serde_json::Value::String(text.into_owned()),
-            )
-        })
-        .collect()
+pub(super) fn compiled_config(settings: &[crate::SettingAst]) -> CompiledConfig {
+    let mut config = CompiledConfig::default();
+    for setting in settings {
+        match (&*setting.key.value, &setting.value) {
+            ("languages", ExprAst::List { values, .. }) => {
+                config.languages = values
+                    .iter()
+                    .filter_map(|value| match value {
+                        ExprAst::String(value) => Some(value.value.clone()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            ("on_error", ExprAst::Identifier(value)) => {
+                config.on_error = error_strategy(Some(&value.value));
+            }
+            _ => {}
+        }
+    }
+    config
 }
 
 pub(super) fn phase_order(ast: &PolicyAst) -> Vec<String> {

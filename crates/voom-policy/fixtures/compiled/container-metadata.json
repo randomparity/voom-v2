@@ -1,15 +1,18 @@
 {
   "policy_name": "container-metadata",
   "slug": "container-metadata",
-  "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+  "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
   "schema_version": 2,
   "metadata": {
     "description": "container and metadata normalization",
     "version": "1"
   },
   "config": {
-    "languages": "languages audio: [eng, und]",
-    "on_error": "on_error: abort"
+    "languages": [
+      "eng",
+      "und"
+    ],
+    "on_error": "abort"
   },
   "phases": [
     {
@@ -17,7 +20,7 @@
       "depends_on": [],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "set_container",

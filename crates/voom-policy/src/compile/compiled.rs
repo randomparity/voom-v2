@@ -2,6 +2,121 @@ use std::collections::BTreeMap;
 
 use crate::PolicyDiagnostic;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct CompiledConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_error: Option<ErrorStrategy>,
+}
+
+impl<'de> serde::Deserialize<'de> for CompiledConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values =
+            <BTreeMap<String, serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+        let languages = values
+            .get("languages")
+            .map(decode_languages)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        let on_error = values
+            .get("on_error")
+            .map(decode_on_error)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .flatten();
+        Ok(Self {
+            languages,
+            on_error,
+        })
+    }
+}
+
+fn decode_languages(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    let languages = match value {
+        serde_json::Value::Array(values) => {
+            let mut languages = Vec::with_capacity(values.len());
+            for (index, value) in values.iter().enumerate() {
+                let Some(language) = value.as_str() else {
+                    return Err(format!("config.languages[{index}] must be a string"));
+                };
+                languages.push(language.to_owned());
+            }
+            languages
+        }
+        serde_json::Value::String(statement) => decode_legacy_languages(statement)?,
+        _ => return Err("config.languages must be an array".to_owned()),
+    };
+    for (index, language) in languages.iter().enumerate() {
+        if !is_canonical_language_code(language) {
+            return Err(format!(
+                "config.languages[{index}] must be a three-letter lowercase ASCII code"
+            ));
+        }
+    }
+    Ok(languages)
+}
+
+fn decode_legacy_languages(statement: &str) -> Result<Vec<String>, String> {
+    let (prefix, values) = statement
+        .split_once('[')
+        .ok_or_else(|| "legacy config.languages is missing `[`".to_owned())?;
+    let prefix = prefix.trim();
+    if !matches!(prefix, "languages:" | "languages audio:") {
+        return Err(format!(
+            "legacy config.languages has unknown statement prefix `{prefix}`"
+        ));
+    }
+    let values = values
+        .trim()
+        .strip_suffix(']')
+        .ok_or_else(|| "legacy config.languages is missing final `]`".to_owned())?;
+    if values.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(values
+        .split(',')
+        .map(|language| {
+            let language = language.trim();
+            language
+                .strip_prefix('"')
+                .and_then(|language| language.strip_suffix('"'))
+                .unwrap_or(language)
+                .to_owned()
+        })
+        .collect())
+}
+
+fn decode_on_error(value: &serde_json::Value) -> Result<Option<ErrorStrategy>, String> {
+    let Some(value) = value.as_str() else {
+        return Err("config.on_error must be a string".to_owned());
+    };
+    let value = value
+        .strip_prefix("on_error:")
+        .or_else(|| value.strip_prefix("on_error "))
+        .unwrap_or(value)
+        .trim();
+    let strategy = match value {
+        "abort" => ErrorStrategy::Abort,
+        "continue" => ErrorStrategy::Continue,
+        "skip" => ErrorStrategy::Skip,
+        _ => {
+            return Err(format!(
+                "config.on_error contains unknown strategy `{value}`"
+            ));
+        }
+    };
+    Ok(Some(strategy))
+}
+
+pub(crate) fn is_canonical_language_code(value: &str) -> bool {
+    value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyTool {
     Ffmpeg,
@@ -63,7 +178,8 @@ pub struct CompiledPolicy {
     pub source_hash: String,
     pub schema_version: u32,
     pub metadata: BTreeMap<String, serde_json::Value>,
-    pub config: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub config: CompiledConfig,
     pub phases: Vec<CompiledPhase>,
     pub phase_order: Vec<String>,
     pub warnings: Vec<PolicyDiagnostic>,
@@ -102,6 +218,21 @@ impl CompiledPolicy {
         Ok(tools)
     }
 
+    /// Materialize configured policy defaults into phases that omit overrides.
+    ///
+    /// Calling this method more than once is safe. Explicit phase strategies
+    /// are never replaced.
+    pub fn apply_execution_defaults(&mut self) {
+        let Some(strategy) = self.config.on_error else {
+            return;
+        };
+        for phase in &mut self.phases {
+            if phase.on_error.is_none() {
+                phase.on_error = Some(strategy);
+            }
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn minimal_for_test(policy_name: &str, source_hash: &str) -> Self {
@@ -111,7 +242,7 @@ impl CompiledPolicy {
             source_hash: source_hash.to_owned(),
             schema_version: 2,
             metadata: BTreeMap::new(),
-            config: BTreeMap::new(),
+            config: CompiledConfig::default(),
             phases: Vec::new(),
             phase_order: Vec::new(),
             warnings: Vec::new(),

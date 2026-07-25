@@ -16,6 +16,114 @@ fn compiled_json_is_deterministic() {
 }
 
 #[test]
+fn published_config_lowers_to_typed_defaults_and_fills_omitted_phases() {
+    let policy = crate::compile_policy(
+        "policy \"p\" { \
+         config { languages: [\"eng\", \"und\"] on_error: continue } \
+         phase inherits {} \
+         phase overrides { depends_on: [inherits] on_error: abort } \
+         }",
+    )
+    .unwrap()
+    .policy;
+
+    assert_eq!(policy.config.languages, ["eng", "und"]);
+    assert_eq!(policy.config.on_error, Some(ErrorStrategy::Continue));
+    assert_eq!(policy.phases[0].on_error, Some(ErrorStrategy::Continue));
+    assert_eq!(policy.phases[1].on_error, Some(ErrorStrategy::Abort));
+    let json = deterministic_json(&policy).unwrap();
+    assert_eq!(
+        json["config"]["languages"],
+        serde_json::json!(["eng", "und"])
+    );
+    assert_eq!(json["config"]["on_error"], "continue");
+}
+
+#[test]
+fn execution_default_application_is_idempotent() {
+    let mut policy = CompiledPolicy::minimal_for_test("p", "hash");
+    policy.config.on_error = Some(ErrorStrategy::Continue);
+    policy.phases.push(CompiledPhase {
+        name: "a".to_owned(),
+        depends_on: Vec::new(),
+        run_if: None,
+        skip_if: None,
+        on_error: None,
+        operations: Vec::new(),
+    });
+
+    policy.apply_execution_defaults();
+    let once = policy.clone();
+    policy.apply_execution_defaults();
+
+    assert_eq!(policy, once);
+    assert_eq!(policy.phases[0].on_error, Some(ErrorStrategy::Continue));
+}
+
+#[test]
+fn legacy_compiled_config_deserializes_and_applies_defaults() {
+    let json = include_str!("../../fixtures/compiled/legacy-policy-config-v2.json");
+    let mut policy: CompiledPolicy = serde_json::from_str(json).unwrap();
+
+    assert_eq!(policy.config.languages, ["eng", "und"]);
+    assert_eq!(policy.config.on_error, Some(ErrorStrategy::Continue));
+    assert_eq!(policy.phases[0].on_error, None);
+    policy.apply_execution_defaults();
+    assert_eq!(policy.phases[0].on_error, Some(ErrorStrategy::Continue));
+    assert_eq!(policy.phases[1].on_error, Some(ErrorStrategy::Abort));
+}
+
+#[test]
+fn compiled_policy_without_config_field_remains_readable() {
+    let policy = CompiledPolicy::minimal_for_test("p", "hash");
+    let mut json = deterministic_json(&policy).unwrap();
+    json.as_object_mut().unwrap().remove("config");
+
+    let decoded: CompiledPolicy = serde_json::from_value(json).unwrap();
+
+    assert_eq!(decoded.config, CompiledConfig::default());
+}
+
+#[test]
+fn compiled_config_rejects_invalid_typed_and_legacy_languages() {
+    let cases = [
+        serde_json::json!({"languages": ["EN"]}),
+        serde_json::json!({"languages": ["en"]}),
+        serde_json::json!({"languages": [7]}),
+        serde_json::json!({"languages": "languages audio: [EN]"}),
+        serde_json::json!({"languages": "language_preferences: [eng]"}),
+        serde_json::json!({"languages": "languages: [eng] trailing"}),
+        serde_json::json!({"languages": "languages: [\"eng]"}),
+    ];
+
+    for value in cases {
+        let error = serde_json::from_value::<CompiledConfig>(value).unwrap_err();
+        assert!(error.to_string().contains("config.languages"));
+    }
+}
+
+#[test]
+fn legacy_compiled_config_reads_previously_published_skip_value() {
+    let config: CompiledConfig =
+        serde_json::from_value(serde_json::json!({"on_error": "on_error skip"})).unwrap();
+
+    assert_eq!(config.on_error, Some(ErrorStrategy::Skip));
+}
+
+#[test]
+fn configured_languages_do_not_rewrite_explicit_track_filters() {
+    let without_config = compile_single_op("defaults audio where language == \"spa\"");
+    let policy = crate::compile_policy(
+        "policy \"p\" { config { languages: [\"eng\"] } \
+         phase a { defaults audio where language == \"spa\" } }",
+    )
+    .unwrap()
+    .policy;
+
+    assert_eq!(policy.phases[0].operations[0], without_config);
+}
+
+#[test]
 fn required_tools_preserve_source_order_and_remove_duplicates() {
     let policy = crate::compile_policy(
         "policy \"p\" { metadata { \

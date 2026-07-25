@@ -5,8 +5,11 @@
   "schema_version": 2,
   "metadata": {},
   "config": {
-    "languages": "languages: [\"eng\", \"und\"]",
-    "on_error": "on_error: abort"
+    "languages": [
+      "eng",
+      "und"
+    ],
+    "on_error": "abort"
   },
   "phases": [
     {
@@ -14,7 +17,7 @@
       "depends_on": [],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "remove_tracks",
@@ -115,7 +118,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "reorder_tracks",
@@ -135,7 +138,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "reorder_tracks",
@@ -158,7 +161,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "reorder_tracks",
@@ -176,7 +179,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "set_defaults",
@@ -216,7 +219,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "conditional",
@@ -302,7 +305,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "abort",
       "operations": [
         {
           "type": "verify_artifact"

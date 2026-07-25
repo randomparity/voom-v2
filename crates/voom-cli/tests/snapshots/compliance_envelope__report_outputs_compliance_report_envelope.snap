@@ -9,11 +9,11 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_f8690c76cc62bd8c",
-      "plan_hash": "blake3:f8690c76cc62bd8cb59d2ef54933d3c557bf20927e8318b686163e44e7b9ed34",
+      "plan_id": "plan_d3221cffe1d55f8d",
+      "plan_hash": "blake3:d3221cffe1d55f8d38bddae40db33d327bd9563df7d3de1de4690e0bec1dba54",
       "policy": {
         "slug": "container-metadata",
-        "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+        "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
         "document_id": 1,
         "version_id": 1
       },
@@ -258,13 +258,13 @@ expression: json
     },
     "report": {
       "schema_version": 1,
-      "report_id": "report_1ea8dec9b95c14ae",
-      "report_hash": "blake3:c789514e4f443faf1b96642c4700eeb486e6cd03a07d681e65e25883e9b894cb",
-      "plan_id": "plan_f8690c76cc62bd8c",
-      "plan_hash": "blake3:f8690c76cc62bd8cb59d2ef54933d3c557bf20927e8318b686163e44e7b9ed34",
+      "report_id": "report_8f639ac8edfd19a1",
+      "report_hash": "blake3:1400c3a38ef22a61b104ed5fcee3359015f6da8548d8cc77dc99c065afc3992f",
+      "plan_id": "plan_d3221cffe1d55f8d",
+      "plan_hash": "blake3:d3221cffe1d55f8d38bddae40db33d327bd9563df7d3de1de4690e0bec1dba54",
       "policy": {
         "slug": "container-metadata",
-        "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+        "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
         "document_id": 1,
         "version_id": 1
       },
@@ -291,7 +291,7 @@ expression: json
       },
       "checks": [
         {
-          "check_id": "check_b743497eedb1879e",
+          "check_id": "check_b830334e72bb02d8",
           "node_id": "node_a2985ff8ff45d281",
           "target": {
             "type": "synthetic",
@@ -320,7 +320,7 @@ expression: json
           "execution_eligibility": "supported"
         },
         {
-          "check_id": "check_0886badfc58122ef",
+          "check_id": "check_ce84ac6156bcae92",
           "node_id": "node_810a976b823236df",
           "target": {
             "type": "synthetic",
@@ -338,7 +338,7 @@ expression: json
           "execution_eligibility": "unsupported"
         },
         {
-          "check_id": "check_d63a7ae2ffd3836f",
+          "check_id": "check_8f93566e9c16fa26",
           "node_id": "node_49b773aa85d91815",
           "target": {
             "type": "synthetic",
@@ -364,7 +364,7 @@ expression: json
           "execution_eligibility": "unsupported"
         },
         {
-          "check_id": "check_a34f4fd8e32b3b89",
+          "check_id": "check_cc7004cdb8356067",
           "node_id": "node_41195a59cc88f9d4",
           "target": {
             "type": "synthetic",
@@ -388,9 +388,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation clear_tags is not supported by compliance reports",
-          "plan_id": "plan_f8690c76cc62bd8c",
+          "plan_id": "plan_d3221cffe1d55f8d",
           "node_id": "node_810a976b823236df",
-          "check_id": "check_0886badfc58122ef",
+          "check_id": "check_ce84ac6156bcae92",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -401,9 +401,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation set_tag is not supported by compliance reports",
-          "plan_id": "plan_f8690c76cc62bd8c",
+          "plan_id": "plan_d3221cffe1d55f8d",
           "node_id": "node_49b773aa85d91815",
-          "check_id": "check_d63a7ae2ffd3836f",
+          "check_id": "check_8f93566e9c16fa26",
           "target": {
             "type": "synthetic",
             "key": "variant-1",
@@ -414,9 +414,9 @@ expression: json
           "severity": "warning",
           "code": "unsupported_compliance_operation",
           "message": "operation delete_tag is not supported by compliance reports",
-          "plan_id": "plan_f8690c76cc62bd8c",
+          "plan_id": "plan_d3221cffe1d55f8d",
           "node_id": "node_41195a59cc88f9d4",
-          "check_id": "check_a34f4fd8e32b3b89",
+          "check_id": "check_cc7004cdb8356067",
           "target": {
             "type": "synthetic",
             "key": "variant-1",

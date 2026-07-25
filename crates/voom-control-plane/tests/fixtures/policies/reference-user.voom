@@ -11,7 +11,7 @@ policy "reference user library normalize" {
   }
 
   config {
-    languages audio: [eng, und]
+    languages: ["eng", "und"]
     on_error: continue
   }
 

@@ -43,16 +43,16 @@ expression: json
         "phase_ordinal": 0,
         "phase_name": "normalize",
         "outcome": "completed",
-        "report_id": "report_e4b2821af4314231",
+        "report_id": "report_264575dff0cd55fa",
         "report": {
           "schema_version": 1,
-          "report_id": "report_e4b2821af4314231",
-          "report_hash": "blake3:09ded0f81db6f5028287e7dfe199b8ec881b4d60a770df7a221afb36c5c55a3a",
-          "plan_id": "plan_26a3c00101d7024f",
-          "plan_hash": "blake3:26a3c00101d7024f8671fe5f821c05f18942a4bbe73d7e6701d1c4609905410a",
+          "report_id": "report_264575dff0cd55fa",
+          "report_hash": "blake3:e881b2d61692898217917a6ad42110d13124897f0003a2251ba982ab14750a2e",
+          "plan_id": "plan_3904d56dde0a712c",
+          "plan_hash": "blake3:3904d56dde0a712c4a2dd0ddf0759c9a69d7106592223c137af6e8dcfd38cd0f",
           "policy": {
             "slug": "container-metadata",
-            "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+            "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
             "version_id": 1
           },
           "input": {
@@ -78,7 +78,7 @@ expression: json
           },
           "checks": [
             {
-              "check_id": "check_dbabb3ebf97d8a1a",
+              "check_id": "check_7a96ef2e33adb6e2",
               "node_id": "node_d9b6b0cc4caf4781",
               "target": {
                 "type": "file_version",
@@ -107,7 +107,7 @@ expression: json
               "execution_eligibility": "supported"
             },
             {
-              "check_id": "check_4bc9525cb63646aa",
+              "check_id": "check_c2753796f6a475f4",
               "node_id": "node_c520b9e0e0a4da73",
               "target": {
                 "type": "file_version",
@@ -124,7 +124,7 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_7f67c8f1da9fabc8",
+              "check_id": "check_05842f62cb568ec6",
               "node_id": "node_2cb1f04bb88984c6",
               "target": {
                 "type": "file_version",
@@ -149,7 +149,7 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_b858982717e7ae74",
+              "check_id": "check_03ea54620627b4f4",
               "node_id": "node_7e472d6411e7638f",
               "target": {
                 "type": "file_version",
@@ -172,9 +172,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation clear_tags is not supported by compliance reports",
-              "plan_id": "plan_26a3c00101d7024f",
+              "plan_id": "plan_3904d56dde0a712c",
               "node_id": "node_c520b9e0e0a4da73",
-              "check_id": "check_4bc9525cb63646aa",
+              "check_id": "check_c2753796f6a475f4",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -184,9 +184,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation set_tag is not supported by compliance reports",
-              "plan_id": "plan_26a3c00101d7024f",
+              "plan_id": "plan_3904d56dde0a712c",
               "node_id": "node_2cb1f04bb88984c6",
-              "check_id": "check_7f67c8f1da9fabc8",
+              "check_id": "check_05842f62cb568ec6",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -196,9 +196,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation delete_tag is not supported by compliance reports",
-              "plan_id": "plan_26a3c00101d7024f",
+              "plan_id": "plan_3904d56dde0a712c",
               "node_id": "node_7e472d6411e7638f",
-              "check_id": "check_b858982717e7ae74",
+              "check_id": "check_03ea54620627b4f4",
               "target": {
                 "type": "file_version",
                 "id": 2

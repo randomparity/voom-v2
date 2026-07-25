@@ -5,7 +5,7 @@ policy "container-metadata" {
   }
 
   config {
-    languages audio: [eng, und]
+    languages: ["eng", "und"]
     on_error: abort
   }
 

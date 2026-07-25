@@ -5,8 +5,11 @@
   "schema_version": 2,
   "metadata": {},
   "config": {
-    "languages": "languages: [\"eng\", \"und\"]",
-    "on_error": "on_error: continue"
+    "languages": [
+      "eng",
+      "und"
+    ],
+    "on_error": "continue"
   },
   "phases": [
     {
@@ -246,7 +249,7 @@
         "op": "lt",
         "value": 2
       },
-      "on_error": null,
+      "on_error": "continue",
       "operations": [
         {
           "type": "rules",
@@ -320,7 +323,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "continue",
       "operations": [
         {
           "type": "verify_artifact"

@@ -55,6 +55,32 @@ async fn durable_planning_reads_compiled_policy_without_creating_execution_state
     assert_eq!(before, read_only_table_counts(&cp).await);
 }
 
+#[tokio::test]
+async fn stored_policy_loader_applies_legacy_execution_defaults() {
+    let (cp, _tmp) = cp().await;
+    let source = "policy \"legacy defaults\" {\n  config {\n    \
+        languages: [\"eng\", \"und\"]\n    on_error: continue\n  }\n  \
+        phase normalize {}\n}\n";
+    let created = cp
+        .create_policy_document("legacy-defaults", source)
+        .await
+        .unwrap();
+    let mut version = created.version;
+    version.compiled_json["config"] = serde_json::json!({
+        "languages": "languages audio: [eng, und]",
+        "on_error": "on_error continue"
+    });
+    version.compiled_json["phases"][0]["on_error"] = serde_json::Value::Null;
+
+    let policy = deserialize_stored_compiled_policy(&version).unwrap();
+
+    assert_eq!(policy.config.languages, ["eng", "und"]);
+    assert_eq!(
+        policy.phases[0].on_error,
+        Some(voom_policy::ErrorStrategy::Continue)
+    );
+}
+
 const PLAN_READ_ONLY_TABLES: &[&str] = &[
     "jobs",
     "tickets",

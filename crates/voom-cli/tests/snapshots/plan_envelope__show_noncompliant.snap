@@ -1,6 +1,5 @@
 ---
 source: crates/voom-cli/tests/plan_envelope.rs
-assertion_line: 107
 expression: json
 ---
 {
@@ -10,11 +9,11 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_f8690c76cc62bd8c",
-      "plan_hash": "blake3:f8690c76cc62bd8cb59d2ef54933d3c557bf20927e8318b686163e44e7b9ed34",
+      "plan_id": "plan_d3221cffe1d55f8d",
+      "plan_hash": "blake3:d3221cffe1d55f8d38bddae40db33d327bd9563df7d3de1de4690e0bec1dba54",
       "policy": {
         "slug": "container-metadata",
-        "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3",
+        "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
         "document_id": 1,
         "version_id": 1
       },

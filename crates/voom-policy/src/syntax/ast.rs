@@ -9,7 +9,7 @@ pub struct PolicyAst {
     pub name: Spanned<String>,
     pub extends: Option<Spanned<String>>,
     pub metadata: Vec<SettingAst>,
-    pub config: Vec<StatementAst>,
+    pub config: Vec<SettingAst>,
     pub phases: Vec<PhaseAst>,
     pub unknown_top_level: Vec<StatementAst>,
 }
