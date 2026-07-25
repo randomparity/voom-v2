@@ -12,6 +12,7 @@ use crate::{
     NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary, PlanningContext,
     PlanningDiagnostic, PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates,
     SafetyHints, SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
+    stream_condition_eligibility_diagnostics,
 };
 
 pub mod audio;
@@ -42,6 +43,7 @@ pub fn generate_plan(request: PlanningRequest) -> Result<ExecutionPlan, PlanGene
         input,
         context,
     } = request;
+    validate_policy_eligibility(&policy)?;
     validate_input(&input)?;
 
     let mut builder = PlanBuilder::new(&policy, &input, &context);
@@ -80,6 +82,7 @@ pub fn plan_phase(
         input,
         context,
     } = request;
+    validate_policy_eligibility(&policy)?;
     validate_input(&input)?;
 
     if !policy.phase_order.iter().any(|name| name == phase_name) {
@@ -116,6 +119,14 @@ fn validate_input(input: &PolicyInputSetDraft) -> Result<(), PlanGenerationError
     }
 
     Ok(())
+}
+
+fn validate_policy_eligibility(policy: &CompiledPolicy) -> Result<(), PlanGenerationError> {
+    let diagnostics = stream_condition_eligibility_diagnostics(policy);
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    Err(PlanGenerationError { diagnostics })
 }
 
 struct PlanBuilder<'a> {

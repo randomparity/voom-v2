@@ -122,6 +122,7 @@ impl ControlPlane {
 pub(crate) fn deserialize_stored_compiled_policy(
     version: &voom_store::repo::PolicyVersion,
 ) -> Result<voom_policy::CompiledPolicy, VoomError> {
+    validate_stored_stream_condition_shapes(&version.compiled_json)?;
     let mut policy: voom_policy::CompiledPolicy =
         serde_json::from_value(version.compiled_json.clone()).map_err(|error| {
             VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {error}"))
@@ -133,8 +134,151 @@ pub(crate) fn deserialize_stored_compiled_policy(
             version.id
         )));
     }
+    if let Some(diagnostic) = voom_plan::stream_condition_eligibility_diagnostics(&policy)
+        .into_iter()
+        .next()
+    {
+        return Err(VoomError::PlanGeneration(diagnostic.message));
+    }
     policy.apply_execution_defaults();
     Ok(policy)
+}
+
+pub(crate) fn validate_stored_stream_condition_shapes(
+    value: &serde_json::Value,
+) -> Result<(), VoomError> {
+    let Some(phases) = value.get("phases").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+    for (phase_index, phase) in phases.iter().enumerate() {
+        let path = format!("/phases/{phase_index}");
+        if let Some(run_if) = phase.get("run_if") {
+            validate_condition_shape(run_if, &format!("{path}/run_if"))?;
+        }
+        if let Some(skip_if) = phase.get("skip_if") {
+            validate_condition_shape(skip_if, &format!("{path}/skip_if"))?;
+        }
+        if let Some(operations) = phase
+            .get("operations")
+            .and_then(serde_json::Value::as_array)
+        {
+            validate_operation_shapes(operations, &format!("{path}/operations"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_operation_shapes(
+    operations: &[serde_json::Value],
+    path: &str,
+) -> Result<(), VoomError> {
+    for (operation_index, operation) in operations.iter().enumerate() {
+        let operation_path = format!("{path}/{operation_index}");
+        match operation.get("type").and_then(serde_json::Value::as_str) {
+            Some("conditional") => {
+                if let Some(condition) = operation.get("condition") {
+                    validate_condition_shape(condition, &format!("{operation_path}/condition"))?;
+                }
+                if let Some(nested) = operation
+                    .get("operations")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    validate_operation_shapes(nested, &format!("{operation_path}/operations"))?;
+                }
+            }
+            Some("rules") => {
+                if let Some(rules) = operation.get("rules").and_then(serde_json::Value::as_array) {
+                    validate_rule_shapes(rules, &format!("{operation_path}/rules"))?;
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_rule_shapes(rules: &[serde_json::Value], path: &str) -> Result<(), VoomError> {
+    for (rule_index, rule) in rules.iter().enumerate() {
+        let rule_path = format!("{path}/{rule_index}");
+        if let Some(condition) = rule.get("condition") {
+            validate_condition_shape(condition, &format!("{rule_path}/condition"))?;
+        }
+        if let Some(operations) = rule.get("operations").and_then(serde_json::Value::as_array) {
+            validate_operation_shapes(operations, &format!("{rule_path}/operations"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_condition_shape(value: &serde_json::Value, path: &str) -> Result<(), VoomError> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    match object.get("type").and_then(serde_json::Value::as_str) {
+        Some("exists") => {
+            validate_condition_keys(object, &["type", "target"], &["filter"], "exists", path)
+        }
+        Some("count") => validate_condition_keys(
+            object,
+            &["type", "target", "op", "value"],
+            &[],
+            "count",
+            path,
+        ),
+        Some("not") => {
+            if let Some(inner) = object.get("inner") {
+                validate_condition_shape(inner, &format!("{path}/inner"))?;
+            }
+            Ok(())
+        }
+        Some("and" | "or") => {
+            if let Some(conditions) = object
+                .get("conditions")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, condition) in conditions.iter().enumerate() {
+                    validate_condition_shape(condition, &format!("{path}/conditions/{index}"))?;
+                }
+            }
+            Ok(())
+        }
+        Some(_) | None => Ok(()),
+    }
+}
+
+fn validate_condition_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    required: &[&str],
+    optional: &[&str],
+    kind: &str,
+    path: &str,
+) -> Result<(), VoomError> {
+    for key in required {
+        if !object.contains_key(*key) {
+            return Err(unpublished_raw_condition(
+                path,
+                format!("{kind} is missing required key `{key}`"),
+            ));
+        }
+    }
+    let mut unexpected = object
+        .keys()
+        .filter(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+        .collect::<Vec<_>>();
+    unexpected.sort_unstable();
+    if let Some(key) = unexpected.first() {
+        return Err(unpublished_raw_condition(
+            path,
+            format!("{kind} has unexpected key `{key}`"),
+        ));
+    }
+    Ok(())
+}
+
+fn unpublished_raw_condition(path: &str, detail: impl std::fmt::Display) -> VoomError {
+    VoomError::PlanGeneration(format!(
+        "unpublished compiled stream condition at {path}: {detail}"
+    ))
 }
 
 pub(crate) fn input_set_to_draft(input: PolicyInputSet) -> PolicyInputSetDraft {

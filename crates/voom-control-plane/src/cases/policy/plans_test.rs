@@ -28,6 +28,79 @@ fn plan_policy_source_with_input_draft_does_not_need_database() {
     );
 }
 
+#[test]
+fn stored_stream_shape_gate_rejects_condition_slots_in_path_order() {
+    for (value, expected_path) in [
+        (
+            serde_json::json!({
+                "phases": [{
+                    "run_if": {
+                        "type": "exists",
+                        "target": "audio",
+                        "extra": true
+                    }
+                }]
+            }),
+            "/phases/0/run_if",
+        ),
+        (
+            serde_json::json!({
+                "phases": [{
+                    "operations": [{
+                        "type": "conditional",
+                        "condition": {"type": "predicate", "name": "ready"},
+                        "operations": [{
+                            "type": "rules",
+                            "rules": [{
+                                "condition": {
+                                    "type": "and",
+                                    "conditions": [
+                                        {"type": "predicate", "name": "ready"},
+                                        {"type": "count", "target": "audio", "op": "gte"}
+                                    ]
+                                },
+                                "operations": []
+                            }]
+                        }]
+                    }]
+                }]
+            }),
+            "/phases/0/operations/0/operations/0/rules/0/condition/conditions/1",
+        ),
+    ] {
+        let error = validate_stored_stream_condition_shapes(&value).unwrap_err();
+
+        assert_eq!(error.code(), "PLAN_GENERATION_ERROR");
+        assert!(
+            error
+                .to_string()
+                .contains("unpublished compiled stream condition at")
+        );
+        assert!(error.to_string().contains(expected_path));
+    }
+}
+
+#[test]
+fn stored_stream_shape_gate_ignores_unrelated_tagged_json() {
+    let value = serde_json::json!({
+        "metadata": {
+            "tagged": {"type": "exists", "target": "audio", "extra": true}
+        },
+        "provenance": {
+            "flags": {"tagged": {"type": "count", "extra": true}}
+        },
+        "phases": [{
+            "operations": [{
+                "type": "set_tag",
+                "key": "tagged",
+                "value": {"type": "exists", "target": "audio", "extra": true}
+            }]
+        }]
+    });
+
+    validate_stored_stream_condition_shapes(&value).unwrap();
+}
+
 #[tokio::test]
 async fn durable_planning_reads_compiled_policy_without_creating_execution_state() {
     let (cp, _tmp) = cp().await;
@@ -78,6 +151,45 @@ async fn stored_policy_loader_applies_legacy_execution_defaults() {
     assert_eq!(
         policy.phases[0].on_error,
         Some(voom_policy::ErrorStrategy::Continue)
+    );
+}
+
+#[tokio::test]
+async fn stored_policy_loader_rejects_raw_and_typed_unpublished_stream_shapes() {
+    let (cp, _tmp) = cp().await;
+    let created = cp
+        .create_policy_document(
+            "stream-shapes",
+            "policy \"stream shapes\" { phase normalize { when exists audio { container mkv } } }",
+        )
+        .await
+        .unwrap();
+    let mut raw_invalid = created.version.clone();
+    raw_invalid.compiled_json["phases"][0]["operations"][0]["condition"]["extra"] =
+        serde_json::json!(true);
+
+    let raw_error = deserialize_stored_compiled_policy(&raw_invalid).unwrap_err();
+
+    assert!(
+        raw_error
+            .to_string()
+            .contains("/phases/0/operations/0/condition")
+    );
+    let mut typed_invalid = created.version;
+    typed_invalid.compiled_json["phases"][0]["operations"][0]["condition"]["filter"] =
+        serde_json::json!({"type": "commentary"});
+
+    let typed_error = deserialize_stored_compiled_policy(&typed_invalid).unwrap_err();
+
+    assert!(
+        typed_error
+            .to_string()
+            .contains("phase[0:\"normalize\"].operations[0].condition")
+    );
+    assert!(
+        typed_error
+            .to_string()
+            .contains("exists target=audio filter=present")
     );
 }
 

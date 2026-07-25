@@ -2141,6 +2141,43 @@ fn plan_phase_reevaluates_run_if_against_supplied_snapshot() {
 }
 
 #[test]
+fn planner_entry_points_reject_unpublished_condition_in_later_phase() {
+    let mut policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        ("tracks", Vec::new()),
+    ]);
+    policy.phases[1].skip_if = Some(CompiledCondition::Exists {
+        target: TrackTarget::Video,
+        filter: None,
+    });
+    let snapshot = snapshot_mp4_with_video_audio_subtitle();
+
+    let complete = generate_plan(request(policy.clone(), snapshot.clone())).unwrap_err();
+    let one_phase = plan_phase(request(policy, snapshot), "normalize").unwrap_err();
+
+    assert_eq!(complete.diagnostics, one_phase.diagnostics);
+    assert_eq!(
+        complete.diagnostics[0].code,
+        PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+    assert!(
+        complete.diagnostics[0]
+            .message
+            .starts_with("unpublished compiled stream condition at")
+    );
+    assert!(
+        complete.diagnostics[0]
+            .message
+            .contains("phase[1:\"tracks\"].skip_if")
+    );
+}
+
+#[test]
 fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
     let policy = compiled_policy_with_phases(&[(
         "audio",

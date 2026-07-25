@@ -10,6 +10,7 @@
 pub mod audio;
 pub mod compliance;
 pub mod diagnostic;
+pub mod eligibility;
 pub mod fixtures;
 pub mod hash;
 pub mod model;
@@ -28,6 +29,7 @@ pub use compliance::{
     hash as compliance_hash, model as compliance_model, report as compliance_report,
 };
 pub use diagnostic::{PlanningDiagnostic, PlanningDiagnosticCode, PlanningDiagnosticSeverity};
+pub use eligibility::stream_condition_eligibility_diagnostics;
 pub use fixtures::{GoldenPlanFixtureError, load_golden_compliance_report, load_golden_plan};
 pub use hash::{edge_id, node_id, plan_hash, plan_id};
 pub use model::{
