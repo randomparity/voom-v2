@@ -186,25 +186,54 @@ fn warns_for_unknown_plugin_namespace() {
 }
 
 #[test]
-fn warns_for_metadata_requires_tools() {
-    let ast = parse_policy_source(
-        "policy \"p\" { metadata { requires_tools: [ffmpeg] } phase a { container mkv } }",
-    )
-    .unwrap();
-
-    let result = validate_policy_ast("", &ast);
-
+fn accepts_published_metadata_tool_identifiers_without_warning() {
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "metadata_requires_tools_deferred")
+        codes(
+            "policy \"p\" { metadata { requires_tools: [ffmpeg, ffprobe, mkvtoolnix] } \
+             phase a { container mkv } }"
+        )
+        .is_empty()
     );
+}
+
+#[test]
+fn rejects_non_list_metadata_tool_requirements() {
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|d| d.severity == crate::DiagnosticSeverity::Warning)
+        codes("policy \"p\" { metadata { requires_tools: ffmpeg } phase a { container mkv } }")
+            .contains(&"invalid_metadata_requires_tools".to_owned())
+    );
+}
+
+#[test]
+fn rejects_quoted_metadata_tool_requirements() {
+    assert!(
+        codes(
+            "policy \"p\" { metadata { requires_tools: [\"ffmpeg\"] } \
+             phase a { container mkv } }"
+        )
+        .contains(&"invalid_metadata_requires_tools".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unknown_metadata_tool_requirements() {
+    assert!(
+        codes(
+            "policy \"p\" { metadata { requires_tools: [mediainfo] } \
+             phase a { container mkv } }"
+        )
+        .contains(&"invalid_metadata_requires_tools".to_owned())
+    );
+}
+
+#[test]
+fn rejects_repeated_metadata_tool_requirement_settings() {
+    assert!(
+        codes(
+            "policy \"p\" { metadata { requires_tools: [ffmpeg] \
+             requires_tools: [mkvtoolnix] } phase a { container mkv } }"
+        )
+        .contains(&"invalid_metadata_requires_tools".to_owned())
     );
 }
 

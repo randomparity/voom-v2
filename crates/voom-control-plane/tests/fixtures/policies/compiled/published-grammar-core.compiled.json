@@ -67,24 +67,7 @@
     "encode",
     "verify"
   ],
-  "warnings": [
-    {
-      "code": "metadata_requires_tools_deferred",
-      "severity": "warning",
-      "stage": "validate",
-      "span": {
-        "start": 51,
-        "end": 65
-      },
-      "location": {
-        "line": 3,
-        "column": 5
-      },
-      "message": "metadata requires_tools is not represented as worker capabilities in Sprint 4",
-      "suggestion": null,
-      "related": []
-    }
-  ],
+  "warnings": [],
   "provenance": {
     "compiler": "voom-policy",
     "format": "sprint4-v2",
