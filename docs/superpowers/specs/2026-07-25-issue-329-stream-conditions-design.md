@@ -302,7 +302,11 @@ per file in #330.
   prefix, and structural context before any node is emitted.
 - Source forms outside the newly executable leaves fail compilation.
 
-No failure path mutates durable state.
+Every #329 raw-shape, typed-eligibility, provenance, duplicate-lineage,
+non-file-member, and unavailable-authority failure occurs before issue
+application, job creation, or dispatch and performs no durable mutation.
+Runtime failures after issue application, dispatch, or commit retain the
+existing honest partial-state contracts from ADRs 0007 and 0008.
 
 ## Test strategy
 
@@ -351,6 +355,8 @@ Focused tests prove:
   metadata and provenance objects tagged `exists` or `count` remain readable;
 - provenance failures have identical codes and context across stored plan,
   report, fresh execution, and resume; and
+- every #329 preflight rejection leaves issue, job, ticket, file-version, and
+  workflow-summary rows unchanged; and
 - previously serialized canonical compiled policies remain readable.
 
 The existing #326 coverage matrix already assigns C07-C11 and S10/S14-S17 to

@@ -65,6 +65,8 @@ Red tests:
 - missing target versions or current snapshots, linked non-file targets, and
   mismatched links fail every stored read path with the same error class and
   identifier context;
+- every adapter rejection through execute leaves issue, job, ticket,
+  file-version, and workflow-summary rows unchanged;
 - repository failures propagate rather than becoming provenance errors;
 - store-free planning keeps its supplied summary.
 
@@ -142,6 +144,8 @@ Red tests:
   deterministic phase/placement/operation/rule/Boolean path context;
 - `generate_plan`, `plan_phase`, and stored preparation preserve the same
   eligibility diagnostic message;
+- raw and typed eligibility rejection through execute leaves issue, job,
+  ticket, file-version, and workflow-summary rows unchanged;
 - stream conditions in `run_if` fail plan generation while canonical predicates
   retain their existing unknown behavior.
 
