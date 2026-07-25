@@ -68,6 +68,13 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
 
 ### Fact authority
 
+Every stored entry point runs the raw `Exists`/`Count` shape gate,
+deserialization, and complete typed eligibility pass before applying the
+authority rules below. An unpublished condition therefore always fails with
+the eligibility diagnostic; references here to a policy containing
+`Exists`/`Count` mean an eligibility-approved policy containing a published
+shape.
+
 1. A store-free planning call uses the `MediaSnapshotInput` supplied by its
    caller.
 2. Every durable input whose target is `FileVersion` selects that version's
@@ -75,10 +82,10 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
    proves original provenance and must name a snapshot for the target version.
 3. A linked durable input with any other target kind is invalid. An unlinked
    durable input with another target kind continues using its stored facts only
-   when the complete compiled policy contains no `Exists` or `Count`. If either
-   variant appears anywhere, every stored plan, report, fresh execution, and
-   resume rejects the non-file member before planning. Store-free calls remain
-   unchanged.
+   when the eligibility-approved compiled policy contains no published
+   `Exists` or `Count`. If either variant appears anywhere, every stored plan,
+   report, fresh execution, and resume rejects the non-file member before
+   planning. Store-free calls remain unchanged.
 4. Every stored plan, compliance report, fresh execution, and resumed execution
    resolves each selected file lineage's active chain tip and latest durable
    snapshot with one identity-repository read. The operation selects the
@@ -236,8 +243,8 @@ prefix `stored policy stream facts are invalid` for:
 - a target/snapshot file-version mismatch; or
 - a selected `FileVersion` or file lineage with no active version or latest
   snapshot; or
-- a non-`FileVersion` stored media member used with a policy containing
-  `Exists` or `Count`.
+- a non-`FileVersion` stored media member used with an eligibility-approved
+  policy containing a published `Exists` or `Count`.
 
 The message names the input-set identifier, member ordinal, target kind and
 file-version identifier when present, optional linked snapshot identifier, and

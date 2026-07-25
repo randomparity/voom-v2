@@ -81,9 +81,10 @@ The first pass classifies and validates every media input:
    file version.
 3. Reject a linked non-`FileVersion` target.
 4. An unlinked input with another target kind retains its stored facts only
-   when the policy contains no `Exists` or `Count`. If either condition appears
-   anywhere, every stored entry point rejects the non-file member before
-   planning; store-free callers remain unchanged.
+   when the eligibility-approved policy contains no published `Exists` or
+   `Count`. If either condition appears anywhere, every stored entry point
+   rejects the non-file member before planning; store-free callers remain
+   unchanged.
 
 Before resolving any active tip, group selected versions by file-asset id and
 reject a duplicate group, including different historical versions of one
@@ -350,6 +351,8 @@ Focused tests prove:
 - a stored policy with `Exists`/`Count` rejects non-file media members across
   every stored entry point, while other stored policies and store-free inputs
   retain their existing behavior;
+- a request combining an unpublished stream condition with a non-file stored
+  member fails eligibility first with no durable mutation;
 - both snapshot projection callers preserve missing and malformed stream
   values without changing container/remux eligibility;
 - an invalid stream leaf in a later phase fails before any earlier phase opens

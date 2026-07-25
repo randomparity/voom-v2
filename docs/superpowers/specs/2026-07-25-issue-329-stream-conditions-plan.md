@@ -57,6 +57,9 @@ Red tests:
   both member identities in the error;
 - stored policies containing `Exists`/`Count` reject non-file media members
   across plan, report, fresh, and resume, while other policies retain them;
+- a request combining an unpublished stream condition with a non-file stored
+  member fails eligibility first with the same diagnostic across stored entry
+  points;
 - the active version and latest snapshot are returned by one repository
   statement, and the snapshot belongs to that version;
 - the repository selects greatest live version id and greatest snapshot id,
