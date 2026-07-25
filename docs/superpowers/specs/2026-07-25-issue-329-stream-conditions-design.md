@@ -56,7 +56,7 @@ then plan each phase from its active chain tip and latest durable snapshot.
 The control plane adds one async adapter used by all stored planning paths:
 
 ```text
-PolicyInputSet
+CompiledPolicy + PolicyInputSet
     -> validate original links and resolve current snapshots
     -> StoredPlanningInput {
            draft: PolicyInputSetDraft,
@@ -69,7 +69,8 @@ Each `ResolvedFileInput` carries the member ordinal, selected input-set
 `FileVersion` id, file-asset id, complete resolved active `FileVersion`, and
 exact latest `MediaSnapshot` returned by the authority read.
 
-For each media input:
+The adapter receives the already raw-gated, deserialized, and typed-eligible
+policy. For each media input:
 
 1. A `FileVersion` target selects its file lineage whether or not
    `existing_media_snapshot_id` is present.
@@ -81,10 +82,19 @@ For each media input:
    version with the greatest id.
 4. Replace the complete media input with a projection of the current snapshot,
    preserving its ordinal.
-5. Reject a linked non-`FileVersion` target. An unlinked input with another
-   target kind retains its stored facts.
-6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
+5. Reject a linked non-`FileVersion` target.
+6. An unlinked input with another target kind retains its stored facts only
+   when the policy contains no `Exists` or `Count`. If either condition appears
+   anywhere, every stored entry point rejects the non-file member before
+   planning; store-free callers remain unchanged.
+7. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
    resolved.
+
+After member resolution, the adapter rejects two members that select the same
+file asset, including different historical versions that converge on one
+active tip. The failure names the input-set id, shared file-asset id, resolved
+active-version id, and both member ordinals and selected-version ids. It emits
+no partial `StoredPlanningInput`.
 
 Stored plan display and compliance reporting pass `draft` to `voom-plan`.
 Coordinator preparation also retains `files`: it derives branch ids from the
@@ -93,6 +103,26 @@ from those records. Fresh and resume do not repeat the initial active-tip or
 snapshot read. Store-free fixture planning continues to trust its explicit
 draft. Invalid durable links remain readable but fail this adapter; #353
 separately owns generic write-time validation.
+
+## Single execute preparation
+
+Fresh compliance execution must not call the public stored-report path and
+coordinator preparation independently. One internal preparation flow:
+
+1. loads the accepted policy version and durable input set once;
+2. runs raw eligibility, deserializes, and runs typed eligibility;
+3. calls the stored-input adapter exactly once;
+4. resolves profiles and performs tool preflight;
+5. generates the initial plan/report from `StoredPlanningInput.draft`;
+6. applies safety and live-worker checks to that plan; and
+7. derives branch ids and first-phase files from the same
+   `StoredPlanningInput.files`.
+
+It returns the report data and `PhaseBarrierRunInputs` together. Issue
+application consumes that report before the prepared coordinator opens its
+job. The test-only runtime-registry execute path uses the same preparation
+function. Public plan/report calls and direct fresh/resume coordinator calls
+each perform one independent adapter call for their own invocation.
 
 The coordinator already projects active snapshots for each phase under ADRs
 0005, 0007, and 0008. Read-only plan/report paths adopt that same authority.
@@ -259,9 +289,13 @@ per file in #330.
 - Missing or invalid linked provenance and unavailable current snapshots fail
   every stored read path with `PLAN_GENERATION_ERROR` and the message prefix
   `stored policy stream facts are invalid`.
+- Duplicate resolved file assets and non-file members used with any
+  `Exists`/`Count` condition use that same error code and prefix.
 - Read-side messages include input-set id, member ordinal, target kind and
   target file-version id when present, snapshot id, and snapshot file-version
   id when available.
+- Duplicate-lineage messages also include both ordinals and selected-version
+  ids, the shared file-asset id, and resolved active-version id.
 - Repository errors such as `DB_UNREACHABLE` propagate unchanged.
 - Unpublished compiled stream conditions fail with
   `PLAN_GENERATION_ERROR`, `invalid_planning_request`, the stable message
@@ -289,6 +323,8 @@ Focused tests prove:
   chain-tip snapshot before their first phase;
 - coordinator preparation retains the resolved authority records and performs
   no second initial-tip or snapshot read;
+- fresh execute generates its initial report, safety decisions, and
+  first-phase state from one adapter result;
 - first-phase construction uses an injected authority result even when a later
   repository read would return another tip; #352 owns future pre-dispatch
   revalidation;
@@ -300,7 +336,11 @@ Focused tests prove:
 - link target mismatches fail planning;
 - unlinked durable `FileVersion` members resolve their active lineage in every
   stored entry point;
-- unlinked durable non-file and store-free inputs retain their supplied facts;
+- duplicate members that resolve to one file asset fail identically across
+  plan, report, fresh execution, and resume;
+- a stored policy with `Exists`/`Count` rejects non-file media members across
+  every stored entry point, while other stored policies and store-free inputs
+  retain their existing behavior;
 - both snapshot projection callers preserve missing and malformed stream
   values without changing container/remux eligibility;
 - an invalid stream leaf in a later phase fails before any earlier phase opens

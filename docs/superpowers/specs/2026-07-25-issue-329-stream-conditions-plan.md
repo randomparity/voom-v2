@@ -27,6 +27,7 @@ Files:
 - `crates/voom-control-plane/src/cases/policy/plans.rs`
 - `crates/voom-control-plane/src/cases/policy/plans_test.rs`
 - `crates/voom-control-plane/src/cases/policy/compliance.rs`
+- `crates/voom-control-plane/src/cases/policy/compliance_test.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/mod.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/planning.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/resume.rs`
@@ -50,6 +51,12 @@ Red tests:
   second active-tip or snapshot read;
 - an authority result remains the first-phase source when a later repository
   read would return a different tip (#352 owns later revalidation);
+- complete fresh execute uses one adapter result for its initial report,
+  safety/live-worker decisions, branch ids, and first phase;
+- two members that resolve to one file asset fail every stored entry point with
+  both member identities in the error;
+- stored policies containing `Exists`/`Count` reject non-file media members
+  across plan, report, fresh, and resume, while other policies retain them;
 - the active version and latest snapshot are returned by one repository
   statement, and the snapshot belongs to that version;
 - the repository selects greatest live version id and greatest snapshot id,
@@ -59,7 +66,6 @@ Red tests:
   mismatched links fail every stored read path with the same error class and
   identifier context;
 - repository failures propagate rather than becoming provenance errors;
-- unlinked stored non-file inputs keep their facts; and
 - store-free planning keeps its supplied summary.
 
 Implementation:
@@ -70,10 +76,17 @@ Implementation:
   latest snapshot as a coherent per-file pair;
 - add an async stored-input adapter that returns the projected draft and
   authority-bearing resolved-file records;
+- make the adapter policy-aware so newly executable stream conditions reject
+  non-file stored members without changing other stored policies;
+- reject duplicate resolved file assets before returning any adapter result;
 - use the projected draft from stored plan and report entry points;
 - thread the resolved-file records through coordinator preparation and build
-  first-phase state from them without calling `initial_phase_files`; and
-- remove the superseded duplicate initial-resolution helper.
+  first-phase state from them without calling `initial_phase_files`;
+- remove the superseded duplicate initial-resolution helper;
+- add one execute-preparation function that loads durable inputs, validates the
+  policy, calls the adapter once, produces the initial report, runs preflight,
+  and returns report data plus prepared coordinator inputs; and
+- route production and test-registry execute entry points through that function.
 
 Expected failure before implementation:
 
