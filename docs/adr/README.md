@@ -39,3 +39,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0031](0031-keyset-cursor-pagination.md) | Keyset cursor pagination for durable-row inspection commands |
 | [0032](0032-video-and-quality-scoring-profile-management.md) | Video profile and quality-scoring profile management |
 | [0033](0033-toxiproxy-network-resilience-harness.md) | Toxiproxy network-resilience harness at the worker-protocol boundary |
+| [0034](0034-policy-tool-requirements-use-worker-capabilities.md) | Policy tool requirements use worker capabilities |
