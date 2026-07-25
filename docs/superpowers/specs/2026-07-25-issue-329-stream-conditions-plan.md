@@ -26,6 +26,8 @@ Files:
 - `crates/voom-control-plane/src/cases/policy/plans_test.rs`
 - `crates/voom-control-plane/src/cases/policy/compliance.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/mod.rs`
+- `crates/voom-control-plane/src/workflow/coordinator/planning.rs`
+- `crates/voom-control-plane/src/workflow/coordinator/resume.rs`
 - `crates/voom-control-plane/src/workflow/coordinator/mod_test.rs`
 
 Red tests:
@@ -33,9 +35,15 @@ Red tests:
 - missing streams stay missing through both snapshot projections;
 - null and non-array streams are copied rather than normalized;
 - arrays retain exact members and derive the video count;
-- stored planning replaces a linked cached summary from the exact snapshot;
-- it does not substitute a later snapshot for the same file version;
-- missing, non-file-version, and mismatched links fail planning;
+- missing and non-array streams retain the legacy zero-video sentinel;
+- container-only/remux behavior is unchanged across missing, null, non-array,
+  malformed-array, and empty-array inventories;
+- stored plan, report, fresh execution, and resume replace linked cached facts
+  from the same active chain-tip snapshot;
+- post-commit phases use the produced version's refreshed snapshot;
+- missing, non-file-version, and mismatched links fail every stored read path
+  with the same error class and identifier context;
+- repository failures propagate rather than becoming provenance errors;
 - unlinked stored inputs keep their summary; and
 - store-free planning keeps its supplied summary.
 
@@ -43,8 +51,8 @@ Implementation:
 
 - make the shared stream-summary projection preserve source shape;
 - route both production snapshot projections through it;
-- add an async stored-input adapter that loads exact linked snapshots,
-  validates file-version provenance, and replaces only stream summaries;
+- add an async stored-input adapter that validates original link provenance,
+  resolves active chain-tip snapshots, and projects complete current facts;
 - use the adapter from stored plan, report, and coordinator entry points; and
 - validate link provenance on new control-plane writes.
 
@@ -83,16 +91,20 @@ Red tests:
 - canonical stored compiled shapes remain deserializable;
 - unpublished compiled stream shapes fail plan generation;
 - one unpublished stream leaf invalidates its complete Boolean tree; and
+- an invalid leaf in a later phase fails full-policy validation before an
+  earlier phase can open a job or dispatch;
 - stream conditions in `run_if` fail plan generation while canonical predicates
   retain their existing unknown behavior.
 
 Implementation:
 
 - narrow source validation only for `Exists` and `Count`;
-- traverse phase and operation condition placements before planning;
+- traverse all phase and operation condition placements before planning;
 - accept published stream shapes only on ordinary condition surfaces; and
 - reject stream conditions in `run_if` without changing other compiled
-  condition behavior.
+  condition behavior;
+- call the same pure full-policy validation from `generate_plan`, `plan_phase`,
+  and stored coordinator preparation before profile resolution or job creation.
 
 Expected failure before implementation:
 
@@ -161,10 +173,13 @@ Review targets:
 Review focus:
 
 - linked versus unlinked authority;
-- exact snapshot identity;
+- original link provenance and active chain-tip authority;
 - missing versus empty facts;
+- remux non-regression for unavailable inventories;
 - accidental activation of filtered/video/attachment conditions;
 - Boolean short-circuiting around unpublished stream leaves;
+- full-policy validation before phase mutation;
+- stable provenance failure codes and context;
 - `run_if` placement isolation; and
 - existing compiled-version readability.
 

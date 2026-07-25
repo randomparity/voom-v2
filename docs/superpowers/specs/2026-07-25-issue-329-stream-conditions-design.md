@@ -14,7 +14,7 @@ In scope:
 - audio/subtitle `count` with all six numeric comparators;
 - `when`, phase `skip`, `rules first`, and `rules all`;
 - missing, empty, malformed, duplicate, and known stream inventories;
-- exact linked-snapshot rehydration for stored planning paths;
+- linked-provenance validation and active-snapshot projection for stored paths;
 - source rejection of unpublished `Exists` and `Count` forms;
 - fail-closed planning for unpublished compiled stream conditions; and
 - readability of existing compiled policy versions.
@@ -42,10 +42,11 @@ array before returning typed facts. An actual empty array succeeds. Missing or
 non-array streams, malformed entries, duplicate identifiers, unknown targets,
 and invalid provider indexes fail the projection.
 
-Stored policy inputs duplicate stream facts in `stream_summary` and may link the
-source snapshot through `existing_media_snapshot_id`. Historical projection
-normalized a missing stream array to an empty array, although the linked
-snapshot payload retains the distinction.
+Stored policy inputs duplicate stream facts in `stream_summary` and may link
+their original snapshot through `existing_media_snapshot_id`. Historical
+projection normalized a missing stream array to an empty array. Existing
+coordinator semantics use that link to select a file lineage, then plan every
+phase from its active chain tip and latest durable snapshot.
 
 ## Planning-input authority
 
@@ -53,7 +54,7 @@ The control plane adds one async adapter used by all stored planning paths:
 
 ```text
 PolicyInputSet
-    -> validate and rehydrate linked stream summaries
+    -> validate original links and resolve current snapshots
     -> PolicyInputSetDraft
     -> voom-plan
 ```
@@ -62,18 +63,24 @@ For each media input:
 
 1. If `existing_media_snapshot_id` is absent, retain the stored summary.
 2. If present, load that exact snapshot identifier.
-3. Require the media input target to be the snapshot's exact file version.
-4. Replace only `stream_summary` with a fresh projection of the source payload.
-5. Fail with `PLAN_GENERATION_ERROR` when the link is missing or mismatched.
+3. Require the media input target to be that snapshot's exact file version.
+4. Resolve the target version's file asset, its active chain tip, and that
+   version's latest snapshot.
+5. Replace the complete media input with a projection of the current snapshot,
+   preserving its ordinal.
+6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
+   resolved.
 
 The adapter is used by stored plan display, compliance reporting, and
 coordinator preparation. Store-free fixture planning continues to trust its
 explicit draft. New control-plane writes reject invalid linked provenance
 before persistence.
 
-The coordinator already projects exact durable snapshots for each active phase.
-Using the same stream-summary projection in both paths keeps single-shot and
-phase planning aligned.
+The coordinator already projects active snapshots for each phase under ADRs
+0005, 0007, and 0008. Read-only plan/report paths adopt that same authority.
+After a phase commits, its produced version's refreshed snapshot becomes the
+next phase's authority. Resume resolves the active chain again before opening
+its new job.
 
 ## Projection contract
 
@@ -81,17 +88,18 @@ phase planning aligned.
 
 | Source `payload.streams` | Summary |
 |---|---|
-| missing | no `streams`; no `video_stream_count` |
+| missing | no `streams`; `video_stream_count: 0` |
 | array | exact `streams`; derived integer `video_stream_count` |
-| null or other non-array | exact `streams`; no `video_stream_count` |
+| null or other non-array | exact `streams`; `video_stream_count: 0` |
 
 Array members are not cleaned or filtered during projection. Validation belongs
 to `stream_facts`, so one malformed or duplicate entry makes the complete
 inventory unavailable.
 
-This projection fixes future cached rows as well as planning rehydration.
+The retained video-count sentinel preserves existing container/remux
+eligibility. Stream conditions never use it as evidence of a known inventory.
 Existing cached rows need no rewrite because linked planning no longer treats
-them as authoritative.
+them as current facts.
 
 ## Source boundary
 
@@ -111,11 +119,12 @@ track-filter aliases and unpublished filter spellings.
 No compiled type, discriminator, key, schema version, or serde annotation
 changes.
 
-Before evaluation, the planner checks every stream condition in:
+Before evaluation, the planner checks every stream condition in the complete
+compiled policy, including:
 
+- every phase, even when `plan_phase` names a different phase;
 - phase `skip`;
-- conditional operations;
-- `rules first|all`; and
+- recursively nested conditional operations and `rules first|all`; and
 - phase `run_if`.
 
 Ordinary condition surfaces accept only unfiltered audio/subtitle `Exists` and
@@ -126,6 +135,11 @@ fails before Boolean evaluation.
 This check is limited to `Exists` and `Count`. It prevents #329 from activating
 parser-only stream forms without claiming the broader compiled-policy contract
 owned by #344.
+
+`generate_plan` and `plan_phase` perform the complete validation before node
+expansion. Stored coordinator preparation performs it before profile
+resolution, job creation, or dispatch. An invalid later phase therefore cannot
+follow an earlier committed phase.
 
 Canonical historical compiled versions deserialize and execute. Historical
 parser-only stream forms deserialize but fail plan generation with a message
@@ -173,8 +187,15 @@ per file in #330.
 
 - Missing or malformed facts create the existing
   `insufficient_snapshot_facts` blocked nodes.
-- Missing or mismatched linked snapshots fail the stored planning call with
-  `PLAN_GENERATION_ERROR`.
+- Missing or invalid linked provenance and unavailable current snapshots fail
+  every stored read path with `PLAN_GENERATION_ERROR` and the message prefix
+  `linked policy stream facts are invalid`.
+- Read-side messages include input-set id, member ordinal, target kind and
+  target file-version id when present, snapshot id, and snapshot file-version
+  id when available.
+- Repository errors such as `DB_UNREACHABLE` propagate unchanged.
+- New writes use `NOT_FOUND` for a missing snapshot and `CONFLICT` for target
+  kind or file-version mismatch.
 - Unpublished compiled stream conditions fail plan generation before any node
   is emitted.
 - Source forms outside the newly executable leaves fail compilation.
@@ -194,11 +215,17 @@ Focused tests prove:
 - `when`, `skip`, `rules first`, and `rules all`;
 - stream conditions remain unavailable in `run_if`;
 - unpublished compiled stream leaves fail before Boolean short-circuiting;
-- linked input rehydration uses the exact snapshot rather than the cached
-  summary or latest snapshot;
+- stored plan, report, fresh execution, and resume resolve the same active
+  chain-tip snapshot before their first phase;
+- post-commit phases use the produced version's refreshed snapshot;
 - link target mismatches fail planning;
 - unlinked and store-free inputs retain their supplied summary;
-- both snapshot projection callers preserve missing and malformed values; and
+- both snapshot projection callers preserve missing and malformed stream
+  values without changing container/remux eligibility;
+- an invalid stream leaf in a later phase fails before any earlier phase opens
+  a job or dispatches;
+- provenance failures have identical codes and context across stored plan,
+  report, fresh execution, and resume; and
 - previously serialized canonical compiled policies remain readable.
 
 The existing #326 coverage matrix already assigns C07-C11 and S10/S14-S17 to

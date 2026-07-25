@@ -23,10 +23,11 @@ track operations they guard.
 
 Durable policy inputs may contain an `existing_media_snapshot_id`. Historical
 projection code copied that snapshot's stream array into `stream_summary`, but
-normalized a missing array to `[]`. The exact linked `media_snapshots` row still
-contains the authoritative value. Repairing every cached summary would add a
-migration and a second durable identity contract when planning can instead read
-the declared source.
+normalized a missing array to `[]`. The linked row still proves the input's
+original file lineage. Existing coordinator semantics then resolve that
+lineage's active chain tip and latest durable snapshot for every execution
+phase (ADRs 0005, 0007, and 0008). Read-only plan and report paths need the same
+current-fact authority once stream facts select control flow.
 
 ## Review charter
 
@@ -35,8 +36,9 @@ the declared source.
   from trustworthy per-file stream facts.
 - **Surfaces:** `voom-policy` validation, `voom-plan` evaluation, and the
   control-plane stored-input planning adapter.
-- **Direct dependencies:** existing `IdentityRepo::get_media_snapshot`,
-  `stream_facts`, and the published condition grammar.
+- **Direct dependencies:** existing snapshot and active-version identity
+  reads, `stream_facts`, ADRs 0005/0007/0008, and the published condition
+  grammar.
 - **Persistence:** read existing rows; no schema, migration, trigger, or stored
   JSON shape change.
 - **Review targets:** this ADR, the #329 design spec, and the #329
@@ -61,36 +63,45 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
 
 ### Fact authority
 
-1. A store-free planning call uses the `MediaSnapshotInput.stream_summary`
-   supplied by its caller.
-2. An unlinked durable policy input also uses its stored `stream_summary`.
-3. Before any stored policy input reaches the planner, the control plane
-   rehydrates each linked input from the exact `media_snapshots` row named by
-   `existing_media_snapshot_id`.
-4. A linked input is valid only when its target is `FileVersion` and that
-   target equals the linked snapshot's `file_version_id`. A missing snapshot,
-   other target kind, or mismatch fails planning before plan generation.
-5. Rehydration replaces only `stream_summary`. Other accepted input facts keep
-   their stored values.
-6. New control-plane writes validate the same link relationship. Historical
-   mismatches remain readable from the repository but cannot be planned.
+1. A store-free planning call uses the `MediaSnapshotInput` supplied by its
+   caller.
+2. An unlinked durable policy input also uses its stored facts.
+3. For a linked durable input, `existing_media_snapshot_id` proves original
+   provenance. Its target must be `FileVersion`, and that target must equal the
+   linked snapshot's `file_version_id`.
+4. After provenance validation, every stored plan, compliance report, fresh
+   execution, and resumed execution resolves that file asset's active chain tip
+   and latest durable snapshot. The control plane projects the complete current
+   `MediaSnapshotInput`, retaining the input member's ordinal.
+5. The first execution phase therefore uses the same current-fact rule as a
+   read-only plan or report. After a committed phase, the existing coordinator
+   refreshes from the produced version's snapshot before planning the next
+   phase, as required by ADRs 0005, 0007, and 0008.
+6. New control-plane writes validate the original link relationship.
+   Historical mismatches remain repository-readable but cannot be planned.
 
-The exact snapshot identifier is authoritative, not the latest snapshot for a
-file version. This keeps accepted input sets deterministic.
+The input set is a durable selection of file lineage, not an immutable copy of
+observed media facts. This is existing coordinator behavior made consistent
+across all stored planning paths.
 
 ### Stream projection
 
-The shared snapshot projection preserves the source payload shape:
+The shared snapshot projection preserves the source stream value without
+changing unrelated remux eligibility:
 
-- missing `payload.streams` produces a summary with no `streams` member;
+- missing `payload.streams` produces no `streams` member;
 - present `payload.streams` is copied exactly, including JSON null or a
   malformed non-array value;
 - an array produces `video_stream_count` from entries whose string `kind` is
-  `video`;
-- missing or non-array streams do not synthesize `video_stream_count`.
+  `video`; and
+- missing or non-array streams retain the existing
+  `video_stream_count: 0` sentinel.
 
 A successfully validated empty array is therefore known empty. Missing,
 non-array, malformed, or duplicate stream facts remain unknown.
+`Exists`/`Count` use only the validated `streams` projection. The retained
+video-count sentinel preserves existing container/remux decisions and is not
+evidence that an unavailable inventory is known empty.
 
 ### Published source and compiled shapes
 
@@ -115,11 +126,18 @@ Exists { target: Audio | Subtitle, filter: None }
 Count { target: Audio | Subtitle, op: Eq | Ne | Lt | Lte | Gt | Gte, value }
 ```
 
-Before evaluation, the planner traverses phase `skip`, conditional operations,
-and rule conditions. A stream condition outside those shapes, or any stream
-condition in `run_if`, fails plan generation as an unpublished compiled stream
-condition. This whole-tree check prevents a decisive Boolean sibling from
-activating an unpublished stream form.
+Before evaluation, a pure eligibility pass traverses the complete compiled
+policy: every phase, `run_if`, `skip_if`, recursively nested conditional and
+rule operation, rule condition, and Boolean child. A stream condition outside
+the published shapes, or any stream condition in `run_if`, fails plan
+generation as an unpublished compiled stream condition. This whole-policy
+check prevents a decisive Boolean sibling or an earlier phase from hiding an
+unpublished stream form.
+
+`generate_plan` and `plan_phase` both validate the complete policy before
+expanding any node. Stored coordinator preparation runs the same validation
+before profile resolution, job creation, or dispatch, so an invalid later
+phase cannot follow a committed earlier phase.
 
 The validation is intentionally limited to `Exists` and `Count`, whose runtime
 meaning changes in this issue. Other pre-existing compiled condition behavior
@@ -153,15 +171,39 @@ behavior also remains unchanged:
 Canonical `run_if` predicates remain unknown until #330 supplies per-file
 phase history.
 
+### Failure contract
+
+All stored read paths use `PLAN_GENERATION_ERROR` with the stable message
+prefix `linked policy stream facts are invalid` for:
+
+- a missing linked snapshot;
+- a linked member whose target is not `FileVersion`;
+- a target/snapshot file-version mismatch; or
+- a selected file lineage with no active version or latest snapshot.
+
+The message names the input-set identifier, member ordinal, target kind and
+file-version identifier when present, snapshot identifier, and snapshot
+file-version identifier when available. Repository failures such as
+`DB_UNREACHABLE` propagate unchanged.
+
+New writes return `NOT_FOUND` when the named snapshot does not exist and
+`CONFLICT` for a non-file target or file-version mismatch, matching the
+existing scan-import contract. They include the same member and identifier
+context.
+
 ## Consequences
 
 - Published existence and count conditions become executable without changing
   the parser or compiled schema.
-- Linked historical inputs recover missing-versus-empty truth from their exact
-  source snapshot without a data migration.
+- Stored plan, report, fresh execution, and resume use the same active
+  chain-tip snapshot rule.
+- Linked historical inputs recover missing-versus-empty truth from current
+  durable snapshots without a data migration.
 - Synthetic fixtures and direct planner callers remain self-contained.
 - Malformed media facts continue producing the existing insufficient-facts
   planning behavior.
+- Existing container/remux eligibility is unchanged for missing and malformed
+  stream inventories.
 - Parser-only stream condition shapes fail before evaluation instead of being
   activated accidentally.
 - The policy input cache may still differ from its linked source, but it is no
@@ -172,8 +214,8 @@ phase history.
 ### Repair and constrain every stored stream summary
 
 Rejected because it would add a migration, triggers, rollback work, and a
-second durable truth contract. The exact linked snapshot already contains the
-needed fact.
+second durable truth contract. The linked provenance already identifies the
+file lineage whose current snapshot supplies the needed fact.
 
 ### Treat missing streams as an empty inventory
 
@@ -190,7 +232,9 @@ planning rejects.
 Rejected because compiled representation breadth is not authority to publish
 video, attachment, or filtered-existence conditions.
 
-### Re-read the latest snapshot for the file version
+### Keep read-only planning pinned to the original snapshot
 
-Rejected because an accepted input links one exact snapshot. Substituting a
-later snapshot would make the same durable input set produce different plans.
+Rejected because the phase coordinator already resolves the selected file
+lineage's active chain tip and refreshes facts after every commit. Pinning only
+read-only paths would make preview and execution select different condition
+branches.
