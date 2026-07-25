@@ -73,13 +73,13 @@ impl FilePhaseOutcome {
         }
     }
 
-    fn parse(s: &str) -> Result<Self, VoomError> {
+    fn parse(s: &str, table: &'static str) -> Result<Self, VoomError> {
         match s {
             "committed" => Ok(Self::Committed),
             "skipped" => Ok(Self::Skipped),
             "blocked" => Ok(Self::Blocked),
             other => Err(VoomError::database(format!(
-                "workflow_file_phase_summaries.outcome {other:?} not in vocab"
+                "{table}.outcome {other:?} not in vocab"
             ))),
         }
     }
@@ -199,6 +199,23 @@ pub struct FileRunStart {
     pub starting_phase_ordinal: u32,
 }
 
+/// One prior phase outcome copied into a new phase-barrier job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFileRunHistory {
+    pub branch_id: String,
+    pub phase_ordinal: u32,
+    pub outcome: FilePhaseOutcome,
+}
+
+/// Stored prior phase outcome for one file in a phase-barrier job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRunHistory {
+    pub job_id: JobId,
+    pub branch_id: String,
+    pub phase_ordinal: u32,
+    pub outcome: FilePhaseOutcome,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteWorkflowSummaryRepo {
     pool: SqlitePool,
@@ -225,6 +242,8 @@ const FILE_PHASE_COLS: &str = "id, job_id, phase_ordinal, branch_id, ticket_ids,
 
 const FILE_RUN_START_COLS: &str =
     "job_id, branch_id, starting_file_version_id, starting_phase_ordinal";
+
+const FILE_RUN_HISTORY_COLS: &str = "job_id, branch_id, phase_ordinal, outcome";
 
 impl SqliteWorkflowSummaryRepo {
     /// Insert every file cursor in the caller's transaction.
@@ -257,6 +276,36 @@ impl SqliteWorkflowSummaryRepo {
         Ok(())
     }
 
+    /// Insert inherited file-phase outcomes in the caller's transaction.
+    ///
+    /// # Errors
+    /// Returns a database error if any row violates a key, parent-run, ordinal,
+    /// or outcome constraint. The caller owns rollback of the complete batch.
+    pub async fn insert_file_run_history_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        job_id: JobId,
+        inputs: &[NewFileRunHistory],
+    ) -> Result<(), VoomError> {
+        for input in inputs {
+            sqlx::query(
+                "INSERT INTO workflow_file_run_history \
+                 (job_id, branch_id, phase_ordinal, outcome) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(i64_from_u64(job_id.0))
+            .bind(&input.branch_id)
+            .bind(i64::from(input.phase_ordinal))
+            .bind(input.outcome.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("workflow_file_run_history insert", error)
+            })?;
+        }
+        Ok(())
+    }
+
     /// Atomically insert a complete run-start batch and return it in inspection
     /// order.
     ///
@@ -272,6 +321,23 @@ impl SqliteWorkflowSummaryRepo {
             .await?;
         commit(tx).await?;
         self.file_run_starts_for_job(job_id).await
+    }
+
+    /// Atomically insert inherited file-phase outcomes and return them in
+    /// inspection order.
+    ///
+    /// # Errors
+    /// Propagates transaction and constraint failures.
+    pub async fn insert_file_run_history(
+        &self,
+        job_id: JobId,
+        inputs: Vec<NewFileRunHistory>,
+    ) -> Result<Vec<FileRunHistory>, VoomError> {
+        let mut tx = begin(&self.pool).await?;
+        self.insert_file_run_history_in_tx(&mut tx, job_id, &inputs)
+            .await?;
+        commit(tx).await?;
+        self.file_run_history_for_job(job_id).await
     }
 
     pub async fn insert_summary_in_tx(
@@ -540,6 +606,25 @@ impl SqliteWorkflowSummaryRepo {
         .map_err(|error| VoomError::database_context("workflow_file_run_starts list", error))?;
         rows.iter().map(row_to_file_run_start).collect()
     }
+
+    /// Inspect one job's inherited per-file phase outcomes.
+    ///
+    /// # Errors
+    /// Propagates repository reads and malformed persisted values.
+    pub async fn file_run_history_for_job(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<FileRunHistory>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {FILE_RUN_HISTORY_COLS} FROM workflow_file_run_history \
+             WHERE job_id = ? ORDER BY branch_id ASC, phase_ordinal ASC"
+        ))
+        .bind(i64_from_u64(job_id.0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow_file_run_history list", error))?;
+        rows.iter().map(row_to_file_run_history).collect()
+    }
 }
 
 async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
@@ -718,7 +803,7 @@ fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, 
         produced_file_location_id: opt_id(row, "produced_file_location_id", FileLocationId)?,
         artifact_handle_id: opt_id(row, "artifact_handle_id", ArtifactHandleId)?,
         reprobe_snapshot_id: opt_id(row, "reprobe_snapshot_id", MediaSnapshotId)?,
-        outcome: FilePhaseOutcome::parse(&outcome)?,
+        outcome: FilePhaseOutcome::parse(&outcome, t)?,
         created_at: parse_iso8601(&created)?,
     })
 }
@@ -742,6 +827,28 @@ fn row_to_file_run_start(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunStart, 
         branch_id,
         starting_file_version_id: FileVersionId(u64_from_i64(version_id)),
         starting_phase_ordinal: u32_from_i64(phase_ordinal)?,
+    })
+}
+
+fn row_to_file_run_history(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunHistory, VoomError> {
+    let table = "workflow_file_run_history";
+    let job_id: i64 = row
+        .try_get("job_id")
+        .map_err(|error| map_row_err(table, &error))?;
+    let branch_id: String = row
+        .try_get("branch_id")
+        .map_err(|error| map_row_err(table, &error))?;
+    let phase_ordinal: i64 = row
+        .try_get("phase_ordinal")
+        .map_err(|error| map_row_err(table, &error))?;
+    let outcome: String = row
+        .try_get("outcome")
+        .map_err(|error| map_row_err(table, &error))?;
+    Ok(FileRunHistory {
+        job_id: JobId(u64_from_i64(job_id)),
+        branch_id,
+        phase_ordinal: u32_from_i64(phase_ordinal)?,
+        outcome: FilePhaseOutcome::parse(&outcome, table)?,
     })
 }
 

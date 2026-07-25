@@ -108,9 +108,9 @@ pub use workers::{
     WorkerInspection, WorkerKind, WorkerNodeContext, WorkerOperationEligibility, WorkerStatus,
 };
 pub use workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, FileRunStart, NewFilePhaseSummary, NewFileRunStart,
-    NewPhaseSummary, NewWorkflowSummary, PhaseOutcome, PhaseReport, PhaseSummary,
-    SqliteWorkflowSummaryRepo, WorkflowSummary,
+    FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFilePhaseSummary,
+    NewFileRunHistory, NewFileRunStart, NewPhaseSummary, NewWorkflowSummary, PhaseOutcome,
+    PhaseReport, PhaseSummary, SqliteWorkflowSummaryRepo, WorkflowSummary,
 };
 
 /// Marker trait so future repository traits compose uniformly.
