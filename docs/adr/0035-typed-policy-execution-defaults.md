@@ -41,9 +41,11 @@ The detailed design is recorded in
      codes;
    - `on_error`: the identifier `abort` or `continue`.
 
-   Repeated config keys fail validation. Unknown keys retain the existing
-   unknown-config diagnostic behavior. The parser does not add aliases or
-   unpublished productions.
+   Language entries require comma separators; the typed settings parser must
+   not newly accept whitespace-separated values that the previous config
+   validator rejected. Repeated config keys fail validation. Unknown keys
+   retain the existing unknown-config diagnostic behavior. The parser does not
+   add aliases or unpublished productions.
 
 2. `CompiledPolicy.config` becomes `CompiledConfig`, with:
 
@@ -56,9 +58,18 @@ The detailed design is recorded in
 
 3. `CompiledConfig` has a narrow compatibility deserializer for existing
    compiled policy JSON. It accepts the previous raw statement strings for the
-   two known keys and normalizes them into the typed fields. Serialization
-   emits only the typed shape. Malformed legacy values fail deserialization
-   with field context.
+   two known keys and normalizes them into the typed fields. The accepted
+   language statements include both canonical-looking
+   `languages: ["eng", "und"]` and the actually persisted legacy
+   `languages audio: [eng, und]` form. Legacy `on_error` accepts the colonless
+   spelling and `skip` because the former compiler emitted both. Serialization
+   emits only the typed shape.
+
+   Both typed arrays and legacy statements are validated after decoding:
+   language values must remain lowercase three-letter ASCII codes. Malformed
+   types, spellings, or values fail deserialization with field context. An
+   immutable pre-change compiled fixture pins the old wire shape while new
+   source tests prove those legacy spellings are not accepted.
 
    This compatibility is for stored compiled JSON only. It does not make legacy
    source forms valid in the parser or validator.

@@ -17,9 +17,13 @@ existing compiled policy version readable.
 - Old raw-string compiled config JSON deserializes and receives the same
   effective defaults.
 - Missing config fields deserialize to empty/implicit-abort defaults.
+- Typed and legacy stored language values obey the same lowercase
+  three-letter invariant.
 - Explicit `where` selectors are byte-for-byte equivalent in compiled
   operations regardless of configured languages.
 - Unpublished config source forms are rejected, not normalized as aliases.
+- Whitespace-separated language lists are not newly accepted by the typed
+  parser.
 - `defaults ... best` remains visibly unsupported until #336.
 
 ## Existing flow
@@ -68,9 +72,10 @@ languages: ["eng", ...]
 on_error: abort|continue
 ```
 
-Language entries must be quoted lowercase three-letter ASCII codes. Order is
-preserved. The compiler does not add `languages audio`, bare language tokens,
-or `skip` as config aliases.
+Language entries must be quoted lowercase three-letter ASCII codes, with commas
+between entries. Order is preserved. The compiler does not add
+`languages audio`, bare language tokens, whitespace-separated list values, or
+`skip` as config aliases.
 
 ### Compiled JSON
 
@@ -88,7 +93,7 @@ New shape:
 Missing keys default to `[]` and `None`. Empty values are omitted when writing,
 so a policy without config retains `"config": {}`.
 
-The compatibility reader accepts the existing shape:
+The compatibility reader accepts the existing shapes:
 
 ```json
 {
@@ -99,9 +104,30 @@ The compatibility reader accepts the existing shape:
 }
 ```
 
-Compatibility parsing is intentionally restricted to these stored fields.
-Invalid types, non-string list entries, or unknown error-strategy values fail
-with the config field in the message.
+and the shape present in checked-in pre-change policy versions:
+
+```json
+{
+  "config": {
+    "languages": "languages audio: [eng, und]",
+    "on_error": "on_error continue"
+  }
+}
+```
+
+The legacy `on_error` reader also accepts `skip` because the former compiler
+accepted and lowered it. New source does not.
+
+Compatibility parsing is intentionally restricted to these stored fields and
+known legacy prefixes. Typed arrays and legacy statements both validate every
+decoded language as a lowercase three-letter ASCII code. Invalid types,
+non-string list entries, invalid language values, unknown legacy prefixes, or
+unknown error-strategy values fail with the config field in the message.
+
+An immutable `legacy-policy-config-v2.json` fixture retains the pre-change raw
+wire representation. Golden regeneration never rewrites it. A paired source
+test rejects `languages audio` so stored compatibility cannot leak into source
+grammar.
 
 ### Effective phase strategy
 
@@ -147,13 +173,13 @@ continues to lower the filter as `LanguageIn { values: ["spa"] }`.
 
 ### `voom-policy`
 
-- parser produces typed config settings;
+- parser produces typed config settings and rejects comma-less language lists;
 - canonical config lowers to typed fields in source order;
 - duplicate/unknown/wrong-shape/unquoted language values fail;
 - config `skip` fails while phase compatibility remains unchanged;
 - new compiled JSON uses typed values;
-- old raw-string JSON and missing fields deserialize;
-- malformed old values fail with context;
+- the immutable old raw-string fixture and missing fields deserialize;
+- malformed typed and legacy language values fail with context;
 - policy defaults fill omitted phase values;
 - explicit phase values win;
 - explicit track filters are unchanged.
@@ -161,13 +187,16 @@ continues to lower the filter as `LanguageIn { values: ["spa"] }`.
 ### `voom-control-plane`
 
 - stored legacy config is normalized before accepted-policy planning;
-- policy-level `continue` reaches the pre-job fail-loud guard;
-- phase-level `abort` overrides policy `continue`;
+- the execute loader receives legacy raw config with null phase values and
+  policy-level `continue` reaches the pre-job fail-loud guard;
+- the same legacy execute fixture proves phase-level `abort` overrides policy
+  `continue`;
 - no job is opened on an unsupported effective `continue`.
 
 ### Corpus and fixtures
 
-- regenerate compiled goldens from canonical sources;
+- preserve the immutable pre-change compiled compatibility fixture;
+- regenerate only current compiled goldens from canonical sources;
 - keep the published grammar corpus green;
 - update legacy sample source spellings to the published config syntax.
 
