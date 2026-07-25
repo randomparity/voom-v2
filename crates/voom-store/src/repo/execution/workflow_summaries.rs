@@ -182,6 +182,23 @@ pub struct FilePhaseSummary {
     pub created_at: OffsetDateTime,
 }
 
+/// Immutable per-file cursor inserted when a phase-barrier job opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFileRunStart {
+    pub branch_id: String,
+    pub starting_file_version_id: FileVersionId,
+    pub starting_phase_ordinal: u32,
+}
+
+/// Stored per-file cursor for one phase-barrier job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRunStart {
+    pub job_id: JobId,
+    pub branch_id: String,
+    pub starting_file_version_id: FileVersionId,
+    pub starting_phase_ordinal: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteWorkflowSummaryRepo {
     pool: SqlitePool,
@@ -206,7 +223,57 @@ const FILE_PHASE_COLS: &str = "id, job_id, phase_ordinal, branch_id, ticket_ids,
      produced_file_version_id, produced_file_location_id, artifact_handle_id, \
      reprobe_snapshot_id, outcome, created_at";
 
+const FILE_RUN_START_COLS: &str =
+    "job_id, branch_id, starting_file_version_id, starting_phase_ordinal";
+
 impl SqliteWorkflowSummaryRepo {
+    /// Insert every file cursor in the caller's transaction.
+    ///
+    /// # Errors
+    /// Returns a database error if any cursor violates a key, foreign key, or
+    /// ordinal constraint. The caller owns rollback of the complete batch.
+    pub async fn insert_file_run_starts_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        job_id: JobId,
+        inputs: &[NewFileRunStart],
+    ) -> Result<(), VoomError> {
+        for input in inputs {
+            sqlx::query(
+                "INSERT INTO workflow_file_run_starts \
+                 (job_id, branch_id, starting_file_version_id, starting_phase_ordinal) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(i64_from_u64(job_id.0))
+            .bind(&input.branch_id)
+            .bind(i64_from_u64(input.starting_file_version_id.0))
+            .bind(i64::from(input.starting_phase_ordinal))
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("workflow_file_run_starts insert", error)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Atomically insert a complete run-start batch and return it in inspection
+    /// order.
+    ///
+    /// # Errors
+    /// Propagates transaction and constraint failures.
+    pub async fn insert_file_run_starts(
+        &self,
+        job_id: JobId,
+        inputs: Vec<NewFileRunStart>,
+    ) -> Result<Vec<FileRunStart>, VoomError> {
+        let mut tx = begin(&self.pool).await?;
+        self.insert_file_run_starts_in_tx(&mut tx, job_id, &inputs)
+            .await?;
+        commit(tx).await?;
+        self.file_run_starts_for_job(job_id).await
+    }
+
     pub async fn insert_summary_in_tx(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -454,6 +521,25 @@ impl SqliteWorkflowSummaryRepo {
         .map_err(|e| VoomError::database_context("workflow_file_phase_summaries list", e))?;
         rows.iter().map(row_to_file_phase).collect()
     }
+
+    /// Inspect one job's immutable per-file starting cursors.
+    ///
+    /// # Errors
+    /// Propagates repository reads and malformed persisted values.
+    pub async fn file_run_starts_for_job(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<FileRunStart>, VoomError> {
+        let rows = sqlx::query(&format!(
+            "SELECT {FILE_RUN_START_COLS} FROM workflow_file_run_starts \
+             WHERE job_id = ? ORDER BY branch_id ASC"
+        ))
+        .bind(i64_from_u64(job_id.0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("workflow_file_run_starts list", error))?;
+        rows.iter().map(row_to_file_run_start).collect()
+    }
 }
 
 async fn begin(pool: &SqlitePool) -> Result<Transaction<'static, Sqlite>, VoomError> {
@@ -634,6 +720,28 @@ fn row_to_file_phase(row: &sqlx::sqlite::SqliteRow) -> Result<FilePhaseSummary, 
         reprobe_snapshot_id: opt_id(row, "reprobe_snapshot_id", MediaSnapshotId)?,
         outcome: FilePhaseOutcome::parse(&outcome)?,
         created_at: parse_iso8601(&created)?,
+    })
+}
+
+fn row_to_file_run_start(row: &sqlx::sqlite::SqliteRow) -> Result<FileRunStart, VoomError> {
+    let table = "workflow_file_run_starts";
+    let job_id: i64 = row
+        .try_get("job_id")
+        .map_err(|error| map_row_err(table, &error))?;
+    let branch_id: String = row
+        .try_get("branch_id")
+        .map_err(|error| map_row_err(table, &error))?;
+    let version_id: i64 = row
+        .try_get("starting_file_version_id")
+        .map_err(|error| map_row_err(table, &error))?;
+    let phase_ordinal: i64 = row
+        .try_get("starting_phase_ordinal")
+        .map_err(|error| map_row_err(table, &error))?;
+    Ok(FileRunStart {
+        job_id: JobId(u64_from_i64(job_id)),
+        branch_id,
+        starting_file_version_id: FileVersionId(u64_from_i64(version_id)),
+        starting_phase_ordinal: u32_from_i64(phase_ordinal)?,
     })
 }
 

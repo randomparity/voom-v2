@@ -99,6 +99,59 @@ fn committed_file_phase(branch_id: &str) -> NewFilePhaseSummary {
     }
 }
 
+fn file_run_start(branch_id: &str, version_id: u64, phase_ordinal: u32) -> NewFileRunStart {
+    NewFileRunStart {
+        branch_id: branch_id.to_owned(),
+        starting_file_version_id: FileVersionId(version_id),
+        starting_phase_ordinal: phase_ordinal,
+    }
+}
+
+#[tokio::test]
+async fn file_run_starts_insert_atomically_and_list_by_branch() {
+    let (repo, _tmp) = repo().await;
+
+    let inserted = repo
+        .insert_file_run_starts(
+            JOB,
+            vec![file_run_start("zeta", 1, 2), file_run_start("alpha", 1, 0)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inserted
+            .iter()
+            .map(|row| row.branch_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "zeta"]
+    );
+    assert_eq!(inserted[1].starting_phase_ordinal, 2);
+
+    let listed = repo.file_run_starts_for_job(JOB).await.unwrap();
+    assert_eq!(listed, inserted);
+}
+
+#[tokio::test]
+async fn file_run_start_batch_rolls_back_on_invalid_member() {
+    let (repo, _tmp) = repo().await;
+
+    let err = repo
+        .insert_file_run_starts(
+            JOB,
+            vec![
+                file_run_start("valid", 1, 0),
+                file_run_start("missing-version", 999, 0),
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "DB_UNREACHABLE");
+    assert_eq!(
+        repo.file_run_starts_for_job(JOB).await.unwrap(),
+        Vec::<FileRunStart>::new()
+    );
+}
+
 #[tokio::test]
 async fn summary_round_trips() {
     let (repo, _tmp) = repo().await;

@@ -87,6 +87,11 @@ const MIGRATION_0020_SQL: &str =
 /// compile time.
 const MIGRATION_0021_SQL: &str = include_str!("../../../migrations/0021_profile_management.sql");
 
+/// SQL for migration 0022 (per-file phase-barrier run starts, #329), embedded
+/// at compile time.
+const MIGRATION_0022_SQL: &str =
+    include_str!("../../../migrations/0022_workflow_file_run_starts.sql");
+
 /// Embedded migration set, constructed without the `sqlx::migrate!` macro.
 ///
 /// We don't use sqlx's `macros` feature: it pulls `sqlx-macros-core`, which
@@ -247,6 +252,13 @@ pub static MIGRATOR: LazyLock<Migrator> = LazyLock::new(|| Migrator {
             Cow::Borrowed("profile_management"),
             MigrationType::Simple,
             Cow::Borrowed(MIGRATION_0021_SQL),
+            false,
+        ),
+        Migration::new(
+            22,
+            Cow::Borrowed("workflow_file_run_starts"),
+            MigrationType::Simple,
+            Cow::Borrowed(MIGRATION_0022_SQL),
             false,
         ),
     ]),

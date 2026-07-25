@@ -10,7 +10,7 @@ use sqlx::Row;
 use voom_core::{
     FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId, VoomError,
 };
-use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, PhaseSummary,
 };
@@ -25,7 +25,7 @@ use crate::workflow::plan::policy_bridge::policy_workflow_node_id;
 
 /// The durable references a committed file-phase row requires (NOT NULL by DB
 /// CHECK): the produced version, its live location, and its reprobe snapshot.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 #[expect(
     clippy::struct_field_names,
     reason = "fields mirror the NewFilePhaseSummary produced_*/reprobe_* id columns"
@@ -39,23 +39,44 @@ pub(super) struct ProducedRefs {
 impl ProducedRefs {
     pub(super) async fn resolve(
         control_plane: &ControlPlane,
-        tip: &FileVersion,
+        file_version_id: FileVersionId,
         snapshot: &MediaSnapshot,
     ) -> Result<Self, VoomError> {
         let location = control_plane
             .identity
-            .list_live_file_locations_by_version(tip.id)
+            .list_live_file_locations_by_version(file_version_id)
             .await?
             .into_iter()
             .next()
             .ok_or_else(|| {
-                VoomError::Internal(format!("committed version {} has no live location", tip.id))
+                VoomError::Internal(format!(
+                    "committed version {file_version_id} has no live location"
+                ))
             })?;
         Ok(Self {
-            file_version_id: Some(tip.id),
+            file_version_id: Some(file_version_id),
             file_location_id: Some(location.id),
             reprobe_snapshot_id: Some(snapshot.id),
         })
+    }
+
+    pub(super) fn committed_seed(
+        self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        branch_id: String,
+    ) -> NewFilePhaseSummary {
+        NewFilePhaseSummary {
+            job_id,
+            phase_ordinal,
+            branch_id,
+            ticket_ids: Vec::new(),
+            produced_file_version_id: self.file_version_id,
+            produced_file_location_id: self.file_location_id,
+            artifact_handle_id: None,
+            reprobe_snapshot_id: self.reprobe_snapshot_id,
+            outcome: FilePhaseOutcome::Committed,
+        }
     }
 }
 
@@ -255,7 +276,7 @@ impl ControlPlane {
             }
             let workflow_node_id = policy_workflow_node_id(node_id);
             let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
-            let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
+            let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
             let row = self
                 .write_file_row(
                     job_id,
@@ -380,7 +401,7 @@ impl ControlPlane {
                         .await?;
                     return Ok((row, file.snapshot.clone(), Some(file)));
                 }
-                let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
+                let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
                 let row = self
                     .write_file_row(
                         job_id,

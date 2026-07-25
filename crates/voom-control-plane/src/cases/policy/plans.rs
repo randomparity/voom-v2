@@ -11,13 +11,6 @@ use voom_store::repo::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
 use crate::ControlPlane;
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "retained authority records are consumed by coordinator preparation"
-    )
-)]
 pub(crate) struct ResolvedFileInput {
     pub(crate) ordinal: u32,
     pub(crate) selected_version_id: FileVersionId,
@@ -27,13 +20,6 @@ pub(crate) struct ResolvedFileInput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "retained authority records are consumed by coordinator preparation"
-    )
-)]
 pub(crate) struct StoredPlanningInput {
     pub(crate) draft: PolicyInputSetDraft,
     pub(crate) files: Vec<ResolvedFileInput>,

@@ -27,7 +27,46 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 21);
+    assert_eq!(expected_migrations(), 22);
+}
+
+#[tokio::test]
+async fn workflow_file_run_start_schema_is_strict_and_job_owned() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'workflow_file_run_starts'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(table_sql.contains("PRIMARY KEY (job_id, branch_id)"));
+    assert!(table_sql.contains("CHECK (starting_phase_ordinal >= 0)"));
+    assert!(table_sql.ends_with("STRICT"));
+
+    let job_fk: (String, String) = sqlx::query_as(
+        "SELECT \"table\", on_delete \
+         FROM pragma_foreign_key_list('workflow_file_run_starts') \
+         WHERE \"from\" = 'job_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(job_fk, ("jobs".to_owned(), "CASCADE".to_owned()));
+
+    let version_fk: (String, String) = sqlx::query_as(
+        "SELECT \"table\", on_delete \
+         FROM pragma_foreign_key_list('workflow_file_run_starts') \
+         WHERE \"from\" = 'starting_file_version_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        version_fk,
+        ("file_versions".to_owned(), "RESTRICT".to_owned())
+    );
 }
 
 #[tokio::test]
