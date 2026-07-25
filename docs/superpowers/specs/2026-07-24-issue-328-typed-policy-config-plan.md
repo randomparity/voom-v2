@@ -44,7 +44,8 @@ Files:
 Steps:
 
 1. Add an immutable compiled-policy fixture with the actual pre-change
-   `languages audio: [eng, und]`, colonless `on_error`, and null phase strategy.
+   `languages audio: [eng, und]`, former subtitle/whitespace variants,
+   colonless `on_error`, and null phase strategy.
 2. Add tests for canonical typed JSON, missing fields, the immutable legacy
    fixture, and malformed typed and legacy values.
 3. Introduce `CompiledConfig` with serde-defaulted languages and `on_error`.

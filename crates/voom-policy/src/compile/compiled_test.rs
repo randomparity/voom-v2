@@ -111,6 +111,41 @@ fn legacy_compiled_config_reads_previously_published_skip_value() {
 }
 
 #[test]
+fn compiled_config_reads_previous_language_targets_and_whitespace() {
+    let cases = [
+        (
+            serde_json::json!({
+                "languages": "languages subtitle : [eng, \"und\"]",
+                "on_error": "on_error\tcontinue"
+            }),
+            ErrorStrategy::Continue,
+        ),
+        (
+            serde_json::json!({
+                "languages": "languages : [\"eng\"]",
+                "on_error": "on_error \t: \t abort"
+            }),
+            ErrorStrategy::Abort,
+        ),
+    ];
+
+    for (value, strategy) in cases {
+        let config: CompiledConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.languages[0], "eng");
+        assert_eq!(config.on_error, Some(strategy));
+    }
+}
+
+#[test]
+fn compiled_config_rejects_unknown_durable_fields() {
+    let error =
+        serde_json::from_value::<CompiledConfig>(serde_json::json!({"renamed": "continue"}))
+            .unwrap_err();
+
+    assert!(error.to_string().contains("config contains unknown field"));
+}
+
+#[test]
 fn configured_languages_do_not_rewrite_explicit_track_filters() {
     let without_config = compile_single_op("defaults audio where language == \"spa\"");
     let policy = crate::compile_policy(

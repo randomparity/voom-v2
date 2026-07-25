@@ -61,9 +61,11 @@ The detailed design is recorded in
    two known keys and normalizes them into the typed fields. The accepted
    language statements include both canonical-looking
    `languages: ["eng", "und"]` and the actually persisted legacy
-   `languages audio: [eng, und]` form. Legacy `on_error` accepts the colonless
-   spelling and `skip` because the former compiler emitted both. Serialization
-   emits only the typed shape.
+   `languages audio: [eng, und]` form. It also accepts the former
+   `languages subtitle` target and whitespace/colon variations that the raw
+   statement parser compiled. Legacy `on_error` accepts its former whitespace
+   and colonless spellings plus `skip`. Serialization emits only the typed
+   shape.
 
    Both typed arrays and legacy statements are validated after decoding:
    language values must remain lowercase three-letter ASCII codes. Malformed

@@ -17,6 +17,14 @@ impl<'de> serde::Deserialize<'de> for CompiledConfig {
     {
         let values =
             <BTreeMap<String, serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+        if let Some(key) = values
+            .keys()
+            .find(|key| !matches!(key.as_str(), "languages" | "on_error"))
+        {
+            return Err(serde::de::Error::custom(format!(
+                "config contains unknown field `{key}`"
+            )));
+        }
         let languages = values
             .get("languages")
             .map(decode_languages)
@@ -65,10 +73,10 @@ fn decode_legacy_languages(statement: &str) -> Result<Vec<String>, String> {
     let (prefix, values) = statement
         .split_once('[')
         .ok_or_else(|| "legacy config.languages is missing `[`".to_owned())?;
-    let prefix = prefix.trim();
-    if !matches!(prefix, "languages:" | "languages audio:") {
+    if !is_known_legacy_language_prefix(prefix) {
         return Err(format!(
-            "legacy config.languages has unknown statement prefix `{prefix}`"
+            "legacy config.languages has unknown statement prefix `{}`",
+            prefix.trim()
         ));
     }
     let values = values
@@ -91,15 +99,22 @@ fn decode_legacy_languages(statement: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
+fn is_known_legacy_language_prefix(prefix: &str) -> bool {
+    let prefix = prefix.trim();
+    let prefix = prefix.strip_suffix(':').map_or(prefix, str::trim_end);
+    let mut words = prefix.split_ascii_whitespace();
+    if words.next() != Some("languages") {
+        return false;
+    }
+    let target = words.next();
+    words.next().is_none() && matches!(target, None | Some("audio" | "subtitle"))
+}
+
 fn decode_on_error(value: &serde_json::Value) -> Result<Option<ErrorStrategy>, String> {
     let Some(value) = value.as_str() else {
         return Err("config.on_error must be a string".to_owned());
     };
-    let value = value
-        .strip_prefix("on_error:")
-        .or_else(|| value.strip_prefix("on_error "))
-        .unwrap_or(value)
-        .trim();
+    let value = legacy_on_error_value(value)?;
     let strategy = match value {
         "abort" => ErrorStrategy::Abort,
         "continue" => ErrorStrategy::Continue,
@@ -111,6 +126,28 @@ fn decode_on_error(value: &serde_json::Value) -> Result<Option<ErrorStrategy>, S
         }
     };
     Ok(Some(strategy))
+}
+
+fn legacy_on_error_value(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    if matches!(value, "abort" | "continue" | "skip") {
+        return Ok(value);
+    }
+    let Some(rest) = value.strip_prefix("on_error") else {
+        return Ok(value);
+    };
+    let Some(first) = rest.chars().next() else {
+        return Err("config.on_error is missing a strategy".to_owned());
+    };
+    let rest = if first == ':' {
+        &rest[first.len_utf8()..]
+    } else if first.is_ascii_whitespace() {
+        let rest = rest.trim_start();
+        rest.strip_prefix(':').map_or(rest, str::trim_start)
+    } else {
+        return Ok(value);
+    };
+    Ok(rest.trim())
 }
 
 pub(crate) fn is_canonical_language_code(value: &str) -> bool {

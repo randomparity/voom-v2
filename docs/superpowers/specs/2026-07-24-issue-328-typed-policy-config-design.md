@@ -116,10 +116,14 @@ and the shape present in checked-in pre-change policy versions:
 ```
 
 The legacy `on_error` reader also accepts `skip` because the former compiler
-accepted and lowered it. New source does not.
+accepted and lowered it. The compatibility reader recognizes the former
+`languages audio|subtitle` targets and whitespace around or instead of the
+colon because those shapes could be persisted as raw statements. New source
+does not accept any of those aliases.
 
 Compatibility parsing is intentionally restricted to these stored fields and
-known legacy prefixes. Typed arrays and legacy statements both validate every
+known legacy structures. Unknown config fields fail instead of being silently
+discarded. Typed arrays and legacy statements both validate every
 decoded language as a lowercase three-letter ASCII code. Invalid types,
 non-string list entries, invalid language values, unknown legacy prefixes, or
 unknown error-strategy values fail with the config field in the message.
@@ -179,6 +183,9 @@ continues to lower the filter as `LanguageIn { values: ["spa"] }`.
 - config `skip` fails while phase compatibility remains unchanged;
 - new compiled JSON uses typed values;
 - the immutable old raw-string fixture and missing fields deserialize;
+- prior language targets and config whitespace deserialize only at the stored
+  JSON boundary;
+- unknown durable config fields fail loudly;
 - malformed typed and legacy language values fail with context;
 - policy defaults fill omitted phase values;
 - explicit phase values win;
