@@ -603,7 +603,7 @@ impl ControlPlane {
             .iter()
             .map(|file| file.selected_version_id)
             .collect::<Vec<_>>();
-        let branch_ids = self.active_branch_ids(&selected).await?;
+        let branch_ids = self.selected_branch_ids(&selected).await?;
         let files = initial_phase_files(stored.files, branch_ids)?;
         Ok(PhaseBarrierRunInputs {
             policy,

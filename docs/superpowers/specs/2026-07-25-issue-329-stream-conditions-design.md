@@ -104,12 +104,14 @@ Unresolvable provenance or current facts fail with `PLAN_GENERATION_ERROR`.
 The adapter emits no partial `StoredPlanningInput`.
 
 Stored plan display and compliance reporting pass `draft` to `voom-plan`.
-Coordinator preparation also retains `files`: it derives branch ids from the
-resolved active versions and constructs first-phase `PhaseFile` state directly
-from those records. Fresh and resume do not repeat the initial active-tip or
-snapshot read. Store-free fixture planning continues to trust its explicit
-draft. Invalid durable links remain readable but fail this adapter; #353
-separately owns generic write-time validation.
+Coordinator preparation also retains `files`: it derives stable branch ids from
+the selected source versions, while constructing first-phase `PhaseFile`
+version/snapshot state directly from the resolved active records. The selected
+source path keeps branch identity stable when an active artifact has a different
+filename. Fresh and resume do not repeat the initial active-tip or snapshot
+read. Store-free fixture planning continues to trust its explicit draft.
+Invalid durable links remain readable but fail this adapter; #353 separately
+owns generic write-time validation.
 
 ## Single execute preparation
 

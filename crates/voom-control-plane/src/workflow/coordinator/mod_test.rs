@@ -256,7 +256,7 @@ fn file_draft(slug: &str, snapshots: &[MediaSnapshot]) -> voom_policy::PolicyInp
 }
 
 #[tokio::test]
-async fn active_branch_ids_disambiguates_duplicate_basenames() {
+async fn selected_branch_ids_disambiguate_duplicate_basenames() {
     let (cp, _tmp) = cp().await;
     let v1 = seed_version(
         &cp,
@@ -273,7 +273,7 @@ async fn active_branch_ids_disambiguates_duplicate_basenames() {
     )
     .await;
 
-    let branch_ids = cp.active_branch_ids(&[v1, v2]).await.unwrap();
+    let branch_ids = cp.selected_branch_ids(&[v1, v2]).await.unwrap();
 
     assert_eq!(
         branch_ids,
@@ -285,7 +285,7 @@ async fn active_branch_ids_disambiguates_duplicate_basenames() {
 }
 
 #[tokio::test]
-async fn active_branch_ids_rejects_duplicate_active_targets() {
+async fn selected_branch_ids_reject_duplicate_selected_versions() {
     let (cp, _tmp) = cp().await;
     let version = seed_version(
         &cp,
@@ -295,7 +295,10 @@ async fn active_branch_ids_rejects_duplicate_active_targets() {
     )
     .await;
 
-    let err = cp.active_branch_ids(&[version, version]).await.unwrap_err();
+    let err = cp
+        .selected_branch_ids(&[version, version])
+        .await
+        .unwrap_err();
 
     assert_eq!(err.code(), "CONFIG_INVALID");
     assert!(err.to_string().contains("appears more than once"));
@@ -446,6 +449,10 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         .await
         .unwrap();
     assert_eq!(prepared.files[0].version_id, active);
+    assert_eq!(
+        prepared.files[0].branch_id, "movie",
+        "branch identity stays anchored to the selected source path"
+    );
     assert!(prepared.initial_plan.nodes.iter().all(|node| {
         let TargetRef::FileVersion { id } = node.target else {
             return false;
@@ -467,6 +474,7 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         .await
         .unwrap();
     assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].branch_id, "movie");
     assert_eq!(starts[0].starting_file_version_id, active);
     assert_eq!(starts[0].starting_phase_ordinal, 0);
 }

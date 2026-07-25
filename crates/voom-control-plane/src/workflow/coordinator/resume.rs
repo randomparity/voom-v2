@@ -21,7 +21,7 @@ use crate::workflow::coordinator::PhaseFile;
 use crate::workflow::coordinator::finalize::{
     ProducedRefs, first_stream_of_kind, payload_str, payload_u32,
 };
-use crate::workflow::coordinator::promotion::ensure_unique_active_branch_ids;
+use crate::workflow::coordinator::promotion::ensure_unique_selected_branch_ids;
 use crate::workflow::plan::expansion::branch_ids_from_paths;
 
 #[derive(Debug)]
@@ -43,12 +43,12 @@ impl ControlPlane {
     /// disambiguating colliding path stems while preserving stem-only ids for
     /// non-colliding paths. The selected source path stays stable when the
     /// active version advances to an artifact with a different filename.
-    pub(super) async fn active_branch_ids(
+    pub(super) async fn selected_branch_ids(
         &self,
-        active: &[FileVersionId],
+        selected: &[FileVersionId],
     ) -> Result<Vec<(FileVersionId, String)>, VoomError> {
-        let mut paths = Vec::with_capacity(active.len());
-        for &file_version_id in active {
+        let mut paths = Vec::with_capacity(selected.len());
+        for &file_version_id in selected {
             paths.push((
                 file_version_id,
                 self.file_branch_path(file_version_id).await?,
@@ -64,7 +64,7 @@ impl ControlPlane {
             .zip(branch_ids)
             .map(|((file_version_id, _), branch_id)| (file_version_id, branch_id))
             .collect::<Vec<_>>();
-        ensure_unique_active_branch_ids(&branch_ids)?;
+        ensure_unique_selected_branch_ids(&branch_ids)?;
         Ok(branch_ids)
     }
 
