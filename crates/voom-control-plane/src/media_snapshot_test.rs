@@ -31,7 +31,7 @@ fn planning_input_derives_video_count_and_copies_container_and_codec() {
         }),
     };
 
-    let input = planning_input(&snapshot);
+    let input = planning_input(1, &snapshot);
 
     assert_eq!(input.stream_summary["video_stream_count"], 1);
     assert_eq!(input.stream_summary["streams"], snapshot.payload["streams"]);
@@ -52,7 +52,7 @@ fn planning_input_defaults_video_count_zero_when_no_streams() {
         payload: json!({}),
     };
 
-    let input = planning_input(&snapshot);
+    let input = planning_input(1, &snapshot);
 
     assert_eq!(input.stream_summary["video_stream_count"], 0);
     assert!(input.stream_summary.get("streams").is_none());
@@ -79,7 +79,7 @@ fn planning_input_projects_video_dimensions() {
             "width": 3840, "height": 2160, "pixel_format": "yuv420p"
         }]
     }));
-    let input = planning_input(&snapshot);
+    let input = planning_input(1, &snapshot);
     assert_eq!(input.width, Some(3840));
     assert_eq!(input.height, Some(2160));
 }

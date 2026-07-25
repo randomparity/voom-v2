@@ -8,37 +8,36 @@ use voom_store::repo::identity::MediaSnapshot;
 /// Derives `video_stream_count` from the payload's `streams`, copies the
 /// container and video codec, and leaves the remaining optional fact fields at
 /// their defaults (selection only consults stream/video facts).
-pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
-    let streams = snapshot.payload.get("streams");
-    let video_stream = streams.and_then(Value::as_array).and_then(|arr| {
-        arr.iter()
-            .find(|s| s.get("kind").and_then(Value::as_str) == Some("video"))
+pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSnapshotInput {
+    let payload = &snapshot.payload;
+    let video_stream = payload
+        .get("streams")
+        .and_then(Value::as_array)
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
+        });
+    let container = payload.get("container").and_then(|container| {
+        container
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| payload_str(container, "format_name"))
     });
-    let dimension = |key: &str| {
-        video_stream
-            .and_then(|s| s.get(key))
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-    };
+    let video_codec = video_stream
+        .and_then(|stream| payload_str(stream, "codec_name"))
+        .or_else(|| payload_str(payload, "video_codec"));
 
     MediaSnapshotInput {
-        ordinal: 1,
+        ordinal,
         target: TargetRef::FileVersion {
             id: snapshot.file_version_id,
         },
-        container: snapshot
-            .payload
-            .get("container")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        stream_summary: stream_summary_from_snapshot_payload(&snapshot.payload),
-        video_codec: snapshot
-            .payload
-            .get("video_codec")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        width: dimension("width"),
-        height: dimension("height"),
+        container,
+        stream_summary: stream_summary_from_snapshot_payload(payload),
+        video_codec,
+        width: video_stream.and_then(|stream| payload_u32(stream, "width")),
+        height: video_stream.and_then(|stream| payload_u32(stream, "height")),
         hdr: None,
         bitrate: None,
         duration_millis: None,
@@ -47,6 +46,17 @@ pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
         health_flags: Vec::new(),
         existing_media_snapshot_id: Some(snapshot.id),
     }
+}
+
+fn payload_str(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+fn payload_u32(value: &Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|number| u32::try_from(number).ok())
 }
 
 pub(crate) fn stream_summary_from_snapshot_payload(payload: &Value) -> Value {

@@ -56,7 +56,7 @@ pub fn transcode_selection_from_payload_and_snapshot(
             payload.container
         )));
     }
-    let snapshot_input = crate::media_snapshot::planning_input(snapshot);
+    let snapshot_input = crate::media_snapshot::planning_input(1, snapshot);
     let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
         .map_err(audio_block_error)?;
     if selected.is_empty() {
@@ -98,7 +98,7 @@ pub fn extract_selection_from_payload_and_snapshot(
             payload.container, payload.target_codec
         )));
     }
-    let snapshot_input = crate::media_snapshot::planning_input(snapshot);
+    let snapshot_input = crate::media_snapshot::planning_input(1, snapshot);
     let selected = selected_audio_streams(&snapshot_input, payload.filter.as_ref())
         .map_err(audio_block_error)?;
     let [source] = selected.as_slice() else {

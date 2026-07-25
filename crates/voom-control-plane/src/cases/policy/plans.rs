@@ -15,8 +15,8 @@ pub(crate) struct ResolvedFileInput {
     pub(crate) ordinal: u32,
     pub(crate) selected_version_id: FileVersionId,
     pub(crate) file_asset_id: FileAssetId,
-    pub(crate) version: FileVersion,
-    pub(crate) snapshot: MediaSnapshot,
+    pub(crate) active_version: FileVersion,
+    pub(crate) active_snapshot: MediaSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +114,7 @@ impl ControlPlane {
         let mut draft = input_set_to_draft(input);
         let mut files = Vec::with_capacity(selected.len());
         for selection in selected {
-            let (version, snapshot) = self
+            let (active_version, active_snapshot) = self
                 .identity
                 .get_active_version_with_snapshot(selection.file_asset_id)
                 .await?
@@ -124,17 +124,15 @@ impl ControlPlane {
                         input_set_id, selection.ordinal, selection.selected_version_id
                     ))
                 })?;
-            let projected = crate::workflow::coordinator::project_media_snapshot_input(
-                selection.ordinal,
-                &snapshot,
-            );
+            let projected =
+                crate::media_snapshot::planning_input(selection.ordinal, &active_snapshot);
             draft.media_snapshots[selection.index] = projected;
             files.push(ResolvedFileInput {
                 ordinal: selection.ordinal,
                 selected_version_id: selection.selected_version_id,
                 file_asset_id: selection.file_asset_id,
-                version,
-                snapshot,
+                active_version,
+                active_snapshot,
             });
         }
         Ok(StoredPlanningInput { draft, files })

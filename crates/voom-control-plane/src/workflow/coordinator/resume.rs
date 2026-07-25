@@ -7,20 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
-use voom_core::{FileAssetId, FileVersionId, JobId, VoomError};
-use voom_policy::{MediaSnapshotInput, TargetRef};
-use voom_store::repo::identity::{FileLocationKind, FileVersion, IdentityRepo, MediaSnapshot};
+use voom_core::{FileVersionId, JobId, VoomError};
+use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, FileRunStart, NewFileRunStart,
 };
 
 use crate::ControlPlane;
-use crate::media_snapshot::stream_summary_from_snapshot_payload;
 use crate::workflow::coordinator::PhaseFile;
-use crate::workflow::coordinator::finalize::{
-    ProducedRefs, first_stream_of_kind, payload_str, payload_u32,
-};
+use crate::workflow::coordinator::finalize::ProducedRefs;
 use crate::workflow::coordinator::promotion::ensure_unique_selected_branch_ids;
 use crate::workflow::plan::expansion::branch_ids_from_paths;
 
@@ -107,6 +102,13 @@ impl ControlPlane {
             .into_iter()
             .map(|start| (start.branch_id.clone(), start))
             .collect::<BTreeMap<_, _>>();
+        let mut rows_by_branch = BTreeMap::<&str, Vec<&FilePhaseSummary>>::new();
+        for row in &rows {
+            rows_by_branch
+                .entry(row.branch_id.as_str())
+                .or_default()
+                .push(row);
+        }
         let mut survivors = Vec::with_capacity(files.len());
         let mut run_starts = Vec::with_capacity(files.len());
         let mut seeds = Vec::new();
@@ -114,13 +116,12 @@ impl ControlPlane {
             let start = starts.get(&file.branch_id).ok_or_else(|| {
                 resume_incomplete(format!("missing start for branch {}", file.branch_id))
             })?;
-            let branch_rows = rows
-                .iter()
-                .filter(|row| row.branch_id == file.branch_id)
-                .collect::<Vec<_>>();
-            self.validate_resume_lineage(&file, start, &branch_rows)
+            let branch_rows = rows_by_branch
+                .get(file.branch_id.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            self.validate_resume_lineage(&file, start, branch_rows)
                 .await?;
-            let state = validate_prior_row_shape(start, &branch_rows, phase_count)?;
+            let state = validate_prior_row_shape(start, branch_rows, phase_count)?;
             let mut next_ordinal = state.next_ordinal;
             if state.terminal {
                 if file.version_id != state.recorded_tip {
@@ -309,71 +310,4 @@ fn validate_seed_row(start: &FileRunStart, row: &FilePhaseSummary) -> Result<(),
 
 fn resume_incomplete(detail: impl std::fmt::Display) -> VoomError {
     VoomError::PolicyExecution(format!("resume state is incomplete: {detail}"))
-}
-
-/// Project a committed file version's reprobe [`MediaSnapshot`] into the planner
-/// input the next phase plans against.
-///
-/// The reprobe payload (`scan::persist::snapshot_with_stream_ids` output) carries
-/// `container.format_name` plus a `streams` array whose entries are tagged with a
-/// `kind` (`video`/`audio`/`subtitle`). Top-level `container`, `video_codec`,
-/// `width`, and `height` are lifted from the container object and the first video
-/// stream; the full `streams` array is forwarded verbatim as `stream_summary` so
-/// the planner's per-stream readers see refreshed facts.
-pub(crate) fn project_media_snapshot_input(
-    ordinal: u32,
-    snapshot: &MediaSnapshot,
-) -> MediaSnapshotInput {
-    let payload = &snapshot.payload;
-    let container = payload.get("container").and_then(|container| {
-        container
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| payload_str(container, "format_name"))
-    });
-    let video = first_stream_of_kind(payload, "video");
-    let video_codec = video
-        .and_then(|stream| payload_str(stream, "codec_name"))
-        .or_else(|| {
-            payload
-                .get("video_codec")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
-    let width = video.and_then(|stream| payload_u32(stream, "width"));
-    let height = video.and_then(|stream| payload_u32(stream, "height"));
-    MediaSnapshotInput {
-        ordinal,
-        target: TargetRef::FileVersion {
-            id: snapshot.file_version_id,
-        },
-        container,
-        stream_summary: stream_summary_from_snapshot_payload(payload),
-        video_codec,
-        width,
-        height,
-        hdr: None,
-        bitrate: None,
-        duration_millis: None,
-        audio_languages: Vec::new(),
-        subtitle_languages: Vec::new(),
-        health_flags: Vec::new(),
-        existing_media_snapshot_id: Some(snapshot.id),
-    }
-}
-
-/// Read a file asset's active version (chain tip = latest non-retired
-/// `file_versions` row) and its latest [`MediaSnapshot`].
-///
-/// Returns `Ok(None)` when the asset has no live version, or when the live tip
-/// has no recorded snapshot yet. The coordinator resolves `file_asset_id` from a
-/// starting `FileVersionId` via `IdentityRepo::get_file_version`.
-///
-/// # Errors
-/// Propagates repository read errors.
-pub(crate) async fn active_version_with_snapshot(
-    repo: &impl IdentityRepo,
-    file_asset_id: FileAssetId,
-) -> Result<Option<(FileVersion, MediaSnapshot)>, VoomError> {
-    repo.get_active_version_with_snapshot(file_asset_id).await
 }

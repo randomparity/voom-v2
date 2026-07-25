@@ -702,12 +702,12 @@ impl ControlPlane {
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let registered = self.policy_runtime_registry().await.map_err(no_partial)?;
         let live = self.probe_live_runtimes(registered.clone()).await;
-        let prepared = self
+        let (initial_plan, prepared) = self
             .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &live)
             .await
             .map_err(no_partial)?;
         let report_data = self
-            .compliance_report_for_plan(prepared.initial_plan.clone())
+            .compliance_report_for_plan(initial_plan)
             .await
             .map_err(no_partial)?;
         if let Some(slug) = options.safety_policy_slug.clone() {
@@ -746,12 +746,12 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let prepared = self
+        let (initial_plan, prepared) = self
             .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await
             .map_err(no_partial)?;
         let report_data = self
-            .compliance_report_for_plan(prepared.initial_plan.clone())
+            .compliance_report_for_plan(initial_plan)
             .await
             .map_err(no_partial)?;
         self.execute_compliance_with_report(

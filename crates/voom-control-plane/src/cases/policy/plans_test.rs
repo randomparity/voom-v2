@@ -238,10 +238,10 @@ async fn stored_stream_input_replaces_cached_facts() {
     assert_eq!(resolved.files[0].selected_version_id, file_version_id);
     assert_eq!(
         resolved.files[0].file_asset_id,
-        resolved.files[0].version.file_asset_id
+        resolved.files[0].active_version.file_asset_id
     );
-    assert_eq!(resolved.files[0].version.id, file_version_id);
-    assert_eq!(resolved.files[0].snapshot.id, latest.id);
+    assert_eq!(resolved.files[0].active_version.id, file_version_id);
+    assert_eq!(resolved.files[0].active_snapshot.id, latest.id);
     assert_eq!(
         resolved.draft.media_snapshots[0].stream_summary["streams"],
         latest.payload["streams"]

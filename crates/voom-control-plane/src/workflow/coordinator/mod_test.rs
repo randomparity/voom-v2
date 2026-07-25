@@ -19,7 +19,7 @@ use voom_store::repo::workflow_summaries::{
 use crate::cases::cp;
 use crate::cases::policy::compliance::ComplianceExecutionOptions;
 
-use super::{PhaseFile, active_version_with_snapshot, project_media_snapshot_input};
+use super::PhaseFile;
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -107,7 +107,7 @@ async fn project_media_snapshot_input_round_trips_committed_facts() {
     let version = seed_version(&cp, "/srv/a.mp4", "hash-a", reprobe_payload("h264")).await;
     let snapshot = latest_snapshot(&cp, version).await;
 
-    let input = project_media_snapshot_input(7, &snapshot);
+    let input = crate::media_snapshot::planning_input(7, &snapshot);
 
     assert_eq!(input.ordinal, 7);
     assert_eq!(input.target, TargetRef::FileVersion { id: version });
@@ -135,7 +135,7 @@ fn project_media_snapshot_input_preserves_missing_stream_inventory() {
         payload: json!({}),
     };
 
-    let input = project_media_snapshot_input(1, &snapshot);
+    let input = crate::media_snapshot::planning_input(1, &snapshot);
 
     assert!(input.stream_summary.get("streams").is_none());
     assert_eq!(input.stream_summary["video_stream_count"], 0);
@@ -168,7 +168,9 @@ async fn active_version_with_snapshot_picks_latest_committed_tip() {
         .await
         .unwrap();
 
-    let (tip, snapshot) = active_version_with_snapshot(cp.identity(), asset_id)
+    let (tip, snapshot) = cp
+        .identity()
+        .get_active_version_with_snapshot(asset_id)
         .await
         .unwrap()
         .unwrap();
@@ -212,7 +214,9 @@ async fn active_version_with_snapshot_skips_retired_tip() {
         .await
         .unwrap();
 
-    let (tip, snapshot) = active_version_with_snapshot(cp.identity(), asset_id)
+    let (tip, snapshot) = cp
+        .identity()
+        .get_active_version_with_snapshot(asset_id)
         .await
         .unwrap()
         .unwrap();
@@ -245,7 +249,7 @@ fn file_draft(slug: &str, snapshots: &[MediaSnapshot]) -> voom_policy::PolicyInp
             .iter()
             .enumerate()
             .map(|(index, snapshot)| {
-                project_media_snapshot_input(u32::try_from(index + 1).unwrap(), snapshot)
+                crate::media_snapshot::planning_input(u32::try_from(index + 1).unwrap(), snapshot)
             })
             .collect(),
         identity_evidence: Vec::new(),
@@ -444,7 +448,7 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         .await
         .unwrap();
     let runtimes = crate::workflow::WorkerRuntimeRegistry::new();
-    let prepared = cp
+    let (initial_plan, prepared) = cp
         .prepare_phase_barrier_run_inputs(created.version.id, input.id, &runtimes)
         .await
         .unwrap();
@@ -453,7 +457,7 @@ async fn fresh_run_records_retained_active_version_at_phase_zero() {
         prepared.files[0].branch_id, "movie",
         "branch identity stays anchored to the selected source path"
     );
-    assert!(prepared.initial_plan.nodes.iter().all(|node| {
+    assert!(initial_plan.nodes.iter().all(|node| {
         let TargetRef::FileVersion { id } = node.target else {
             return false;
         };
@@ -525,7 +529,9 @@ async fn control_plane_persists_workflow_summary_over_shared_pool() {
 async fn active_version_with_snapshot_returns_none_for_unknown_asset() {
     let (cp, _tmp) = cp().await;
 
-    let result = active_version_with_snapshot(cp.identity(), voom_core::FileAssetId(9_999))
+    let result = cp
+        .identity()
+        .get_active_version_with_snapshot(voom_core::FileAssetId(9_999))
         .await
         .unwrap();
 
@@ -646,7 +652,9 @@ async fn phase_file(
         .await
         .unwrap()
         .unwrap();
-    let (active, snapshot) = active_version_with_snapshot(cp.identity(), version.file_asset_id)
+    let (active, snapshot) = cp
+        .identity()
+        .get_active_version_with_snapshot(version.file_asset_id)
         .await
         .unwrap()
         .unwrap();

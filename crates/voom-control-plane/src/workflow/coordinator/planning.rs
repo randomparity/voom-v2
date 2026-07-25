@@ -16,7 +16,7 @@ use voom_store::repo::workflow_summaries::{
 };
 
 use crate::cases::policy::plans::ResolvedFileInput;
-use crate::workflow::coordinator::resume::project_media_snapshot_input;
+use crate::media_snapshot::planning_input;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
 
 /// Classify each active file's node for a phase by `NodeStatus`. A file with no
@@ -93,7 +93,7 @@ pub(super) fn phase_draft(base: &PolicyInputSetDraft, files: &[PhaseFile]) -> Po
     let mut draft = base.clone();
     draft.media_snapshots = files
         .iter()
-        .map(|file| project_media_snapshot_input(file.ordinal, &file.snapshot))
+        .map(|file| planning_input(file.ordinal, &file.snapshot))
         .collect();
     draft
 }
@@ -114,7 +114,7 @@ pub(super) fn regenerate_phase_report(
     let mut draft = base_draft.clone();
     draft.media_snapshots = refreshed
         .iter()
-        .map(|(ordinal, snapshot)| project_media_snapshot_input(*ordinal, snapshot))
+        .map(|(ordinal, snapshot)| planning_input(*ordinal, snapshot))
         .collect();
     let plan = voom_plan::plan_phase(
         PlanningRequest {
@@ -216,8 +216,8 @@ pub(super) fn initial_phase_files(
             }
             Ok(PhaseFile {
                 asset_id: resolved.file_asset_id,
-                version_id: resolved.version.id,
-                snapshot: resolved.snapshot,
+                version_id: resolved.active_version.id,
+                snapshot: resolved.active_snapshot,
                 branch_id,
                 ordinal: resolved.ordinal,
                 resume_ordinal: 0,

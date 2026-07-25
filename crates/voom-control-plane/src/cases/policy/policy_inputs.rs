@@ -199,9 +199,8 @@ impl ControlPlane {
                 skipped_count += 1;
                 continue;
             };
-            let mut member = crate::media_snapshot::planning_input(&snapshot);
             included_count += 1;
-            member.ordinal = included_count;
+            let member = crate::media_snapshot::planning_input(included_count, &snapshot);
             media_snapshots.push(member);
         }
 
@@ -275,9 +274,8 @@ impl ControlPlane {
                 skipped_count += 1;
                 continue;
             };
-            let mut member = crate::media_snapshot::planning_input(&snapshot);
             included_count += 1;
-            member.ordinal = included_count;
+            let member = crate::media_snapshot::planning_input(included_count, &snapshot);
             media_snapshots.push(member);
         }
 
