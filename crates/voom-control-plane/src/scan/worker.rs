@@ -223,6 +223,37 @@ impl BundledWorkerProcess {
     }
 }
 
+pub(crate) async fn verify_bundled_ffprobe_readiness() -> Result<(), ScanWorkerError> {
+    verify_ffprobe_readiness(bundled_ffprobe_command()).await
+}
+
+async fn verify_ffprobe_readiness(command: WorkerCommand) -> Result<(), ScanWorkerError> {
+    let process = BundledWorkerProcess::launch(WorkerId(u64::MAX), command).await?;
+    let readiness: Result<(), ScanWorkerError> = async {
+        process
+            .inner
+            .client
+            .handshake(voom_core::PROTOCOL_VERSION)
+            .await
+            .map_err(|error| ScanWorkerError::worker_crash(format!("handshake failed: {error}")))?;
+        process
+            .inner
+            .client
+            .identity(&process.inner.credentials)
+            .await
+            .map_err(|error| ScanWorkerError::worker_crash(format!("identity failed: {error}")))?;
+        Ok(())
+    }
+    .await;
+    let shutdown = process
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .await
+        .map_err(|error| ScanWorkerError::worker_crash(format!("shutdown failed: {error}")));
+    readiness?;
+    shutdown?;
+    Ok(())
+}
+
 pub async fn dispatch_probe_file_with_client<C>(
     client: &C,
     credentials: &WorkerCredentials,

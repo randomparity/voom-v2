@@ -356,6 +356,30 @@ impl SqliteWorkerRepo {
         rows.iter().map(row_to_worker).collect()
     }
 
+    /// List every worker in an exact legacy-name or incarnation-prefix namespace.
+    ///
+    /// # Errors
+    /// Returns a database error when the namespace query or row decoding fails.
+    pub async fn list_by_name_namespace(
+        &self,
+        legacy_name: &str,
+        incarnation_prefix: &str,
+    ) -> Result<Vec<Worker>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+             FROM workers \
+             WHERE name = ? OR substr(name, 1, length(?)) = ? \
+             ORDER BY registered_at ASC, id ASC",
+        )
+        .bind(legacy_name)
+        .bind(incarnation_prefix)
+        .bind(incarnation_prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("workers list name namespace", e))?;
+        rows.iter().map(row_to_worker).collect()
+    }
+
     pub async fn get_inspection(
         &self,
         id: WorkerId,

@@ -8,3 +8,4 @@ pub(crate) mod policies;
 pub(crate) mod policy_inputs;
 pub(crate) mod quality_scoring_profiles;
 pub(crate) mod safety_gate;
+pub(crate) mod tool_preflight;

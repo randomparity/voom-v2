@@ -50,6 +50,35 @@ async fn launch_uses_caller_supplied_worker_id_and_dispatches_probe_file() {
     worker.shutdown(Duration::from_secs(5)).await.unwrap();
 }
 
+#[tokio::test]
+async fn readiness_authenticates_then_shuts_down_bundled_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let ffprobe = write_fake_ffprobe(
+        dir.path(),
+        "printf '{\"format\":{\"format_name\":\"matroska\"},\"streams\":[]}\\n'\n",
+    );
+    let command = ffprobe_worker_command().env("VOOM_FFPROBE_BIN", ffprobe.as_os_str());
+
+    verify_ffprobe_readiness(command).await.unwrap();
+}
+
+#[tokio::test]
+async fn readiness_reaps_worker_after_post_bound_handshake_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("worker.pid");
+    let script = format!(
+        "printf '%s' $$ > '{}'; printf 'BOUND addr=127.0.0.1:9\\n'; read ignored",
+        pid_file.display()
+    );
+    let command = WorkerCommand::new("/bin/sh").arg("-c").arg(script);
+
+    let err = verify_ffprobe_readiness(command).await.unwrap_err();
+    let pid = wait_for_pid_file(&pid_file).await;
+
+    assert!(err.to_string().contains("handshake failed"));
+    assert_process_exited(pid.trim());
+}
+
 async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProcess) {
     let mut wrong_credentials = worker.credentials().clone();
     wrong_credentials.worker_id = WorkerId(worker.worker_id().0 + 1);

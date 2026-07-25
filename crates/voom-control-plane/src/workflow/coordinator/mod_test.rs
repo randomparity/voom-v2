@@ -928,6 +928,64 @@ async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
     assert_eq!(jobs, 1, "resume opened no job beyond the prior one");
 }
 
+#[tokio::test]
+async fn tool_requirements_fail_before_fresh_or_resume_jobs_open() {
+    let (cp, _tmp) = cp().await;
+    let source = "policy \"requires ffmpeg\" {\n  metadata {\n    \
+        requires_tools: [ffmpeg]\n  }\n  phase inspect {}\n}\n";
+    let created = cp
+        .create_policy_document("requires-ffmpeg", source)
+        .await
+        .unwrap();
+    let version = seed_version(
+        &cp,
+        "/lib/tool/movie.mkv",
+        "hash-tool",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let snapshot = latest_snapshot(&cp, version).await;
+    let input = cp
+        .create_policy_input_set(file_draft("requires-ffmpeg", &[snapshot]))
+        .await
+        .unwrap();
+
+    let fresh = cp
+        .run_phase_barrier_with_runtimes(
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+            crate::workflow::WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(fresh.source.code(), "POLICY_EXECUTION_ERROR");
+    assert!(fresh.source.to_string().contains("ffmpeg"));
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0, "fresh preflight failure opened a job");
+
+    let prior = open_workflow_job(&cp).await;
+    let resumed = cp
+        .resume_phase_barrier_with_runtimes(
+            prior,
+            created.version.id,
+            input.id,
+            ComplianceExecutionOptions::default(),
+            crate::workflow::WorkerRuntimeRegistry::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(resumed.source.code(), "POLICY_EXECUTION_ERROR");
+    let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 1, "resume preflight failure opened a new job");
+}
+
 /// Post-run promotion canonicalizes the working dirs, so the candidate artifact
 /// path must be canonicalized too: a live location recorded at a path that
 /// traverses a symlink (e.g. macOS `/tmp` -> `/private/tmp`) must still match its

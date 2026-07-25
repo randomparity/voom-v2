@@ -489,6 +489,51 @@ async fn compliance_apply_does_not_create_issue_for_unsupported_operation() {
 }
 
 #[tokio::test]
+async fn compliance_tool_preflight_fails_before_issue_and_job_writes() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "requires-mkvtoolnix",
+            "policy \"requires mkvtoolnix\" {\n  metadata {\n    \
+             requires_tools: [mkvtoolnix]\n  }\n  phase normalize {\n    container mkv\n  }\n}\n",
+        )
+        .await
+        .unwrap();
+    let (file_version_id, media_snapshot_id) = scanned_snapshot_with_video(&cp).await;
+    let input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "requires-mkvtoolnix".to_owned(),
+            file_version_id,
+            media_snapshot_id,
+            container: "mp4".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let err = cp
+        .execute_compliance_policy_with_runtime_registry_and_options_for_test(
+            policy.version.id,
+            input.input_set_id,
+            WorkerRuntimeRegistry::new(),
+            super::ComplianceExecutionOptions::default(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.source.code(), "POLICY_EXECUTION_ERROR");
+    assert!(err.source.to_string().contains("mkvtoolnix"));
+    for table in ["issues", "jobs", "tickets", "leases"] {
+        let query = format!("SELECT COUNT(*) FROM {table}");
+        let rows: i64 = sqlx::query_scalar(&query)
+            .fetch_one(cp.pool_for_test())
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "{table} changed before preflight failed");
+    }
+}
+
+#[tokio::test]
 async fn compliance_execute_options_reach_policy_remux_ticket_payload() {
     let (cp, _tmp) = cp().await;
     let source = load_policy_fixture("fixtures/policies/container-metadata.voom").unwrap();
