@@ -36,7 +36,7 @@ current-fact authority once stream facts select control flow.
   from trustworthy per-file stream facts.
 - **Surfaces:** `voom-policy` validation, `voom-plan` evaluation, and the
   control-plane stored-input planning adapter.
-- **Direct dependencies:** existing snapshot and active-version identity
+- **Direct dependencies:** snapshot and active-version identity-repository
   reads, `stream_facts`, ADRs 0005/0007/0008, and the published condition
   grammar.
 - **Persistence:** read existing rows; no schema, migration, trigger, or stored
@@ -56,6 +56,9 @@ Explicit exclusions:
   predicates unknown.
 - Filtered and attachment/commentary track execution is owned by #331 and #332.
   #329 does not evaluate track filters.
+- Job-level isolation when a lineage advances after planning is owned by #352
+  under #325. #329 makes each selected version/snapshot pair coherent but does
+  not add a plan-through-dispatch concurrency guarantee.
 
 An excluded concern remains blocking if #329 depends on it or makes it worse.
 
@@ -71,8 +74,10 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
    linked snapshot's `file_version_id`.
 4. After provenance validation, every stored plan, compliance report, fresh
    execution, and resumed execution resolves that file asset's active chain tip
-   and latest durable snapshot. The control plane projects the complete current
-   `MediaSnapshotInput`, retaining the input member's ordinal.
+   and latest durable snapshot with one identity-repository read. The returned
+   version and snapshot belong to the same SQLite statement snapshot, and the
+   snapshot belongs to that version. The control plane projects the complete
+   current `MediaSnapshotInput`, retaining the input member's ordinal.
 5. The first execution phase therefore uses the same current-fact rule as a
    read-only plan or report. After a committed phase, the existing coordinator
    refreshes from the produced version's snapshot before planning the next
@@ -83,6 +88,14 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
 The input set is a durable selection of file lineage, not an immutable copy of
 observed media facts. This is existing coordinator behavior made consistent
 across all stored planning paths.
+
+Authority is coherent per input member, not one wall-clock snapshot across the
+complete input set. Conditions and operations are evaluated per file and never
+join facts from different input members, so resolving members at different
+committed instants cannot combine them into one branch decision. The selected
+version may still be superseded after the read and before dispatch; #352 owns
+that pre-existing coordinator isolation question. #329 neither widens that
+window nor substitutes cached facts inside it.
 
 ### Stream projection
 
@@ -147,6 +160,20 @@ Existing compiled policy versions remain deserializable because no compiled
 type or JSON shape changes. Canonical stored versions gain the published
 execution semantics. Previously accepted parser-only stream conditions remain
 readable but fail planning.
+
+Eligibility rejection uses
+`PlanningDiagnosticCode::InvalidPlanningRequest` and the stable message prefix
+`unpublished compiled stream condition at`. The message includes a
+deterministic structural path containing the phase ordinal and name, the
+`run_if`/`skip_if`/operation/rule placement, nested operation indexes, and
+Boolean child indexes. It also names the rejected target, whether a filter is
+present, and whether the placement is `run_if`.
+
+The eligibility pass collects failures in policy traversal order.
+`generate_plan` and `plan_phase` return the same `PlanGenerationError`
+diagnostics. Stored preparation converts the first diagnostic through the
+existing `PLAN_GENERATION_ERROR` boundary without replacing its message. No new
+outer error code or planning-diagnostic enum variant is added.
 
 ### Evaluation
 

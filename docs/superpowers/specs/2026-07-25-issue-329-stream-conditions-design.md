@@ -25,7 +25,8 @@ Deferred with tracked ownership:
 - full compiled-policy durable JSON strictness: #344;
 - rollback runbook corrections: #351;
 - per-file `run_if` history: #330; and
-- filtered remux execution: #331 and #332.
+- filtered remux execution: #331 and #332; and
+- plan-through-dispatch lineage isolation: #352.
 
 #329 does not change track-filter validation, compiled JSON shapes, serde
 strictness, database schema, migrations, rollback procedures, or parser
@@ -65,7 +66,8 @@ For each media input:
 2. If present, load that exact snapshot identifier.
 3. Require the media input target to be that snapshot's exact file version.
 4. Resolve the target version's file asset, its active chain tip, and that
-   version's latest snapshot.
+   version's latest snapshot with one identity-repository statement. The
+   returned snapshot must belong to the returned active version.
 5. Replace the complete media input with a projection of the current snapshot,
    preserving its ordinal.
 6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
@@ -81,6 +83,12 @@ The coordinator already projects active snapshots for each phase under ADRs
 After a phase commits, its produced version's refreshed snapshot becomes the
 next phase's authority. Resume resolves the active chain again before opening
 its new job.
+
+The repository read is coherent per input member. There is no input-set-wide
+transaction because policy conditions and operations never join facts from
+different files. A lineage can still advance after its pair is read; #352 owns
+that existing coordinator isolation boundary. This change does not add another
+read window or use cached facts during the existing one.
 
 ## Projection contract
 
@@ -145,6 +153,18 @@ Canonical historical compiled versions deserialize and execute. Historical
 parser-only stream forms deserialize but fail plan generation with a message
 that identifies an unpublished compiled stream condition.
 
+Eligibility failures use the existing
+`PlanningDiagnosticCode::InvalidPlanningRequest`. Their messages begin with
+`unpublished compiled stream condition at` and include a deterministic path:
+phase ordinal/name, guard or operation/rule placement, nested operation indexes,
+and Boolean child indexes. The message also includes the target, filter
+presence, and whether the condition appeared in `run_if`.
+
+The pass collects every rejection in policy traversal order. Both planner entry
+points return the same `PlanGenerationError` diagnostics. Stored preparation
+preserves the first diagnostic's message when converting it to the public
+`PLAN_GENERATION_ERROR`; no new public error or diagnostic code is introduced.
+
 ## Evaluation semantics
 
 For an eligible leaf, call `stream_facts(snapshot)`.
@@ -196,8 +216,9 @@ per file in #330.
 - Repository errors such as `DB_UNREACHABLE` propagate unchanged.
 - New writes use `NOT_FOUND` for a missing snapshot and `CONFLICT` for target
   kind or file-version mismatch.
-- Unpublished compiled stream conditions fail plan generation before any node
-  is emitted.
+- Unpublished compiled stream conditions fail with
+  `PLAN_GENERATION_ERROR`, `invalid_planning_request`, the stable message
+  prefix, and structural context before any node is emitted.
 - Source forms outside the newly executable leaves fail compilation.
 
 No failure path mutates durable state.
@@ -217,6 +238,8 @@ Focused tests prove:
 - unpublished compiled stream leaves fail before Boolean short-circuiting;
 - stored plan, report, fresh execution, and resume resolve the same active
   chain-tip snapshot before their first phase;
+- each resolved active-version/latest-snapshot pair comes from one repository
+  statement and the snapshot belongs to the returned version;
 - post-commit phases use the produced version's refreshed snapshot;
 - link target mismatches fail planning;
 - unlinked and store-free inputs retain their supplied summary;
@@ -224,6 +247,8 @@ Focused tests prove:
   values without changing container/remux eligibility;
 - an invalid stream leaf in a later phase fails before any earlier phase opens
   a job or dispatches;
+- direct and stored planner entry points report the same deterministic
+  eligibility diagnostics and structural paths;
 - provenance failures have identical codes and context across stored plan,
   report, fresh execution, and resume; and
 - previously serialized canonical compiled policies remain readable.

@@ -18,6 +18,8 @@ Guardrails:
 
 Files:
 
+- `crates/voom-store/src/repo/media/identity.rs`
+- `crates/voom-store/src/repo/media/identity_test.rs`
 - `crates/voom-control-plane/src/media_snapshot.rs`
 - `crates/voom-control-plane/src/media_snapshot_test.rs`
 - `crates/voom-control-plane/src/cases/policy/policy_inputs.rs`
@@ -40,6 +42,8 @@ Red tests:
   malformed-array, and empty-array inventories;
 - stored plan, report, fresh execution, and resume replace linked cached facts
   from the same active chain-tip snapshot;
+- the active version and latest snapshot are returned by one repository
+  statement, and the snapshot belongs to that version;
 - post-commit phases use the produced version's refreshed snapshot;
 - missing, non-file-version, and mismatched links fail every stored read path
   with the same error class and identifier context;
@@ -51,6 +55,8 @@ Implementation:
 
 - make the shared stream-summary projection preserve source shape;
 - route both production snapshot projections through it;
+- add one identity-repository read that returns an active chain tip and its
+  latest snapshot as a coherent per-file pair;
 - add an async stored-input adapter that validates original link provenance,
   resolves active chain-tip snapshots, and projects complete current facts;
 - use the adapter from stored plan, report, and coordinator entry points; and
@@ -93,6 +99,10 @@ Red tests:
 - one unpublished stream leaf invalidates its complete Boolean tree; and
 - an invalid leaf in a later phase fails full-policy validation before an
   earlier phase can open a job or dispatch;
+- eligibility diagnostics use `invalid_planning_request`, a stable prefix, and
+  deterministic phase/placement/operation/rule/Boolean path context;
+- `generate_plan`, `plan_phase`, and stored preparation preserve the same
+  eligibility diagnostic message;
 - stream conditions in `run_if` fail plan generation while canonical predicates
   retain their existing unknown behavior.
 
@@ -103,6 +113,8 @@ Implementation:
 - accept published stream shapes only on ordinary condition surfaces; and
 - reject stream conditions in `run_if` without changing other compiled
   condition behavior;
+- collect eligibility failures in deterministic policy traversal order with
+  the existing `InvalidPlanningRequest` diagnostic code;
 - call the same pure full-policy validation from `generate_plan`, `plan_phase`,
   and stored coordinator preparation before profile resolution or job creation.
 
@@ -174,6 +186,8 @@ Review focus:
 
 - linked versus unlinked authority;
 - original link provenance and active chain-tip authority;
+- coherent per-file version/snapshot reads without claiming input-set-wide or
+  plan-through-dispatch isolation (#352);
 - missing versus empty facts;
 - remux non-regression for unavailable inventories;
 - accidental activation of filtered/video/attachment conditions;
