@@ -60,6 +60,11 @@ impl WorkerRuntimeRegistry {
             .ok_or_else(|| VoomError::Config(format!("missing runtime for worker {worker_id}")))
     }
 
+    #[must_use]
+    pub(crate) fn get_optional(&self, worker_id: WorkerId) -> Option<WorkerRuntime> {
+        self.runtimes.get(&worker_id).cloned()
+    }
+
     /// Iterate the registered `(worker_id, runtime)` pairs, e.g. to probe each
     /// worker's endpoint before dispatch.
     pub fn entries(&self) -> impl Iterator<Item = (WorkerId, &WorkerRuntime)> {

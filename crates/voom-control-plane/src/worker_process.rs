@@ -253,9 +253,10 @@ impl BundledWorkerProcess {
             self.reaped = true;
             return status;
         }
-        child.kill().await?;
+        let kill_result = child.start_kill();
         let status = child.wait().await?;
         self.reaped = true;
+        kill_result?;
         Ok(status)
     }
 }

@@ -703,6 +703,10 @@ impl ControlPlane {
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
             .map_err(no_partial)?;
+        let prepared = self
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &live)
+            .await
+            .map_err(no_partial)?;
         if let Some(slug) = options.safety_policy_slug.clone() {
             self.enforce_safety_policy(
                 &slug,
@@ -717,14 +721,8 @@ impl ControlPlane {
         self.reject_dead_endpoint_operations(&report_data.plan, &registered, &live)
             .await
             .map_err(no_partial)?;
-        self.execute_compliance_with_report(
-            report_data,
-            policy_version_id,
-            input_set_id,
-            options,
-            live,
-        )
-        .await
+        self.execute_compliance_with_report(report_data, policy_version_id, options, live, prepared)
+            .await
     }
 
     /// Apply the initial report's findings to durable issues, then drive the
@@ -743,12 +741,16 @@ impl ControlPlane {
             .generate_compliance_report(policy_version_id, input_set_id)
             .await
             .map_err(no_partial)?;
+        let prepared = self
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
+            .await
+            .map_err(no_partial)?;
         self.execute_compliance_with_report(
             report_data,
             policy_version_id,
-            input_set_id,
             options,
             runtimes,
+            prepared,
         )
         .await
     }
@@ -757,9 +759,9 @@ impl ControlPlane {
         &self,
         report_data: ComplianceReportData,
         policy_version_id: PolicyVersionId,
-        input_set_id: PolicyInputSetId,
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
+        prepared: crate::workflow::coordinator::PhaseBarrierRunInputs,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let apply_data = self
             .apply_generated_compliance_report(&report_data, policy_version_id)
@@ -767,7 +769,7 @@ impl ControlPlane {
             .map_err(no_partial)?;
         let issues = apply_data.issues;
         match self
-            .run_phase_barrier_with_runtimes(policy_version_id, input_set_id, options, runtimes)
+            .run_prepared_phase_barrier(prepared, options, runtimes)
             .await
         {
             Ok(outcome) => Ok(ComplianceExecuteData::from_outcome(issues, &outcome)),
@@ -1016,6 +1018,7 @@ impl ControlPlane {
         // Resolve after the stored-identity check so the mutation cannot affect
         // `source_hash`.
         super::plans::resolve_profiles_in_policy(self, &mut policy).await?;
+        super::tool_preflight::normalize_policy_tool_requirements(&mut policy)?;
         Ok(policy)
     }
 

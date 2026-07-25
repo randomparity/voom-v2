@@ -118,7 +118,7 @@ struct PhaseDispatchFailure {
 /// Shared inputs for a fresh or resumed phase-barrier run. Everything here is
 /// prepared before a new job opens, so validation failures do not create a job
 /// that immediately needs cleanup.
-struct PhaseBarrierRunInputs {
+pub(crate) struct PhaseBarrierRunInputs {
     policy: voom_policy::CompiledPolicy,
     context: PlanningContext,
     base_draft: PolicyInputSetDraft,
@@ -458,8 +458,18 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let inputs = self
-            .phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await?;
+        self.run_prepared_phase_barrier(inputs, options, runtimes)
+            .await
+    }
+
+    pub(crate) async fn run_prepared_phase_barrier(
+        &self,
+        inputs: PhaseBarrierRunInputs,
+        options: ComplianceExecutionOptions,
+        runtimes: WorkerRuntimeRegistry,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let inputs = Box::new(inputs);
         self.with_phase_barrier_job(|job_id| {
             Box::pin(async move {
@@ -518,7 +528,7 @@ impl ControlPlane {
             .into());
         }
         let inputs = self
-            .phase_barrier_run_inputs(policy_version_id, input_set_id)
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await?;
         let inputs = Box::new(inputs);
 
@@ -571,16 +581,18 @@ impl ControlPlane {
     /// Prepare all shared phase-barrier inputs that are independent of the new
     /// job. Both fresh and resume runs use the same policy/input identity,
     /// projected planning context, base draft, and active branch-id set.
-    async fn phase_barrier_run_inputs(
+    pub(crate) async fn prepare_phase_barrier_run_inputs(
         &self,
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
+        runtimes: &WorkerRuntimeRegistry,
     ) -> Result<PhaseBarrierRunInputs, VoomError> {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
-        let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        let mut policy = self.compiled_policy_for_version(&inputs.version).await?;
         reject_unhandled_on_error(&policy)?;
+        self.preflight_policy_tools(&mut policy, runtimes).await?;
         let active: Vec<FileVersionId> = inputs
             .input
             .media_snapshots

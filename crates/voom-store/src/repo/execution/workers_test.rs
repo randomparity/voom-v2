@@ -72,6 +72,33 @@ async fn get_by_name_returns_none_for_missing_name() {
 }
 
 #[tokio::test]
+async fn list_by_name_namespace_includes_exact_prefixed_and_retired_workers() {
+    let (pool, _tmp) = pool().await;
+    let repo = SqliteWorkerRepo::new(pool);
+    let exact = repo
+        .register(sample_new_worker("local-ffmpeg"))
+        .await
+        .unwrap();
+    let prefixed = repo
+        .register(sample_new_worker("local-ffmpeg-incarnation"))
+        .await
+        .unwrap();
+    let unrelated = repo.register(sample_new_worker("ffmpeg")).await.unwrap();
+    repo.retire(prefixed.id, prefixed.epoch, T0).await.unwrap();
+
+    let workers = repo
+        .list_by_name_namespace("local-ffmpeg", "local-ffmpeg-")
+        .await
+        .unwrap();
+
+    assert_eq!(workers.len(), 2);
+    assert_eq!(workers[0].id, exact.id);
+    assert_eq!(workers[1].id, prefixed.id);
+    assert_eq!(workers[1].status, WorkerStatus::Retired);
+    assert!(!workers.iter().any(|worker| worker.id == unrelated.id));
+}
+
+#[tokio::test]
 async fn record_capability_stores_arrays_as_json() {
     let (pool, _tmp) = pool().await;
     let repo = SqliteWorkerRepo::new(pool.clone());
