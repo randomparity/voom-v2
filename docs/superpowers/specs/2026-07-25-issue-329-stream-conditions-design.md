@@ -70,31 +70,36 @@ Each `ResolvedFileInput` carries the member ordinal, selected input-set
 exact latest `MediaSnapshot` returned by the authority read.
 
 The adapter receives the already raw-gated, deserialized, and typed-eligible
-policy. For each media input:
+policy. It performs two passes.
+
+The first pass classifies and validates every media input:
 
 1. A `FileVersion` target selects its file lineage whether or not
-   `existing_media_snapshot_id` is present.
+   `existing_media_snapshot_id` is present. Load the selected version to obtain
+   its file-asset id.
 2. When the link is present, load it and require it to name the target's exact
    file version.
-3. Resolve the target version's file asset, its active chain tip, and that
-   version's latest snapshot with one identity-repository statement. Select the
-   non-retired version with the greatest id, then the snapshot for that exact
-   version with the greatest id.
-4. Replace the complete media input with a projection of the current snapshot,
-   preserving its ordinal.
-5. Reject a linked non-`FileVersion` target.
-6. An unlinked input with another target kind retains its stored facts only
+3. Reject a linked non-`FileVersion` target.
+4. An unlinked input with another target kind retains its stored facts only
    when the policy contains no `Exists` or `Count`. If either condition appears
    anywhere, every stored entry point rejects the non-file member before
    planning; store-free callers remain unchanged.
-7. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
-   resolved.
 
-After member resolution, the adapter rejects two members that select the same
-file asset, including different historical versions that converge on one
-active tip. The failure names the input-set id, shared file-asset id, resolved
-active-version id, and both member ordinals and selected-version ids. It emits
-no partial `StoredPlanningInput`.
+Before resolving any active tip, group selected versions by file-asset id and
+reject a duplicate group, including different historical versions of one
+lineage. The failure names the input-set id, shared file-asset id, and both
+member ordinals and selected-version ids.
+
+The second pass resolves each unique file lineage:
+
+1. Read its active chain tip and that version's latest snapshot with one
+   identity-repository statement. Select the non-retired version with the
+   greatest id, then the snapshot for that exact version with the greatest id.
+2. Replace the complete media input with a projection of the current snapshot,
+   preserving its ordinal.
+
+Unresolvable provenance or current facts fail with `PLAN_GENERATION_ERROR`.
+The adapter emits no partial `StoredPlanningInput`.
 
 Stored plan display and compliance reporting pass `draft` to `voom-plan`.
 Coordinator preparation also retains `files`: it derives branch ids from the
@@ -289,13 +294,13 @@ per file in #330.
 - Missing or invalid linked provenance and unavailable current snapshots fail
   every stored read path with `PLAN_GENERATION_ERROR` and the message prefix
   `stored policy stream facts are invalid`.
-- Duplicate resolved file assets and non-file members used with any
+- Duplicate selected file lineages and non-file members used with any
   `Exists`/`Count` condition use that same error code and prefix.
 - Read-side messages include input-set id, member ordinal, target kind and
   target file-version id when present, snapshot id, and snapshot file-version
   id when available.
 - Duplicate-lineage messages also include both ordinals and selected-version
-  ids, the shared file-asset id, and resolved active-version id.
+  ids and the shared file-asset id.
 - Repository errors such as `DB_UNREACHABLE` propagate unchanged.
 - Unpublished compiled stream conditions fail with
   `PLAN_GENERATION_ERROR`, `invalid_planning_request`, the stable message
@@ -340,7 +345,7 @@ Focused tests prove:
 - link target mismatches fail planning;
 - unlinked durable `FileVersion` members resolve their active lineage in every
   stored entry point;
-- duplicate members that resolve to one file asset fail identically across
+- duplicate members that select one file asset fail identically across
   plan, report, fresh execution, and resume;
 - a stored policy with `Exists`/`Count` rejects non-file media members across
   every stored entry point, while other stored policies and store-free inputs

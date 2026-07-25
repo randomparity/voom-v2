@@ -80,7 +80,7 @@ Implementation:
   authority-bearing resolved-file records;
 - make the adapter policy-aware so newly executable stream conditions reject
   non-file stored members without changing other stored policies;
-- reject duplicate resolved file assets before returning any adapter result;
+- reject duplicate selected file lineages before any active-pair read;
 - use the projected draft from stored plan and report entry points;
 - thread the resolved-file records through coordinator preparation and build
   first-phase state from them without calling `initial_phase_files`;

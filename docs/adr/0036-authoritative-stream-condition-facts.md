@@ -1,6 +1,6 @@
 # ADR 0036: Evaluate stream conditions from authoritative snapshot facts
 
-Status: Accepted
+Status: Proposed
 
 ## Context
 
@@ -74,7 +74,11 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
    file lineage. When `existing_media_snapshot_id` is present, it additionally
    proves original provenance and must name a snapshot for the target version.
 3. A linked durable input with any other target kind is invalid. An unlinked
-   durable input with another target kind continues using its stored facts.
+   durable input with another target kind continues using its stored facts only
+   when the complete compiled policy contains no `Exists` or `Count`. If either
+   variant appears anywhere, every stored plan, report, fresh execution, and
+   resume rejects the non-file member before planning. Store-free calls remain
+   unchanged.
 4. Every stored plan, compliance report, fresh execution, and resumed execution
    resolves each selected file lineage's active chain tip and latest durable
    snapshot with one identity-repository read. The operation selects the
@@ -231,7 +235,9 @@ prefix `stored policy stream facts are invalid` for:
 - a linked member whose target is not `FileVersion`;
 - a target/snapshot file-version mismatch; or
 - a selected `FileVersion` or file lineage with no active version or latest
-  snapshot.
+  snapshot; or
+- a non-`FileVersion` stored media member used with a policy containing
+  `Exists` or `Count`.
 
 The message names the input-set identifier, member ordinal, target kind and
 file-version identifier when present, optional linked snapshot identifier, and
@@ -247,6 +253,8 @@ snapshot file-version identifier when available. Repository failures such as
 - Linked historical inputs recover missing-versus-empty truth from current
   durable snapshots without a data migration.
 - Synthetic fixtures and direct planner callers remain self-contained.
+- Stored synthetic/non-file inputs retain existing behavior for policies that
+  do not use the stream conditions activated here.
 - Malformed media facts continue producing the existing insufficient-facts
   planning behavior.
 - Existing container/remux eligibility is unchanged for missing and malformed
