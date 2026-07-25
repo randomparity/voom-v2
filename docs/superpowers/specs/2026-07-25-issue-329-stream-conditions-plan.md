@@ -172,6 +172,7 @@ Files:
 - `migrations/0022_workflow_file_run_starts.sql`
 - `crates/voom-store/src/migrator.rs`
 - `crates/voom-store/src/schema_test.rs`
+- `crates/voom-store/tests/migration_inventory.rs`
 - `crates/voom-store/src/repo/execution/workflow_summaries.rs`
 - `crates/voom-store/src/repo/execution/workflow_summaries_test.rs`
 - `crates/voom-store/src/repo/mod.rs`
@@ -208,6 +209,8 @@ Red tests:
 - terminal branches are recorded at exactly `phase_count` and never backfill;
 - pre-migration file jobs fail with `resume state is incomplete`;
 - zero-file jobs require no run-start rows and retain zero-work behavior;
+- current branches `{a, b}` with prior starts `{a, c}` fail exact-set
+  validation with `resume state is incomplete` before any durable write;
 - job creation, start rows, and seed backfills roll back together on failure;
 - every #329 preparation rejection leaves issue, job, ticket, file-version,
   run-start, and workflow-summary rows unchanged;
@@ -217,9 +220,11 @@ Red tests:
 Implementation:
 
 - add the `workflow_file_run_starts` migration and typed repository model;
+- register the migration in both `MIGRATOR` and the exact file inventory;
 - batch-load and batch-insert immutable job/branch starting cursors;
 - split resume reconciliation into a read-only preparation that validates
-  prior starts, row shape, lineage, terminality, and one lost commit;
+  the exact prior/current branch set, row shape, lineage, terminality, and one
+  lost commit;
 - prepare the new job's post-reconciliation starts and optional seed rows;
 - add one transaction that creates the job, appends `job.opened`, inserts every
   start, and inserts seed rows atomically;
@@ -240,6 +245,7 @@ Verification:
 
 ```text
 cargo test -p voom-store workflow_file_run_start
+cargo test -p voom-store --test migration_inventory
 cargo test -p voom-control-plane reconcile_resume
 cargo test -p voom-control-plane stored_stream
 ```
