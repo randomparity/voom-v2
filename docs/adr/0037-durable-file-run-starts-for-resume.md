@@ -54,19 +54,19 @@ against the prior job:
    used for that branch must produce a version from the same lineage. Missing,
    duplicate, or mismatched state fails closed before a new job opens.
 3. Validate the prior rows against the starting ordinal `s` and phase count.
-   Every row ordinal is below the phase count. When `s > 0`, rows may contain
-   one committed reconciliation seed with empty ticket ids at `s - 1`,
-   followed by a contiguous ordinary tail beginning at `s`; either part may be
-   absent. No other earlier row or gap is valid, and a blocked row must end the
-   tail.
+   Require `s <= phase_count`; a larger cursor is invalid. Every row ordinal is
+   below the phase count. When `s > 0`, rows may contain one committed
+   reconciliation seed with empty ticket ids at `s - 1`, followed by a
+   contiguous ordinary tail beginning at `s`; either part may be absent. No
+   other earlier row or gap is valid, and a blocked row must end the tail.
 4. Use the highest prior phase row plus one as the next ordinal. With no prior
    row, use `starting_phase_ordinal`. The validated seed-only case also yields
    the starting ordinal.
 5. Use the produced version of the highest committed prior row as the recorded
    tip. With no committed row, use `starting_file_version_id`.
 6. Determine terminality before considering backfill. A prior blocked row or a
-   next ordinal at or beyond the phase count is terminal. Its current tip must
-   equal the recorded tip; a difference is mismatched state, not evidence for a
+   next ordinal equal to the phase count is terminal. Its current tip must equal
+   the recorded tip; a difference is mismatched state, not evidence for a
    nonexistent later phase. A valid terminal branch records phase count as the
    new job's starting ordinal.
 7. Only a non-terminal branch whose current tip differs from the recorded tip

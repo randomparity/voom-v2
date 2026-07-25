@@ -159,6 +159,7 @@ run-start and phase rows before opening a new job. For each branch:
 - phase rows must be a contiguous tail beginning at the stored starting
   ordinal, optionally preceded when `start > 0` by one committed
   reconciliation seed with empty ticket ids at `start - 1`;
+- the stored starting ordinal must be at most `phase_count`;
 - every row ordinal must be below `phase_count`, and a blocked row must end the
   tail;
 - highest phase row plus one determines the next ordinal;
@@ -413,6 +414,7 @@ Focused tests prove:
 - zero-file jobs require no run-start row and retain zero-work resume behavior;
 - prior rows with gaps, out-of-range ordinals, rows before `start - 1`, or rows
   after a blocked outcome fail before a new job opens;
+- a starting ordinal above `phase_count` fails rather than becoming terminal;
 - run-start and committed-row versions from another file lineage fail before a
   new job opens;
 - blocked and complete cursors never backfill an out-of-range phase, and a
