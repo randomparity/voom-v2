@@ -13,8 +13,9 @@ use voom_worker_protocol::{
 async fn main() -> Result<(), WorkerStartupError> {
     let credentials = load_worker_credentials_from_env()?;
     let bind = load_worker_bind_addr_from_env()?;
+    let config = FfprobeConfig::from_process_env().map_err(WorkerStartupError::dependency)?;
 
-    let server = worker_server(credentials);
+    let server = worker_server(credentials, config);
     let running = serve_worker_http(&server, bind).await?;
 
     println!("BOUND addr={}", running.bound);
@@ -38,11 +39,8 @@ async fn main() -> Result<(), WorkerStartupError> {
     Ok(())
 }
 
-fn worker_server(credentials: WorkerCredentials) -> HttpServer {
-    HttpServer::new(
-        credentials,
-        operation_handler_with_config(FfprobeConfig::from_process_env()),
-    )
+fn worker_server(credentials: WorkerCredentials, config: FfprobeConfig) -> HttpServer {
+    HttpServer::new(credentials, operation_handler_with_config(config))
 }
 
 #[cfg(test)]

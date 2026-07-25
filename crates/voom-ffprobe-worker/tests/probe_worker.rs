@@ -30,8 +30,9 @@ async fn missing_ffprobe_returns_terminal_domain_error_over_http_success() {
         return;
     };
     let media_path = write_wav(dir.path());
-    let missing_ffprobe = dir.path().join("missing-ffprobe");
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, missing_ffprobe.as_os_str())]);
+    let ffprobe = write_fake_ffprobe(dir.path(), "exit 0\n");
+    let config = configured_ffprobe(&ffprobe);
+    std::fs::remove_file(ffprobe).expect("fake ffprobe should be removed");
 
     let terminal = Box::pin(dispatch_terminal_frame(
         &media_path,
@@ -56,7 +57,7 @@ async fn nonzero_ffprobe_returns_terminal_domain_error_over_http_success() {
     };
     let media_path = write_wav(dir.path());
     let fake_ffprobe = write_fake_ffprobe(dir.path(), "printf 'boom\\n' >&2\nexit 42\n");
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let config = configured_ffprobe(&fake_ffprobe);
 
     let terminal = Box::pin(dispatch_terminal_frame(
         &media_path,
@@ -81,7 +82,7 @@ async fn invalid_ffprobe_json_returns_terminal_domain_error_over_http_success() 
     };
     let media_path = write_wav(dir.path());
     let fake_ffprobe = write_fake_ffprobe(dir.path(), "printf 'not-json\\n'\nexit 0\n");
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let config = configured_ffprobe(&fake_ffprobe);
 
     let terminal = Box::pin(dispatch_terminal_frame(&media_path, config, "invalid-json")).await;
 
@@ -104,7 +105,7 @@ async fn content_drift_returns_terminal_domain_error_over_http_success() {
         dir.path(),
         "last=''\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf drift >> \"$last\"\nprintf '{\"format\":{},\"streams\":[]}\\n'\nexit 0\n",
     );
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let config = configured_ffprobe(&fake_ffprobe);
 
     let terminal = Box::pin(dispatch_terminal_frame(
         &media_path,
@@ -132,7 +133,7 @@ async fn ffprobe_success_returns_progress_and_probe_result() {
         dir.path(),
         &format!("cat <<'JSON'\n{BASIC_FFPROBE_JSON}\nJSON\nexit 0\n"),
     );
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let config = configured_ffprobe(&fake_ffprobe);
     let running_result = running_server(config).await;
     assert!(running_result.is_ok());
     let Ok((addr, running)) = running_result else {
@@ -203,11 +204,14 @@ async fn ffprobe_success_returns_progress_and_probe_result() {
 #[tokio::test]
 async fn binary_prints_bound_address_and_stops_on_stdin_close() {
     let binary = env!("CARGO_BIN_EXE_voom-ffprobe-worker");
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let fake_ffprobe = write_fake_ffprobe(dir.path(), "exit 0\n");
     let mut child = tokio::process::Command::new(binary)
         .env("VOOM_WORKER_ID", "7")
         .env("VOOM_WORKER_EPOCH", "3")
         .env("VOOM_WORKER_SECRET", "secret")
         .env("VOOM_WORKER_BIND", "127.0.0.1:0")
+        .env(FFPROBE_BIN_ENV, fake_ffprobe)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -245,9 +249,41 @@ async fn binary_prints_bound_address_and_stops_on_stdin_close() {
 }
 
 #[tokio::test]
+async fn binary_does_not_bind_when_ffprobe_dependency_is_missing() {
+    let binary = env!("CARGO_BIN_EXE_voom-ffprobe-worker");
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new(binary)
+            .env("VOOM_WORKER_ID", "7")
+            .env("VOOM_WORKER_EPOCH", "3")
+            .env("VOOM_WORKER_SECRET", "secret")
+            .env("VOOM_WORKER_BIND", "127.0.0.1:0")
+            .env(FFPROBE_BIN_ENV, dir.path().join("missing-ffprobe"))
+            .output(),
+    )
+    .await
+    .expect("worker startup should finish before timeout")
+    .expect("worker process should launch");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "worker unexpectedly succeeded");
+    assert!(
+        !stdout.contains("BOUND addr="),
+        "worker advertised readiness without ffprobe: {stdout}"
+    );
+    assert!(
+        stderr.contains("ffprobe"),
+        "startup error should identify ffprobe: {stderr}"
+    );
+}
+
+#[tokio::test]
 async fn malformed_payload_returns_terminal_domain_error_over_http_success() {
-    let config =
-        FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, std::ffi::OsStr::new("/nonexistent"))]);
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let fake_ffprobe = write_fake_ffprobe(dir.path(), "exit 0\n");
+    let config = configured_ffprobe(&fake_ffprobe);
     let (addr, running) = running_server(config).await.expect("server starts");
     let client = HttpClient::new(addr);
 
@@ -461,6 +497,11 @@ fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
     let chmod_result = std::fs::set_permissions(&path, permissions);
     assert!(chmod_result.is_ok());
     path
+}
+
+fn configured_ffprobe(path: &Path) -> FfprobeConfig {
+    FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, path.as_os_str())])
+        .expect("fake ffprobe version check should succeed")
 }
 
 fn fallback_error_frame() -> ProgressFrame {

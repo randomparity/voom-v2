@@ -6,7 +6,7 @@ use voom_core::{ErrorCode, FailureClass};
 use super::*;
 
 #[tokio::test]
-async fn nonexistent_explicit_ffprobe_path_maps_to_external_system_unavailable() {
+async fn ffprobe_removed_after_config_maps_to_external_system_unavailable() {
     let dir_result = tempfile::tempdir();
     assert!(dir_result.is_ok());
     let Ok(dir) = dir_result else {
@@ -15,10 +15,11 @@ async fn nonexistent_explicit_ffprobe_path_maps_to_external_system_unavailable()
     let media_path = dir.path().join("clip.bin");
     let write_result = std::fs::write(&media_path, b"not media");
     assert!(write_result.is_ok());
-    let config = FfprobeConfig::from_env_pairs([(
-        FFPROBE_BIN_ENV,
-        dir.path().join("does-not-exist").as_os_str(),
-    )]);
+    let fake_ffprobe = write_fake_ffprobe(dir.path(), "exit 0\n");
+    let Some(config) = configured_ffprobe(&fake_ffprobe) else {
+        return;
+    };
+    assert!(std::fs::remove_file(fake_ffprobe).is_ok());
 
     let result = run_ffprobe_json(&media_path, &config).await;
 
@@ -43,7 +44,9 @@ async fn helper_process_invalid_json_maps_to_malformed_worker_result() {
     let media_path = dir.path().join("clip.bin");
     let write_result = std::fs::write(&media_path, b"not media");
     assert!(write_result.is_ok());
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let Some(config) = configured_ffprobe(&fake_ffprobe) else {
+        return;
+    };
 
     let result = run_ffprobe_json(&media_path, &config).await;
 
@@ -69,13 +72,42 @@ async fn ffprobe_config_captures_provider_version_from_helper() {
         "printf '{\"format\":{\"format_name\":\"mov,mp4\"},\"streams\":[]}\\n'\n",
     );
 
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let Some(config) = configured_ffprobe(&fake_ffprobe) else {
+        return;
+    };
 
     assert_eq!(config.provider_version(), "test-helper");
 }
 
 #[test]
-fn ffprobe_config_version_probe_times_out_quickly() {
+fn ffprobe_config_rejects_missing_dependency() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+
+    let result = FfprobeConfig::from_env_pairs([(
+        FFPROBE_BIN_ENV,
+        dir.path().join("missing-ffprobe").as_os_str(),
+    )]);
+
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::Io);
+    let FfprobeConfigError::Io {
+        binary: _,
+        operation,
+        source: _,
+    } = error
+    else {
+        return;
+    };
+    assert_eq!(operation, "start version check");
+}
+
+#[test]
+fn ffprobe_config_rejects_timed_out_version_probe_quickly() {
     let dir_result = tempfile::tempdir();
     assert!(dir_result.is_ok());
     let Ok(dir) = dir_result else {
@@ -89,10 +121,70 @@ fn ffprobe_config_version_probe_times_out_quickly() {
     );
     let started = std::time::Instant::now();
 
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+    let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
 
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    assert_eq!(config.provider_version(), "unknown");
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::Timeout);
+    let FfprobeConfigError::Timeout { binary: _, timeout } = error else {
+        return;
+    };
+    assert_eq!(timeout, FFPROBE_VERSION_TIMEOUT);
+}
+
+#[test]
+fn ffprobe_config_rejects_nonzero_version_probe() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+    let fake_ffprobe = write_executable(
+        dir.path(),
+        "#!/bin/sh\necho 'dependency unavailable' 1>&2\nexit 42\n",
+    );
+
+    let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::Exit);
+    let FfprobeConfigError::Exit {
+        binary: _,
+        status,
+        stderr,
+    } = error
+    else {
+        return;
+    };
+    assert_eq!(status.code(), Some(42));
+    assert_eq!(stderr, "dependency unavailable");
+}
+
+#[test]
+fn ffprobe_config_rejects_malformed_version_output() {
+    let Ok(dir) = tempfile::tempdir() else {
+        return;
+    };
+    let fake_ffprobe = write_executable(
+        dir.path(),
+        "#!/bin/sh\nprintf 'unexpected version output\\n'\nexit 0\n",
+    );
+
+    let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, fake_ffprobe.as_os_str())]);
+
+    assert!(result.is_err());
+    let Err(error) = result else {
+        return;
+    };
+    assert_eq!(config_error_kind(&error), ConfigErrorKind::MalformedVersion);
+    let FfprobeConfigError::MalformedVersion { binary: _, output } = error else {
+        return;
+    };
+    assert_eq!(output, "unexpected version output\n");
 }
 
 #[test]
@@ -124,7 +216,9 @@ async fn nonzero_exit_with_malformed_signature_maps_to_malformed_media() {
         dir.path(),
         "echo 'clip.mkv: Invalid data found when processing input' 1>&2\nexit 1\n",
     );
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, ffprobe.as_os_str())]);
+    let Some(config) = configured_ffprobe(&ffprobe) else {
+        return;
+    };
 
     let result = run_ffprobe_json(&media_path, &config).await;
 
@@ -150,7 +244,9 @@ async fn nonzero_exit_without_signature_stays_external_system_unavailable() {
     assert!(std::fs::write(&media_path, b"garbage").is_ok());
     // A transient-looking failure (no structural-fault signature) stays retriable.
     let ffprobe = write_fake_ffprobe(dir.path(), "echo 'clip.mkv: End of file' 1>&2\nexit 1\n");
-    let config = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, ffprobe.as_os_str())]);
+    let Some(config) = configured_ffprobe(&ffprobe) else {
+        return;
+    };
 
     let result = run_ffprobe_json(&media_path, &config).await;
 
@@ -170,6 +266,43 @@ fn write_fake_ffprobe(dir: &Path, body: &str) -> PathBuf {
          {body}"
     );
     write_executable(dir, &script)
+}
+
+fn configured_ffprobe(path: &Path) -> Option<FfprobeConfig> {
+    let result = FfprobeConfig::from_env_pairs([(FFPROBE_BIN_ENV, path.as_os_str())]);
+    assert!(result.is_ok());
+    result.ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigErrorKind {
+    Io,
+    Timeout,
+    Exit,
+    MalformedVersion,
+}
+
+const fn config_error_kind(error: &FfprobeConfigError) -> ConfigErrorKind {
+    match error {
+        FfprobeConfigError::Io {
+            binary: _,
+            operation: _,
+            source: _,
+        } => ConfigErrorKind::Io,
+        FfprobeConfigError::Timeout {
+            binary: _,
+            timeout: _,
+        } => ConfigErrorKind::Timeout,
+        FfprobeConfigError::Exit {
+            binary: _,
+            status: _,
+            stderr: _,
+        } => ConfigErrorKind::Exit,
+        FfprobeConfigError::MalformedVersion {
+            binary: _,
+            output: _,
+        } => ConfigErrorKind::MalformedVersion,
+    }
 }
 
 fn write_executable(dir: &Path, script: &str) -> PathBuf {
