@@ -1646,11 +1646,11 @@ fn policy_warnings_are_visible_in_plan_output() {
         container: "mkv".to_owned(),
     });
     compiled.warnings.push(PolicyDiagnostic::warning(
-        DiagnosticCode::MetadataRequiresToolsDeferred,
+        DiagnosticCode::UnknownExtensionNamespace,
         DiagnosticStage::Validate,
         SourceSpan::new(7, 21),
         SourceLocation { line: 1, column: 8 },
-        "metadata requires_tools is deferred",
+        "plugin namespace is not registered",
     ));
 
     let plan = generate_plan(PlanningRequest {
@@ -1662,10 +1662,7 @@ fn policy_warnings_are_visible_in_plan_output() {
 
     assert_eq!(
         plan.warnings,
-        vec![
-            "policy:metadata_requires_tools_deferred:metadata requires_tools is deferred"
-                .to_owned()
-        ]
+        vec!["policy:unknown_extension_namespace:plugin namespace is not registered".to_owned()]
     );
 }
 

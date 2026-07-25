@@ -15,6 +15,83 @@ fn compiled_json_is_deterministic() {
     assert_eq!(first, second);
 }
 
+#[test]
+fn required_tools_preserve_source_order_and_remove_duplicates() {
+    let policy = crate::compile_policy(
+        "policy \"p\" { metadata { \
+         requires_tools: [ffprobe, ffmpeg, ffprobe, mkvtoolnix] \
+         } phase a { container mkv } }",
+    )
+    .unwrap()
+    .policy;
+
+    assert_eq!(
+        policy.required_tools().unwrap(),
+        vec![
+            PolicyTool::Ffprobe,
+            PolicyTool::Ffmpeg,
+            PolicyTool::Mkvtoolnix,
+        ]
+    );
+    assert!(policy.warnings.is_empty());
+}
+
+#[test]
+fn required_tools_accept_legacy_canonical_json_strings() {
+    let mut policy = CompiledPolicy::minimal_for_test("p", "hash");
+    policy.metadata.insert(
+        "requires_tools".to_owned(),
+        serde_json::json!(["mkvtoolnix", "ffmpeg"]),
+    );
+
+    assert_eq!(
+        policy.required_tools().unwrap(),
+        vec![PolicyTool::Mkvtoolnix, PolicyTool::Ffmpeg]
+    );
+}
+
+#[test]
+fn required_tools_reject_malformed_legacy_json() {
+    let cases = [
+        (
+            serde_json::json!("ffmpeg"),
+            "metadata.requires_tools must be an array",
+        ),
+        (
+            serde_json::json!(["ffmpeg", 7]),
+            "metadata.requires_tools[1] must be a string",
+        ),
+        (
+            serde_json::json!(["mediainfo"]),
+            "metadata.requires_tools[0] contains unknown tool `mediainfo`",
+        ),
+    ];
+
+    for (value, message) in cases {
+        let mut policy = CompiledPolicy::minimal_for_test("p", "hash");
+        policy.metadata.insert("requires_tools".to_owned(), value);
+        assert_eq!(policy.required_tools().unwrap_err().to_string(), message);
+    }
+}
+
+#[test]
+fn required_tools_do_not_add_a_compiled_policy_field() {
+    let policy = crate::compile_policy(
+        "policy \"p\" { metadata { requires_tools: [ffmpeg] } \
+         phase a { container mkv } }",
+    )
+    .unwrap()
+    .policy;
+    let json = deterministic_json(&policy).unwrap();
+
+    assert!(json.get("required_tools").is_none());
+    assert_eq!(
+        json["metadata"]["requires_tools"],
+        serde_json::json!(["ffmpeg"])
+    );
+    assert_eq!(json["schema_version"], 2);
+}
+
 fn compile_single_op(operation: &str) -> CompiledOperation {
     let source = format!("policy \"p\" {{ phase a {{ {operation} }} }}");
     let policy = crate::compile_policy(&source).unwrap().policy;

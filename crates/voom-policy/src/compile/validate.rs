@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::text::{dependency_values, statement_text, text_after_list, words};
 use crate::{
-    DiagnosticCode, DiagnosticSeverity, DiagnosticStage, PhaseAst, PolicyAst, PolicyDiagnostic,
-    SourceSpan, StatementAst, line_column,
+    DiagnosticCode, DiagnosticSeverity, DiagnosticStage, ExprAst, PhaseAst, PolicyAst,
+    PolicyDiagnostic, SourceSpan, StatementAst, line_column,
 };
 
 mod conditions;
@@ -43,6 +43,17 @@ struct TagEffects {
     saw_set_tag: bool,
     set_tags: BTreeSet<String>,
     delete_tags: BTreeSet<String>,
+}
+
+const fn expr_span(value: &ExprAst) -> SourceSpan {
+    match value {
+        ExprAst::String(value)
+        | ExprAst::Identifier(value)
+        | ExprAst::Number(value)
+        | ExprAst::FieldPath(value) => value.span,
+        ExprAst::Boolean(value) => value.span,
+        ExprAst::List { span, .. } => *span,
+    }
 }
 
 impl<'a> Validator<'a> {
@@ -116,12 +127,53 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_metadata(&mut self) {
+        let mut first_requires_tools = None;
         for setting in &self.ast.metadata {
-            if setting.key.value == "requires_tools" {
-                self.warning(
-                    DiagnosticCode::MetadataRequiresToolsDeferred,
+            if setting.key.value != "requires_tools" {
+                continue;
+            }
+            if let Some(first_span) = first_requires_tools {
+                let mut diagnostic = self.make_error(
+                    DiagnosticCode::InvalidMetadataRequiresTools,
                     setting.key.span,
-                    "metadata requires_tools is not represented as worker capabilities in Sprint 4",
+                    "metadata requires_tools may be declared only once",
+                );
+                diagnostic.related.push(crate::RelatedSpan {
+                    span: first_span,
+                    location: line_column(self.source, first_span.start),
+                    message: "first requires_tools declaration".to_owned(),
+                });
+                self.diagnostics.push(diagnostic);
+                continue;
+            }
+            first_requires_tools = Some(setting.key.span);
+            self.validate_required_tools_value(&setting.value);
+        }
+    }
+
+    fn validate_required_tools_value(&mut self, value: &ExprAst) {
+        let ExprAst::List { values, .. } = value else {
+            self.error(
+                DiagnosticCode::InvalidMetadataRequiresTools,
+                expr_span(value),
+                "metadata requires_tools must be a list of published tool identifiers",
+            );
+            return;
+        };
+        for value in values {
+            let ExprAst::Identifier(tool) = value else {
+                self.error(
+                    DiagnosticCode::InvalidMetadataRequiresTools,
+                    expr_span(value),
+                    "metadata requires_tools entries must be unquoted identifiers",
+                );
+                continue;
+            };
+            if !matches!(tool.value.as_str(), "ffmpeg" | "ffprobe" | "mkvtoolnix") {
+                self.error(
+                    DiagnosticCode::InvalidMetadataRequiresTools,
+                    tool.span,
+                    format!("unknown metadata tool `{}`", tool.value),
                 );
             }
         }

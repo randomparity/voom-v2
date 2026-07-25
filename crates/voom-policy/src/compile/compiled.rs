@@ -2,6 +2,60 @@ use std::collections::BTreeMap;
 
 use crate::PolicyDiagnostic;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyTool {
+    Ffmpeg,
+    Ffprobe,
+    Mkvtoolnix,
+}
+
+impl PolicyTool {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ffmpeg => "ffmpeg",
+            Self::Ffprobe => "ffprobe",
+            Self::Mkvtoolnix => "mkvtoolnix",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "ffmpeg" => Some(Self::Ffmpeg),
+            "ffprobe" => Some(Self::Ffprobe),
+            "mkvtoolnix" => Some(Self::Mkvtoolnix),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequiredToolsError {
+    NotArray,
+    NotString { index: usize },
+    UnknownTool { index: usize, name: String },
+}
+
+impl std::fmt::Display for RequiredToolsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotArray => formatter.write_str("metadata.requires_tools must be an array"),
+            Self::NotString { index } => {
+                write!(
+                    formatter,
+                    "metadata.requires_tools[{index}] must be a string"
+                )
+            }
+            Self::UnknownTool { index, name } => write!(
+                formatter,
+                "metadata.requires_tools[{index}] contains unknown tool `{name}`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RequiredToolsError {}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompiledPolicy {
     pub policy_name: String,
@@ -17,6 +71,37 @@ pub struct CompiledPolicy {
 }
 
 impl CompiledPolicy {
+    /// Return the published tools declared by `metadata.requires_tools`.
+    ///
+    /// The metadata map is the durable representation for every compiled
+    /// policy version. This view accepts canonical strings from stored JSON and
+    /// removes duplicate tools while preserving their first-seen order.
+    ///
+    /// # Errors
+    /// Returns [`RequiredToolsError`] when stored metadata is malformed or
+    /// names a tool outside the published vocabulary.
+    pub fn required_tools(&self) -> Result<Vec<PolicyTool>, RequiredToolsError> {
+        let Some(value) = self.metadata.get("requires_tools") else {
+            return Ok(Vec::new());
+        };
+        let values = value.as_array().ok_or(RequiredToolsError::NotArray)?;
+        let mut tools = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let name = value
+                .as_str()
+                .ok_or(RequiredToolsError::NotString { index })?;
+            let tool =
+                PolicyTool::from_name(name).ok_or_else(|| RequiredToolsError::UnknownTool {
+                    index,
+                    name: name.to_owned(),
+                })?;
+            if !tools.contains(&tool) {
+                tools.push(tool);
+            }
+        }
+        Ok(tools)
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn minimal_for_test(policy_name: &str, source_hash: &str) -> Self {
