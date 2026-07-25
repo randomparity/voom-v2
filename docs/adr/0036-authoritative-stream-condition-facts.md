@@ -1,6 +1,6 @@
 # ADR 0036: Evaluate stream conditions from authoritative snapshot facts
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
