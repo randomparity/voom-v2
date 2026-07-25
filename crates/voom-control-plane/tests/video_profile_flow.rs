@@ -71,7 +71,7 @@ struct Case {
 }
 
 #[tokio::test]
-async fn named_default_hevc_mkv_flow_commits_and_replans_as_no_op() {
+async fn named_default_hevc_mkv_flow_commits_and_authoritative_replan() {
     let case = Case {
         slug: "video-transcode-hevc-default",
         policy_source: HEVC_POLICY,
@@ -84,8 +84,7 @@ async fn named_default_hevc_mkv_flow_commits_and_replans_as_no_op() {
         expected_codec: "hevc",
     };
     let outcome = run_case(&case).await;
-    // A committed default-hevc result must re-plan to NoOp under the same policy.
-    assert_replans_as_no_op(
+    assert_replans_from_authoritative_snapshot(
         &outcome.cp,
         outcome.policy_version_id,
         outcome.result_file_version_id,
@@ -358,9 +357,9 @@ fn assert_probed_result_snapshot(
 /// draft. This proves the probed result snapshot round-trips: the projection
 /// reads `payload["streams"]`, which only exists because the post-commit probe
 /// recorded a real observation. A synthesized stub (no `streams`) would project
-/// to `video_stream_count: 0` and the MP4/codec gates would not see the result
-/// as already-compliant.
-async fn assert_replans_as_no_op(
+/// to `video_stream_count: 0` and block before reaching the raw container-alias
+/// behavior asserted below.
+async fn assert_replans_from_authoritative_snapshot(
     cp: &ControlPlane,
     policy_version_id: PolicyVersionId,
     result_file_version_id: FileVersionId,
@@ -398,9 +397,15 @@ async fn assert_replans_as_no_op(
         .generate_compliance_report(policy_version_id, projected.input_set_id)
         .await
         .unwrap();
+    // Stored planning trusts the durable raw probe alias, not the cached "mkv".
+    // Canonical probe-container mapping is tracked separately.
     assert_eq!(
         result_plan.plan.nodes[0].status,
-        voom_plan::NodeStatus::NoOp
+        voom_plan::NodeStatus::Planned
+    );
+    assert_eq!(
+        result_plan.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "matroska,webm"
     );
 }
 

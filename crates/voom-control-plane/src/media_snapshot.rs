@@ -9,18 +9,8 @@ use voom_store::repo::identity::MediaSnapshot;
 /// container and video codec, and leaves the remaining optional fact fields at
 /// their defaults (selection only consults stream/video facts).
 pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
-    let streams = snapshot
-        .payload
-        .get("streams")
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let video_stream_count = streams.as_array().map_or(0, |streams| {
-        streams
-            .iter()
-            .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
-            .count()
-    });
-    let video_stream = streams.as_array().and_then(|arr| {
+    let streams = snapshot.payload.get("streams");
+    let video_stream = streams.and_then(Value::as_array).and_then(|arr| {
         arr.iter()
             .find(|s| s.get("kind").and_then(Value::as_str) == Some("video"))
     });
@@ -41,10 +31,7 @@ pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
             .get("container")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        stream_summary: json!({
-            "video_stream_count": video_stream_count,
-            "streams": streams,
-        }),
+        stream_summary: stream_summary_from_snapshot_payload(&snapshot.payload),
         video_codec: snapshot
             .payload
             .get("video_codec")
@@ -60,6 +47,21 @@ pub(crate) fn planning_input(snapshot: &MediaSnapshot) -> MediaSnapshotInput {
         health_flags: Vec::new(),
         existing_media_snapshot_id: Some(snapshot.id),
     }
+}
+
+pub(crate) fn stream_summary_from_snapshot_payload(payload: &Value) -> Value {
+    let streams = payload.get("streams");
+    let video_stream_count = streams.and_then(Value::as_array).map_or(0, |streams| {
+        streams
+            .iter()
+            .filter(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
+            .count()
+    });
+    let mut summary = json!({"video_stream_count": video_stream_count});
+    if let Some(streams) = streams {
+        summary["streams"] = streams.clone();
+    }
+    summary
 }
 
 #[cfg(test)]

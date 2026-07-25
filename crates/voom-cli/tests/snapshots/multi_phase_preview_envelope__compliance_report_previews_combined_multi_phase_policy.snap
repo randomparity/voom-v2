@@ -9,8 +9,8 @@ expression: json
   "data": {
     "plan": {
       "schema_version": 1,
-      "plan_id": "plan_eb7d1acac3012439",
-      "plan_hash": "blake3:eb7d1acac30124390bc0e2fbcfdf51331fc941f8cb7769fd121a601616693a4f",
+      "plan_id": "plan_a89db18ae10e9786",
+      "plan_hash": "blake3:a89db18ae10e9786d5d3384ab50d74e3056d81caed4c69a831db0e4f703c42a6",
       "policy": {
         "slug": "sprint-16-combined",
         "source_hash": "ddba5e21e8ab362a97dd97d6a7212033a14337c11d3f565aafe24e9fc9134cb3",
@@ -26,8 +26,8 @@ expression: json
       },
       "summary": {
         "total_node_count": 3,
-        "executable_node_count": 2,
-        "no_op_node_count": 1,
+        "executable_node_count": 3,
+        "no_op_node_count": 0,
         "blocked_node_count": 0,
         "target_count": 1,
         "operation_counts_by_kind": {
@@ -76,12 +76,12 @@ expression: json
             "source_media_snapshot_id": 1
           },
           "observed_state": {
-            "container": "mkv"
+            "container": "matroska,webm"
           },
-          "status": "no_op",
-          "status_reason": "container is already mkv and track selection is unchanged",
+          "status": "planned",
+          "status_reason": "container matroska,webm will be changed to mkv",
           "capability_hints": {
-            "operation_capability": null
+            "operation_capability": "remux_container"
           },
           "scheduling_hints": {
             "priority_class": "normal",
@@ -126,7 +126,7 @@ expression: json
             }
           },
           "observed_state": {
-            "container": "mkv",
+            "container": "matroska,webm",
             "video_codec": "h264",
             "video_stream_count": 1
           },
@@ -183,7 +183,7 @@ expression: json
             }
           },
           "observed_state": {
-            "container": "mkv",
+            "container": "matroska,webm",
             "selected_audio_stream_count": 1,
             "audio_codecs": [
               "aac"
@@ -238,10 +238,10 @@ expression: json
     },
     "report": {
       "schema_version": 1,
-      "report_id": "report_1bb3880148f8304f",
-      "report_hash": "blake3:31115395f1cc92aba1e172ed9e6789523e4dba600e4c28c95e5206538b4b0f3a",
-      "plan_id": "plan_eb7d1acac3012439",
-      "plan_hash": "blake3:eb7d1acac30124390bc0e2fbcfdf51331fc941f8cb7769fd121a601616693a4f",
+      "report_id": "report_34d97ccd92e0cccc",
+      "report_hash": "blake3:e2b76a028ba59059acc4ef5112dc7901472d9a04e4e7c7c8bd4301826866fd22",
+      "plan_id": "plan_a89db18ae10e9786",
+      "plan_hash": "blake3:a89db18ae10e9786d5d3384ab50d74e3056d81caed4c69a831db0e4f703c42a6",
       "policy": {
         "slug": "sprint-16-combined",
         "source_hash": "ddba5e21e8ab362a97dd97d6a7212033a14337c11d3f565aafe24e9fc9134cb3",
@@ -258,10 +258,10 @@ expression: json
       "summary": {
         "status": "noncompliant",
         "total_check_count": 3,
-        "compliant_check_count": 1,
-        "noncompliant_check_count": 2,
+        "compliant_check_count": 0,
+        "noncompliant_check_count": 3,
         "blocked_check_count": 0,
-        "executable_check_count": 2,
+        "executable_check_count": 3,
         "operation_counts_by_kind": {
           "remux": 1,
           "transcode_audio": 1,
@@ -270,7 +270,7 @@ expression: json
       },
       "checks": [
         {
-          "check_id": "check_b0388c428fa5df74",
+          "check_id": "check_01097fe65de3b948",
           "node_id": "node_a7cad66e020f76f0",
           "target": {
             "type": "file_version",
@@ -308,15 +308,15 @@ expression: json
             "source_media_snapshot_id": 1
           },
           "observed_state": {
-            "container": "mkv"
+            "container": "matroska,webm"
           },
-          "check_status": "compliant",
-          "reason": "container is already mkv and track selection is unchanged",
-          "issue_action_hint": "resolve_matching",
-          "execution_eligibility": "no_op"
+          "check_status": "noncompliant",
+          "reason": "container matroska,webm will be changed to mkv",
+          "issue_action_hint": "create_or_update_planned",
+          "execution_eligibility": "supported"
         },
         {
-          "check_id": "check_5acc09962daf3713",
+          "check_id": "check_42429d8d6006b5bc",
           "node_id": "node_24bd9fb668590f0d",
           "target": {
             "type": "file_version",
@@ -338,7 +338,7 @@ expression: json
             }
           },
           "observed_state": {
-            "container": "mkv",
+            "container": "matroska,webm",
             "video_codec": "h264",
             "video_stream_count": 1
           },
@@ -348,7 +348,7 @@ expression: json
           "execution_eligibility": "supported"
         },
         {
-          "check_id": "check_a4be029fc4a0ec09",
+          "check_id": "check_ab884d0c51d21bc1",
           "node_id": "node_9f0612bab44b9308",
           "target": {
             "type": "file_version",
@@ -370,7 +370,7 @@ expression: json
             }
           },
           "observed_state": {
-            "container": "mkv",
+            "container": "matroska,webm",
             "selected_audio_stream_count": 1,
             "audio_codecs": [
               "aac"

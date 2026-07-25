@@ -497,9 +497,12 @@ impl ControlPlane {
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        let input = self
+            .resolve_stored_planning_input(&policy, inputs.input)
+            .await?;
         let plan = super::plans::plan_compiled_policy_with_input(
             policy,
-            super::plans::input_set_to_draft(inputs.input),
+            input.draft,
             voom_plan::PlanningContext {
                 policy_document_id: Some(inputs.version.policy_document_id),
                 policy_version_id: Some(inputs.version.id),

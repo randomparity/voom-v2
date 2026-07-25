@@ -51,7 +51,8 @@ use planning::{
 #[cfg(test)]
 use finalize::{sqlite_i64, sqlite_u64};
 #[cfg(test)]
-pub(crate) use resume::{active_version_with_snapshot, project_media_snapshot_input};
+pub(crate) use resume::active_version_with_snapshot;
+pub(crate) use resume::project_media_snapshot_input;
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.

@@ -125,6 +125,22 @@ async fn project_media_snapshot_input_round_trips_committed_facts() {
     assert_eq!(input.stream_summary["streams"][1]["kind"], "audio");
 }
 
+#[test]
+fn project_media_snapshot_input_preserves_missing_stream_inventory() {
+    let snapshot = MediaSnapshot {
+        id: voom_core::MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: T0,
+        payload: json!({}),
+    };
+
+    let input = project_media_snapshot_input(1, &snapshot);
+
+    assert!(input.stream_summary.get("streams").is_none());
+    assert_eq!(input.stream_summary["video_stream_count"], 0);
+}
+
 #[tokio::test]
 async fn active_version_with_snapshot_picks_latest_committed_tip() {
     let (cp, _tmp) = cp().await;

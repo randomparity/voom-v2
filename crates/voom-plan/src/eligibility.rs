@@ -56,6 +56,128 @@ pub fn stream_condition_eligibility_diagnostics(
     diagnostics
 }
 
+/// Return whether a compiled policy contains an `exists` or `count` leaf.
+///
+/// Callers that need published-only semantics must first require an empty
+/// [`stream_condition_eligibility_diagnostics`] result.
+#[must_use]
+pub fn policy_uses_stream_conditions(policy: &CompiledPolicy) -> bool {
+    for phase in &policy.phases {
+        if phase
+            .run_if
+            .as_ref()
+            .is_some_and(condition_uses_stream_facts)
+            || phase
+                .skip_if
+                .as_ref()
+                .is_some_and(condition_uses_stream_facts)
+            || operations_use_stream_facts(&phase.operations)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn operations_use_stream_facts(operations: &[CompiledOperation]) -> bool {
+    for operation in operations {
+        match operation {
+            CompiledOperation::Conditional {
+                condition,
+                operations,
+            } => {
+                if condition_uses_stream_facts(condition) || operations_use_stream_facts(operations)
+                {
+                    return true;
+                }
+            }
+            CompiledOperation::Rules { mode: _, rules } => {
+                for rule in rules {
+                    if rule
+                        .condition
+                        .as_ref()
+                        .is_some_and(condition_uses_stream_facts)
+                        || operations_use_stream_facts(&rule.operations)
+                    {
+                        return true;
+                    }
+                }
+            }
+            CompiledOperation::SetContainer { container: _ }
+            | CompiledOperation::KeepTracks {
+                target: _,
+                filter: _,
+            }
+            | CompiledOperation::RemoveTracks {
+                target: _,
+                filter: _,
+            }
+            | CompiledOperation::ReorderTracks {
+                targets: _,
+                head_filter: _,
+            }
+            | CompiledOperation::SetDefaults {
+                target: _,
+                strategy: _,
+                filter: _,
+            }
+            | CompiledOperation::ClearTrackActions { target: _ }
+            | CompiledOperation::ClearTags
+            | CompiledOperation::SetTag { key: _, value: _ }
+            | CompiledOperation::DeleteTag { key: _ }
+            | CompiledOperation::TranscodeVideo {
+                target_codec: _,
+                container: _,
+                profile: _,
+                resolved_profile: _,
+            }
+            | CompiledOperation::TranscodeAudio {
+                target_codec: _,
+                container: _,
+                filter: _,
+            }
+            | CompiledOperation::ExtractAudio {
+                target_codec: _,
+                container: _,
+                filter: _,
+            }
+            | CompiledOperation::SynthesizeAudio {
+                target_codec: _,
+                container: _,
+                target_channels: _,
+                filter: _,
+            }
+            | CompiledOperation::VerifyArtifact => {}
+        }
+    }
+    false
+}
+
+fn condition_uses_stream_facts(condition: &CompiledCondition) -> bool {
+    match condition {
+        CompiledCondition::Exists {
+            target: _,
+            filter: _,
+        }
+        | CompiledCondition::Count {
+            target: _,
+            op: _,
+            value: _,
+        } => true,
+        CompiledCondition::Not { inner } => condition_uses_stream_facts(inner),
+        CompiledCondition::And { conditions } | CompiledCondition::Or { conditions } => {
+            conditions.iter().any(condition_uses_stream_facts)
+        }
+        CompiledCondition::FieldComparison {
+            path: _,
+            op: _,
+            value: _,
+        }
+        | CompiledCondition::FieldExists { path: _ }
+        | CompiledCondition::Predicate { name: _ } => false,
+    }
+}
+
 fn visit_operations(
     operations: &[CompiledOperation],
     path: &str,

@@ -5,13 +5,14 @@
 //! committed file version's reprobe snapshot into the planner input the next
 //! phase plans against.
 
+use serde_json::Value;
 use voom_core::{FileAssetId, FileVersionId, JobId, VoomError};
 use voom_policy::{MediaSnapshotInput, TargetRef};
 use voom_store::repo::identity::{FileLocationKind, FileVersion, IdentityRepo, MediaSnapshot};
 use voom_store::repo::workflow_summaries::{FilePhaseOutcome, FilePhaseSummary};
 
 use crate::ControlPlane;
-use crate::cases::policy::policy_inputs::stream_summary_from_snapshot_payload;
+use crate::media_snapshot::stream_summary_from_snapshot_payload;
 use crate::workflow::coordinator::PhaseFile;
 use crate::workflow::coordinator::finalize::{
     ProducedRefs, first_stream_of_kind, payload_str, payload_u32,
@@ -155,11 +156,21 @@ pub(crate) fn project_media_snapshot_input(
     snapshot: &MediaSnapshot,
 ) -> MediaSnapshotInput {
     let payload = &snapshot.payload;
-    let container = payload
-        .get("container")
-        .and_then(|container| payload_str(container, "format_name"));
+    let container = payload.get("container").and_then(|container| {
+        container
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| payload_str(container, "format_name"))
+    });
     let video = first_stream_of_kind(payload, "video");
-    let video_codec = video.and_then(|stream| payload_str(stream, "codec_name"));
+    let video_codec = video
+        .and_then(|stream| payload_str(stream, "codec_name"))
+        .or_else(|| {
+            payload
+                .get("video_codec")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
     let width = video.and_then(|stream| payload_u32(stream, "width"));
     let height = video.and_then(|stream| payload_u32(stream, "height"));
     MediaSnapshotInput {
@@ -195,17 +206,5 @@ pub(crate) async fn active_version_with_snapshot(
     repo: &impl IdentityRepo,
     file_asset_id: FileAssetId,
 ) -> Result<Option<(FileVersion, MediaSnapshot)>, VoomError> {
-    let versions = repo.list_file_versions_by_asset(file_asset_id).await?;
-    let Some(tip) = versions
-        .into_iter()
-        .filter(|version| version.retired_at.is_none())
-        .max_by_key(|version| version.id.0)
-    else {
-        return Ok(None);
-    };
-    let snapshots = repo.list_media_snapshots_by_version(tip.id).await?;
-    let Some(snapshot) = snapshots.into_iter().max_by_key(|snapshot| snapshot.id.0) else {
-        return Ok(None);
-    };
-    Ok(Some((tip, snapshot)))
+    repo.get_active_version_with_snapshot(file_asset_id).await
 }

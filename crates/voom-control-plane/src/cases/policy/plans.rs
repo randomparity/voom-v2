@@ -1,11 +1,51 @@
-use voom_core::{PolicyInputSetId, PolicyVersionId, VoomError};
+use std::collections::BTreeMap;
+
+use voom_core::{FileAssetId, FileVersionId, PolicyInputSetId, PolicyVersionId, VoomError};
 use voom_policy::{
     BundleTargetInput, IdentityEvidenceInput, IssueInput, MediaSnapshotInput, PolicyInputSetDraft,
     PolicySyntheticTarget, QualityProfileSelection, TargetRef,
 };
+use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
 use voom_store::repo::policy_inputs::{PolicyInputSet, PolicyInputTargetRef};
 
 use crate::ControlPlane;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "retained authority records are consumed by coordinator preparation"
+    )
+)]
+pub(crate) struct ResolvedFileInput {
+    pub(crate) ordinal: u32,
+    pub(crate) selected_version_id: FileVersionId,
+    pub(crate) file_asset_id: FileAssetId,
+    pub(crate) version: FileVersion,
+    pub(crate) snapshot: MediaSnapshot,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "retained authority records are consumed by coordinator preparation"
+    )
+)]
+pub(crate) struct StoredPlanningInput {
+    pub(crate) draft: PolicyInputSetDraft,
+    pub(crate) files: Vec<ResolvedFileInput>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectedFileInput {
+    index: usize,
+    ordinal: u32,
+    selected_version_id: FileVersionId,
+    file_asset_id: FileAssetId,
+}
 
 pub fn plan_compiled_policy_with_input(
     policy: voom_policy::CompiledPolicy,
@@ -77,6 +117,108 @@ pub(crate) async fn resolve_profiles_in_policy(
 }
 
 impl ControlPlane {
+    pub(crate) async fn resolve_stored_planning_input(
+        &self,
+        policy: &voom_policy::CompiledPolicy,
+        input: PolicyInputSet,
+    ) -> Result<StoredPlanningInput, VoomError> {
+        let selected = self.validate_stored_media_members(policy, &input).await?;
+        reject_duplicate_lineages(input.id, &selected)?;
+        let input_set_id = input.id;
+        let mut draft = input_set_to_draft(input);
+        let mut files = Vec::with_capacity(selected.len());
+        for selection in selected {
+            let (version, snapshot) = self
+                .identity
+                .get_active_version_with_snapshot(selection.file_asset_id)
+                .await?
+                .ok_or_else(|| {
+                    stored_stream_facts_error(format!(
+                        "input set {} member {} selected file version {} has no active snapshot",
+                        input_set_id, selection.ordinal, selection.selected_version_id
+                    ))
+                })?;
+            let projected = crate::workflow::coordinator::project_media_snapshot_input(
+                selection.ordinal,
+                &snapshot,
+            );
+            draft.media_snapshots[selection.index] = projected;
+            files.push(ResolvedFileInput {
+                ordinal: selection.ordinal,
+                selected_version_id: selection.selected_version_id,
+                file_asset_id: selection.file_asset_id,
+                version,
+                snapshot,
+            });
+        }
+        Ok(StoredPlanningInput { draft, files })
+    }
+
+    async fn validate_stored_media_members(
+        &self,
+        policy: &voom_policy::CompiledPolicy,
+        input: &PolicyInputSet,
+    ) -> Result<Vec<SelectedFileInput>, VoomError> {
+        let uses_stream_conditions = voom_plan::policy_uses_stream_conditions(policy);
+        let mut selected = Vec::new();
+        for (index, member) in input.media_snapshots.iter().enumerate() {
+            let PolicyInputTargetRef::FileVersion { id } = &member.target else {
+                if let Some(snapshot_id) = member.existing_media_snapshot_id {
+                    return Err(stored_stream_facts_error(format!(
+                        "input set {} member {} targets {} but links snapshot {snapshot_id}; \
+                         linked members must target a file version",
+                        input.id,
+                        member.ordinal,
+                        stored_target_kind(&member.target)
+                    )));
+                }
+                if uses_stream_conditions {
+                    return Err(stored_stream_facts_error(format!(
+                        "input set {} member {} targets {} but the policy uses published \
+                         stream conditions",
+                        input.id,
+                        member.ordinal,
+                        stored_target_kind(&member.target)
+                    )));
+                }
+                continue;
+            };
+            let version = self.identity.get_file_version(*id).await?.ok_or_else(|| {
+                stored_stream_facts_error(format!(
+                    "input set {} member {} selects missing file version {id}",
+                    input.id, member.ordinal
+                ))
+            })?;
+            if let Some(snapshot_id) = member.existing_media_snapshot_id {
+                let snapshot = self
+                    .identity
+                    .get_media_snapshot(snapshot_id)
+                    .await?
+                    .ok_or_else(|| {
+                        stored_stream_facts_error(format!(
+                            "input set {} member {} links missing snapshot {snapshot_id} \
+                             for file version {id}",
+                            input.id, member.ordinal
+                        ))
+                    })?;
+                if snapshot.file_version_id != *id {
+                    return Err(stored_stream_facts_error(format!(
+                        "input set {} member {} links snapshot {snapshot_id} for file version {} \
+                         but selects file version {id}",
+                        input.id, member.ordinal, snapshot.file_version_id
+                    )));
+                }
+            }
+            selected.push(SelectedFileInput {
+                index,
+                ordinal: member.ordinal,
+                selected_version_id: *id,
+                file_asset_id: version.file_asset_id,
+            });
+        }
+        Ok(selected)
+    }
+
     /// Generate an execution plan from stored policy and input rows.
     ///
     /// # Errors
@@ -106,9 +248,10 @@ impl ControlPlane {
             .ok_or_else(|| {
                 VoomError::NotFound(format!("policy input set {input_set_id} not found"))
             })?;
+        let input = self.resolve_stored_planning_input(&policy, input).await?;
         plan_compiled_policy_with_input(
             policy,
-            input_set_to_draft(input),
+            input.draft,
             voom_plan::PlanningContext {
                 policy_document_id: Some(version.policy_document_id),
                 policy_version_id: Some(version.id),
@@ -117,6 +260,46 @@ impl ControlPlane {
             },
         )
     }
+}
+
+fn reject_duplicate_lineages(
+    input_set_id: PolicyInputSetId,
+    selected: &[SelectedFileInput],
+) -> Result<(), VoomError> {
+    let mut seen = BTreeMap::new();
+    for member in selected {
+        if let Some((ordinal, version_id)) = seen.insert(
+            member.file_asset_id,
+            (member.ordinal, member.selected_version_id),
+        ) {
+            return Err(stored_stream_facts_error(format!(
+                "input set {input_set_id} selects file asset {} twice: member {ordinal} \
+                 file version {version_id} and member {} file version {}",
+                member.file_asset_id, member.ordinal, member.selected_version_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn stored_target_kind(target: &PolicyInputTargetRef) -> &'static str {
+    match target {
+        PolicyInputTargetRef::MediaWork { id: _ } => "media_work",
+        PolicyInputTargetRef::MediaVariant { id: _ } => "media_variant",
+        PolicyInputTargetRef::AssetBundle { id: _ } => "asset_bundle",
+        PolicyInputTargetRef::FileAsset { id: _ } => "file_asset",
+        PolicyInputTargetRef::FileVersion { id: _ } => "file_version",
+        PolicyInputTargetRef::FileLocation { id: _ } => "file_location",
+        PolicyInputTargetRef::Synthetic {
+            id: _,
+            key: _,
+            kind: _,
+        } => "synthetic",
+    }
+}
+
+fn stored_stream_facts_error(detail: impl std::fmt::Display) -> VoomError {
+    VoomError::PlanGeneration(format!("stored policy stream facts are invalid: {detail}"))
 }
 
 pub(crate) fn deserialize_stored_compiled_policy(

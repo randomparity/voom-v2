@@ -136,3 +136,29 @@ fn eligibility_collects_unpublished_leaves_in_structural_order() {
             .all(|message| message.starts_with("unpublished compiled stream condition at"))
     );
 }
+
+#[test]
+fn stream_condition_usage_finds_nested_leaves() {
+    let stream_policy = policy(vec![phase(
+        "normalize",
+        vec![CompiledOperation::Rules {
+            mode: RuleMatchMode::First,
+            rules: vec![CompiledRule {
+                name: "nested".to_owned(),
+                condition: Some(CompiledCondition::Not {
+                    inner: Box::new(exists(TrackTarget::Audio)),
+                }),
+                operations: Vec::new(),
+            }],
+        }],
+    )]);
+    let condition_free = policy(vec![phase(
+        "normalize",
+        vec![CompiledOperation::SetContainer {
+            container: "mkv".to_owned(),
+        }],
+    )]);
+
+    assert!(policy_uses_stream_conditions(&stream_policy));
+    assert!(!policy_uses_stream_conditions(&condition_free));
+}

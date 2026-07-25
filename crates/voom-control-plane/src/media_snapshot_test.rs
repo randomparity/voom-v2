@@ -55,8 +55,19 @@ fn planning_input_defaults_video_count_zero_when_no_streams() {
     let input = planning_input(&snapshot);
 
     assert_eq!(input.stream_summary["video_stream_count"], 0);
+    assert!(input.stream_summary.get("streams").is_none());
     assert_eq!(input.container, None);
     assert_eq!(input.video_codec, None);
+}
+
+#[test]
+fn stream_summary_preserves_unavailable_stream_inventory_shapes() {
+    for streams in [serde_json::Value::Null, json!({"unexpected": "shape"})] {
+        let summary = stream_summary_from_snapshot_payload(&json!({"streams": streams.clone()}));
+
+        assert_eq!(summary["streams"], streams);
+        assert_eq!(summary["video_stream_count"], 0);
+    }
 }
 
 #[test]

@@ -606,6 +606,12 @@ pub trait IdentityRepo: Repository {
         &self,
         asset_id: FileAssetId,
     ) -> Result<Vec<FileVersion>, VoomError>;
+    /// Read the greatest live version id for one file asset and the greatest
+    /// snapshot id belonging to that exact version in one database statement.
+    async fn get_active_version_with_snapshot(
+        &self,
+        asset_id: FileAssetId,
+    ) -> Result<Option<(FileVersion, MediaSnapshot)>, VoomError>;
     /// List every live (non-retired) `file_versions` row in id order.
     ///
     /// Anchors whole-library operations that have no durable scan id:
@@ -1300,6 +1306,36 @@ impl IdentityRepo for SqliteIdentityRepo {
         .await
         .map_err(|e| VoomError::database_context("file_versions list", e))?;
         rows.iter().map(row_to_file_version).collect()
+    }
+
+    async fn get_active_version_with_snapshot(
+        &self,
+        asset_id: FileAssetId,
+    ) -> Result<Option<(FileVersion, MediaSnapshot)>, VoomError> {
+        let row = sqlx::query(
+            "WITH active_version AS ( \
+                 SELECT id, file_asset_id, content_hash, size_bytes, produced_by, \
+                        produced_from_version_id, created_at, retired_at, epoch \
+                 FROM file_versions \
+                 WHERE file_asset_id = ? AND retired_at IS NULL \
+                 ORDER BY id DESC LIMIT 1 \
+             ) \
+             SELECT fv.id, fv.file_asset_id, fv.content_hash, fv.size_bytes, fv.produced_by, \
+                    fv.produced_from_version_id, fv.created_at, fv.retired_at, fv.epoch, \
+                    ms.id AS snapshot_id, ms.file_version_id AS snapshot_file_version_id, \
+                    ms.probed_by AS snapshot_probed_by, ms.probed_at AS snapshot_probed_at, \
+                    ms.payload AS snapshot_payload \
+             FROM active_version fv \
+             JOIN media_snapshots ms ON ms.file_version_id = fv.id \
+             ORDER BY ms.id DESC LIMIT 1",
+        )
+        .bind(i64_from_u64(asset_id.0))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VoomError::database_context("active file version snapshot get", e))?;
+        row.as_ref()
+            .map(|row| Ok((row_to_file_version(row)?, row_to_active_snapshot(row)?)))
+            .transpose()
     }
 
     async fn list_live_file_versions(&self) -> Result<Vec<FileVersion>, VoomError> {
@@ -2713,6 +2749,33 @@ fn row_to_media_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot,
         probed_by: probed_by.map(|v| WorkerId(u64_from_i64(v))),
         probed_at: parse_iso8601(&probed_at)?,
         payload: payload_v,
+    })
+}
+
+fn row_to_active_snapshot(row: &sqlx::sqlite::SqliteRow) -> Result<MediaSnapshot, VoomError> {
+    let id: i64 = row
+        .try_get("snapshot_id")
+        .map_err(|e| map_row_err("media_snapshots", &e))?;
+    let file_version_id: i64 = row
+        .try_get("snapshot_file_version_id")
+        .map_err(|e| map_row_err("media_snapshots", &e))?;
+    let probed_by: Option<i64> = row
+        .try_get("snapshot_probed_by")
+        .map_err(|e| map_row_err("media_snapshots", &e))?;
+    let probed_at: String = row
+        .try_get("snapshot_probed_at")
+        .map_err(|e| map_row_err("media_snapshots", &e))?;
+    let payload: String = row
+        .try_get("snapshot_payload")
+        .map_err(|e| map_row_err("media_snapshots", &e))?;
+    let payload = serde_json::from_str(&payload)
+        .map_err(|e| VoomError::database_context("parse media_snapshots.payload", e))?;
+    Ok(MediaSnapshot {
+        id: MediaSnapshotId(u64_from_i64(id)),
+        file_version_id: FileVersionId(u64_from_i64(file_version_id)),
+        probed_by: probed_by.map(|value| WorkerId(u64_from_i64(value))),
+        probed_at: parse_iso8601(&probed_at)?,
+        payload,
     })
 }
 

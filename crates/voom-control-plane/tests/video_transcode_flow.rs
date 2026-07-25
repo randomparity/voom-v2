@@ -24,7 +24,7 @@ use voom_test_support::worker::{
 };
 
 #[tokio::test]
-async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
+async fn video_transcode_flow_verifies_commits_and_authoritative_replan() {
     cargo_build_package("voom-ffprobe-worker").unwrap();
     cargo_build_package("voom-verify-artifact-worker").unwrap();
     cargo_build_package("voom-ffmpeg-worker").unwrap();
@@ -106,7 +106,7 @@ async fn video_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
 
     let (result_file_version_id, result_media_snapshot_id) =
         assert_transcode_execution_result(&url, &out_dir, &executed).await;
-    assert_result_replans_as_no_op(
+    assert_result_replans_from_authoritative_snapshot(
         &cp,
         policy.version.id,
         result_file_version_id,
@@ -161,7 +161,7 @@ async fn assert_transcode_execution_result(
 /// (`create_policy_input_set_from_scan`), proving the probed snapshot round-trips:
 /// the projection reads `payload["streams"]`, which only exists because the
 /// post-commit probe recorded a real observation.
-async fn assert_result_replans_as_no_op(
+async fn assert_result_replans_from_authoritative_snapshot(
     cp: &ControlPlane,
     policy_version_id: voom_core::PolicyVersionId,
     result_file_version_id: FileVersionId,
@@ -195,9 +195,15 @@ async fn assert_result_replans_as_no_op(
         .generate_compliance_report(policy_version_id, projected.input_set_id)
         .await
         .unwrap();
+    // Stored planning trusts the durable raw probe alias, not the cached "mkv".
+    // Canonical probe-container mapping is tracked separately.
     assert_eq!(
         result_plan.plan.nodes[0].status,
-        voom_plan::NodeStatus::NoOp
+        voom_plan::NodeStatus::Planned
+    );
+    assert_eq!(
+        result_plan.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "matroska,webm"
     );
 }
 

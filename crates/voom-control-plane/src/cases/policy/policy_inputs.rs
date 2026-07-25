@@ -8,6 +8,7 @@ use voom_store::repo::{
 };
 
 use crate::ControlPlane;
+use crate::media_snapshot::stream_summary_from_snapshot_payload;
 
 use super::{begin_tx, commit_tx};
 
@@ -353,27 +354,6 @@ fn snapshot_has_video_stream(payload: &serde_json::Value) -> bool {
                 stream.get("kind").and_then(serde_json::Value::as_str) == Some("video")
             })
         })
-}
-
-pub(crate) fn stream_summary_from_snapshot_payload(
-    payload: &serde_json::Value,
-) -> serde_json::Value {
-    let streams = payload
-        .get("streams")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let video_stream_count = streams.as_array().map_or(0, |streams| {
-        streams
-            .iter()
-            .filter(|stream| {
-                stream.get("kind").and_then(serde_json::Value::as_str) == Some("video")
-            })
-            .count()
-    });
-    serde_json::json!({
-        "video_stream_count": video_stream_count,
-        "streams": streams,
-    })
 }
 
 #[cfg(test)]

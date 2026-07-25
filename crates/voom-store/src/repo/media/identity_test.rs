@@ -583,6 +583,128 @@ async fn record_and_list_media_snapshot() {
     assert_eq!(list[0].id, snap.id);
 }
 
+#[tokio::test]
+async fn active_version_snapshot_pair_selects_newest_rows() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let first = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "first".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let active = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "active".to_owned(),
+            size_bytes: 2,
+            produced_by: ProducedBy::Transcode,
+            produced_from_version_id: Some(first.id),
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.record_media_snapshot_in_tx(
+        &mut tx,
+        NewMediaSnapshot {
+            file_version_id: first.id,
+            probed_by: None,
+            probed_at: T0,
+            payload: json!({"marker": "old-version"}),
+        },
+    )
+    .await
+    .unwrap();
+    repo.record_media_snapshot_in_tx(
+        &mut tx,
+        NewMediaSnapshot {
+            file_version_id: active.id,
+            probed_by: None,
+            probed_at: T0,
+            payload: json!({"marker": "old-snapshot"}),
+        },
+    )
+    .await
+    .unwrap();
+    let latest = repo
+        .record_media_snapshot_in_tx(
+            &mut tx,
+            NewMediaSnapshot {
+                file_version_id: active.id,
+                probed_by: None,
+                probed_at: T0,
+                payload: json!({"marker": "latest-snapshot", "streams": null}),
+            },
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let (version, snapshot) = repo
+        .get_active_version_with_snapshot(asset.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(version.id, active.id);
+    assert_eq!(snapshot.id, latest.id);
+    assert_eq!(snapshot.payload["marker"], "latest-snapshot");
+    assert!(snapshot.payload["streams"].is_null());
+}
+
+#[tokio::test]
+async fn active_version_snapshot_pair_does_not_fall_back_to_older_version() {
+    let (repo, _tmp) = fresh().await;
+    let asset = repo.create_file_asset(T0).await.unwrap();
+    let first = repo
+        .create_file_version(NewFileVersion {
+            file_asset_id: asset.id,
+            content_hash: "first".to_owned(),
+            size_bytes: 1,
+            produced_by: ProducedBy::Ingest,
+            produced_from_version_id: None,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tx = repo.pool.begin().await.unwrap();
+    repo.record_media_snapshot_in_tx(
+        &mut tx,
+        NewMediaSnapshot {
+            file_version_id: first.id,
+            probed_by: None,
+            probed_at: T0,
+            payload: json!({"marker": "old-version"}),
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    repo.create_file_version(NewFileVersion {
+        file_asset_id: asset.id,
+        content_hash: "active-without-snapshot".to_owned(),
+        size_bytes: 2,
+        produced_by: ProducedBy::Transcode,
+        produced_from_version_id: Some(first.id),
+        created_at: T0,
+    })
+    .await
+    .unwrap();
+
+    let pair = repo
+        .get_active_version_with_snapshot(asset.id)
+        .await
+        .unwrap();
+
+    assert!(pair.is_none());
+}
+
 // ---- record_discovered_file: NewFileAsset path ---------------------------
 
 #[tokio::test]
