@@ -86,7 +86,11 @@ shape.
    `Exists` or `Count`. If either variant appears anywhere, every stored plan,
    report, fresh execution, and resume rejects the non-file member before
    planning. Store-free calls remain unchanged.
-4. Every stored plan, compliance report, fresh execution, and resumed execution
+4. After loading selected `FileVersion` rows but before any active-tip read,
+   group members by file-asset id. Two members selecting one file lineage,
+   including different historical versions, invalidate the complete stored
+   request.
+5. Every stored plan, compliance report, fresh execution, and resumed execution
    resolves each selected file lineage's active chain tip and latest durable
    snapshot with one identity-repository read. The operation selects the
    non-retired `file_versions` row with the greatest identifier, then the
@@ -94,11 +98,11 @@ shape.
    The returned pair belongs to one SQLite statement snapshot. The control
    plane projects the complete current `MediaSnapshotInput`, retaining the
    input member's ordinal.
-5. The first execution phase therefore uses the same current-fact rule as a
+6. The first execution phase therefore uses the same current-fact rule as a
    read-only plan or report. After a committed phase, the existing coordinator
    refreshes from the produced version's snapshot before planning the next
    phase, as required by ADRs 0005, 0007, and 0008.
-6. Invalid links remain repository-readable but cannot be planned.
+7. Invalid links remain repository-readable but cannot be planned.
 
 The input set is a durable selection of file lineage, not an immutable copy of
 observed media facts. This is existing coordinator behavior made consistent
@@ -240,9 +244,10 @@ prefix `stored policy stream facts are invalid` for:
 
 - a missing linked snapshot;
 - a linked member whose target is not `FileVersion`;
-- a target/snapshot file-version mismatch; or
+- a target/snapshot file-version mismatch;
 - a selected `FileVersion` or file lineage with no active version or latest
-  snapshot; or
+  snapshot;
+- two members selecting the same file asset; and
 - a non-`FileVersion` stored media member used with an eligibility-approved
   policy containing a published `Exists` or `Count`.
 
@@ -250,6 +255,9 @@ The message names the input-set identifier, member ordinal, target kind and
 file-version identifier when present, optional linked snapshot identifier, and
 snapshot file-version identifier when available. Repository failures such as
 `DB_UNREACHABLE` propagate unchanged.
+
+A duplicate-lineage message names the input-set identifier, shared file-asset
+identifier, both member ordinals, and both selected `FileVersion` identifiers.
 
 ## Consequences
 
