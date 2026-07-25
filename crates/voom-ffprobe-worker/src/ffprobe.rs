@@ -21,7 +21,6 @@ pub const FFPROBE_BIN_ENV: &str = "VOOM_FFPROBE_BIN";
 const DEFAULT_FFPROBE_BIN: &str = "ffprobe";
 const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const FFPROBE_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
-const PROVIDER_VERSION_UNKNOWN: &str = "unknown";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfprobeConfig {
@@ -30,19 +29,15 @@ pub struct FfprobeConfig {
 }
 
 impl FfprobeConfig {
-    #[must_use]
-    pub fn from_process_env() -> Self {
+    pub fn from_process_env() -> Result<Self, FfprobeConfigError> {
         let ffprobe_bin = std::env::var_os(FFPROBE_BIN_ENV)
             .unwrap_or_else(|| OsString::from(DEFAULT_FFPROBE_BIN));
-        Self {
-            provider_version: detect_ffprobe_version(&ffprobe_bin)
-                .unwrap_or_else(|| PROVIDER_VERSION_UNKNOWN.to_owned()),
-            ffprobe_bin,
-        }
+        Self::from_bin(ffprobe_bin)
     }
 
-    #[must_use]
-    pub fn from_env_pairs<K, V>(pairs: impl IntoIterator<Item = (K, V)>) -> Self
+    pub fn from_env_pairs<K, V>(
+        pairs: impl IntoIterator<Item = (K, V)>,
+    ) -> Result<Self, FfprobeConfigError>
     where
         K: AsRef<OsStr>,
         V: AsRef<OsStr>,
@@ -57,11 +52,14 @@ impl FfprobeConfig {
                 }
             })
             .unwrap_or_else(|| OsString::from(DEFAULT_FFPROBE_BIN));
-        Self {
-            provider_version: detect_ffprobe_version(&ffprobe_bin)
-                .unwrap_or_else(|| PROVIDER_VERSION_UNKNOWN.to_owned()),
+        Self::from_bin(ffprobe_bin)
+    }
+
+    fn from_bin(ffprobe_bin: OsString) -> Result<Self, FfprobeConfigError> {
+        Ok(Self {
+            provider_version: detect_ffprobe_version(&ffprobe_bin)?,
             ffprobe_bin,
-        }
+        })
     }
 
     fn ffprobe_bin(&self) -> &OsStr {
@@ -72,6 +70,33 @@ impl FfprobeConfig {
     pub fn provider_version(&self) -> &str {
         &self.provider_version
     }
+}
+
+#[derive(Debug, Error)]
+pub enum FfprobeConfigError {
+    #[error("ffprobe dependency {binary:?} failed during {operation}: {source}")]
+    Io {
+        binary: PathBuf,
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "ffprobe dependency {binary:?} version check exceeded {} second",
+        timeout.as_secs()
+    )]
+    Timeout {
+        binary: PathBuf,
+        timeout: std::time::Duration,
+    },
+    #[error("ffprobe dependency {binary:?} exited with {status}: {stderr}")]
+    Exit {
+        binary: PathBuf,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("ffprobe dependency {binary:?} returned malformed version output: {output:?}")]
+    MalformedVersion { binary: PathBuf, output: String },
 }
 
 #[derive(Debug, Error)]
@@ -205,11 +230,6 @@ pub async fn run_ffprobe_json(path: &Path, config: &FfprobeConfig) -> Result<Val
 }
 
 #[must_use]
-pub fn handle_operation(req: OperationRequest) -> OperationFuture {
-    handle_operation_with_config(req, FfprobeConfig::from_process_env())
-}
-
-#[must_use]
 pub fn operation_handler_with_config(config: FfprobeConfig) -> OperationHandler {
     Arc::new(move |req| handle_operation_with_config(req, config.clone()))
 }
@@ -278,27 +298,65 @@ async fn probe_file(
     })
 }
 
-fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Option<String> {
+fn detect_ffprobe_version(ffprobe_bin: &OsStr) -> Result<String, FfprobeConfigError> {
+    let binary = PathBuf::from(ffprobe_bin);
     let started = std::time::Instant::now();
     let mut command = std::process::Command::new(ffprobe_bin);
     command
         .arg("-version")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let mut child = spawn_with_retry(&mut command).ok()?;
+        .stderr(std::process::Stdio::piped());
+    let mut child = spawn_with_retry(&mut command).map_err(|source| FfprobeConfigError::Io {
+        binary: binary.clone(),
+        operation: "start version check",
+        source,
+    })?;
     loop {
-        if let Some(status) = child.try_wait().ok()? {
+        let status = child.try_wait().map_err(|source| FfprobeConfigError::Io {
+            binary: binary.clone(),
+            operation: "poll version check",
+            source,
+        })?;
+        if let Some(status) = status {
+            let output = child
+                .wait_with_output()
+                .map_err(|source| FfprobeConfigError::Io {
+                    binary: binary.clone(),
+                    operation: "collect version output",
+                    source,
+                })?;
             if !status.success() {
-                return None;
+                return Err(FfprobeConfigError::Exit {
+                    binary,
+                    status,
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                });
             }
-            let output = child.wait_with_output().ok()?;
-            let stdout = String::from_utf8(output.stdout).ok()?;
-            return parse_ffprobe_version(stdout.lines().next().unwrap_or_default());
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let Some(version) = parse_ffprobe_version(stdout.lines().next().unwrap_or_default())
+            else {
+                return Err(FfprobeConfigError::MalformedVersion {
+                    binary,
+                    output: stdout,
+                });
+            };
+            return Ok(version);
         }
         if started.elapsed() >= FFPROBE_VERSION_TIMEOUT {
-            let _kill = child.kill();
-            let _status = child.wait();
-            return None;
+            child.kill().map_err(|source| FfprobeConfigError::Io {
+                binary: binary.clone(),
+                operation: "terminate timed-out version check",
+                source,
+            })?;
+            child.wait().map_err(|source| FfprobeConfigError::Io {
+                binary: binary.clone(),
+                operation: "reap timed-out version check",
+                source,
+            })?;
+            return Err(FfprobeConfigError::Timeout {
+                binary,
+                timeout: FFPROBE_VERSION_TIMEOUT,
+            });
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

@@ -78,8 +78,8 @@ async fn assert_worker_rejects_different_presented_id(worker: &BundledWorkerProc
 async fn worker_terminal_error_becomes_scan_worker_error() {
     let dir = tempfile::tempdir().unwrap();
     let media_path = write_media_file(dir.path());
-    let missing_ffprobe = dir.path().join("missing-ffprobe");
-    let command = ffprobe_worker_command().env("VOOM_FFPROBE_BIN", missing_ffprobe.as_os_str());
+    let ffprobe = write_fake_ffprobe(dir.path(), "echo 'dependency unavailable' 1>&2\nexit 42\n");
+    let command = ffprobe_worker_command().env("VOOM_FFPROBE_BIN", ffprobe.as_os_str());
     let mut worker = BundledWorkerProcess::launch(WorkerId(45), command)
         .await
         .unwrap();
