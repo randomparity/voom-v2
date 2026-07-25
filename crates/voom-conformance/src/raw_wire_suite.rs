@@ -132,7 +132,7 @@ async fn record_fixture(
 }
 
 async fn golden_handshake_request_round_trips(launch: &crate::WorkerLaunch) -> Result<(), String> {
-    let body = serde_json::to_vec(&serde_json::json!({"offered": 1}))
+    let body = serde_json::to_vec(&serde_json::json!({"offered": voom_core::PROTOCOL_VERSION}))
         .map_err(|e| format!("handshake encode: {e}"))?;
     let response = send_raw(
         launch.bound,

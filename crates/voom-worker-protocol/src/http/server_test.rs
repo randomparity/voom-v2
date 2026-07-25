@@ -12,10 +12,22 @@ fn enforce_version_wrong_version_rejects() {
     assert!(matches!(
         err,
         ProtocolError::UnsupportedProtocolVersion {
-            offered: 2,
-            expected: 1,
-        }
+            offered,
+            expected,
+        } if offered == voom_core::PROTOCOL_VERSION + 1
+            && expected == voom_core::PROTOCOL_VERSION
     ));
+}
+
+#[test]
+fn identity_route_is_read_only_and_unauthenticated() {
+    assert_eq!(
+        route_policy(&Method::POST, "/v1/identity"),
+        Some(RoutePolicy {
+            version: false,
+            auth: false,
+        })
+    );
 }
 
 #[test]

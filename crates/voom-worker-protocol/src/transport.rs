@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 use crate::{
     HandshakeResponse, NdjsonReader, OperationRequest, OperationResponse, ProtocolError,
-    WorkerCredentials,
+    WorkerCredentials, WorkerIdentityResponse,
 };
 
 /// Crate-owned NDJSON byte stream type. Erases the underlying
@@ -41,6 +41,12 @@ impl std::fmt::Debug for DispatchStream {
 pub trait ClientHandle: Send + Sync + std::fmt::Debug {
     /// Negotiate the protocol version with the worker.
     async fn handshake(&self, offered: u32) -> Result<HandshakeResponse, ProtocolError>;
+
+    /// Authenticate the serving worker's recorded identity.
+    async fn identity(
+        &self,
+        credentials: &WorkerCredentials,
+    ) -> Result<WorkerIdentityResponse, ProtocolError>;
 
     /// Dispatch one operation. `idempotency_key` must be a fresh ULID
     /// per dispatch; the same key on a retry must reach the worker as

@@ -70,4 +70,8 @@ pub use wire::envelope::{
     OperationRequest, OperationResponse, PercentBps, ProgressFrame, ProtocolError,
 };
 pub use wire::handshake::{HandshakeRequest, HandshakeResponse, negotiate};
+pub use wire::identity::{
+    WorkerIdentityRequest, WorkerIdentityResponse, generate_identity_challenge, identity_response,
+    verify_identity_response,
+};
 pub use wire::ndjson::{NdjsonOutcome, NdjsonReader, NdjsonWriter};
