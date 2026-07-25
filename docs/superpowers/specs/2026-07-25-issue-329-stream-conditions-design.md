@@ -17,6 +17,7 @@ In scope:
 - linked-provenance validation and active-snapshot projection for stored paths;
 - source rejection of unpublished `Exists` and `Count` forms;
 - bounded raw-JSON validation for stored `Exists` and `Count` shapes;
+- durable per-job file starts for safe reconciliation of historical inputs;
 - fail-closed planning for unpublished compiled stream conditions; and
 - readability of existing compiled policy versions.
 
@@ -31,9 +32,9 @@ Deferred with tracked ownership:
 - generic policy-input write validation: #353.
 
 #329 does not change track-filter validation, compiled JSON shapes, serde
-strictness, database schema, migrations, rollback procedures, or parser
-productions. A deferred concern returns to scope if this design depends on it
-or worsens it.
+strictness, rollback procedures, or parser productions. Its only schema change
+is ADR 0037's per-job file-start table and migration. A deferred concern returns
+to scope if this design depends on it or worsens it.
 
 ## Current behavior
 
@@ -133,8 +134,52 @@ each perform one independent adapter call for their own invocation.
 The coordinator already projects active snapshots for each phase under ADRs
 0005, 0007, and 0008. Read-only plan/report paths adopt that same authority.
 After a phase commits, its produced version's refreshed snapshot becomes the
-next phase's authority. Resume resolves the active chain again before opening
-its new job.
+next phase's authority.
+
+## Resume run-start authority
+
+The input-set selector cannot serve as resume's starting version because it may
+be historical. Each phase-barrier job therefore records ADR 0037's immutable
+per-file run start: branch id, authoritative active version at job start, and
+the first phase ordinal that file may enter.
+
+Fresh files map into `PhaseFile` as follows:
+
+```text
+version_id = resolved active FileVersion id
+snapshot = resolved latest snapshot
+resume_ordinal = 0
+```
+
+Resume resolves the current authority once, then reads the prior job's
+run-start and phase rows before opening a new job. For each branch:
+
+- highest phase row plus one determines the next ordinal;
+- with no row, the prior run's starting ordinal determines it;
+- highest committed row determines the recorded tip;
+- with no committed row, the prior run's starting version determines it; and
+- a current tip different from the recorded tip backfills exactly one phase
+  and advances the ordinal.
+
+Missing or mismatched prior run-start rows fail with
+`POLICY_EXECUTION_ERROR` and prefix `resume state is incomplete` before the new
+job opens. Pre-migration jobs without run-start rows fail rather than guessing.
+
+The new job records the post-reconciliation current version and next ordinal
+for every branch, including terminal branches at `phase_count`. Job creation,
+the `job.opened` event, all new run-start rows, and any backfilled file-phase
+rows commit in one transaction. The coordinator then constructs `PhaseFile`
+values from the already resolved authority records:
+
+```text
+version_id = resolved current FileVersion id
+snapshot = resolved latest snapshot
+resume_ordinal = reconciled next ordinal
+```
+
+`PhaseFile.start_version_id` is removed. A chained resume therefore remains
+correct even when a resumed job crashes before writing its first ordinary
+phase row.
 
 The repository read is coherent per input member. There is no input-set-wide
 transaction because policy conditions and operations never join facts from
@@ -177,6 +222,14 @@ leaves whose runtime behavior changes:
 
 All other source-condition validation is unchanged. #350 separately owns
 track-filter aliases and unpublished filter spellings.
+
+`production-normalize-reduced.voom`, which contains filtered `exists`, moves
+from the valid compilation corpus to the invalid source corpus with a
+diagnostic golden. Its existing compiled JSON remains unchanged as a dedicated
+stored-compatibility fixture: deserialization succeeds, then typed eligibility
+rejects the filtered leaf before planning. The fixture transition narrows
+published source without discarding evidence that historical compiled versions
+remain readable.
 
 ## Stored compiled compatibility
 
@@ -335,6 +388,16 @@ Focused tests prove:
   no second initial-tip or snapshot read;
 - fresh execute generates its initial report, safety decisions, and
   first-phase state from one adapter result;
+- fresh job creation atomically records every branch's resolved starting
+  version and phase zero;
+- resume with a historical selected version and no prior phase rows does not
+  mistake a version active before the prior job for a lost phase commit;
+- resume backfills a real commit whose row was lost, then records the advanced
+  phase cursor atomically with the new job;
+- chained resume preserves a nonzero starting ordinal when the intermediate
+  resumed job wrote no ordinary phase row;
+- pre-migration, missing, duplicate, or branch-mismatched run-start state fails
+  before a new job opens;
 - first-phase construction uses an injected authority result even when a later
   repository read would return another tip; #352 owns future pre-dispatch
   revalidation;
@@ -361,6 +424,8 @@ Focused tests prove:
   typed-eligibility diagnostics and semantic paths;
 - raw-shape failures report deterministic JSON-pointer paths while unrelated
   metadata and provenance objects tagged `exists` or `count` remain readable;
+- filtered `exists` is a negative source fixture while its unchanged compiled
+  JSON remains readable and fails typed eligibility;
 - provenance failures have identical codes and context across stored plan,
   report, fresh execution, and resume; and
 - every #329 preflight rejection leaves issue, job, ticket, file-version, and
