@@ -36,6 +36,23 @@ fn rejects_unknown_bare_dependency() {
 }
 
 #[test]
+fn run_if_requires_exactly_one_published_trigger_and_phase() {
+    let valid = "policy \"p\" { phase a {} phase b { run_if completed a } }";
+    assert!(codes(valid).is_empty());
+
+    for source in [
+        "policy \"p\" { phase a { run_if } }",
+        "policy \"p\" { phase a {} phase b { run_if changed a } }",
+        "policy \"p\" { phase a {} phase b { run_if modified a extra } }",
+    ] {
+        assert!(
+            codes(source).contains(&"invalid_run_if_trigger".to_owned()),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn rejects_depends_on_with_extra_tokens_after_list() {
     assert!(
         codes("policy \"p\" { phase a {} phase b { depends_on: [a] later } }")

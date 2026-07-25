@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use voom_core::MediaSnapshotId;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
-    CompiledRule, CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage,
+    CompiledRule, CompiledRunIf, CompiledValue, DefaultStrategy, DiagnosticCode, DiagnosticStage,
     MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft, PolicyInputSourceKind,
-    RuleMatchMode, SourceLocation, SourceSpan, TargetKind, TargetRef, TrackFilter, TrackTarget,
+    RuleMatchMode, RunIfTrigger, SourceLocation, SourceSpan, TargetKind, TargetRef, TrackFilter,
+    TrackTarget,
 };
 
 use crate::{
@@ -1711,8 +1712,9 @@ fn unresolved_phase_run_if_blocks_phase_operations() {
     let mut compiled = policy(CompiledOperation::SetContainer {
         container: "mkv".to_owned(),
     });
-    compiled.phases[0].run_if = Some(CompiledCondition::Predicate {
-        name: "modified".to_owned(),
+    compiled.phases[0].run_if = Some(CompiledRunIf {
+        trigger: RunIfTrigger::Modified,
+        phase: "inspect".to_owned(),
     });
 
     let plan = generate_plan(PlanningRequest {
@@ -2354,29 +2356,31 @@ fn plan_phase_reevaluates_skip_if_against_supplied_snapshot() {
 }
 
 #[test]
-fn plan_phase_reevaluates_run_if_against_supplied_snapshot() {
+fn plan_phase_leaves_run_if_resolution_to_the_coordinator() {
     let mut policy = compiled_policy_with_phases(&[(
         "normalize",
         vec![CompiledOperation::SetContainer {
             container: "mkv".to_owned(),
         }],
     )]);
-    policy.phases[0].run_if = Some(container_is("avi"));
+    policy.phases[0].run_if = Some(CompiledRunIf {
+        trigger: RunIfTrigger::Completed,
+        phase: "inspect".to_owned(),
+    });
 
-    let does_not_run = plan_phase(
+    let mp4 = plan_phase(
         request(policy.clone(), snapshot_with(Some("mp4"), None, None)),
         "normalize",
     )
     .unwrap();
-    assert!(does_not_run.nodes.is_empty());
+    assert_eq!(mp4.nodes[0].status, NodeStatus::Blocked);
 
-    let runs = plan_phase(
+    let avi = plan_phase(
         request(policy, snapshot_with(Some("avi"), None, None)),
         "normalize",
     )
     .unwrap();
-    assert_eq!(runs.nodes.len(), 1);
-    assert_eq!(runs.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(avi.nodes[0].status, NodeStatus::Blocked);
 }
 
 #[test]
@@ -2505,8 +2509,9 @@ fn plan_phase_blocks_phase_when_run_if_facts_are_insufficient() {
             container: "mkv".to_owned(),
         }],
     )]);
-    policy.phases[0].run_if = Some(CompiledCondition::Predicate {
-        name: "modified".to_owned(),
+    policy.phases[0].run_if = Some(CompiledRunIf {
+        trigger: RunIfTrigger::Modified,
+        phase: "inspect".to_owned(),
     });
 
     let plan = plan_phase(

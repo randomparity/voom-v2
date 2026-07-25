@@ -1,22 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::text::{dependency_values, setting_value, statement_text};
-use crate::{ExprAst, PolicyAst, PolicyDiagnostic, StatementAst};
+use crate::{
+    DiagnosticCode, DiagnosticStage, ExprAst, PolicyAst, PolicyDiagnostic, StatementAst,
+    line_column,
+};
 
-use super::super::compiled::{CompiledCondition, CompiledConfig, CompiledPhase, ErrorStrategy};
+use super::super::compiled::{
+    CompiledCondition, CompiledConfig, CompiledPhase, CompiledRunIf, ErrorStrategy,
+};
 use super::conditions::condition_from_text;
 use super::operations::lower_operations;
 
 pub(super) fn lower_phases(
     source: &str,
     ast: &PolicyAst,
+    phase_order: &[String],
 ) -> Result<Vec<CompiledPhase>, Vec<PolicyDiagnostic>> {
     let mut phases = Vec::with_capacity(ast.phases.len());
     for phase in &ast.phases {
         phases.push(CompiledPhase {
             name: phase.name.value.clone(),
             depends_on: phase_dependencies(&phase.controls),
-            run_if: phase_run_if(&phase.controls),
+            run_if: phase_run_if(source, phase, phase_order)?,
             skip_if: phase_skip_if(&phase.controls),
             on_error: phase_on_error(&phase.controls),
             operations: lower_operations(source, &phase.operations)?,
@@ -123,16 +129,46 @@ fn visit_phase(
     order.push(name.to_owned());
 }
 
-fn phase_run_if(controls: &[StatementAst]) -> Option<CompiledCondition> {
-    controls
+fn phase_run_if(
+    source: &str,
+    phase: &crate::PhaseAst,
+    phase_order: &[String],
+) -> Result<Option<CompiledRunIf>, Vec<PolicyDiagnostic>> {
+    let Some(control) = phase
+        .controls
         .iter()
         .find(|control| control.keyword().value == "run_if")
-        .map(|control| {
-            let text = statement_text(control);
-            CompiledCondition::Predicate {
-                name: text.trim_start_matches("run_if").trim().to_owned(),
-            }
-        })
+    else {
+        return Ok(None);
+    };
+    let text = statement_text(control);
+    let name = text.trim_start_matches("run_if").trim();
+    let gate = CompiledRunIf::parse(name).map_err(|message| {
+        vec![PolicyDiagnostic::error(
+            DiagnosticCode::InvalidRunIfTrigger,
+            DiagnosticStage::Compile,
+            control.span(),
+            line_column(source, control.span().start),
+            message,
+        )]
+    })?;
+    let current_index = phase_order
+        .iter()
+        .position(|name| name == &phase.name.value);
+    let referenced_index = phase_order.iter().position(|name| name == &gate.phase);
+    if referenced_index
+        .zip(current_index)
+        .is_none_or(|(referenced, current)| referenced >= current)
+    {
+        return Err(vec![PolicyDiagnostic::error(
+            DiagnosticCode::UnknownPhaseReference,
+            DiagnosticStage::Compile,
+            control.span(),
+            line_column(source, control.span().start),
+            "run_if must reference a predecessor in phase order",
+        )]);
+    }
+    Ok(Some(gate))
 }
 
 fn phase_skip_if(controls: &[StatementAst]) -> Option<CompiledCondition> {

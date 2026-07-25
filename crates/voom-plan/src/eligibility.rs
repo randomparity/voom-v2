@@ -4,21 +4,6 @@ use voom_policy::{
 
 use crate::{PlanningDiagnostic, PlanningDiagnosticCode};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ConditionPlacement {
-    Ordinary,
-    RunIf,
-}
-
-impl ConditionPlacement {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ordinary => "condition",
-            Self::RunIf => "run_if",
-        }
-    }
-}
-
 /// Validate that compiled stream conditions use only published executable
 /// shapes and placements.
 #[must_use]
@@ -28,20 +13,10 @@ pub fn stream_condition_eligibility_diagnostics(
     let mut diagnostics = Vec::new();
     for (phase_index, phase) in policy.phases.iter().enumerate() {
         let phase_path = format!("phase[{phase_index}:\"{}\"]", phase.name);
-        if let Some(condition) = &phase.run_if {
-            visit_condition(
-                condition,
-                &format!("{phase_path}.run_if"),
-                ConditionPlacement::RunIf,
-                &phase.name,
-                &mut diagnostics,
-            );
-        }
         if let Some(condition) = &phase.skip_if {
             visit_condition(
                 condition,
                 &format!("{phase_path}.skip_if"),
-                ConditionPlacement::Ordinary,
                 &phase.name,
                 &mut diagnostics,
             );
@@ -64,13 +39,9 @@ pub fn stream_condition_eligibility_diagnostics(
 pub fn policy_uses_stream_conditions(policy: &CompiledPolicy) -> bool {
     for phase in &policy.phases {
         if phase
-            .run_if
+            .skip_if
             .as_ref()
             .is_some_and(condition_uses_stream_facts)
-            || phase
-                .skip_if
-                .as_ref()
-                .is_some_and(condition_uses_stream_facts)
             || operations_use_stream_facts(&phase.operations)
         {
             return true;
@@ -194,7 +165,6 @@ fn visit_operations(
                 visit_condition(
                     condition,
                     &format!("{operation_path}.condition"),
-                    ConditionPlacement::Ordinary,
                     phase_name,
                     diagnostics,
                 );
@@ -212,7 +182,6 @@ fn visit_operations(
                         visit_condition(
                             condition,
                             &format!("{rule_path}.condition"),
-                            ConditionPlacement::Ordinary,
                             phase_name,
                             diagnostics,
                         );
@@ -277,29 +246,23 @@ fn visit_operations(
 fn visit_condition(
     condition: &CompiledCondition,
     path: &str,
-    placement: ConditionPlacement,
     phase_name: &str,
     diagnostics: &mut Vec<PlanningDiagnostic>,
 ) {
     match condition {
         CompiledCondition::Exists { .. } | CompiledCondition::Count { .. } => {
-            if let Some(diagnostic) = unpublished_diagnostic(condition, path, placement, phase_name)
-            {
+            if let Some(diagnostic) = unpublished_diagnostic(condition, path, phase_name) {
                 diagnostics.push(diagnostic);
             }
         }
-        CompiledCondition::Not { inner } => visit_condition(
-            inner,
-            &format!("{path}.not"),
-            placement,
-            phase_name,
-            diagnostics,
-        ),
+        CompiledCondition::Not { inner } => {
+            visit_condition(inner, &format!("{path}.not"), phase_name, diagnostics);
+        }
         CompiledCondition::And { conditions } => {
-            visit_boolean_children(conditions, path, "and", placement, phase_name, diagnostics);
+            visit_boolean_children(conditions, path, "and", phase_name, diagnostics);
         }
         CompiledCondition::Or { conditions } => {
-            visit_boolean_children(conditions, path, "or", placement, phase_name, diagnostics);
+            visit_boolean_children(conditions, path, "or", phase_name, diagnostics);
         }
         CompiledCondition::FieldComparison {
             path: _,
@@ -315,7 +278,6 @@ fn visit_boolean_children(
     conditions: &[CompiledCondition],
     path: &str,
     kind: &str,
-    placement: ConditionPlacement,
     phase_name: &str,
     diagnostics: &mut Vec<PlanningDiagnostic>,
 ) {
@@ -323,7 +285,6 @@ fn visit_boolean_children(
         visit_condition(
             condition,
             &format!("{path}.{kind}[{index}]"),
-            placement,
             phase_name,
             diagnostics,
         );
@@ -333,40 +294,31 @@ fn visit_boolean_children(
 fn unpublished_diagnostic(
     condition: &CompiledCondition,
     path: &str,
-    placement: ConditionPlacement,
     phase_name: &str,
 ) -> Option<PlanningDiagnostic> {
     let detail = match condition {
         CompiledCondition::Exists { target, filter } => {
-            if placement == ConditionPlacement::Ordinary
-                && is_published_target(*target)
-                && filter.is_none()
-            {
+            if is_published_target(*target) && filter.is_none() {
                 return None;
             }
             format!(
-                "exists target={} filter={} placement={}",
+                "exists target={} filter={} placement=condition",
                 target_name(*target),
                 if filter.is_some() {
                     "present"
                 } else {
                     "absent"
-                },
-                placement.as_str()
+                }
             )
         }
         CompiledCondition::Count { target, op, value } => {
-            if placement == ConditionPlacement::Ordinary
-                && is_published_target(*target)
-                && is_numeric_comparison(*op)
-            {
+            if is_published_target(*target) && is_numeric_comparison(*op) {
                 return None;
             }
             format!(
-                "count target={} op={} value={value} placement={}",
+                "count target={} op={} value={value} placement=condition",
                 target_name(*target),
-                comparison_name(*op),
-                placement.as_str()
+                comparison_name(*op)
             )
         }
         CompiledCondition::FieldComparison {

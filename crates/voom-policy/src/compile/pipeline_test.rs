@@ -100,6 +100,51 @@ fn compile_policy_topologically_sorts_phase_order() {
 }
 
 #[test]
+fn compile_policy_lowers_published_run_if_triggers_to_typed_gates() {
+    let out = compile_policy(
+        "policy \"p\" { \
+         phase inspect {} \
+         phase normalize { depends_on: [inspect] run_if completed inspect } \
+         phase organize { depends_on: [normalize] run_if modified normalize } \
+         }",
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.policy.phases[1].run_if,
+        Some(crate::CompiledRunIf {
+            trigger: crate::RunIfTrigger::Completed,
+            phase: "inspect".to_owned(),
+        })
+    );
+    assert_eq!(
+        out.policy.phases[2].run_if,
+        Some(crate::CompiledRunIf {
+            trigger: crate::RunIfTrigger::Modified,
+            phase: "normalize".to_owned(),
+        })
+    );
+}
+
+#[test]
+fn compile_policy_rejects_run_if_reference_that_is_not_a_predecessor() {
+    let error = compile_policy(
+        "policy \"p\" { \
+         phase first { run_if completed second } \
+         phase second {} \
+         }",
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unknown_phase_reference")
+    );
+}
+
+#[test]
 fn compile_policy_lowers_negated_exists_phase_skip_condition() {
     let out = compile_policy("policy \"p\" { phase a { skip when not exists audio } }").unwrap();
 

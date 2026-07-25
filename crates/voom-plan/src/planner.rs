@@ -57,7 +57,9 @@ pub fn generate_plan(request: PlanningRequest) -> Result<ExecutionPlan, PlanGene
 /// (`docs/superpowers/specs/2026-05-29-voom-sprint-16-design.md` §5,
 /// `docs/adr/0005-plan-phase-entry-point.md`): it projects each file's current
 /// snapshot into `request.input` and re-invokes the planner per phase so
-/// `run_if`/`skip_if` re-evaluate against the artifact the prior phase produced.
+/// `skip_if` re-evaluates against the artifact the prior phase produced.
+/// The coordinator resolves per-file `run_if` gates from durable phase outcomes
+/// and clears the resolved gate before calling this entry point.
 ///
 /// Shares the single planning code path with [`generate_plan`]; the resulting
 /// plan is deterministic from `(compiled policy, phase, snapshot)` and carries
@@ -238,7 +240,7 @@ impl<'a> PlanBuilder<'a> {
 
         self.expand_phase(
             &phase.name,
-            phase.run_if.as_ref(),
+            phase.run_if.is_some(),
             phase.skip_if.as_ref(),
             &phase.operations,
         );
@@ -247,30 +249,33 @@ impl<'a> PlanBuilder<'a> {
     fn expand_phase(
         &mut self,
         phase_name: &str,
-        run_if: Option<&CompiledCondition>,
+        has_unresolved_run_if: bool,
         skip_if: Option<&CompiledCondition>,
         operations: &[CompiledOperation],
     ) {
-        match (run_if, skip_if) {
-            (None, None) => {
+        if has_unresolved_run_if {
+            for snapshot in &self.input.media_snapshots {
+                self.expand_blocked_insufficient_facts_for_operations(
+                    phase_name, snapshot, operations,
+                );
+            }
+            return;
+        }
+
+        match skip_if {
+            None => {
                 for snapshot in &self.input.media_snapshots {
                     self.expand_operations_for_snapshot(phase_name, snapshot, operations);
                 }
             }
-            _ => {
+            Some(skip_if) => {
                 for snapshot in &self.input.media_snapshots {
-                    let should_run = run_if.map_or(ConditionEval::Matched, |condition| {
-                        evaluate_condition(condition, snapshot)
-                    });
-                    let should_skip = skip_if.map_or(ConditionEval::NotMatched, |condition| {
-                        evaluate_condition(condition, snapshot)
-                    });
-                    match (should_run, should_skip) {
-                        (ConditionEval::Matched, ConditionEval::NotMatched) => {
+                    match evaluate_condition(skip_if, snapshot) {
+                        ConditionEval::NotMatched => {
                             self.expand_operations_for_snapshot(phase_name, snapshot, operations);
                         }
-                        (ConditionEval::NotMatched, _) | (_, ConditionEval::Matched) => {}
-                        (ConditionEval::Unknown, _) | (_, ConditionEval::Unknown) => {
+                        ConditionEval::Matched => {}
+                        ConditionEval::Unknown => {
                             self.expand_blocked_insufficient_facts_for_operations(
                                 phase_name, snapshot, operations,
                             );

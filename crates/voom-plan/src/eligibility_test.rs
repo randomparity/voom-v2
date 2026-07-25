@@ -109,7 +109,6 @@ fn eligibility_collects_unpublished_leaves_in_structural_order() {
             },
         ],
     );
-    normalize.run_if = Some(exists(TrackTarget::Audio));
     normalize.skip_if = Some(exists(TrackTarget::Video));
     let policy = policy(vec![normalize]);
 
@@ -119,17 +118,16 @@ fn eligibility_collects_unpublished_leaves_in_structural_order() {
         .map(|diagnostic| diagnostic.message.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(diagnostics.len(), 5);
+    assert_eq!(diagnostics.len(), 4);
     assert!(
         diagnostics
             .iter()
             .all(|diagnostic| diagnostic.code == PlanningDiagnosticCode::InvalidPlanningRequest)
     );
-    assert!(messages[0].contains("phase[0:\"normalize\"].run_if"));
-    assert!(messages[1].contains("phase[0:\"normalize\"].skip_if"));
-    assert!(messages[2].contains("operations[0].condition.and[1]"));
-    assert!(messages[3].contains("operations[0].operations[0].condition"));
-    assert!(messages[4].contains("operations[1].rules[0].operations[0].rules[0].condition"));
+    assert!(messages[0].contains("phase[0:\"normalize\"].skip_if"));
+    assert!(messages[1].contains("operations[0].condition.and[1]"));
+    assert!(messages[2].contains("operations[0].operations[0].condition"));
+    assert!(messages[3].contains("operations[1].rules[0].operations[0].rules[0].condition"));
     assert!(
         messages
             .iter()
