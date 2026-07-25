@@ -246,6 +246,36 @@ async fn running_server(handler: OperationHandler) -> (SocketAddr, ServerRunning
     (running.bound, running)
 }
 
+#[tokio::test]
+async fn identity_round_trip_authenticates_expected_server() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls, None)).await;
+    let client = HttpClient::new(addr);
+
+    let response = client.identity(&creds()).await.unwrap();
+
+    assert_eq!(response.worker_id, creds().worker_id);
+    assert_eq!(response.worker_epoch, creds().worker_epoch);
+    assert_eq!(response.protocol_version, voom_core::PROTOCOL_VERSION);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
+#[tokio::test]
+async fn identity_round_trip_rejects_wrong_expected_secret() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (addr, running) = running_server(operation_handler(calls, None)).await;
+    let client = HttpClient::new(addr);
+    let mut expected = creds();
+    expected.secret = SecretString::from("wrong-secret");
+
+    let error = client.identity(&expected).await.unwrap_err();
+
+    assert_eq!(error, ProtocolError::IdentityProofMismatch);
+    let _ = running.shutdown.send(());
+    let _ = running.joined.await;
+}
+
 async fn write_chunk(stream: &mut tokio::net::TcpStream, bytes: &[u8]) -> std::io::Result<()> {
     stream
         .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
@@ -767,6 +797,23 @@ async fn handshake_times_out_when_worker_never_responds() {
     // Outer guard: if the client fails to self-time-out, this fires first and
     // the unwrap panics — the failure points at a client that hung.
     let result = tokio::time::timeout(Duration::from_secs(5), client.handshake(1))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, Err(ProtocolError::Timeout { .. })),
+        "expected Timeout, got {result:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn identity_times_out_when_worker_never_responds() {
+    let (addr, server) = unresponsive_server().await;
+    let client =
+        HttpClient::with_timeouts(addr, Duration::from_millis(100), Duration::from_millis(100));
+
+    let result = tokio::time::timeout(Duration::from_secs(5), client.identity(&creds()))
         .await
         .unwrap();
 

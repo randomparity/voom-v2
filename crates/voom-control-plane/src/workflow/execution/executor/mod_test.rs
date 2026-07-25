@@ -2343,6 +2343,13 @@ impl ClientHandle for FakeClient {
         Err(ProtocolError::InternalServerError)
     }
 
+    async fn identity(
+        &self,
+        _credentials: &WorkerCredentials,
+    ) -> Result<voom_worker_protocol::WorkerIdentityResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
     async fn dispatch(
         &self,
         _creds: &WorkerCredentials,

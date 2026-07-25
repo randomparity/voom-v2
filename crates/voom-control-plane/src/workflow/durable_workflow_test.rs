@@ -1284,6 +1284,13 @@ impl ClientHandle for InProcessFakeProvider {
         Err(ProtocolError::InternalServerError)
     }
 
+    async fn identity(
+        &self,
+        _credentials: &WorkerCredentials,
+    ) -> Result<voom_worker_protocol::WorkerIdentityResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
     async fn dispatch(
         &self,
         _creds: &WorkerCredentials,
@@ -1329,6 +1336,13 @@ struct UnreachableInProcessProvider;
 #[async_trait::async_trait]
 impl ClientHandle for UnreachableInProcessProvider {
     async fn handshake(&self, _offered: u32) -> Result<HandshakeResponse, ProtocolError> {
+        Err(ProtocolError::InternalServerError)
+    }
+
+    async fn identity(
+        &self,
+        _credentials: &WorkerCredentials,
+    ) -> Result<voom_worker_protocol::WorkerIdentityResponse, ProtocolError> {
         Err(ProtocolError::InternalServerError)
     }
 

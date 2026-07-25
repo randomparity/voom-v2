@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use crate::transport::{ServerHandle, ServerRunning};
 use crate::{
     HandshakeRequest, OperationRequest, PresentedCredentials, ProtocolError, WorkerCredentials,
-    negotiate, validate_credentials,
+    WorkerIdentityRequest, identity_response, negotiate, validate_credentials,
 };
 
 use super::idempotency::{
@@ -58,7 +58,7 @@ pub struct RoutePolicy {
 #[must_use]
 pub fn route_policy(method: &Method, path: &str) -> Option<RoutePolicy> {
     match (method, path) {
-        (&Method::POST, "/v1/handshake") => Some(RoutePolicy {
+        (&Method::POST, "/v1/handshake" | "/v1/identity") => Some(RoutePolicy {
             version: false,
             auth: false,
         }),
@@ -208,9 +208,21 @@ async fn handle_request(
 
     Ok(match path.as_str() {
         "/v1/handshake" => handle_handshake(&body_bytes),
+        "/v1/identity" => handle_identity(&body_bytes, creds),
         "/v1/operations" => handle_operations(&parts.headers, &body_bytes, handler, cache).await,
         _ => plain_status(StatusCode::NOT_FOUND, "not found"),
     })
+}
+
+fn handle_identity(body: &[u8], credentials: &WorkerCredentials) -> Response<ResponseBody> {
+    let request: WorkerIdentityRequest = match decode_body(body) {
+        Ok(request) => request,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, &error),
+    };
+    match identity_response(&request, credentials) {
+        Ok(response) => json_ok(StatusCode::OK, &response),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, &error),
+    }
 }
 
 fn enforce_version(headers: &hyper::HeaderMap) -> Result<(), ProtocolError> {

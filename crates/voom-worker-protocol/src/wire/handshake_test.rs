@@ -2,6 +2,11 @@ use super::*;
 use crate::ProtocolError;
 
 #[test]
+fn protocol_version_is_two() {
+    assert_eq!(voom_core::PROTOCOL_VERSION, 2);
+}
+
+#[test]
 fn negotiate_exact_match_returns_agreed() {
     let resp = negotiate(voom_core::PROTOCOL_VERSION).unwrap();
     assert_eq!(resp.agreed, voom_core::PROTOCOL_VERSION);
@@ -13,9 +18,10 @@ fn negotiate_other_version_rejects() {
     assert!(matches!(
         err,
         ProtocolError::UnsupportedProtocolVersion {
-            offered: 2,
-            expected: 1,
-        }
+            offered,
+            expected,
+        } if offered == voom_core::PROTOCOL_VERSION + 1
+            && expected == voom_core::PROTOCOL_VERSION
     ));
 }
 

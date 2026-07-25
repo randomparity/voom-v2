@@ -158,6 +158,8 @@ pub enum ProtocolError {
     UnknownWorkerId { presented: WorkerId },
     #[error("stale worker epoch: presented={presented}, current={current}")]
     StaleWorkerEpoch { presented: u64, current: u64 },
+    #[error("worker identity proof mismatch")]
+    IdentityProofMismatch,
     #[error("worker retired: worker={worker_id:?}, epoch={epoch}")]
     WorkerRetired { worker_id: WorkerId, epoch: u64 },
     #[error("duplicate idempotency key: {key}")]

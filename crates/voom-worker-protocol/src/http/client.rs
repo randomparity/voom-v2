@@ -11,13 +11,15 @@ use hyper::body::Incoming;
 use hyper::header::{AUTHORIZATION, CONTENT_TYPE};
 use hyper::{Method, Request};
 use hyper_util::rt::TokioExecutor;
+use rand::rngs::OsRng;
 use secrecy::ExposeSecret;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::transport::{ClientHandle, DispatchStream};
 use crate::{
     HandshakeRequest, HandshakeResponse, NdjsonReader, OperationRequest, OperationResponse,
-    ProtocolError, WorkerCredentials,
+    ProtocolError, WorkerCredentials, WorkerIdentityRequest, WorkerIdentityResponse,
+    generate_identity_challenge, verify_identity_response,
 };
 
 use super::{
@@ -75,6 +77,67 @@ impl HttpClient {
             handshake_timeout,
             dispatch_timeout,
         }
+    }
+
+    async fn identity_with_challenge(
+        &self,
+        credentials: &WorkerCredentials,
+        challenge: String,
+    ) -> Result<WorkerIdentityResponse, ProtocolError> {
+        let request = WorkerIdentityRequest {
+            offered: voom_core::PROTOCOL_VERSION,
+            challenge,
+        };
+        let body = serde_json::to_vec(&request).map_err(|error| ProtocolError::InvalidPayload {
+            detail: format!("identity encode: {error}"),
+        })?;
+        let http_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("{}/v1/identity", self.base))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|error| ProtocolError::InvalidPayload {
+                detail: format!("identity build: {error}"),
+            })?;
+        let (status, body) = tokio::time::timeout(self.handshake_timeout, async {
+            let response = self.client.request(http_request).await.map_err(|error| {
+                ProtocolError::InvalidPayload {
+                    detail: format!("identity request: {error}"),
+                }
+            })?;
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| ProtocolError::InvalidPayload {
+                    detail: format!("identity body: {error}"),
+                })?
+                .to_bytes();
+            Ok::<_, ProtocolError>((status, body))
+        })
+        .await
+        .map_err(|_| ProtocolError::Timeout {
+            elapsed: self.handshake_timeout,
+            detail: "identity: worker did not respond".to_owned(),
+        })??;
+        if !status.is_success() {
+            return Err(
+                serde_json::from_slice::<ProtocolError>(&body).unwrap_or_else(|_| {
+                    ProtocolError::InvalidPayload {
+                        detail: format!("identity failed status={status}"),
+                    }
+                }),
+            );
+        }
+        let response =
+            serde_json::from_slice::<WorkerIdentityResponse>(&body).map_err(|error| {
+                ProtocolError::InvalidPayload {
+                    detail: format!("identity decode: {error}"),
+                }
+            })?;
+        verify_identity_response(&request, &response, credentials)?;
+        Ok(response)
     }
 }
 
@@ -143,6 +206,14 @@ impl ClientHandle for HttpClient {
             }
         });
         Err(perr)
+    }
+
+    async fn identity(
+        &self,
+        credentials: &WorkerCredentials,
+    ) -> Result<WorkerIdentityResponse, ProtocolError> {
+        let challenge = generate_identity_challenge(&mut OsRng)?;
+        self.identity_with_challenge(credentials, challenge).await
     }
 
     async fn dispatch(

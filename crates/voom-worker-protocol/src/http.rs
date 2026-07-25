@@ -2,6 +2,7 @@
 //!
 //! Exposed routes:
 //! - `POST /v1/handshake` (exempt from version/auth/idempotency)
+//! - `POST /v1/identity` (challenge-response server authentication)
 //! - `POST /v1/operations` (gated on version + auth). Requests must
 //!   carry `x-voom-idempotency-key`; any JSON body field named
 //!   `idempotency_key` is rejected because the header is canonical.
