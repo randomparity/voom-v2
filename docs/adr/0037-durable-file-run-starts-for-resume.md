@@ -1,6 +1,6 @@
 # ADR 0037: Persist per-file run starts for resume reconciliation
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
