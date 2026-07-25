@@ -1,0 +1,184 @@
+# Issue 329 implementation plan: Evaluate published stream conditions
+
+Base branch: `main`
+
+Base commit: `856bacb8ff42954fede8830007145d0674d937bb`
+
+Guardrails:
+
+- `cargo test -p voom-policy condition`
+- `cargo test -p voom-plan condition`
+- `cargo test -p voom-control-plane stream_summary`
+- `cargo test -p voom-control-plane linked_stream`
+- `cargo test -p voom-control-plane --test published_grammar_corpus`
+- `prek run`
+- `just ci`
+
+## Step 1: Preserve and rehydrate authoritative stream facts
+
+Files:
+
+- `crates/voom-control-plane/src/media_snapshot.rs`
+- `crates/voom-control-plane/src/media_snapshot_test.rs`
+- `crates/voom-control-plane/src/cases/policy/policy_inputs.rs`
+- `crates/voom-control-plane/src/cases/policy/policy_inputs_test.rs`
+- `crates/voom-control-plane/src/cases/policy/plans.rs`
+- `crates/voom-control-plane/src/cases/policy/plans_test.rs`
+- `crates/voom-control-plane/src/cases/policy/compliance.rs`
+- `crates/voom-control-plane/src/workflow/coordinator/mod.rs`
+- `crates/voom-control-plane/src/workflow/coordinator/mod_test.rs`
+
+Red tests:
+
+- missing streams stay missing through both snapshot projections;
+- null and non-array streams are copied rather than normalized;
+- arrays retain exact members and derive the video count;
+- stored planning replaces a linked cached summary from the exact snapshot;
+- it does not substitute a later snapshot for the same file version;
+- missing, non-file-version, and mismatched links fail planning;
+- unlinked stored inputs keep their summary; and
+- store-free planning keeps its supplied summary.
+
+Implementation:
+
+- make the shared stream-summary projection preserve source shape;
+- route both production snapshot projections through it;
+- add an async stored-input adapter that loads exact linked snapshots,
+  validates file-version provenance, and replaces only stream summaries;
+- use the adapter from stored plan, report, and coordinator entry points; and
+- validate link provenance on new control-plane writes.
+
+Expected failure before implementation:
+
+- missing streams are currently normalized to `[]`;
+- stored planning currently trusts the cached summary.
+
+Verification:
+
+```text
+cargo test -p voom-control-plane stream_summary
+cargo test -p voom-control-plane linked_stream
+```
+
+Commit:
+
+`fix(policy): use authoritative linked stream facts`
+
+## Step 2: Close the newly executable condition boundary
+
+Files:
+
+- `crates/voom-policy/src/compile/validate/conditions.rs`
+- `crates/voom-policy/src/compile/validate_test.rs`
+- `crates/voom-policy/src/compile/pipeline_test.rs`
+- `crates/voom-plan/src/planner.rs`
+- `crates/voom-plan/src/planner_test.rs`
+
+Red tests:
+
+- canonical audio/subtitle `exists` and `count` source forms compile;
+- all six count comparators compile;
+- filtered exists, video/attachment targets, non-numeric comparators, extra
+  tokens, signs, non-ASCII digits, and overflowing counts fail compilation;
+- canonical stored compiled shapes remain deserializable;
+- unpublished compiled stream shapes fail plan generation;
+- one unpublished stream leaf invalidates its complete Boolean tree; and
+- stream conditions in `run_if` fail plan generation while canonical predicates
+  retain their existing unknown behavior.
+
+Implementation:
+
+- narrow source validation only for `Exists` and `Count`;
+- traverse phase and operation condition placements before planning;
+- accept published stream shapes only on ordinary condition surfaces; and
+- reject stream conditions in `run_if` without changing other compiled
+  condition behavior.
+
+Expected failure before implementation:
+
+- source validation currently accepts broader stream shapes;
+- the shared evaluator has no placement preflight.
+
+Verification:
+
+```text
+cargo test -p voom-policy condition
+cargo test -p voom-plan condition
+```
+
+Commit:
+
+`fix(policy): enforce published stream condition shapes`
+
+## Step 3: Evaluate published stream conditions
+
+Files:
+
+- `crates/voom-plan/src/planner.rs`
+- `crates/voom-plan/src/planner_test.rs`
+
+Red tests:
+
+- `exists` returns true and false from known inventories;
+- `count` covers zero and every comparator boundary;
+- missing, null, non-array, malformed, and duplicate inventories return
+  unknown;
+- a real empty array returns known false/zero;
+- `not`, `and`, and `or` retain three-valued behavior; and
+- outcomes propagate through `when`, `skip`, `rules first`, and `rules all`.
+
+Implementation:
+
+- reuse `stream_facts`;
+- evaluate eligible audio/subtitle existence;
+- count eligible facts and call the existing numeric comparison helper; and
+- preserve the current Boolean and consumer behavior for unknown facts.
+
+Expected failure before implementation:
+
+- every `Exists` and `Count` currently returns unknown.
+
+Verification:
+
+```text
+cargo test -p voom-plan condition
+cargo test -p voom-plan
+cargo test -p voom-control-plane --test published_grammar_corpus
+```
+
+Commit:
+
+`feat(plan): evaluate published stream conditions`
+
+## Step 4: Review and ship
+
+Review targets:
+
+- branch diff against `main`;
+- ADR 0036;
+- #329 design and implementation plan.
+
+Review focus:
+
+- linked versus unlinked authority;
+- exact snapshot identity;
+- missing versus empty facts;
+- accidental activation of filtered/video/attachment conditions;
+- Boolean short-circuiting around unpublished stream leaves;
+- `run_if` placement isolation; and
+- existing compiled-version readability.
+
+Verification:
+
+```text
+prek run
+just ci
+```
+
+Shipping:
+
+1. Rebase on current `origin/main`.
+2. Re-run focused tests and `just ci`.
+3. Push and open a PR closing #329.
+4. Wait for hosted checks and verify mergeability.
+5. Merge under campaign authorization and clean the branch.
