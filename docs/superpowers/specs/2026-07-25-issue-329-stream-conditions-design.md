@@ -16,6 +16,7 @@ In scope:
 - missing, empty, malformed, duplicate, and known stream inventories;
 - linked-provenance validation and active-snapshot projection for stored paths;
 - source rejection of unpublished `Exists` and `Count` forms;
+- bounded raw-JSON validation for stored `Exists` and `Count` shapes;
 - fail-closed planning for unpublished compiled stream conditions; and
 - readability of existing compiled policy versions.
 
@@ -63,15 +64,18 @@ PolicyInputSet
 
 For each media input:
 
-1. If `existing_media_snapshot_id` is absent, retain the stored summary.
-2. If present, load that exact snapshot identifier.
-3. Require the media input target to be that snapshot's exact file version.
-4. Resolve the target version's file asset, its active chain tip, and that
+1. A `FileVersion` target selects its file lineage whether or not
+   `existing_media_snapshot_id` is present.
+2. When the link is present, load it and require it to name the target's exact
+   file version.
+3. Resolve the target version's file asset, its active chain tip, and that
    version's latest snapshot with one identity-repository statement. Select the
    non-retired version with the greatest id, then the snapshot for that exact
    version with the greatest id.
-5. Replace the complete media input with a projection of the current snapshot,
+4. Replace the complete media input with a projection of the current snapshot,
    preserving its ordinal.
+5. Reject a linked non-`FileVersion` target. An unlinked input with another
+   target kind retains its stored facts.
 6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
    resolved.
 
@@ -150,6 +154,18 @@ This check is limited to `Exists` and `Count`. It prevents #329 from activating
 parser-only stream forms without claiming the broader compiled-policy contract
 owned by #344.
 
+Before stored compiled JSON is deserialized into `CompiledPolicy`, a bounded
+raw-value gate recursively checks objects tagged `type: "exists"` or
+`type: "count"`. `exists` requires `type` and `target`, allows optional
+`filter`, and allows no other keys. `count` requires exactly `type`, `target`,
+`op`, and `value`. Missing required or extra keys fail with a deterministic
+JSON path before serde can discard them. Typed eligibility then enforces the
+published values and placements.
+
+The raw gate is not a complete parallel compiled schema and does not rewrite
+JSON. It protects only the two variants made executable by #329. #344 remains
+responsible for unknown-field strictness across every other compiled type.
+
 `generate_plan` and `plan_phase` perform the complete validation before node
 expansion. Stored coordinator preparation performs it before profile
 resolution, job creation, or dispatch. An invalid later phase therefore cannot
@@ -215,7 +231,7 @@ per file in #330.
   `insufficient_snapshot_facts` blocked nodes.
 - Missing or invalid linked provenance and unavailable current snapshots fail
   every stored read path with `PLAN_GENERATION_ERROR` and the message prefix
-  `linked policy stream facts are invalid`.
+  `stored policy stream facts are invalid`.
 - Read-side messages include input-set id, member ordinal, target kind and
   target file-version id when present, snapshot id, and snapshot file-version
   id when available.
@@ -240,6 +256,8 @@ Focused tests prove:
 - `when`, `skip`, `rules first`, and `rules all`;
 - stream conditions remain unavailable in `run_if`;
 - unpublished compiled stream leaves fail before Boolean short-circuiting;
+- stored `exists`/`count` objects with missing or extra keys fail before typed
+  deserialization can erase their shape;
 - stored plan, report, fresh execution, and resume resolve the same active
   chain-tip snapshot before their first phase;
 - each resolved active-version/latest-snapshot pair comes from one repository
@@ -248,7 +266,9 @@ Focused tests prove:
   to an older valid snapshot;
 - post-commit phases use the produced version's refreshed snapshot;
 - link target mismatches fail planning;
-- unlinked and store-free inputs retain their supplied summary;
+- unlinked durable `FileVersion` members resolve their active lineage in every
+  stored entry point;
+- unlinked durable non-file and store-free inputs retain their supplied facts;
 - both snapshot projection callers preserve missing and malformed stream
   values without changing container/remux eligibility;
 - an invalid stream leaf in a later phase fails before any earlier phase opens

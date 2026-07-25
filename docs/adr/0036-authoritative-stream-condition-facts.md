@@ -70,18 +70,19 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
 
 1. A store-free planning call uses the `MediaSnapshotInput` supplied by its
    caller.
-2. An unlinked durable policy input also uses its stored facts.
-3. For a linked durable input, `existing_media_snapshot_id` proves original
-   provenance. Its target must be `FileVersion`, and that target must equal the
-   linked snapshot's `file_version_id`.
-4. After provenance validation, every stored plan, compliance report, fresh
-   execution, and resumed execution resolves that file asset's active chain tip
-   and latest durable snapshot with one identity-repository read. The operation
-   selects the non-retired `file_versions` row with the greatest identifier,
-   then the `media_snapshots` row for that exact version with the greatest
-   identifier. The returned pair belongs to one SQLite statement snapshot. The
-   control plane projects the complete current `MediaSnapshotInput`, retaining
-   the input member's ordinal.
+2. Every durable input whose target is `FileVersion` selects that version's
+   file lineage. When `existing_media_snapshot_id` is present, it additionally
+   proves original provenance and must name a snapshot for the target version.
+3. A linked durable input with any other target kind is invalid. An unlinked
+   durable input with another target kind continues using its stored facts.
+4. Every stored plan, compliance report, fresh execution, and resumed execution
+   resolves each selected file lineage's active chain tip and latest durable
+   snapshot with one identity-repository read. The operation selects the
+   non-retired `file_versions` row with the greatest identifier, then the
+   `media_snapshots` row for that exact version with the greatest identifier.
+   The returned pair belongs to one SQLite statement snapshot. The control
+   plane projects the complete current `MediaSnapshotInput`, retaining the
+   input member's ordinal.
 5. The first execution phase therefore uses the same current-fact rule as a
    read-only plan or report. After a committed phase, the existing coordinator
    refreshes from the produced version's snapshot before planning the next
@@ -164,10 +165,25 @@ The validation is intentionally limited to `Exists` and `Count`, whose runtime
 meaning changes in this issue. Other pre-existing compiled condition behavior
 is unchanged.
 
-Existing compiled policy versions remain deserializable because no compiled
-type or JSON shape changes. Canonical stored versions gain the published
-execution semantics. Previously accepted parser-only stream conditions remain
-readable but fail planning.
+Stored compiled JSON receives a bounded raw-shape gate before typed
+deserialization can discard unknown fields. The gate recursively visits objects
+tagged `type: "exists"` or `type: "count"`:
+
+- `exists` requires `type` and `target`, permits optional `filter`, and rejects
+  every other key;
+- `count` requires exactly `type`, `target`, `op`, and `value`.
+
+Missing required keys and extra keys fail with the same unpublished-condition
+diagnostic and a deterministic JSON path. The subsequent typed eligibility
+pass still rejects unpublished targets, non-null `exists` filters, invalid
+comparators, and every stream condition in `run_if`. This narrow preflight
+exists only because #329 makes these two variants executable. #344 still owns
+unknown-field strictness for the rest of compiled policy JSON.
+
+Existing canonical compiled policy versions remain deserializable because no
+compiled type or JSON shape changes. Canonical stored versions gain the
+published execution semantics. Previously accepted parser-only stream
+conditions remain readable but fail planning.
 
 Eligibility rejection uses
 `PlanningDiagnosticCode::InvalidPlanningRequest` and the stable message prefix
@@ -209,16 +225,17 @@ phase history.
 ### Failure contract
 
 All stored read paths use `PLAN_GENERATION_ERROR` with the stable message
-prefix `linked policy stream facts are invalid` for:
+prefix `stored policy stream facts are invalid` for:
 
 - a missing linked snapshot;
 - a linked member whose target is not `FileVersion`;
 - a target/snapshot file-version mismatch; or
-- a selected file lineage with no active version or latest snapshot.
+- a selected `FileVersion` or file lineage with no active version or latest
+  snapshot.
 
 The message names the input-set identifier, member ordinal, target kind and
-file-version identifier when present, snapshot identifier, and snapshot
-file-version identifier when available. Repository failures such as
+file-version identifier when present, optional linked snapshot identifier, and
+snapshot file-version identifier when available. Repository failures such as
 `DB_UNREACHABLE` propagate unchanged.
 
 ## Consequences
@@ -236,16 +253,16 @@ file-version identifier when available. Repository failures such as
   stream inventories.
 - Parser-only stream condition shapes fail before evaluation instead of being
   activated accidentally.
-- The policy input cache may still differ from its linked source, but it is no
-  longer authoritative for linked stream-condition planning.
+- The policy input cache may still differ from current facts, but it is no
+  longer authoritative for durable `FileVersion` stream-condition planning.
 
 ## Considered and rejected alternatives
 
 ### Repair and constrain every stored stream summary
 
 Rejected because it would add a migration, triggers, rollback work, and a
-second durable truth contract. The linked provenance already identifies the
-file lineage whose current snapshot supplies the needed fact.
+second durable truth contract. The durable `FileVersion` target already
+identifies the file lineage whose current snapshot supplies the needed fact.
 
 ### Treat missing streams as an empty inventory
 

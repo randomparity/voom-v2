@@ -42,15 +42,18 @@ Red tests:
   malformed-array, and empty-array inventories;
 - stored plan, report, fresh execution, and resume replace linked cached facts
   from the same active chain-tip snapshot;
+- stored plan, report, fresh execution, and resume resolve an unlinked durable
+  `FileVersion` target from the same active chain-tip snapshot;
 - the active version and latest snapshot are returned by one repository
   statement, and the snapshot belongs to that version;
 - the repository selects greatest live version id and greatest snapshot id,
   with no fallback from malformed newest facts;
 - post-commit phases use the produced version's refreshed snapshot;
-- missing, non-file-version, and mismatched links fail every stored read path
-  with the same error class and identifier context;
+- missing target versions or current snapshots, linked non-file targets, and
+  mismatched links fail every stored read path with the same error class and
+  identifier context;
 - repository failures propagate rather than becoming provenance errors;
-- unlinked stored inputs keep their summary; and
+- unlinked stored non-file inputs keep their facts; and
 - store-free planning keeps its supplied summary.
 
 Implementation:
@@ -77,7 +80,7 @@ cargo test -p voom-control-plane linked_stream
 
 Commit:
 
-`fix(policy): use authoritative linked stream facts`
+`fix(policy): use authoritative stored stream facts`
 
 ## Step 2: Close the newly executable condition boundary
 
@@ -86,8 +89,13 @@ Files:
 - `crates/voom-policy/src/compile/validate/conditions.rs`
 - `crates/voom-policy/src/compile/validate_test.rs`
 - `crates/voom-policy/src/compile/pipeline_test.rs`
+- `crates/voom-plan/src/eligibility.rs`
+- `crates/voom-plan/src/eligibility_test.rs`
+- `crates/voom-plan/src/lib.rs`
 - `crates/voom-plan/src/planner.rs`
 - `crates/voom-plan/src/planner_test.rs`
+- `crates/voom-control-plane/src/cases/policy/plans.rs`
+- `crates/voom-control-plane/src/cases/policy/plans_test.rs`
 
 Red tests:
 
@@ -96,6 +104,10 @@ Red tests:
 - filtered exists, video/attachment targets, non-numeric comparators, extra
   tokens, signs, non-ASCII digits, and overflowing counts fail compilation;
 - canonical stored compiled shapes remain deserializable;
+- stored `exists` and `count` objects with missing or extra keys fail with a
+  deterministic JSON path before serde can erase the shape;
+- unknown fields outside `exists` and `count` retain their current behavior
+  under #344;
 - unpublished compiled stream shapes fail plan generation;
 - one unpublished stream leaf invalidates its complete Boolean tree; and
 - an invalid leaf in a later phase fails full-policy validation before an
@@ -110,12 +122,16 @@ Red tests:
 Implementation:
 
 - narrow source validation only for `Exists` and `Count`;
+- add a bounded raw-JSON gate for stored objects tagged `exists` or `count`
+  before `deserialize_stored_compiled_policy` invokes serde;
 - traverse all phase and operation condition placements before planning;
 - accept published stream shapes only on ordinary condition surfaces; and
 - reject stream conditions in `run_if` without changing other compiled
   condition behavior;
 - collect eligibility failures in deterministic policy traversal order with
   the existing `InvalidPlanningRequest` diagnostic code;
+- return raw and typed eligibility failures through the same stable
+  unpublished-condition message prefix and structural-path contract;
 - call the same pure full-policy validation from `generate_plan`, `plan_phase`,
   and stored coordinator preparation before profile resolution or job creation.
 
