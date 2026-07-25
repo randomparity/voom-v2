@@ -22,7 +22,7 @@ pub fn selection_from_payload_and_snapshot(
             payload.container
         )));
     }
-    let snapshot_input = crate::media_snapshot::planning_input(snapshot);
+    let snapshot_input = crate::media_snapshot::planning_input(1, snapshot);
     let facts = stream_facts(&snapshot_input).map_err(remux_block_error)?;
     if !facts.iter().any(|stream| stream.kind == TrackTarget::Video) {
         return Err(VoomError::Config(

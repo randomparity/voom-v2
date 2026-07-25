@@ -49,10 +49,6 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
         expected_json_path: "fixtures/compiled/container-metadata.json",
     },
     PolicyFixture {
-        source_path: "fixtures/policies/production-normalize-reduced.voom",
-        expected_json_path: "fixtures/compiled/production-normalize-reduced.json",
-    },
-    PolicyFixture {
         source_path: "fixtures/policies/video-transcode-hevc.voom",
         expected_json_path: "fixtures/compiled/video-transcode-hevc.json",
     },
@@ -79,6 +75,10 @@ const VALID_POLICY_FIXTURES: &[PolicyFixture] = &[
 ];
 
 const INVALID_POLICY_FIXTURES: &[PolicyFixture] = &[
+    PolicyFixture {
+        source_path: "fixtures/policies/production-normalize-reduced.voom",
+        expected_json_path: "fixtures/diagnostics/production-normalize-reduced.json",
+    },
     PolicyFixture {
         source_path: "fixtures/policies/invalid-deferred-transcode.voom",
         expected_json_path: "fixtures/diagnostics/invalid-deferred-transcode.json",

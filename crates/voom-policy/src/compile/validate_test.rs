@@ -655,6 +655,56 @@ fn rejects_invalid_exists_condition_target() {
 }
 
 #[test]
+fn accepts_published_stream_condition_source_forms() {
+    for condition in [
+        "exists audio",
+        "exists subtitle",
+        "count audio == 0",
+        "count audio != 1",
+        "count audio < 2",
+        "count subtitle <= 3",
+        "count subtitle > 4",
+        "count subtitle >= 5",
+    ] {
+        assert!(
+            codes(&format!(
+                "policy \"p\" {{ phase a {{ when {condition} {{ container mkv }} }} }}"
+            ))
+            .is_empty(),
+            "published condition should compile: {condition}"
+        );
+    }
+}
+
+#[test]
+fn rejects_unpublished_stream_condition_source_forms() {
+    for condition in [
+        "exists audio where commentary",
+        "exists video",
+        "exists attachment",
+        "exists subtitles",
+        "count video == 1",
+        "count attachment == 1",
+        "count subtitles == 1",
+        "count audio = 1",
+        "count audio contains 1",
+        "count audio matches 1",
+        "count audio == +1",
+        "count audio == -1",
+        "count audio == ١",
+        "count audio == 1 extra",
+    ] {
+        assert!(
+            codes(&format!(
+                "policy \"p\" {{ phase a {{ when {condition} {{ container mkv }} }} }}"
+            ))
+            .contains(&"unknown_phase_statement_or_operation".to_owned()),
+            "unpublished condition should fail validation: {condition}"
+        );
+    }
+}
+
+#[test]
 fn rejects_condition_comparison_without_value() {
     assert!(
         codes("policy \"p\" { phase a { when video.codec == { container mkv } } }")

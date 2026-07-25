@@ -15,26 +15,39 @@ use crate::ControlPlane;
 use super::{append_event, begin_tx, commit_tx};
 
 impl ControlPlane {
+    /// Open a job and append its audit event in the caller's transaction.
+    ///
+    /// # Errors
+    /// Propagates job insertion and event append failures.
+    pub(crate) async fn open_job_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: NewJob,
+    ) -> Result<Job, VoomError> {
+        let job = self.jobs.create_in_tx(tx, input.clone()).await?;
+        append_event(
+            &self.events,
+            tx,
+            SubjectType::Job,
+            Some(job.id.0),
+            input.created_at,
+            Event::JobOpened(JobOpenedPayload {
+                job_id: job.id.0,
+                kind: input.kind,
+                priority: input.priority,
+            }),
+        )
+        .await?;
+        Ok(job)
+    }
+
     /// Open a new job and emit `job.opened` in the same transaction.
     ///
     /// # Errors
     /// Propagates `SqliteJobRepo::create_in_tx` and `EventRepo::append_in_tx` errors.
     pub async fn open_job(&self, input: NewJob) -> Result<Job, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        let job = self.jobs.create_in_tx(&mut tx, input.clone()).await?;
-        append_event(
-            &self.events,
-            &mut tx,
-            SubjectType::Job,
-            Some(job.id.0),
-            input.created_at,
-            Event::JobOpened(JobOpenedPayload {
-                job_id: job.id.0,
-                kind: input.kind.clone(),
-                priority: input.priority,
-            }),
-        )
-        .await?;
+        let job = self.open_job_in_tx(&mut tx, input).await?;
         commit_tx(tx).await?;
         Ok(job)
     }

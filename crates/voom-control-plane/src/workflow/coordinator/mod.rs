@@ -3,11 +3,11 @@
 //! `run_phase_barrier` owns one job for the whole run (ADR-0007) and drives the
 //! existing executor one phase at a time across every file in a policy input
 //! set, phases acting as barriers across files. Each phase projects every
-//! still-active file's current chain-tip snapshot into the planner
-//! (`project_media_snapshot_input`), plans that one phase, bridges its planned
-//! nodes to a workflow, and runs them in the owned job; blocked files drop,
+//! still-active file's current chain-tip snapshot through the shared durable
+//! snapshot projector, plans that one phase, bridges its planned nodes to a
+//! workflow, and runs them in the owned job; blocked files drop,
 //! compliant/skipped files stay, committed files advance their chain tip
-//! (`active_version_with_snapshot`). It persists a durable per-phase /
+//! through the identity repository. It persists a durable per-phase /
 //! per-`(file, phase)` workflow summary as it goes.
 //!
 //! Responsibility map of the child modules:
@@ -16,7 +16,9 @@
 //! - [`finalize`] — per-file/per-phase durable row writing and payload/sqlite helpers.
 //! - [`resume`] — resume reconciliation and chain-tip/snapshot projection.
 
+#[cfg(test)]
 use std::future::Future;
+#[cfg(test)]
 use std::pin::Pin;
 
 use voom_core::{FileAssetId, FileVersionId, JobId, PolicyInputSetId, PolicyVersionId, VoomError};
@@ -24,14 +26,14 @@ use voom_plan::{ExecutionPlan, PlanningContext, PlanningRequest};
 use voom_policy::PolicyInputSetDraft;
 use voom_store::repo::identity::MediaSnapshot;
 use voom_store::repo::jobs::NewJob;
-use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseSummary, NewPhaseSummary, PhaseSummary, WorkflowSummary,
+    FilePhaseSummary, NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
 };
 
 use crate::ControlPlane;
 use crate::cases::policy::compliance::{ComplianceExecutionOptions, PromotionPlan};
-use crate::cases::policy::plans::input_set_to_draft;
+use crate::cases::policy::plans::plan_compiled_policy_with_input;
+use crate::cases::{begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
 use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
@@ -44,24 +46,20 @@ mod resume;
 
 use finalize::phase_ordinal;
 use planning::{
-    classify_phase, job_grain_summary, phase_draft, phase_outcome, regenerate_phase_report,
-    reject_unhandled_on_error, zero_phase_summary,
+    classify_phase, initial_phase_files, job_grain_summary, phase_draft, phase_outcome,
+    regenerate_phase_report, reject_unhandled_on_error, zero_phase_summary,
 };
+use resume::{PreparedResumeSeed, ResumePreparation};
 
 #[cfg(test)]
 use finalize::{sqlite_i64, sqlite_u64};
-#[cfg(test)]
-pub(crate) use resume::{active_version_with_snapshot, project_media_snapshot_input};
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.
+#[derive(Debug)]
 struct PhaseFile {
     pub(super) asset_id: FileAssetId,
     pub(super) version_id: FileVersionId,
-    /// The input-set starting version (chain root for this run). The resume
-    /// backfill consistency guard compares the current tip against this when no
-    /// committed row is visible (#165).
-    pub(super) start_version_id: FileVersionId,
     pub(super) snapshot: MediaSnapshot,
     pub(super) branch_id: String,
     pub(super) ordinal: u32,
@@ -69,6 +67,17 @@ struct PhaseFile {
     /// resume reconciliation). The loop passes a file through phases below this
     /// untouched (#165).
     pub(super) resume_ordinal: u32,
+}
+
+fn run_starts_for_files(files: &[PhaseFile]) -> Vec<NewFileRunStart> {
+    files
+        .iter()
+        .map(|file| NewFileRunStart {
+            branch_id: file.branch_id.clone(),
+            starting_file_version_id: file.version_id,
+            starting_phase_ordinal: 0,
+        })
+        .collect()
 }
 
 /// How a single file's phase node resolved (ADR-0005: at most one node status
@@ -122,7 +131,7 @@ pub(crate) struct PhaseBarrierRunInputs {
     policy: voom_policy::CompiledPolicy,
     context: PlanningContext,
     base_draft: PolicyInputSetDraft,
-    branch_ids: Vec<(FileVersionId, String)>,
+    files: Vec<PhaseFile>,
 }
 
 /// Everything the phase-loop runner owns once an in-job run starts.
@@ -153,6 +162,7 @@ struct PlannedPhase {
     dispositions: Vec<Disposition>,
 }
 
+#[cfg(test)]
 type CoordinatorFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CoordinatorOutcome, CoordinatorError>> + Send + 'a>>;
 
@@ -440,8 +450,13 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let runtimes = self.policy_runtime_registry().await?;
-        self.run_phase_barrier_with_runtimes(policy_version_id, input_set_id, options, runtimes)
-            .await
+        Box::pin(self.run_phase_barrier_with_runtimes(
+            policy_version_id,
+            input_set_id,
+            options,
+            runtimes,
+        ))
+        .await
     }
 
     /// [`Self::run_phase_barrier`] with an injected worker-runtime registry, so
@@ -457,11 +472,10 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let inputs = self
+        let (_, inputs) = self
             .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await?;
-        self.run_prepared_phase_barrier(inputs, options, runtimes)
-            .await
+        Box::pin(self.run_prepared_phase_barrier(inputs, options, runtimes)).await
     }
 
     pub(crate) async fn run_prepared_phase_barrier(
@@ -470,14 +484,12 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let inputs = Box::new(inputs);
-        self.with_phase_barrier_job(|job_id| {
-            Box::pin(async move {
-                self.run_phase_barrier_in_job(job_id, *inputs, options, runtimes)
-                    .await
-            })
-        })
-        .await
+        let starts = run_starts_for_files(&inputs.files);
+        let (job, _) = self.open_phase_barrier_job(&starts, Vec::new()).await?;
+        let result = self
+            .run_phase_barrier_in_job(job.id, inputs, options, runtimes)
+            .await;
+        self.finish_phase_barrier_job(job.id, result).await
     }
 
     /// Resume a crashed or failed phase-barrier run (issue #165, spec §3/§8).
@@ -527,55 +539,33 @@ impl ControlPlane {
             ))
             .into());
         }
-        let inputs = self
+        let (_, inputs) = self
             .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await?;
-        let inputs = Box::new(inputs);
-
-        self.with_phase_barrier_job(|job_id| {
-            Box::pin(async move {
-                self.resume_phase_barrier_in_job(job_id, prior_job_id, *inputs, options, runtimes)
-                    .await
-            })
-        })
-        .await
-    }
-
-    async fn resume_phase_barrier_in_job(
-        &self,
-        job_id: JobId,
-        prior_job_id: JobId,
-        inputs: PhaseBarrierRunInputs,
-        options: ComplianceExecutionOptions,
-        runtimes: WorkerRuntimeRegistry,
-    ) -> Result<CoordinatorOutcome, CoordinatorError> {
-        let PhaseBarrierRunInputs {
-            policy,
-            context,
-            base_draft,
-            branch_ids,
-        } = inputs;
-        if branch_ids.is_empty() || policy.phase_order.is_empty() {
-            return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
-        }
-        let files = self.initial_phase_files(&branch_ids).await?;
-        let phase_count = u32::try_from(policy.phase_order.len())
+        let phase_count = u32::try_from(inputs.policy.phase_order.len())
             .map_err(|e| VoomError::Internal(format!("phase count overflow: {e}")))?;
-        let (files, backfilled) = self
-            .reconcile_resume(prior_job_id, job_id, files, phase_count)
-            .await?;
-        self.drive_phase_loop(PhaseLoopInputs {
-            job_id,
-            policy,
-            context,
-            base_draft,
+        let ResumePreparation {
             files,
-            seed_file_phases: backfilled,
-            promotion_job_ids: vec![job_id, prior_job_id],
-            options,
-            runtimes,
-        })
-        .await
+            run_starts,
+            seeds,
+        } = self
+            .prepare_resume(prior_job_id, inputs.files, phase_count)
+            .await?;
+        let (job, seed_file_phases) = self.open_phase_barrier_job(&run_starts, seeds).await?;
+        let result = self
+            .drive_phase_loop(PhaseLoopInputs {
+                job_id: job.id,
+                policy: inputs.policy,
+                context: inputs.context,
+                base_draft: inputs.base_draft,
+                files,
+                seed_file_phases,
+                promotion_job_ids: vec![job.id, prior_job_id],
+                options,
+                runtimes,
+            })
+            .await;
+        self.finish_phase_barrier_job(job.id, result).await
     }
 
     /// Prepare all shared phase-barrier inputs that are independent of the new
@@ -586,46 +576,45 @@ impl ControlPlane {
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
         runtimes: &WorkerRuntimeRegistry,
-    ) -> Result<PhaseBarrierRunInputs, VoomError> {
+    ) -> Result<(ExecutionPlan, PhaseBarrierRunInputs), VoomError> {
         let inputs = self
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let mut policy = self.compiled_policy_for_version(&inputs.version).await?;
         reject_unhandled_on_error(&policy)?;
         self.preflight_policy_tools(&mut policy, runtimes).await?;
-        let active: Vec<FileVersionId> = inputs
-            .input
-            .media_snapshots
-            .iter()
-            .filter_map(|snapshot| match snapshot.target {
-                PolicyInputTargetRef::FileVersion { id } => Some(id),
-                _ => None,
-            })
-            .collect();
-
-        // Carry the input set's non-snapshot identity forward; each phase only
-        // swaps in the projected snapshots of the still-active files.
-        let base_draft = input_set_to_draft(inputs.input);
+        let stored = self
+            .resolve_stored_planning_input(&policy, inputs.input)
+            .await?;
         let context = PlanningContext {
+            policy_document_id: Some(inputs.version.policy_document_id),
             policy_version_id: Some(policy_version_id),
             policy_input_set_id: Some(input_set_id),
             ..PlanningContext::default()
         };
-
-        // Derive each active file's branch id before opening the job. The per-
-        // `(file, phase)` upsert is `ON CONFLICT DO NOTHING`, so the batch
-        // derivation disambiguates colliding stems before rows are persisted.
-        let branch_ids = self.active_branch_ids(&active).await?;
-        Ok(PhaseBarrierRunInputs {
-            policy,
-            context,
-            base_draft,
-            branch_ids,
-        })
+        let initial_plan =
+            plan_compiled_policy_with_input(policy.clone(), stored.draft.clone(), context.clone())?;
+        let selected = stored
+            .files
+            .iter()
+            .map(|file| file.selected_version_id)
+            .collect::<Vec<_>>();
+        let branch_ids = self.selected_branch_ids(&selected).await?;
+        let files = initial_phase_files(stored.files, branch_ids)?;
+        Ok((
+            initial_plan,
+            PhaseBarrierRunInputs {
+                policy,
+                context,
+                base_draft: stored.draft,
+                files,
+            },
+        ))
     }
 
     /// Open the owned workflow job, run the supplied in-job phase-barrier work,
     /// and fail the job on every error that escapes after opening.
+    #[cfg(test)]
     async fn with_phase_barrier_job<'a, F>(
         &'a self,
         run: F,
@@ -633,14 +622,53 @@ impl ControlPlane {
     where
         F: FnOnce(JobId) -> CoordinatorFuture<'a>,
     {
-        let job = self
-            .open_job(NewJob {
-                kind: WORKFLOW_JOB_KIND.to_owned(),
-                priority: 0,
-                created_at: self.clock().now(),
-            })
-            .await?;
+        let (job, _) = self.open_phase_barrier_job(&[], Vec::new()).await?;
+        let result = run(job.id).await;
+        self.finish_phase_barrier_job(job.id, result).await
+    }
 
+    async fn open_phase_barrier_job(
+        &self,
+        run_starts: &[NewFileRunStart],
+        seeds: Vec<PreparedResumeSeed>,
+    ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
+        let now = self.clock().now();
+        let mut tx = begin_tx(&self.pool).await?;
+        let job = self
+            .open_job_in_tx(
+                &mut tx,
+                NewJob {
+                    kind: WORKFLOW_JOB_KIND.to_owned(),
+                    priority: 0,
+                    created_at: now,
+                },
+            )
+            .await?;
+        self.workflow_summaries
+            .insert_file_run_starts_in_tx(&mut tx, job.id, run_starts)
+            .await?;
+        let mut rows = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            rows.push(
+                self.workflow_summaries
+                    .upsert_file_phase_summary_in_tx(
+                        &mut tx,
+                        seed.produced
+                            .committed_seed(job.id, seed.phase_ordinal, seed.branch_id),
+                        now,
+                    )
+                    .await?,
+            );
+        }
+        commit_tx(tx).await?;
+        Ok((job, rows))
+    }
+
+    async fn finish_phase_barrier_job(
+        &self,
+        job_id: JobId,
+        result: Result<CoordinatorOutcome, CoordinatorError>,
+    ) -> Result<CoordinatorOutcome, CoordinatorError> {
         // Job-cleanup contract: once the job is open, every error path finalizes
         // it as `failed` rather than orphaning it in `open`. A dispatch failure
         // already failed the job inside `run_plan_in_job` (and `fail_job` is a
@@ -648,11 +676,11 @@ impl ControlPlane {
         // pre-dispatch errors that leave the job open. Committed per-`(file,
         // phase)` rows are durable before the error returns (queryable via
         // `file_phases_for_job` and carried in `partial`), satisfying ADR-0007.
-        match run(job.id).await {
+        match result {
             Ok(outcome) => Ok(outcome),
             Err(err) => {
                 let _ = self
-                    .fail_job(job.id, err.source.to_string(), self.clock().now())
+                    .fail_job(job_id, err.source.to_string(), self.clock().now())
                     .await;
                 Err(err)
             }
@@ -670,12 +698,11 @@ impl ControlPlane {
             policy,
             context,
             base_draft,
-            branch_ids,
+            files,
         } = inputs;
-        if branch_ids.is_empty() || policy.phase_order.is_empty() {
+        if files.is_empty() || policy.phase_order.is_empty() {
             return Ok(self.finalize_zero_phase_run(job_id, Vec::new()).await?);
         }
-        let files = self.initial_phase_files(&branch_ids).await?;
         self.drive_phase_loop(PhaseLoopInputs {
             job_id,
             policy,

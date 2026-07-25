@@ -1,0 +1,18 @@
+[
+  {
+    "code": "unknown_phase_statement_or_operation",
+    "severity": "error",
+    "stage": "validate",
+    "span": {
+      "start": 477,
+      "end": 584
+    },
+    "location": {
+      "line": 23,
+      "column": 7
+    },
+    "message": "invalid condition expression",
+    "suggestion": null,
+    "related": []
+  }
+]

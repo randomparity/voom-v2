@@ -13,6 +13,8 @@ use crate::{
     PlanningDiagnosticCode, PlanningDiagnosticSeverity, PlanningRequest, generate_plan, plan_phase,
 };
 
+use super::{ConditionEval, evaluate_condition};
+
 fn policy(operation: CompiledOperation) -> CompiledPolicy {
     compiled_policy_with_ops(vec![operation])
 }
@@ -203,6 +205,12 @@ fn snapshot_mkv_with_untagged_audio() -> MediaSnapshotInput {
             {"id": "stream-2", "index": 2, "kind": "audio", "codec_name": "aac", "language": "eng"}
         ]
     });
+    snapshot
+}
+
+fn snapshot_mp4_with_untagged_audio() -> MediaSnapshotInput {
+    let mut snapshot = snapshot_mkv_with_untagged_audio();
+    snapshot.container = Some("mp4".to_owned());
     snapshot
 }
 
@@ -1775,6 +1783,237 @@ fn unresolved_condition_emits_blocked_node_for_nested_operation() {
 }
 
 #[test]
+fn published_exists_condition_uses_known_stream_inventory() {
+    let snapshot = snapshot_mkv_with_untagged_audio();
+
+    assert_eq!(
+        evaluate_condition(&exists_condition(TrackTarget::Audio), &snapshot),
+        ConditionEval::Matched
+    );
+    assert_eq!(
+        evaluate_condition(&exists_condition(TrackTarget::Subtitle), &snapshot),
+        ConditionEval::NotMatched
+    );
+}
+
+#[test]
+fn published_count_condition_covers_zero_and_every_numeric_boundary() {
+    let snapshot = snapshot_mkv_with_untagged_audio();
+    let cases = [
+        (ComparisonOp::Eq, 2, ConditionEval::Matched),
+        (ComparisonOp::Eq, 1, ConditionEval::NotMatched),
+        (ComparisonOp::Ne, 1, ConditionEval::Matched),
+        (ComparisonOp::Ne, 2, ConditionEval::NotMatched),
+        (ComparisonOp::Lt, 3, ConditionEval::Matched),
+        (ComparisonOp::Lt, 2, ConditionEval::NotMatched),
+        (ComparisonOp::Lte, 2, ConditionEval::Matched),
+        (ComparisonOp::Lte, 1, ConditionEval::NotMatched),
+        (ComparisonOp::Gt, 1, ConditionEval::Matched),
+        (ComparisonOp::Gt, 2, ConditionEval::NotMatched),
+        (ComparisonOp::Gte, 2, ConditionEval::Matched),
+        (ComparisonOp::Gte, 3, ConditionEval::NotMatched),
+    ];
+
+    for (op, value, expected) in cases {
+        assert_eq!(
+            evaluate_condition(&count_condition(TrackTarget::Audio, op, value), &snapshot),
+            expected,
+            "audio count comparison {op:?} {value}"
+        );
+    }
+
+    let empty = snapshot_with_stream_inventory(&serde_json::json!([]));
+    assert_eq!(
+        evaluate_condition(
+            &count_condition(TrackTarget::Subtitle, ComparisonOp::Eq, 0),
+            &empty
+        ),
+        ConditionEval::Matched
+    );
+}
+
+#[test]
+fn published_stream_conditions_distinguish_empty_from_unavailable_inventory() {
+    let empty = snapshot_with_stream_inventory(&serde_json::json!([]));
+    assert_eq!(
+        evaluate_condition(&exists_condition(TrackTarget::Audio), &empty),
+        ConditionEval::NotMatched
+    );
+
+    let unavailable = [
+        serde_json::json!({}),
+        serde_json::json!({"streams": null}),
+        serde_json::json!({"streams": "not-an-array"}),
+        serde_json::json!({"streams": [{}]}),
+        serde_json::json!({
+            "streams": [
+                {"id": "duplicate", "index": 0, "kind": "audio"},
+                {"id": "duplicate", "index": 1, "kind": "subtitle"}
+            ]
+        }),
+    ];
+    for stream_summary in unavailable {
+        let mut snapshot = snapshot_with(Some("mkv"), None, None);
+        snapshot.stream_summary = stream_summary;
+        assert_eq!(
+            evaluate_condition(&exists_condition(TrackTarget::Audio), &snapshot),
+            ConditionEval::Unknown
+        );
+        assert_eq!(
+            evaluate_condition(
+                &count_condition(TrackTarget::Subtitle, ComparisonOp::Eq, 0),
+                &snapshot
+            ),
+            ConditionEval::Unknown
+        );
+    }
+}
+
+#[test]
+fn published_stream_conditions_preserve_three_valued_boolean_composition() {
+    let unavailable = snapshot_with(Some("mkv"), None, None);
+    let unknown = exists_condition(TrackTarget::Audio);
+
+    assert_eq!(
+        evaluate_condition(
+            &CompiledCondition::Not {
+                inner: Box::new(unknown.clone()),
+            },
+            &unavailable
+        ),
+        ConditionEval::Unknown
+    );
+    assert_eq!(
+        evaluate_condition(
+            &CompiledCondition::And {
+                conditions: vec![container_is("mp4"), unknown.clone()],
+            },
+            &unavailable
+        ),
+        ConditionEval::NotMatched
+    );
+    assert_eq!(
+        evaluate_condition(
+            &CompiledCondition::And {
+                conditions: vec![container_is("mkv"), unknown.clone()],
+            },
+            &unavailable
+        ),
+        ConditionEval::Unknown
+    );
+    assert_eq!(
+        evaluate_condition(
+            &CompiledCondition::Or {
+                conditions: vec![container_is("mkv"), unknown.clone()],
+            },
+            &unavailable
+        ),
+        ConditionEval::Matched
+    );
+    assert_eq!(
+        evaluate_condition(
+            &CompiledCondition::Or {
+                conditions: vec![container_is("mp4"), unknown],
+            },
+            &unavailable
+        ),
+        ConditionEval::Unknown
+    );
+}
+
+#[test]
+fn published_stream_condition_outcomes_propagate_through_when_and_skip() {
+    let snapshot = snapshot_mp4_with_untagged_audio();
+    let operation = CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    };
+    let when_true = generate_plan(request(
+        policy(CompiledOperation::Conditional {
+            condition: exists_condition(TrackTarget::Audio),
+            operations: vec![operation.clone()],
+        }),
+        snapshot.clone(),
+    ))
+    .unwrap();
+    let when_false = generate_plan(request(
+        policy(CompiledOperation::Conditional {
+            condition: exists_condition(TrackTarget::Subtitle),
+            operations: vec![operation.clone()],
+        }),
+        snapshot.clone(),
+    ))
+    .unwrap();
+
+    assert_eq!(when_true.nodes.len(), 1);
+    assert_eq!(when_true.nodes[0].status, NodeStatus::Planned);
+    assert!(when_false.nodes.is_empty());
+
+    let mut skip_true = policy(operation.clone());
+    skip_true.phases[0].skip_if = Some(count_condition(TrackTarget::Audio, ComparisonOp::Eq, 2));
+    let mut skip_false = policy(operation);
+    skip_false.phases[0].skip_if =
+        Some(count_condition(TrackTarget::Subtitle, ComparisonOp::Gt, 0));
+
+    assert!(
+        generate_plan(request(skip_true, snapshot.clone()))
+            .unwrap()
+            .nodes
+            .is_empty()
+    );
+    let planned = generate_plan(request(skip_false, snapshot)).unwrap();
+    assert_eq!(planned.nodes.len(), 1);
+    assert_eq!(planned.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
+fn published_stream_condition_outcomes_propagate_through_both_rule_modes() {
+    let snapshot = snapshot_mp4_with_untagged_audio();
+    let set_container = CompiledOperation::SetContainer {
+        container: "mkv".to_owned(),
+    };
+    let first = policy(CompiledOperation::Rules {
+        mode: RuleMatchMode::First,
+        rules: vec![
+            rule(
+                "no-subtitles",
+                Some(count_condition(TrackTarget::Subtitle, ComparisonOp::Gt, 0)),
+                vec![CompiledOperation::ClearTags],
+            ),
+            rule(
+                "has-audio",
+                Some(exists_condition(TrackTarget::Audio)),
+                vec![set_container.clone()],
+            ),
+            rule("not-reached", None, vec![CompiledOperation::ClearTags]),
+        ],
+    });
+    let all = policy(CompiledOperation::Rules {
+        mode: RuleMatchMode::All,
+        rules: vec![
+            rule(
+                "has-audio",
+                Some(exists_condition(TrackTarget::Audio)),
+                vec![set_container],
+            ),
+            rule(
+                "has-subtitles",
+                Some(exists_condition(TrackTarget::Subtitle)),
+                vec![CompiledOperation::ClearTags],
+            ),
+        ],
+    });
+
+    for plan in [
+        generate_plan(request(first, snapshot.clone())).unwrap(),
+        generate_plan(request(all, snapshot)).unwrap(),
+    ] {
+        assert_eq!(plan.nodes.len(), 1);
+        assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+        assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    }
+}
+
+#[test]
 fn track_operations_block_when_snapshot_stream_facts_are_missing() {
     let plan = generate_plan(PlanningRequest {
         policy: policy(CompiledOperation::KeepTracks {
@@ -2141,6 +2380,43 @@ fn plan_phase_reevaluates_run_if_against_supplied_snapshot() {
 }
 
 #[test]
+fn planner_entry_points_reject_unpublished_condition_in_later_phase() {
+    let mut policy = compiled_policy_with_phases(&[
+        (
+            "normalize",
+            vec![CompiledOperation::SetContainer {
+                container: "mkv".to_owned(),
+            }],
+        ),
+        ("tracks", Vec::new()),
+    ]);
+    policy.phases[1].skip_if = Some(CompiledCondition::Exists {
+        target: TrackTarget::Video,
+        filter: None,
+    });
+    let snapshot = snapshot_mp4_with_video_audio_subtitle();
+
+    let complete = generate_plan(request(policy.clone(), snapshot.clone())).unwrap_err();
+    let one_phase = plan_phase(request(policy, snapshot), "normalize").unwrap_err();
+
+    assert_eq!(complete.diagnostics, one_phase.diagnostics);
+    assert_eq!(
+        complete.diagnostics[0].code,
+        PlanningDiagnosticCode::InvalidPlanningRequest
+    );
+    assert!(
+        complete.diagnostics[0]
+            .message
+            .starts_with("unpublished compiled stream condition at")
+    );
+    assert!(
+        complete.diagnostics[0]
+            .message
+            .contains("phase[1:\"tracks\"].skip_if")
+    );
+}
+
+#[test]
 fn plan_phase_unplannable_operation_yields_blocked_node_and_diagnostic() {
     let policy = compiled_policy_with_phases(&[(
         "audio",
@@ -2349,6 +2625,23 @@ fn container_is(container: &str) -> CompiledCondition {
             value: container.to_owned(),
         },
     }
+}
+
+fn exists_condition(target: TrackTarget) -> CompiledCondition {
+    CompiledCondition::Exists {
+        target,
+        filter: None,
+    }
+}
+
+fn count_condition(target: TrackTarget, op: ComparisonOp, value: u64) -> CompiledCondition {
+    CompiledCondition::Count { target, op, value }
+}
+
+fn snapshot_with_stream_inventory(streams: &serde_json::Value) -> MediaSnapshotInput {
+    let mut snapshot = snapshot_with(Some("mkv"), None, None);
+    snapshot.stream_summary = serde_json::json!({"streams": streams});
+    snapshot
 }
 
 fn transcode_video() -> CompiledOperation {

@@ -186,7 +186,7 @@ fn compile_policy_preserves_boolean_conditions() {
 #[test]
 fn compile_policy_preserves_parenthesized_boolean_conditions() {
     let out = compile_policy(
-        "policy \"p\" { phase a { when (exists audio or exists subtitle) and exists video { container mkv } } }",
+        "policy \"p\" { phase a { when (exists audio or exists subtitle) and count audio > 0 { container mkv } } }",
     )
     .unwrap();
     let CompiledOperation::Conditional {
@@ -199,7 +199,14 @@ fn compile_policy_preserves_parenthesized_boolean_conditions() {
 
     assert_eq!(conditions.len(), 2);
     assert!(matches!(conditions[0], CompiledCondition::Or { .. }));
-    assert!(matches!(conditions[1], CompiledCondition::Exists { .. }));
+    assert_eq!(
+        conditions[1],
+        CompiledCondition::Count {
+            target: crate::TrackTarget::Audio,
+            op: crate::ComparisonOp::Gt,
+            value: 0,
+        }
+    );
 }
 
 #[test]

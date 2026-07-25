@@ -65,18 +65,13 @@ impl Validator<'_> {
         match tokens.as_slice() {
             ["exists", target, ..] => {
                 self.validate_track_target(statement.span(), target);
-                if !is_track_target_name(target) {
-                    return true;
-                }
-                if let Some((_, filter)) = text.split_once(" where ") {
-                    is_valid_track_filter(filter.trim())
-                } else {
-                    tokens.len() == 2
-                }
+                tokens.len() == 2 && is_published_stream_target(target)
             }
             ["count", target, op, value] => {
                 self.validate_track_target(statement.span(), target);
-                is_track_target_name(target) && is_comparison_op(op) && value.parse::<u64>().is_ok()
+                is_published_stream_target(target)
+                    && is_numeric_comparison_op(op)
+                    && is_ascii_u64(value)
             }
             _ => {
                 if let Some(index) = tokens.iter().position(|token| is_comparison_op(token)) {
@@ -355,6 +350,23 @@ fn is_track_target_name(target: &str) -> bool {
         target,
         "video" | "audio" | "subtitle" | "subtitles" | "attachment" | "attachments"
     )
+}
+
+#[must_use]
+fn is_published_stream_target(target: &str) -> bool {
+    target == "audio" || target == "subtitle"
+}
+
+#[must_use]
+fn is_numeric_comparison_op(token: &str) -> bool {
+    token == "==" || token == "!=" || token == "<" || token == "<=" || token == ">" || token == ">="
+}
+
+#[must_use]
+fn is_ascii_u64(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u64>().is_ok()
 }
 
 #[must_use]

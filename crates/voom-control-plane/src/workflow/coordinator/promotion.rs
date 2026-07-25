@@ -68,7 +68,7 @@ fn longest_common_dir(dirs: &[PathBuf]) -> PathBuf {
     common.iter().collect()
 }
 
-pub(super) fn ensure_unique_active_branch_ids(
+pub(super) fn ensure_unique_selected_branch_ids(
     branch_ids: &[(FileVersionId, String)],
 ) -> Result<(), VoomError> {
     let mut seen = HashMap::with_capacity(branch_ids.len());
@@ -76,12 +76,12 @@ pub(super) fn ensure_unique_active_branch_ids(
         if let Some(previous) = seen.insert(branch_id.as_str(), file_version_id) {
             if previous == file_version_id {
                 return Err(VoomError::Config(format!(
-                    "active file {file_version_id} appears more than once with branch id \
-                     `{branch_id}`; phase-barrier summaries require one row per active file"
+                    "selected file version {file_version_id} appears more than once with branch id \
+                     `{branch_id}`; phase-barrier summaries require one row per selected file"
                 )));
             }
             return Err(VoomError::Config(format!(
-                "active files {previous} and {file_version_id} both derive branch id \
+                "selected file versions {previous} and {file_version_id} both derive branch id \
                  `{branch_id}`; phase-barrier summaries require a unique branch id per file"
             )));
         }

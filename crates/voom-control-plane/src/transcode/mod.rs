@@ -123,7 +123,7 @@ async fn decide_copy_video_for_source(
         .await?;
     let latest = snapshots.into_iter().max_by_key(|s| s.id);
     Ok(latest.as_ref().is_some_and(|s| {
-        let snapshot_input = crate::media_snapshot::planning_input(s);
+        let snapshot_input = crate::media_snapshot::planning_input(1, s);
         resolve::decide_copy_video(&resolved.profile, &snapshot_input)
     }))
 }

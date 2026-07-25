@@ -4,7 +4,7 @@ use serde_json::json;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
     CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
-    RuleMatchMode,
+    RuleMatchMode, TrackTarget,
 };
 
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     NodeStatus, PlanNode, PlanOperationKind, PlanProvenance, PlanSummary, PlanningContext,
     PlanningDiagnostic, PlanningDiagnosticCode, PlanningRequest, PolicyIdentity, ResourceEstimates,
     SafetyHints, SchedulingHints, TargetRef, edge_id, node_id, plan_hash, plan_id,
+    stream_condition_eligibility_diagnostics,
 };
 
 pub mod audio;
@@ -42,6 +43,7 @@ pub fn generate_plan(request: PlanningRequest) -> Result<ExecutionPlan, PlanGene
         input,
         context,
     } = request;
+    validate_policy_eligibility(&policy)?;
     validate_input(&input)?;
 
     let mut builder = PlanBuilder::new(&policy, &input, &context);
@@ -80,6 +82,7 @@ pub fn plan_phase(
         input,
         context,
     } = request;
+    validate_policy_eligibility(&policy)?;
     validate_input(&input)?;
 
     if !policy.phase_order.iter().any(|name| name == phase_name) {
@@ -116,6 +119,14 @@ fn validate_input(input: &PolicyInputSetDraft) -> Result<(), PlanGenerationError
     }
 
     Ok(())
+}
+
+fn validate_policy_eligibility(policy: &CompiledPolicy) -> Result<(), PlanGenerationError> {
+    let diagnostics = stream_condition_eligibility_diagnostics(policy);
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    Err(PlanGenerationError { diagnostics })
 }
 
 struct PlanBuilder<'a> {
@@ -825,10 +836,32 @@ fn evaluate_condition(
                 ConditionEval::NotMatched
             }
         }
-        CompiledCondition::Exists { .. }
-        | CompiledCondition::Count { .. }
+        CompiledCondition::Exists {
+            target,
+            filter: None,
+        } => stream_target_count(*target, snapshot).map_or(ConditionEval::Unknown, |count| {
+            ConditionEval::from_bool(count > 0)
+        }),
+        CompiledCondition::Count { target, op, value } => stream_target_count(*target, snapshot)
+            .map_or(ConditionEval::Unknown, |count| {
+                compare_numbers(count, *op, *value)
+            }),
+        CompiledCondition::Exists {
+            target: _,
+            filter: Some(_),
+        }
         | CompiledCondition::Predicate { .. } => ConditionEval::Unknown,
     }
+}
+
+fn stream_target_count(target: TrackTarget, snapshot: &MediaSnapshotInput) -> Option<u64> {
+    match target {
+        TrackTarget::Audio | TrackTarget::Subtitle => {}
+        TrackTarget::Video | TrackTarget::Attachment => return None,
+    }
+    let facts = remux::stream_facts(snapshot).ok()?;
+    let count = facts.iter().filter(|fact| fact.kind == target).count();
+    u64::try_from(count).ok()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

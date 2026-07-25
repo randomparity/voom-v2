@@ -497,9 +497,12 @@ impl ControlPlane {
             .load_current_accepted_policy_and_input(policy_version_id, input_set_id)
             .await?;
         let policy = self.compiled_policy_for_version(&inputs.version).await?;
+        let input = self
+            .resolve_stored_planning_input(&policy, inputs.input)
+            .await?;
         let plan = super::plans::plan_compiled_policy_with_input(
             policy,
-            super::plans::input_set_to_draft(inputs.input),
+            input.draft,
             voom_plan::PlanningContext {
                 policy_document_id: Some(inputs.version.policy_document_id),
                 policy_version_id: Some(inputs.version.id),
@@ -683,11 +686,11 @@ impl ControlPlane {
         policy_version_id: PolicyVersionId,
         input_set_id: PolicyInputSetId,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        self.execute_compliance_policy_with_options(
+        Box::pin(self.execute_compliance_policy_with_options(
             policy_version_id,
             input_set_id,
             ComplianceExecutionOptions::default(),
-        )
+        ))
         .await
     }
 
@@ -699,12 +702,12 @@ impl ControlPlane {
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
         let registered = self.policy_runtime_registry().await.map_err(no_partial)?;
         let live = self.probe_live_runtimes(registered.clone()).await;
-        let report_data = self
-            .generate_compliance_report(policy_version_id, input_set_id)
+        let (initial_plan, prepared) = self
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &live)
             .await
             .map_err(no_partial)?;
-        let prepared = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &live)
+        let report_data = self
+            .compliance_report_for_plan(initial_plan)
             .await
             .map_err(no_partial)?;
         if let Some(slug) = options.safety_policy_slug.clone() {
@@ -721,8 +724,14 @@ impl ControlPlane {
         self.reject_dead_endpoint_operations(&report_data.plan, &registered, &live)
             .await
             .map_err(no_partial)?;
-        self.execute_compliance_with_report(report_data, policy_version_id, options, live, prepared)
-            .await
+        Box::pin(self.execute_compliance_with_report(
+            report_data,
+            policy_version_id,
+            options,
+            live,
+            prepared,
+        ))
+        .await
     }
 
     /// Apply the initial report's findings to durable issues, then drive the
@@ -737,12 +746,12 @@ impl ControlPlane {
         options: ComplianceExecutionOptions,
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<ComplianceExecuteData, ComplianceExecuteError> {
-        let report_data = self
-            .generate_compliance_report(policy_version_id, input_set_id)
+        let (initial_plan, prepared) = self
+            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
             .await
             .map_err(no_partial)?;
-        let prepared = self
-            .prepare_phase_barrier_run_inputs(policy_version_id, input_set_id, &runtimes)
+        let report_data = self
+            .compliance_report_for_plan(initial_plan)
             .await
             .map_err(no_partial)?;
         self.execute_compliance_with_report(
@@ -753,6 +762,20 @@ impl ControlPlane {
             prepared,
         )
         .await
+    }
+
+    async fn compliance_report_for_plan(
+        &self,
+        plan: voom_plan::ExecutionPlan,
+    ) -> Result<ComplianceReportData, VoomError> {
+        let report = voom_plan::generate_compliance_report(&plan)
+            .map_err(voom_plan::ComplianceReportError::into_voom_error)?;
+        let backups = self.backup_evidence_for_plan(&plan).await?;
+        Ok(ComplianceReportData {
+            plan,
+            report,
+            backups,
+        })
     }
 
     async fn execute_compliance_with_report(
@@ -768,10 +791,7 @@ impl ControlPlane {
             .await
             .map_err(no_partial)?;
         let issues = apply_data.issues;
-        match self
-            .run_prepared_phase_barrier(prepared, options, runtimes)
-            .await
-        {
+        match Box::pin(self.run_prepared_phase_barrier(prepared, options, runtimes)).await {
             Ok(outcome) => Ok(ComplianceExecuteData::from_outcome(issues, &outcome)),
             Err(err) => Err(ComplianceExecuteError {
                 source: err.source,

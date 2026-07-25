@@ -5,19 +5,17 @@
 //! files that committed inline before a dispatch failure, and finalizes the owned
 //! job (succeeded or zero-phase) into a [`CoordinatorOutcome`].
 
-use serde_json::Value;
 use sqlx::Row;
 use voom_core::{
     FileAssetId, FileLocationId, FileVersionId, JobId, MediaSnapshotId, TicketId, VoomError,
 };
-use voom_store::repo::identity::{FileVersion, IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, FilePhaseSummary, NewFilePhaseSummary, PhaseSummary,
 };
 
 use crate::ControlPlane;
 use crate::workflow::coordinator::planning::{job_grain_summary, zero_phase_summary};
-use crate::workflow::coordinator::resume::active_version_with_snapshot;
 use crate::workflow::coordinator::{
     CoordinatorError, CoordinatorOutcome, Disposition, PhaseDispatchFailure, PhaseFile,
 };
@@ -25,7 +23,7 @@ use crate::workflow::plan::policy_bridge::policy_workflow_node_id;
 
 /// The durable references a committed file-phase row requires (NOT NULL by DB
 /// CHECK): the produced version, its live location, and its reprobe snapshot.
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 #[expect(
     clippy::struct_field_names,
     reason = "fields mirror the NewFilePhaseSummary produced_*/reprobe_* id columns"
@@ -39,23 +37,44 @@ pub(super) struct ProducedRefs {
 impl ProducedRefs {
     pub(super) async fn resolve(
         control_plane: &ControlPlane,
-        tip: &FileVersion,
+        file_version_id: FileVersionId,
         snapshot: &MediaSnapshot,
     ) -> Result<Self, VoomError> {
         let location = control_plane
             .identity
-            .list_live_file_locations_by_version(tip.id)
+            .list_live_file_locations_by_version(file_version_id)
             .await?
             .into_iter()
             .next()
             .ok_or_else(|| {
-                VoomError::Internal(format!("committed version {} has no live location", tip.id))
+                VoomError::Internal(format!(
+                    "committed version {file_version_id} has no live location"
+                ))
             })?;
         Ok(Self {
-            file_version_id: Some(tip.id),
+            file_version_id: Some(file_version_id),
             file_location_id: Some(location.id),
             reprobe_snapshot_id: Some(snapshot.id),
         })
+    }
+
+    pub(super) fn committed_seed(
+        self,
+        job_id: JobId,
+        phase_ordinal: u32,
+        branch_id: String,
+    ) -> NewFilePhaseSummary {
+        NewFilePhaseSummary {
+            job_id,
+            phase_ordinal,
+            branch_id,
+            ticket_ids: Vec::new(),
+            produced_file_version_id: self.file_version_id,
+            produced_file_location_id: self.file_location_id,
+            artifact_handle_id: None,
+            reprobe_snapshot_id: self.reprobe_snapshot_id,
+            outcome: FilePhaseOutcome::Committed,
+        }
     }
 }
 
@@ -104,26 +123,6 @@ pub(super) fn sqlite_i64(value: u64, field: &str) -> Result<i64, VoomError> {
     i64::try_from(value).map_err(|e| {
         VoomError::database_context(format!("{field} {value} does not fit SQLite i64"), e)
     })
-}
-
-pub(super) fn first_stream_of_kind<'a>(payload: &'a Value, kind: &str) -> Option<&'a Value> {
-    payload
-        .get("streams")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|stream| stream.get("kind").and_then(Value::as_str) == Some(kind))
-}
-
-pub(super) fn payload_str(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_owned)
-}
-
-/// Snapshot dimensions arrive as JSON `u64`, but planner dimensions are `u32`.
-pub(super) fn payload_u32(value: &Value, key: &str) -> Option<u32> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|number| u32::try_from(number).ok())
 }
 
 impl ControlPlane {
@@ -242,7 +241,9 @@ impl ControlPlane {
             let Disposition::Planned { node_id } = disposition else {
                 continue;
             };
-            let (tip, snapshot) = active_version_with_snapshot(&self.identity, file.asset_id)
+            let (tip, snapshot) = self
+                .identity
+                .get_active_version_with_snapshot(file.asset_id)
                 .await?
                 .ok_or_else(|| {
                     VoomError::Internal(format!(
@@ -255,7 +256,7 @@ impl ControlPlane {
             }
             let workflow_node_id = policy_workflow_node_id(node_id);
             let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
-            let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
+            let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
             let row = self
                 .write_file_row(
                     job_id,
@@ -357,7 +358,9 @@ impl ControlPlane {
             Disposition::Planned { node_id } => {
                 let workflow_node_id = policy_workflow_node_id(node_id);
                 let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
-                let (tip, snapshot) = active_version_with_snapshot(&self.identity, file.asset_id)
+                let (tip, snapshot) = self
+                    .identity
+                    .get_active_version_with_snapshot(file.asset_id)
                     .await?
                     .ok_or_else(|| {
                         VoomError::Internal(format!(
@@ -380,7 +383,7 @@ impl ControlPlane {
                         .await?;
                     return Ok((row, file.snapshot.clone(), Some(file)));
                 }
-                let produced = ProducedRefs::resolve(self, &tip, &snapshot).await?;
+                let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
                 let row = self
                     .write_file_row(
                         job_id,

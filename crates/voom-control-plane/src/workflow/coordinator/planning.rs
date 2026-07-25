@@ -10,15 +10,13 @@ use serde_json::{Value, json};
 use voom_core::{FileVersionId, JobId, VoomError};
 use voom_plan::{ExecutionPlan, NodeStatus, PlanningContext, PlanningRequest};
 use voom_policy::{PolicyInputSetDraft, TargetRef};
-use voom_store::repo::identity::{IdentityRepo, MediaSnapshot};
+use voom_store::repo::identity::MediaSnapshot;
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, NewWorkflowSummary, PhaseOutcome, PhaseReport,
 };
 
-use crate::ControlPlane;
-use crate::workflow::coordinator::resume::{
-    active_version_with_snapshot, project_media_snapshot_input,
-};
+use crate::cases::policy::plans::ResolvedFileInput;
+use crate::media_snapshot::planning_input;
 use crate::workflow::coordinator::{Disposition, PhaseFile};
 
 /// Classify each active file's node for a phase by `NodeStatus`. A file with no
@@ -95,7 +93,7 @@ pub(super) fn phase_draft(base: &PolicyInputSetDraft, files: &[PhaseFile]) -> Po
     let mut draft = base.clone();
     draft.media_snapshots = files
         .iter()
-        .map(|file| project_media_snapshot_input(file.ordinal, &file.snapshot))
+        .map(|file| planning_input(file.ordinal, &file.snapshot))
         .collect();
     draft
 }
@@ -116,7 +114,7 @@ pub(super) fn regenerate_phase_report(
     let mut draft = base_draft.clone();
     draft.media_snapshots = refreshed
         .iter()
-        .map(|(ordinal, snapshot)| project_media_snapshot_input(*ordinal, snapshot))
+        .map(|(ordinal, snapshot)| planning_input(*ordinal, snapshot))
         .collect();
     let plan = voom_plan::plan_phase(
         PlanningRequest {
@@ -195,41 +193,35 @@ fn per_operation_json(run: &crate::workflow::WorkflowRunSummary) -> Value {
     Value::Object(map)
 }
 
-impl ControlPlane {
-    /// Resolve every active file's current chain tip (and its latest snapshot)
-    /// into the per-phase working set.
-    pub(super) async fn initial_phase_files(
-        &self,
-        branch_ids: &[(FileVersionId, String)],
-    ) -> Result<Vec<PhaseFile>, VoomError> {
-        let mut files = Vec::with_capacity(branch_ids.len());
-        for (index, (version_id, branch_id)) in branch_ids.iter().enumerate() {
-            let version = self
-                .identity
-                .get_file_version(*version_id)
-                .await?
-                .ok_or_else(|| {
-                    VoomError::NotFound(format!("file version {version_id} not found"))
-                })?;
-            let (tip, snapshot) =
-                active_version_with_snapshot(&self.identity, version.file_asset_id)
-                    .await?
-                    .ok_or_else(|| {
-                        VoomError::NotFound(format!(
-                            "file version {version_id} has no active snapshot to project"
-                        ))
-                    })?;
-            files.push(PhaseFile {
-                asset_id: version.file_asset_id,
-                version_id: tip.id,
-                start_version_id: *version_id,
-                snapshot,
-                branch_id: branch_id.clone(),
-                ordinal: u32::try_from(index + 1)
-                    .map_err(|e| VoomError::Internal(format!("file ordinal overflow: {e}")))?,
-                resume_ordinal: 0,
-            });
-        }
-        Ok(files)
+/// Build the first-phase working set from the authority records retained by
+/// stored-input resolution. No identity read occurs here.
+pub(super) fn initial_phase_files(
+    resolved: Vec<ResolvedFileInput>,
+    branch_ids: Vec<(FileVersionId, String)>,
+) -> Result<Vec<PhaseFile>, VoomError> {
+    if resolved.len() != branch_ids.len() {
+        return Err(VoomError::Internal(
+            "resolved files and branch ids differ in length".to_owned(),
+        ));
     }
+    resolved
+        .into_iter()
+        .zip(branch_ids)
+        .map(|(resolved, (version_id, branch_id))| {
+            if version_id != resolved.selected_version_id {
+                return Err(VoomError::Internal(format!(
+                    "branch id version {version_id} does not match selected version {}",
+                    resolved.selected_version_id
+                )));
+            }
+            Ok(PhaseFile {
+                asset_id: resolved.file_asset_id,
+                version_id: resolved.active_version.id,
+                snapshot: resolved.active_snapshot,
+                branch_id,
+                ordinal: resolved.ordinal,
+                resume_ordinal: 0,
+            })
+        })
+        .collect()
 }

@@ -28,6 +28,14 @@ fn invalid_policy_fixtures_match_diagnostic_goldens() {
     }
 }
 
+#[test]
+fn historical_filtered_exists_compiled_fixture_remains_readable() {
+    let value = load_json_fixture("fixtures/compiled/production-normalize-reduced.json").unwrap();
+    let policy = serde_json::from_value::<crate::CompiledPolicy>(value).unwrap();
+
+    assert_eq!(policy.slug, "production-normalize-reduced");
+}
+
 fn load_json_or_actual_message(
     path: &str,
     actual: &serde_json::Value,

@@ -31,7 +31,7 @@ policy "audio transcode opus" {
 static AUDIO_TRANSCODE_FLOW_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn audio_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
+async fn audio_transcode_flow_verifies_commits_and_authoritative_replan() {
     let _guard = AUDIO_TRANSCODE_FLOW_LOCK.lock().await;
     require_command("ffmpeg", &["-version"]);
     require_command("ffprobe", &["-version"]);
@@ -99,7 +99,7 @@ async fn audio_transcode_flow_verifies_commits_and_replans_result_as_no_op() {
 
     let (result_file_version_id, result_media_snapshot_id) =
         assert_audio_transcode_execution_result(&url, &out_dir, &executed).await;
-    assert_result_replans_as_no_op(
+    assert_result_replans_from_authoritative_snapshot(
         &cp,
         policy.version.id,
         result_file_version_id,
@@ -437,7 +437,7 @@ async fn assert_audio_transcode_succeeded_event(
     );
 }
 
-async fn assert_result_replans_as_no_op(
+async fn assert_result_replans_from_authoritative_snapshot(
     cp: &ControlPlane,
     policy_version_id: voom_core::PolicyVersionId,
     result_file_version_id: FileVersionId,
@@ -458,9 +458,15 @@ async fn assert_result_replans_as_no_op(
         .await
         .unwrap();
     assert_eq!(result_plan.plan.nodes.len(), 1);
+    // Stored planning trusts the durable raw probe alias, not the cached "mkv".
+    // Canonical probe-container mapping is tracked separately.
     assert_eq!(
         result_plan.plan.nodes[0].status,
-        voom_plan::NodeStatus::NoOp
+        voom_plan::NodeStatus::Planned
+    );
+    assert_eq!(
+        result_plan.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "matroska,webm"
     );
 }
 
