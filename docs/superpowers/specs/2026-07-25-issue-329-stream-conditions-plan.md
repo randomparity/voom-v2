@@ -44,6 +44,12 @@ Red tests:
   from the same active chain-tip snapshot;
 - stored plan, report, fresh execution, and resume resolve an unlinked durable
   `FileVersion` target from the same active chain-tip snapshot;
+- the stored adapter returns projected facts plus the selected version,
+  file-asset, active-version, and snapshot authority records;
+- fresh and resume construct first-phase files from those records without a
+  second active-tip or snapshot read;
+- an authority result remains the first-phase source when a later repository
+  read would return a different tip (#352 owns later revalidation);
 - the active version and latest snapshot are returned by one repository
   statement, and the snapshot belongs to that version;
 - the repository selects greatest live version id and greatest snapshot id,
@@ -62,9 +68,12 @@ Implementation:
 - route both production snapshot projections through it;
 - add one identity-repository read that returns an active chain tip and its
   latest snapshot as a coherent per-file pair;
-- add an async stored-input adapter that validates original link provenance,
-  resolves active chain-tip snapshots, and projects complete current facts;
-- use the adapter from stored plan, report, and coordinator entry points.
+- add an async stored-input adapter that returns the projected draft and
+  authority-bearing resolved-file records;
+- use the projected draft from stored plan and report entry points;
+- thread the resolved-file records through coordinator preparation and build
+  first-phase state from them without calling `initial_phase_files`; and
+- remove the superseded duplicate initial-resolution helper.
 
 Expected failure before implementation:
 
@@ -106,6 +115,10 @@ Red tests:
 - canonical stored compiled shapes remain deserializable;
 - stored `exists` and `count` objects with missing or extra keys fail with a
   deterministic JSON path before serde can erase the shape;
+- raw traversal reaches phase guards, nested conditional operations, rules,
+  nested rule operations, and every Boolean child;
+- unrelated metadata, provenance, profile, and compiled-value objects tagged
+  `exists` or `count` remain readable;
 - unknown fields outside `exists` and `count` retain their current behavior
   under #344;
 - unpublished compiled stream shapes fail plan generation;
@@ -124,6 +137,10 @@ Implementation:
 - narrow source validation only for `Exists` and `Count`;
 - add a bounded raw-JSON gate for stored objects tagged `exists` or `count`
   before `deserialize_stored_compiled_policy` invokes serde;
+- traverse only schema-defined phase guard, operation/rule condition, nested
+  operation, and Boolean-child edges in deterministic array order;
+- emit JSON-pointer paths for raw-shape failures without descending into
+  arbitrary JSON-bearing fields;
 - traverse all phase and operation condition placements before planning;
 - accept published stream shapes only on ordinary condition surfaces; and
 - reject stream conditions in `run_if` without changing other compiled

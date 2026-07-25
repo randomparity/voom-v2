@@ -48,8 +48,8 @@ and invalid provider indexes fail the projection.
 Stored policy inputs duplicate stream facts in `stream_summary` and may link
 their original snapshot through `existing_media_snapshot_id`. Historical
 projection normalized a missing stream array to an empty array. Existing
-coordinator semantics use that link to select a file lineage, then plan every
-phase from its active chain tip and latest durable snapshot.
+coordinator semantics use every `FileVersion` target to select a file lineage,
+then plan each phase from its active chain tip and latest durable snapshot.
 
 ## Planning-input authority
 
@@ -58,9 +58,16 @@ The control plane adds one async adapter used by all stored planning paths:
 ```text
 PolicyInputSet
     -> validate original links and resolve current snapshots
-    -> PolicyInputSetDraft
+    -> StoredPlanningInput {
+           draft: PolicyInputSetDraft,
+           files: [ResolvedFileInput]
+       }
     -> voom-plan
 ```
+
+Each `ResolvedFileInput` carries the member ordinal, selected input-set
+`FileVersion` id, file-asset id, complete resolved active `FileVersion`, and
+exact latest `MediaSnapshot` returned by the authority read.
 
 For each media input:
 
@@ -79,10 +86,13 @@ For each media input:
 6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
    resolved.
 
-The adapter is used by stored plan display, compliance reporting, and
-coordinator preparation. Store-free fixture planning continues to trust its
-explicit draft. Invalid durable links remain readable but fail this adapter;
-#353 separately owns generic write-time validation.
+Stored plan display and compliance reporting pass `draft` to `voom-plan`.
+Coordinator preparation also retains `files`: it derives branch ids from the
+resolved active versions and constructs first-phase `PhaseFile` state directly
+from those records. Fresh and resume do not repeat the initial active-tip or
+snapshot read. Store-free fixture planning continues to trust its explicit
+draft. Invalid durable links remain readable but fail this adapter; #353
+separately owns generic write-time validation.
 
 The coordinator already projects active snapshots for each phase under ADRs
 0005, 0007, and 0008. Read-only plan/report paths adopt that same authority.
@@ -116,8 +126,8 @@ inventory unavailable.
 
 The retained video-count sentinel preserves existing container/remux
 eligibility. Stream conditions never use it as evidence of a known inventory.
-Existing cached rows need no rewrite because linked planning no longer treats
-them as current facts.
+Existing cached rows need no rewrite because durable `FileVersion` planning no
+longer treats them as current facts.
 
 ## Source boundary
 
@@ -155,12 +165,26 @@ parser-only stream forms without claiming the broader compiled-policy contract
 owned by #344.
 
 Before stored compiled JSON is deserialized into `CompiledPolicy`, a bounded
-raw-value gate recursively checks objects tagged `type: "exists"` or
-`type: "count"`. `exists` requires `type` and `target`, allows optional
+raw-value gate walks only schema-defined condition slots:
+
+- each `phases[i].run_if` and `phases[i].skip_if`;
+- `condition` on a conditional operation;
+- each `rules[j].condition` on a rules operation;
+- nested operations inside conditional operations and rules; and
+- `inner` for `not` plus `conditions[k]` for `and` and `or`.
+
+The operation walk follows phase, operation, and rule array order. Within a
+phase it visits `run_if`, `skip_if`, then operations. It never descends into
+metadata, provenance flags, resolved profiles, compiled values, or other
+non-condition fields.
+
+At those slots, objects tagged `type: "exists"` or `type: "count"` receive the
+bounded shape check. `exists` requires `type` and `target`, allows optional
 `filter`, and allows no other keys. `count` requires exactly `type`, `target`,
-`op`, and `value`. Missing required or extra keys fail with a deterministic
-JSON path before serde can discard them. Typed eligibility then enforces the
-published values and placements.
+`op`, and `value`. Missing required or extra keys fail before serde can discard
+them. Raw paths use deterministic JSON-pointer form, such as
+`/phases/0/operations/1/rules/0/condition/conditions/1`. Typed eligibility uses
+the semantic phase/placement path described below.
 
 The raw gate is not a complete parallel compiled schema and does not rewrite
 JSON. It protects only the two variants made executable by #329. #344 remains
@@ -182,9 +206,12 @@ phase ordinal/name, guard or operation/rule placement, nested operation indexes,
 and Boolean child indexes. The message also includes the target, filter
 presence, and whether the condition appeared in `run_if`.
 
-The pass collects every rejection in policy traversal order. Both planner entry
-points return the same `PlanGenerationError` diagnostics. Stored preparation
-preserves the first diagnostic's message when converting it to the public
+Typed paths use a form such as
+`phase[0:"normalize"].operations[1].rules[0].condition.and[1]`. The pass uses
+the same phase, guard, operation, rule, and Boolean traversal order as the raw
+walk and collects every rejection in that order. Both planner entry points
+return the same `PlanGenerationError` diagnostics. Stored preparation preserves
+the first diagnostic's message when converting it to the public
 `PLAN_GENERATION_ERROR`; no new public error or diagnostic code is introduced.
 
 ## Evaluation semantics
@@ -260,6 +287,11 @@ Focused tests prove:
   deserialization can erase their shape;
 - stored plan, report, fresh execution, and resume resolve the same active
   chain-tip snapshot before their first phase;
+- coordinator preparation retains the resolved authority records and performs
+  no second initial-tip or snapshot read;
+- first-phase construction uses an injected authority result even when a later
+  repository read would return another tip; #352 owns future pre-dispatch
+  revalidation;
 - each resolved active-version/latest-snapshot pair comes from one repository
   statement and the snapshot belongs to the returned version;
 - a malformed newest snapshot remains authoritative rather than falling back
@@ -274,7 +306,9 @@ Focused tests prove:
 - an invalid stream leaf in a later phase fails before any earlier phase opens
   a job or dispatches;
 - direct and stored planner entry points report the same deterministic
-  eligibility diagnostics and structural paths;
+  typed-eligibility diagnostics and semantic paths;
+- raw-shape failures report deterministic JSON-pointer paths while unrelated
+  metadata and provenance objects tagged `exists` or `count` remain readable;
 - provenance failures have identical codes and context across stored plan,
   report, fresh execution, and resume; and
 - previously serialized canonical compiled policies remain readable.
