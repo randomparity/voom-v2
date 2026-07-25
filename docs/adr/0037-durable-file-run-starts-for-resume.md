@@ -47,16 +47,21 @@ against the prior job:
 
 1. Load the prior job's run-start rows and phase rows.
 2. Require exactly one run-start row for every current branch and no unmatched
-   prior branch. Missing, duplicate, or mismatched state fails closed before a
-   new job opens.
+   prior branch. Resolve each starting version and require its file-asset id to
+   equal the current branch's selected lineage. Every committed prior phase row
+   used for that branch must produce a version from the same lineage. Missing,
+   duplicate, or mismatched state fails closed before a new job opens.
 3. Use the highest prior phase row plus one as the next ordinal. With no prior
    row, use `starting_phase_ordinal`.
 4. Use the produced version of the highest committed prior row as the recorded
    tip. With no committed row, use `starting_file_version_id`.
-5. Compare that recorded tip with the current authoritative tip. A difference
+5. Determine terminality before considering backfill. A prior blocked row or a
+   next ordinal at or beyond the phase count is terminal. Its current tip must
+   equal the recorded tip; a difference is mismatched state, not evidence for a
+   nonexistent later phase. A valid terminal branch records phase count as the
+   new job's starting ordinal.
+6. Only a non-terminal branch whose current tip differs from the recorded tip
    backfills one committed row at the next ordinal and advances the ordinal.
-6. A prior blocked row, or an ordinal at or beyond the phase count, records a
-   terminal start at the phase count for the new job.
 
 The new job's run-start rows record the post-reconciliation active version and
 next ordinal. Job creation, `job.opened`, all run-start rows, and any
@@ -84,6 +89,11 @@ This decision supersedes only these ADR 0009 details:
 ADR 0009's new-job ownership, explicit `prior_job_id`, terminal blocked files,
 single-writer assumption, one-row crash backfill, and heterogeneous phase loop
 remain unchanged.
+
+It also supersedes ADR 0007's rejection of a new phase-cursor table and its
+conclusion that no cursor is needed, but only for this immutable per-run
+starting cursor. ADR 0007's per-file phase rows remain the sole durable record
+that a phase completed; the new table is not updated as phases advance.
 
 ## Consequences
 

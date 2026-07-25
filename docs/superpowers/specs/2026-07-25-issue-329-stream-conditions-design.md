@@ -154,14 +154,19 @@ resume_ordinal = 0
 Resume resolves the current authority once, then reads the prior job's
 run-start and phase rows before opening a new job. For each branch:
 
+- the prior starting version and every committed-row version must belong to
+  the current selected file lineage;
 - highest phase row plus one determines the next ordinal;
 - with no row, the prior run's starting ordinal determines it;
 - highest committed row determines the recorded tip;
-- with no committed row, the prior run's starting version determines it; and
-- a current tip different from the recorded tip backfills exactly one phase
-  and advances the ordinal.
+- with no committed row, the prior run's starting version determines it;
+- a blocked row or next ordinal at `phase_count` is terminal and requires the
+  current tip to equal the recorded tip; and
+- only a non-terminal current tip different from the recorded tip backfills
+  exactly one phase and advances the ordinal.
 
-Missing or mismatched prior run-start rows fail with
+Missing, branch-mismatched, lineage-mismatched, or terminal-tip-mismatched
+prior state fails with
 `POLICY_EXECUTION_ERROR` and prefix `resume state is incomplete` before the new
 job opens. Pre-migration jobs without run-start rows fail rather than guessing.
 
@@ -398,6 +403,10 @@ Focused tests prove:
   resumed job wrote no ordinary phase row;
 - pre-migration, missing, duplicate, or branch-mismatched run-start state fails
   before a new job opens;
+- run-start and committed-row versions from another file lineage fail before a
+  new job opens;
+- blocked and complete cursors never backfill an out-of-range phase, and a
+  changed terminal tip fails closed;
 - first-phase construction uses an injected authority result even when a later
   repository read would return another tip; #352 owns future pre-dispatch
   revalidation;
