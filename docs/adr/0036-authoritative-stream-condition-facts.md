@@ -181,8 +181,19 @@ meaning changes in this issue. Other pre-existing compiled condition behavior
 is unchanged.
 
 Stored compiled JSON receives a bounded raw-shape gate before typed
-deserialization can discard unknown fields. The gate recursively visits objects
-tagged `type: "exists"` or `type: "count"`:
+deserialization can discard unknown fields. It walks only:
+
+- `run_if` and `skip_if` on each phase;
+- conditions and nested operations on conditional operations;
+- each rule condition and its nested operations on rules operations; and
+- `inner` on `not` plus `conditions` elements on `and` and `or`.
+
+Traversal follows phase, guard, operation, rule, and Boolean array order. It
+does not descend into metadata, provenance flags, resolved profiles, compiled
+values, or other non-condition fields.
+
+At those condition slots, objects tagged `type: "exists"` or `type: "count"`
+receive the shape check:
 
 - `exists` requires `type` and `target`, permits optional `filter`, and rejects
   every other key;
