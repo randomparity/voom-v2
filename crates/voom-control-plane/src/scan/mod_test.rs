@@ -554,9 +554,11 @@ async fn bootstrap_worker_id_is_used_for_launch_dispatch_and_persistence() {
         .unwrap();
 
     let launched_worker_id = launcher.launched()[0];
-    assert_eq!(
-        launcher.builtin_name_seen_at_launch.as_deref(),
-        Some("builtin.ffprobe")
+    assert!(
+        launcher
+            .builtin_name_seen_at_launch
+            .as_deref()
+            .is_some_and(|name| name.starts_with("builtin.ffprobe-"))
     );
     assert_eq!(launcher.dispatched(), vec![launched_worker_id]);
     assert_eq!(report.files[0].probe_worker_id, Some(launched_worker_id));

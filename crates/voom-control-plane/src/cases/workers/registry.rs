@@ -24,6 +24,37 @@ use crate::node_auth::verify_node_token;
 
 use super::{append_event, begin_tx, commit_tx};
 
+const BUILTIN_FFPROBE_NAME: &str = "builtin.ffprobe";
+const LOCAL_FFMPEG_NAME: &str = "local-ffmpeg";
+const LOCAL_MKVTOOLNIX_NAME: &str = "local-mkvtoolnix";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReservedProvider {
+    Ffmpeg,
+    Mkvtoolnix,
+    Ffprobe,
+}
+
+pub(crate) fn reserved_provider(name: &str) -> Option<ReservedProvider> {
+    if is_name_or_incarnation(name, LOCAL_FFMPEG_NAME) {
+        return Some(ReservedProvider::Ffmpeg);
+    }
+    if is_name_or_incarnation(name, LOCAL_MKVTOOLNIX_NAME) {
+        return Some(ReservedProvider::Mkvtoolnix);
+    }
+    if is_name_or_incarnation(name, BUILTIN_FFPROBE_NAME) {
+        return Some(ReservedProvider::Ffprobe);
+    }
+    None
+}
+
+fn is_name_or_incarnation(name: &str, base: &str) -> bool {
+    name == base
+        || name
+            .strip_prefix(base)
+            .is_some_and(|suffix| suffix.starts_with('-'))
+}
+
 #[derive(Debug)]
 pub struct RegisterWorkerForNodeInput {
     pub node_id: NodeId,
@@ -58,14 +89,50 @@ impl ControlPlane {
     /// # Errors
     /// Propagates `SqliteWorkerRepo::register_in_tx` and event-append errors.
     pub async fn register_worker(&self, input: NewWorker) -> Result<Worker, VoomError> {
+        reject_reserved_provider(&input.name)?;
         let mut tx = begin_tx(&self.pool).await?;
-        let worker = self.workers.register_in_tx(&mut tx, input.clone()).await?;
+        let worker = self
+            .register_worker_with_event_in_tx(&mut tx, input)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(worker)
+    }
+
+    pub(crate) async fn register_supervisor_worker(
+        &self,
+        input: NewWorker,
+    ) -> Result<Worker, VoomError> {
+        validate_supervisor_worker(&input)?;
+        let mut tx = begin_tx(&self.pool).await?;
+        let worker = self
+            .register_worker_with_event_in_tx(&mut tx, input)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(worker)
+    }
+
+    pub(crate) async fn register_supervisor_worker_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewWorker,
+    ) -> Result<Worker, VoomError> {
+        validate_supervisor_worker(&input)?;
+        self.register_worker_with_event_in_tx(tx, input).await
+    }
+
+    async fn register_worker_with_event_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        input: NewWorker,
+    ) -> Result<Worker, VoomError> {
+        let registered_at = input.registered_at;
+        let worker = self.workers.register_in_tx(tx, input).await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Worker,
             Some(worker.id.0),
-            input.registered_at,
+            registered_at,
             Event::WorkerRegistered(WorkerRegisteredPayload {
                 worker_id: worker.id.0,
                 name: worker.name.clone(),
@@ -73,7 +140,6 @@ impl ControlPlane {
             }),
         )
         .await?;
-        commit_tx(tx).await?;
         Ok(worker)
     }
 
@@ -86,6 +152,7 @@ impl ControlPlane {
         &self,
         input: RegisterWorkerForNodeInput,
     ) -> Result<Worker, VoomError> {
+        reject_reserved_provider(&input.name)?;
         let now = self.clock().now();
         let mut tx = begin_tx(&self.pool).await?;
         let auth = self
@@ -342,6 +409,31 @@ impl ControlPlane {
         commit_tx(tx).await?;
         Ok(worker)
     }
+}
+
+fn reject_reserved_provider(name: &str) -> Result<(), VoomError> {
+    let Some(provider) = reserved_provider(name) else {
+        return Ok(());
+    };
+    Err(VoomError::Conflict(format!(
+        "worker name {name:?} is reserved for the {provider:?} supervisor"
+    )))
+}
+
+fn validate_supervisor_worker(input: &NewWorker) -> Result<(), VoomError> {
+    if reserved_provider(&input.name).is_none() {
+        return Err(VoomError::Conflict(format!(
+            "supervisor worker name {:?} is not reserved",
+            input.name
+        )));
+    }
+    if input.kind != WorkerKind::Local || input.node_id.is_some() {
+        return Err(VoomError::Conflict(format!(
+            "supervisor worker {:?} must be node-less and local",
+            input.name
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

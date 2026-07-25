@@ -198,11 +198,13 @@ async fn scan_reuses_builtin_ffprobe_worker_row() {
     insta::assert_json_snapshot!("scan_reuses_builtin_ffprobe_worker_row", json);
 
     let pool = voom_store::connect(&seeded.url).await.unwrap();
-    let worker_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workers WHERE name = ?")
-        .bind("builtin.ffprobe")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let worker_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workers \
+         WHERE name = 'builtin.ffprobe' OR name LIKE 'builtin.ffprobe-%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(worker_count, 1);
     let probed_by: Vec<i64> =
         sqlx::query_scalar("SELECT DISTINCT probed_by FROM media_snapshots ORDER BY probed_by")

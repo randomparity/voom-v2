@@ -138,7 +138,7 @@ impl ControlPlane {
 
         let secret = random_hex_128();
         let worker = self
-            .register_worker(NewWorker {
+            .register_supervisor_worker(NewWorker {
                 name: format!("{}-{}", kind.base_name(), random_hex_128()),
                 kind: WorkerKind::Local,
                 registered_at: self.clock().now(),
