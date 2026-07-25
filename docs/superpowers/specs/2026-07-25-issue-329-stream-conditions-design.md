@@ -156,6 +156,11 @@ run-start and phase rows before opening a new job. For each branch:
 
 - the prior starting version and every committed-row version must belong to
   the current selected file lineage;
+- phase rows must be a contiguous tail beginning at the stored starting
+  ordinal, optionally preceded when `start > 0` by one committed
+  reconciliation seed with empty ticket ids at `start - 1`;
+- every row ordinal must be below `phase_count`, and a blocked row must end the
+  tail;
 - highest phase row plus one determines the next ordinal;
 - with no row, the prior run's starting ordinal determines it;
 - highest committed row determines the recorded tip;
@@ -168,7 +173,9 @@ run-start and phase rows before opening a new job. For each branch:
 Missing, branch-mismatched, lineage-mismatched, or terminal-tip-mismatched
 prior state fails with
 `POLICY_EXECUTION_ERROR` and prefix `resume state is incomplete` before the new
-job opens. Pre-migration jobs without run-start rows fail rather than guessing.
+job opens. Pre-migration jobs with file branches fail rather than guessing. A
+zero-file prior job needs no per-file cursor and retains its existing zero-work
+behavior.
 
 The new job records the post-reconciliation current version and next ordinal
 for every branch, including terminal branches at `phase_count`. Job creation,
@@ -401,8 +408,11 @@ Focused tests prove:
   phase cursor atomically with the new job;
 - chained resume preserves a nonzero starting ordinal when the intermediate
   resumed job wrote no ordinary phase row;
-- pre-migration, missing, duplicate, or branch-mismatched run-start state fails
-  before a new job opens;
+- pre-migration file jobs and missing, duplicate, or branch-mismatched
+  run-start state fail before a new job opens;
+- zero-file jobs require no run-start row and retain zero-work resume behavior;
+- prior rows with gaps, out-of-range ordinals, rows before `start - 1`, or rows
+  after a blocked outcome fail before a new job opens;
 - run-start and committed-row versions from another file lineage fail before a
   new job opens;
 - blocked and complete cursors never backfill an out-of-range phase, and a

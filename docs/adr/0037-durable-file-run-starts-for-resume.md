@@ -33,11 +33,13 @@ starting_file_version_id
 starting_phase_ordinal
 ```
 
-The primary key is `(job_id, branch_id)`. The version references
-`file_versions`; the ordinal is non-negative. The branch identifier retains
-ADR 0009's existing file-to-row matching contract. The table contains no
-policy facts, snapshots, or mutable cursor: it records only the immutable
-starting point of one run.
+The primary key is `(job_id, branch_id)`. `job_id` is a non-null foreign key to
+`jobs(id)` with `ON DELETE CASCADE`, matching the job-owned workflow-summary
+tables. `starting_file_version_id` is a non-null foreign key to
+`file_versions(id)` with `ON DELETE RESTRICT`. The ordinal is non-negative. The
+branch identifier retains ADR 0009's existing file-to-row matching contract.
+The table contains no policy facts, snapshots, or mutable cursor: it records
+only the immutable starting point of one run.
 
 Fresh preparation records the authoritative active version returned by
 ADR 0036 and phase ordinal zero.
@@ -51,16 +53,23 @@ against the prior job:
    equal the current branch's selected lineage. Every committed prior phase row
    used for that branch must produce a version from the same lineage. Missing,
    duplicate, or mismatched state fails closed before a new job opens.
-3. Use the highest prior phase row plus one as the next ordinal. With no prior
-   row, use `starting_phase_ordinal`.
-4. Use the produced version of the highest committed prior row as the recorded
+3. Validate the prior rows against the starting ordinal `s` and phase count.
+   Every row ordinal is below the phase count. When `s > 0`, rows may contain
+   one committed reconciliation seed with empty ticket ids at `s - 1`,
+   followed by a contiguous ordinary tail beginning at `s`; either part may be
+   absent. No other earlier row or gap is valid, and a blocked row must end the
+   tail.
+4. Use the highest prior phase row plus one as the next ordinal. With no prior
+   row, use `starting_phase_ordinal`. The validated seed-only case also yields
+   the starting ordinal.
+5. Use the produced version of the highest committed prior row as the recorded
    tip. With no committed row, use `starting_file_version_id`.
-5. Determine terminality before considering backfill. A prior blocked row or a
+6. Determine terminality before considering backfill. A prior blocked row or a
    next ordinal at or beyond the phase count is terminal. Its current tip must
    equal the recorded tip; a difference is mismatched state, not evidence for a
    nonexistent later phase. A valid terminal branch records phase count as the
    new job's starting ordinal.
-6. Only a non-terminal branch whose current tip differs from the recorded tip
+7. Only a non-terminal branch whose current tip differs from the recorded tip
    backfills one committed row at the next ordinal and advances the ordinal.
 
 The new job's run-start rows record the post-reconciliation active version and
@@ -76,9 +85,12 @@ single authority result. `version_id` is the current active version and
 durable run-start record instead.
 
 Jobs created before this schema exists have no trustworthy starting cursor.
-Resume rejects such a job with `POLICY_EXECUTION_ERROR` and the stable prefix
-`resume state is incomplete` before opening another job. It does not guess
-from the input-set selection or current tip.
+When the current request contains at least one file branch, resume rejects such
+a job with `POLICY_EXECUTION_ERROR` and the stable prefix
+`resume state is incomplete` before opening another job. It does not guess from
+the input-set selection or current tip. A zero-file run needs no per-file
+cursor and retains its existing zero-work behavior; absence of rows is complete
+state for that case.
 
 This decision supersedes only these ADR 0009 details:
 
@@ -103,8 +115,8 @@ that a phase completed; the new table is not updated as phases advance.
 - Resume state becomes explicit and inspectable instead of reconstructed from
   facts that may predate the run.
 - One narrow durable table and transactional job-opening path are added.
-- Pre-migration jobs cannot be resumed safely and fail with an actionable
-  error instead of risking duplicate or skipped mutation.
+- Pre-migration jobs with file branches cannot be resumed safely and fail with
+  an actionable error instead of risking duplicate or skipped mutation.
 
 ## Considered and rejected alternatives
 
