@@ -199,7 +199,14 @@ fn compile_policy_preserves_parenthesized_boolean_conditions() {
 
     assert_eq!(conditions.len(), 2);
     assert!(matches!(conditions[0], CompiledCondition::Or { .. }));
-    assert!(matches!(conditions[1], CompiledCondition::Count { .. }));
+    assert_eq!(
+        conditions[1],
+        CompiledCondition::Count {
+            target: crate::TrackTarget::Audio,
+            op: crate::ComparisonOp::Gt,
+            value: 0,
+        }
+    );
 }
 
 #[test]

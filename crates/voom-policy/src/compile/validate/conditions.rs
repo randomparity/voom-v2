@@ -65,7 +65,7 @@ impl Validator<'_> {
         match tokens.as_slice() {
             ["exists", target, ..] => {
                 self.validate_track_target(statement.span(), target);
-                matches!(tokens.as_slice(), ["exists", "audio" | "subtitle"])
+                tokens.len() == 2 && is_published_stream_target(target)
             }
             ["count", target, op, value] => {
                 self.validate_track_target(statement.span(), target);
@@ -354,12 +354,12 @@ fn is_track_target_name(target: &str) -> bool {
 
 #[must_use]
 fn is_published_stream_target(target: &str) -> bool {
-    matches!(target, "audio" | "subtitle")
+    target == "audio" || target == "subtitle"
 }
 
 #[must_use]
 fn is_numeric_comparison_op(token: &str) -> bool {
-    matches!(token, "==" | "!=" | "<" | "<=" | ">" | ">=")
+    token == "==" || token == "!=" || token == "<" || token == "<=" || token == ">" || token == ">="
 }
 
 #[must_use]
