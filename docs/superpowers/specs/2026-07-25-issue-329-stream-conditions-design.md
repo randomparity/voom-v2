@@ -26,7 +26,8 @@ Deferred with tracked ownership:
 - rollback runbook corrections: #351;
 - per-file `run_if` history: #330; and
 - filtered remux execution: #331 and #332; and
-- plan-through-dispatch lineage isolation: #352.
+- plan-through-dispatch lineage isolation: #352; and
+- generic policy-input write validation: #353.
 
 #329 does not change track-filter validation, compiled JSON shapes, serde
 strictness, database schema, migrations, rollback procedures, or parser
@@ -66,8 +67,9 @@ For each media input:
 2. If present, load that exact snapshot identifier.
 3. Require the media input target to be that snapshot's exact file version.
 4. Resolve the target version's file asset, its active chain tip, and that
-   version's latest snapshot with one identity-repository statement. The
-   returned snapshot must belong to the returned active version.
+   version's latest snapshot with one identity-repository statement. Select the
+   non-retired version with the greatest id, then the snapshot for that exact
+   version with the greatest id.
 5. Replace the complete media input with a projection of the current snapshot,
    preserving its ordinal.
 6. Fail with `PLAN_GENERATION_ERROR` when provenance or current facts cannot be
@@ -75,8 +77,8 @@ For each media input:
 
 The adapter is used by stored plan display, compliance reporting, and
 coordinator preparation. Store-free fixture planning continues to trust its
-explicit draft. New control-plane writes reject invalid linked provenance
-before persistence.
+explicit draft. Invalid durable links remain readable but fail this adapter;
+#353 separately owns generic write-time validation.
 
 The coordinator already projects active snapshots for each phase under ADRs
 0005, 0007, and 0008. Read-only plan/report paths adopt that same authority.
@@ -89,6 +91,10 @@ transaction because policy conditions and operations never join facts from
 different files. A lineage can still advance after its pair is read; #352 owns
 that existing coordinator isolation boundary. This change does not add another
 read window or use cached facts during the existing one.
+
+The newest snapshot remains authoritative when its stream inventory is missing
+or malformed. The adapter never falls back to an older snapshot with valid
+facts.
 
 ## Projection contract
 
@@ -214,8 +220,6 @@ per file in #330.
   target file-version id when present, snapshot id, and snapshot file-version
   id when available.
 - Repository errors such as `DB_UNREACHABLE` propagate unchanged.
-- New writes use `NOT_FOUND` for a missing snapshot and `CONFLICT` for target
-  kind or file-version mismatch.
 - Unpublished compiled stream conditions fail with
   `PLAN_GENERATION_ERROR`, `invalid_planning_request`, the stable message
   prefix, and structural context before any node is emitted.
@@ -240,6 +244,8 @@ Focused tests prove:
   chain-tip snapshot before their first phase;
 - each resolved active-version/latest-snapshot pair comes from one repository
   statement and the snapshot belongs to the returned version;
+- a malformed newest snapshot remains authoritative rather than falling back
+  to an older valid snapshot;
 - post-commit phases use the produced version's refreshed snapshot;
 - link target mismatches fail planning;
 - unlinked and store-free inputs retain their supplied summary;

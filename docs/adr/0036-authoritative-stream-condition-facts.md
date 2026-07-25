@@ -59,6 +59,8 @@ Explicit exclusions:
 - Job-level isolation when a lineage advances after planning is owned by #352
   under #325. #329 makes each selected version/snapshot pair coherent but does
   not add a plan-through-dispatch concurrency guarantee.
+- Generic policy-input write validation is owned by #353 under #325. #329
+  rejects invalid durable links when they enter stored planning.
 
 An excluded concern remains blocking if #329 depends on it or makes it worse.
 
@@ -74,16 +76,17 @@ An excluded concern remains blocking if #329 depends on it or makes it worse.
    linked snapshot's `file_version_id`.
 4. After provenance validation, every stored plan, compliance report, fresh
    execution, and resumed execution resolves that file asset's active chain tip
-   and latest durable snapshot with one identity-repository read. The returned
-   version and snapshot belong to the same SQLite statement snapshot, and the
-   snapshot belongs to that version. The control plane projects the complete
-   current `MediaSnapshotInput`, retaining the input member's ordinal.
+   and latest durable snapshot with one identity-repository read. The operation
+   selects the non-retired `file_versions` row with the greatest identifier,
+   then the `media_snapshots` row for that exact version with the greatest
+   identifier. The returned pair belongs to one SQLite statement snapshot. The
+   control plane projects the complete current `MediaSnapshotInput`, retaining
+   the input member's ordinal.
 5. The first execution phase therefore uses the same current-fact rule as a
    read-only plan or report. After a committed phase, the existing coordinator
    refreshes from the produced version's snapshot before planning the next
    phase, as required by ADRs 0005, 0007, and 0008.
-6. New control-plane writes validate the original link relationship.
-   Historical mismatches remain repository-readable but cannot be planned.
+6. Invalid links remain repository-readable but cannot be planned.
 
 The input set is a durable selection of file lineage, not an immutable copy of
 observed media facts. This is existing coordinator behavior made consistent
@@ -96,6 +99,11 @@ committed instants cannot combine them into one branch decision. The selected
 version may still be superseded after the read and before dispatch; #352 owns
 that pre-existing coordinator isolation question. #329 neither widens that
 window nor substitutes cached facts inside it.
+
+The selected newest snapshot remains authoritative when its stream inventory is
+missing or malformed. Planning does not fall back to an older valid snapshot:
+doing so would hide the latest observation and make entry points disagree about
+which durable facts are current.
 
 ### Stream projection
 
@@ -212,11 +220,6 @@ The message names the input-set identifier, member ordinal, target kind and
 file-version identifier when present, snapshot identifier, and snapshot
 file-version identifier when available. Repository failures such as
 `DB_UNREACHABLE` propagate unchanged.
-
-New writes return `NOT_FOUND` when the named snapshot does not exist and
-`CONFLICT` for a non-file target or file-version mismatch, matching the
-existing scan-import contract. They include the same member and identifier
-context.
 
 ## Consequences
 

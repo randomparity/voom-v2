@@ -44,6 +44,8 @@ Red tests:
   from the same active chain-tip snapshot;
 - the active version and latest snapshot are returned by one repository
   statement, and the snapshot belongs to that version;
+- the repository selects greatest live version id and greatest snapshot id,
+  with no fallback from malformed newest facts;
 - post-commit phases use the produced version's refreshed snapshot;
 - missing, non-file-version, and mismatched links fail every stored read path
   with the same error class and identifier context;
@@ -59,8 +61,7 @@ Implementation:
   latest snapshot as a coherent per-file pair;
 - add an async stored-input adapter that validates original link provenance,
   resolves active chain-tip snapshots, and projects complete current facts;
-- use the adapter from stored plan, report, and coordinator entry points; and
-- validate link provenance on new control-plane writes.
+- use the adapter from stored plan, report, and coordinator entry points.
 
 Expected failure before implementation:
 
@@ -188,6 +189,8 @@ Review focus:
 - original link provenance and active chain-tip authority;
 - coherent per-file version/snapshot reads without claiming input-set-wide or
   plan-through-dispatch isolation (#352);
+- read-side provenance validation without absorbing generic write hardening
+  (#353);
 - missing versus empty facts;
 - remux non-regression for unavailable inventories;
 - accidental activation of filtered/video/attachment conditions;
