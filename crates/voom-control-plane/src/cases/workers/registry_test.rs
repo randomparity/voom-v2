@@ -55,6 +55,103 @@ async fn register_worker_emits_worker_registered() {
 }
 
 #[tokio::test]
+async fn general_registration_rejects_supervisor_reserved_names() {
+    let (cp, _tmp) = cp().await;
+
+    for name in [
+        "local-ffmpeg",
+        "local-ffmpeg-",
+        "local-ffmpeg-test",
+        "local-mkvtoolnix",
+        "local-mkvtoolnix-",
+        "local-mkvtoolnix-test",
+        "builtin.ffprobe",
+        "builtin.ffprobe-",
+        "builtin.ffprobe-test",
+    ] {
+        let err = cp
+            .register_worker(NewWorker {
+                name: name.to_owned(),
+                kind: WorkerKind::Synthetic,
+                registered_at: T0,
+                node_id: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::Conflict);
+    }
+}
+
+#[tokio::test]
+async fn node_registration_rejects_supervisor_reserved_names() {
+    let (cp, _clock, _tmp) = cp_with_manual_clock(T0).await;
+    let registered = cp
+        .register_node(register_node_input("node-a"))
+        .await
+        .unwrap();
+
+    for name in [
+        "local-ffmpeg-test",
+        "local-mkvtoolnix-test",
+        "builtin.ffprobe",
+        "builtin.ffprobe-test",
+    ] {
+        let err = cp
+            .register_worker_for_node(worker_for_node_input(
+                registered.node.id,
+                registered.token.expose_secret(),
+                name,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_code(), ErrorCode::Conflict);
+    }
+
+    assert_eq!(worker_rows(&cp).await.len(), 0);
+    assert_eq!(worker_events(&cp).await.len(), 0);
+}
+
+#[tokio::test]
+async fn supervisor_registration_requires_reserved_node_less_local_shape() {
+    let (cp, _tmp) = cp().await;
+
+    let wrong_kind = cp
+        .register_supervisor_worker(NewWorker {
+            name: "local-ffmpeg-test".to_owned(),
+            kind: WorkerKind::Synthetic,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(wrong_kind.error_code(), ErrorCode::Conflict);
+
+    let unreserved = cp
+        .register_supervisor_worker(NewWorker {
+            name: "ordinary-worker".to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(unreserved.error_code(), ErrorCode::Conflict);
+
+    let worker = cp
+        .register_supervisor_worker(NewWorker {
+            name: "local-ffmpeg-test".to_owned(),
+            kind: WorkerKind::Local,
+            registered_at: T0,
+            node_id: None,
+        })
+        .await
+        .unwrap();
+    let events = worker_events(&cp).await;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].envelope.subject_id, Some(worker.id.0));
+}
+
+#[tokio::test]
 async fn record_capability_emits_worker_capability_recorded() {
     let (cp, _tmp) = cp().await;
     let w = cp

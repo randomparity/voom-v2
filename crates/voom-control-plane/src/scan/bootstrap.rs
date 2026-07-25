@@ -4,31 +4,50 @@ use voom_store::repo::workers::{
 };
 
 use crate::ControlPlane;
+use crate::worker_process::random_hex_128;
 
 const BUILTIN_FFPROBE_WORKER_NAME: &str = "builtin.ffprobe";
+const BUILTIN_FFPROBE_INCARNATION_PREFIX: &str = "builtin.ffprobe-";
+
 pub async fn ensure_builtin_ffprobe_worker_in_tx(
     control_plane: &ControlPlane,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> Result<Worker, VoomError> {
-    let worker = match control_plane
+    let live_workers = control_plane
         .workers
-        .get_by_name_in_tx(tx, BUILTIN_FFPROBE_WORKER_NAME)
-        .await?
-    {
-        Some(worker) => worker,
-        None => {
+        .list_live_by_name_namespace_in_tx(
+            tx,
+            BUILTIN_FFPROBE_WORKER_NAME,
+            BUILTIN_FFPROBE_INCARNATION_PREFIX,
+        )
+        .await?;
+    let worker = match live_workers.as_slice() {
+        [] => {
             control_plane
-                .workers
-                .register_in_tx(
+                .register_supervisor_worker_in_tx(
                     tx,
                     NewWorker {
-                        name: BUILTIN_FFPROBE_WORKER_NAME.to_owned(),
+                        name: format!("{BUILTIN_FFPROBE_INCARNATION_PREFIX}{}", random_hex_128()),
                         kind: WorkerKind::Local,
                         registered_at: control_plane.clock().now(),
                         node_id: None,
                     },
                 )
                 .await?
+        }
+        [worker] => worker.clone(),
+        [first, second, rest @ ..] => {
+            let mut identities = vec![
+                format!("{}:{}", first.id.0, first.name),
+                format!("{}:{}", second.id.0, second.name),
+            ];
+            for worker in rest {
+                identities.push(format!("{}:{}", worker.id.0, worker.name));
+            }
+            return Err(VoomError::Conflict(format!(
+                "multiple live built-in ffprobe workers violate the reserved identity: {}",
+                identities.join(", ")
+            )));
         }
     };
 

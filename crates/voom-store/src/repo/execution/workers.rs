@@ -334,6 +334,28 @@ impl SqliteWorkerRepo {
         Ok(out)
     }
 
+    pub async fn list_live_by_name_namespace_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        legacy_name: &str,
+        incarnation_prefix: &str,
+    ) -> Result<Vec<Worker>, VoomError> {
+        let rows = sqlx::query(
+            "SELECT id, node_id, name, kind, status, registered_at, last_seen_at, retired_at, epoch \
+             FROM workers \
+             WHERE (name = ? OR substr(name, 1, length(?)) = ?) \
+               AND status IN ('registered', 'active') \
+             ORDER BY registered_at ASC, id ASC",
+        )
+        .bind(legacy_name)
+        .bind(incarnation_prefix)
+        .bind(incarnation_prefix)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| VoomError::database_context("workers list live name namespace", e))?;
+        rows.iter().map(row_to_worker).collect()
+    }
+
     pub async fn get_inspection(
         &self,
         id: WorkerId,
