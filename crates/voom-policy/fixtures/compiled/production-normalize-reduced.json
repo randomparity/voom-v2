@@ -1,15 +1,18 @@
 {
   "policy_name": "production-normalize-reduced",
   "slug": "production-normalize-reduced",
-  "source_hash": "86bf44b489ca99c48171185194166cdefebebd67cca7d0fa403ea824770c577f",
+  "source_hash": "b9ea0c3302a45e5238e5c632202b6930ac0c8475b0835b1fa5c908e87cab2a07",
   "schema_version": 2,
   "metadata": {
     "profile": "production",
     "version": "1"
   },
   "config": {
-    "languages": "languages audio: [eng, und]",
-    "on_error": "on_error: continue"
+    "languages": [
+      "eng",
+      "und"
+    ],
+    "on_error": "continue"
   },
   "phases": [
     {
@@ -17,7 +20,7 @@
       "depends_on": [],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "continue",
       "operations": [
         {
           "type": "set_container",
@@ -116,7 +119,7 @@
       ],
       "run_if": null,
       "skip_if": null,
-      "on_error": null,
+      "on_error": "continue",
       "operations": [
         {
           "type": "set_tag",

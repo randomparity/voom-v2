@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::compiled::is_canonical_language_code;
 use crate::text::{dependency_values, statement_text, text_after_list, words};
 use crate::{
     DiagnosticCode, DiagnosticSeverity, DiagnosticStage, ExprAst, PhaseAst, PolicyAst,
@@ -112,17 +113,105 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_config(&mut self) {
-        for statement in &self.ast.config {
-            let text = statement_text(statement);
-            match statement.keyword().value.as_str() {
-                "languages" => self.validate_language_tokens(statement, text.as_ref()),
-                "on_error" => self.validate_on_error(statement, text.as_ref()),
+        let mut first_by_key = BTreeMap::new();
+        for setting in &self.ast.config {
+            if let Some(first_span) =
+                first_by_key.insert(setting.key.value.as_str(), setting.key.span)
+            {
+                let mut diagnostic = self.make_error(
+                    DiagnosticCode::DuplicateConfigSetting,
+                    setting.key.span,
+                    format!(
+                        "config setting `{}` may be declared only once",
+                        setting.key.value
+                    ),
+                );
+                diagnostic.related.push(crate::RelatedSpan {
+                    span: first_span,
+                    location: line_column(self.source, first_span.start),
+                    message: "first config declaration".to_owned(),
+                });
+                self.diagnostics.push(diagnostic);
+                continue;
+            }
+            match setting.key.value.as_str() {
+                "languages" => self.validate_config_languages(setting),
+                "on_error" => self.validate_config_on_error(setting),
                 _ => self.error(
                     DiagnosticCode::UnknownTopLevelBlock,
-                    statement.span(),
+                    setting.key.span,
                     "unknown config statement",
                 ),
             }
+        }
+    }
+
+    fn validate_config_languages(&mut self, setting: &crate::SettingAst) {
+        let ExprAst::List { values, span } = &setting.value else {
+            self.error(
+                DiagnosticCode::InvalidLanguageCode,
+                expr_span(&setting.value),
+                "config languages must be a comma-separated list of quoted language codes",
+            );
+            return;
+        };
+        if !self.config_language_list_has_commas(values, *span) {
+            self.error(
+                DiagnosticCode::InvalidLanguageCode,
+                *span,
+                "config languages must separate quoted language codes with commas",
+            );
+        }
+        for value in values {
+            let ExprAst::String(language) = value else {
+                self.error(
+                    DiagnosticCode::InvalidLanguageCode,
+                    expr_span(value),
+                    "config language codes must be quoted",
+                );
+                continue;
+            };
+            if !is_canonical_language_code(&language.value) {
+                self.error(
+                    DiagnosticCode::InvalidLanguageCode,
+                    language.span,
+                    "language code must be a three-letter lowercase ASCII code",
+                );
+            }
+        }
+    }
+
+    fn config_language_list_has_commas(&self, values: &[ExprAst], list_span: SourceSpan) -> bool {
+        for pair in values.windows(2) {
+            let previous = expr_span(&pair[0]);
+            let next = expr_span(&pair[1]);
+            let separator = &self.source[previous.end..next.start];
+            if !separator.trim_start().starts_with(',') {
+                return false;
+            }
+        }
+        let Some(last) = values.last() else {
+            return true;
+        };
+        let suffix = &self.source[expr_span(last).end..list_span.end];
+        !suffix.trim_start().starts_with(',')
+    }
+
+    fn validate_config_on_error(&mut self, setting: &crate::SettingAst) {
+        let ExprAst::Identifier(value) = &setting.value else {
+            self.error(
+                DiagnosticCode::InvalidOnErrorValue,
+                expr_span(&setting.value),
+                "config on_error must be abort or continue",
+            );
+            return;
+        };
+        if !matches!(value.value.as_str(), "abort" | "continue") {
+            self.error(
+                DiagnosticCode::InvalidOnErrorValue,
+                value.span,
+                "config on_error must be abort or continue",
+            );
         }
     }
 

@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "plan_id": "plan_e3b8273af88abb9f",
-  "plan_hash": "blake3:e3b8273af88abb9f7257d8018ef59707c445168a5c521991679723ed7612d0eb",
+  "plan_id": "plan_d0d0965c7034b176",
+  "plan_hash": "blake3:d0d0965c7034b1766ec464964580b3e1c8864cac07d4d17d0bfc9a60ccd134fa",
   "policy": {
     "slug": "container-metadata",
-    "source_hash": "507b8505b197398ad3c71f966880f50b5a60cec812cab36f7f7409cdb68fd5c3"
+    "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b"
   },
   "input": {
     "slug": "synthetic-compliant-baseline",

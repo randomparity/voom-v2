@@ -1003,18 +1003,7 @@ impl ControlPlane {
         &self,
         version: &voom_store::repo::PolicyVersion,
     ) -> Result<voom_policy::CompiledPolicy, VoomError> {
-        let mut policy: voom_policy::CompiledPolicy =
-            serde_json::from_value(version.compiled_json.clone()).map_err(|e| {
-                VoomError::PlanGeneration(format!("stored compiled policy JSON is invalid: {e}"))
-            })?;
-        if policy.source_hash != version.source_hash
-            || policy.schema_version != version.schema_version
-        {
-            return Err(VoomError::PlanGeneration(format!(
-                "stored compiled policy identity mismatch for policy version {}",
-                version.id
-            )));
-        }
+        let mut policy = super::plans::deserialize_stored_compiled_policy(version)?;
         // Resolve after the stored-identity check so the mutation cannot affect
         // `source_hash`.
         super::plans::resolve_profiles_in_policy(self, &mut policy).await?;

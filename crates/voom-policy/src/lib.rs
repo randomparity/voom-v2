@@ -24,9 +24,10 @@ pub use syntax::{ast, parser, span};
 
 pub use ast::{ExprAst, PhaseAst, PolicyAst, SettingAst, Spanned, StatementAst};
 pub use compiled::{
-    ComparisonOp, CompiledCondition, CompiledOperation, CompiledPhase, CompiledPolicy,
-    CompiledRule, CompiledValue, DefaultStrategy, ErrorStrategy, PolicyProvenance, PolicyTool,
-    RequiredToolsError, RuleMatchMode, TrackFilter, TrackTarget, deterministic_json, source_hash,
+    ComparisonOp, CompiledCondition, CompiledConfig, CompiledOperation, CompiledPhase,
+    CompiledPolicy, CompiledRule, CompiledValue, DefaultStrategy, ErrorStrategy, PolicyProvenance,
+    PolicyTool, RequiredToolsError, RuleMatchMode, TrackFilter, TrackTarget, deterministic_json,
+    source_hash,
 };
 pub use diagnostic::{
     DiagnosticCode, DiagnosticSeverity, DiagnosticStage, PolicyDiagnostic, RelatedSpan,

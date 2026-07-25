@@ -268,8 +268,48 @@ fn rejects_unknown_core_field_path_extra_segments() {
 #[test]
 fn rejects_invalid_config_language() {
     assert!(
-        codes("policy \"p\" { config { languages audio: [english] } phase a {} }")
+        codes("policy \"p\" { config { languages: [\"english\"] } phase a {} }")
             .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unquoted_config_languages() {
+    assert!(
+        codes("policy \"p\" { config { languages: [eng, und] } phase a {} }")
+            .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
+fn rejects_non_list_config_languages() {
+    assert!(
+        codes("policy \"p\" { config { languages: \"eng\" } phase a {} }")
+            .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
+fn rejects_config_languages_without_commas() {
+    assert!(
+        codes("policy \"p\" { config { languages: [\"eng\" \"und\"] } phase a {} }")
+            .contains(&"invalid_language_code".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unpublished_config_language_target() {
+    let error =
+        parse_policy_source("policy \"p\" { config { languages audio: [\"eng\"] } phase a {} }")
+            .unwrap_err();
+    assert_eq!(error.diagnostics[0].code, "unexpected_token");
+}
+
+#[test]
+fn rejects_duplicate_config_settings() {
+    assert!(
+        codes("policy \"p\" { config { languages: [\"eng\"] languages: [\"und\"] } phase a {} }")
+            .contains(&"duplicate_config_setting".to_owned())
     );
 }
 
@@ -285,6 +325,14 @@ fn rejects_invalid_language_filter_alias() {
 fn rejects_invalid_on_error() {
     assert!(
         codes("policy \"p\" { config { on_error: retry } phase a {} }")
+            .contains(&"invalid_on_error_value".to_owned())
+    );
+}
+
+#[test]
+fn rejects_unpublished_config_on_error_skip() {
+    assert!(
+        codes("policy \"p\" { config { on_error: skip } phase a {} }")
             .contains(&"invalid_on_error_value".to_owned())
     );
 }

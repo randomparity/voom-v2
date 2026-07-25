@@ -24,7 +24,7 @@ fn compiled_policy_with_ops(operations: Vec<CompiledOperation>) -> CompiledPolic
         source_hash: "source-hash".to_owned(),
         schema_version: 2,
         metadata: BTreeMap::new(),
-        config: BTreeMap::new(),
+        config: voom_policy::CompiledConfig::default(),
         phases: vec![CompiledPhase {
             name: "normalize".to_owned(),
             depends_on: Vec::new(),
@@ -46,7 +46,7 @@ fn compiled_policy_with_phases(phases: &[(&str, Vec<CompiledOperation>)]) -> Com
         source_hash: "source-hash".to_owned(),
         schema_version: 2,
         metadata: BTreeMap::new(),
-        config: BTreeMap::new(),
+        config: voom_policy::CompiledConfig::default(),
         phases: phases
             .iter()
             .enumerate()

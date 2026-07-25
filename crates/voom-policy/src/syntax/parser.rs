@@ -83,11 +83,11 @@ impl<'a> Parser<'a> {
                 }
                 "metadata" => {
                     self.cursor = keyword.span.end;
-                    ast.metadata = self.parse_metadata_block()?;
+                    ast.metadata = self.parse_setting_block()?;
                 }
                 "config" => {
                     self.cursor = keyword.span.end;
-                    ast.config = self.parse_statement_block()?;
+                    ast.config = self.parse_setting_block()?;
                 }
                 "phase" => ast.phases.push(self.parse_phase()?),
                 _ => ast.unknown_top_level.push(self.parse_statement()?),
@@ -134,7 +134,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_metadata_block(&mut self) -> Result<Vec<SettingAst>, ParseError> {
+    fn parse_setting_block(&mut self) -> Result<Vec<SettingAst>, ParseError> {
         self.skip_ws_and_comments();
         self.expect_byte(b'{')?;
         self.parse_setting_list()
@@ -220,23 +220,6 @@ impl<'a> Parser<'a> {
             settings.push(SettingAst { key, value });
         }
         Ok(settings)
-    }
-
-    fn parse_statement_block(&mut self) -> Result<Vec<StatementAst>, ParseError> {
-        self.skip_ws_and_comments();
-        self.expect_byte(b'{')?;
-        let mut statements = Vec::new();
-        loop {
-            self.skip_ws_and_comments();
-            if self.consume_byte(b'}') {
-                break;
-            }
-            if self.is_eof() {
-                return Err(self.error_at(self.cursor, "expected `}` to close block"));
-            }
-            statements.push(self.parse_statement()?);
-        }
-        Ok(statements)
     }
 
     fn parse_statement(&mut self) -> Result<StatementAst, ParseError> {

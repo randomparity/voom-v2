@@ -40,3 +40,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0032](0032-video-and-quality-scoring-profile-management.md) | Video profile and quality-scoring profile management |
 | [0033](0033-toxiproxy-network-resilience-harness.md) | Toxiproxy network-resilience harness at the worker-protocol boundary |
 | [0034](0034-policy-tool-requirements-use-worker-capabilities.md) | Policy tool requirements use worker capabilities |
+| [0035](0035-typed-policy-execution-defaults.md) | Published policy config lowers to typed execution defaults |

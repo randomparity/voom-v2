@@ -1,0 +1,41 @@
+{
+  "policy_name": "legacy policy config",
+  "slug": "legacy-policy-config",
+  "source_hash": "legacy-config-source-hash",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {
+    "languages": "languages audio: [eng, und]",
+    "on_error": "on_error continue"
+  },
+  "phases": [
+    {
+      "name": "inherits",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": []
+    },
+    {
+      "name": "overrides",
+      "depends_on": [
+        "inherits"
+      ],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": "abort",
+      "operations": []
+    }
+  ],
+  "phase_order": [
+    "inherits",
+    "overrides"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}
