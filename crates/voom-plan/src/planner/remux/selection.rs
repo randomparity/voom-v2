@@ -14,6 +14,7 @@ pub struct SnapshotStreamFact {
     pub title: Option<String>,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
+    pub commentary: Option<bool>,
     pub is_default: bool,
     pub is_forced: bool,
 }
@@ -69,6 +70,7 @@ pub fn stream_facts(
             title: optional_string(stream.get("title")),
             mime_type: optional_string(stream.get("mime_type")),
             filename: optional_string(stream.get("filename")),
+            commentary: disposition_optional_bool(stream.get("disposition"), "commentary"),
             is_default: disposition_flag(stream.get("disposition"), "default"),
             is_forced: disposition_flag(stream.get("disposition"), "forced"),
         });
@@ -101,16 +103,13 @@ pub fn evaluate_filter(
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(compare_u64(u64::from(channels), *op, *value))
         }
-        TrackFilter::Commentary | TrackFilter::TitleMatches { .. } => {
-            Err(RemuxPlanningBlock::UnsupportedMediaShape)
-        }
+        TrackFilter::Commentary => stream
+            .commentary
+            .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts),
+        TrackFilter::TitleMatches { .. } => Err(RemuxPlanningBlock::UnsupportedMediaShape),
         TrackFilter::Forced => Ok(stream.is_forced),
         TrackFilter::Default => Ok(stream.is_default),
-        TrackFilter::Font => Ok(stream.kind == TrackTarget::Attachment
-            && stream
-                .mime_type
-                .as_deref()
-                .is_some_and(|mime_type| mime_type.contains("font"))),
+        TrackFilter::Font => evaluate_font_filter(stream),
         TrackFilter::TitleContains { value } => {
             let title = stream
                 .title
@@ -159,12 +158,43 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
 }
 
-fn disposition_flag(disposition: Option<&Value>, key: &str) -> bool {
+fn disposition_optional_bool(disposition: Option<&Value>, key: &str) -> Option<bool> {
     disposition
         .and_then(Value::as_object)
         .and_then(|object| object.get(key))
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+}
+
+fn disposition_flag(disposition: Option<&Value>, key: &str) -> bool {
+    disposition_optional_bool(disposition, key).unwrap_or(false)
+}
+
+fn evaluate_font_filter(stream: &SnapshotStreamFact) -> Result<bool, RemuxPlanningBlock> {
+    if stream.kind != TrackTarget::Attachment {
+        return Ok(false);
+    }
+    let mime_type = stream
+        .mime_type
+        .as_deref()
+        .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
+    Ok(is_font_mime_type(mime_type))
+}
+
+fn is_font_mime_type(mime_type: &str) -> bool {
+    [
+        "font/sfnt",
+        "font/ttf",
+        "font/otf",
+        "font/collection",
+        "font/woff",
+        "font/woff2",
+        "application/x-truetype-font",
+        "application/x-font-ttf",
+        "application/vnd.ms-opentype",
+        "application/font-sfnt",
+        "application/font-woff",
+    ]
+    .contains(&mime_type)
 }
 
 fn compare_u64(left: u64, op: ComparisonOp, right: u64) -> bool {

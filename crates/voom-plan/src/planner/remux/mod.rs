@@ -48,11 +48,6 @@ pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSuppo
                     "video track selection is not supported by remux planning",
                 );
             }
-            if *target == TrackTarget::Attachment {
-                return CandidateSupport::Unsupported(
-                    "attachment track selection is not supported by remux planning",
-                );
-            }
             if filter.as_ref().is_some_and(filter_has_unsupported_shape) {
                 CandidateSupport::Unsupported("track filter is not supported by remux planning")
             } else {
@@ -335,7 +330,7 @@ fn duplicate_track_targets(targets: &[TrackTarget]) -> bool {
 
 fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
     match filter {
-        TrackFilter::Commentary | TrackFilter::TitleMatches { .. } => true,
+        TrackFilter::TitleMatches { .. } => true,
         TrackFilter::Not { inner } => filter_has_unsupported_shape(inner),
         TrackFilter::And { filters } | TrackFilter::Or { filters } => {
             filters.iter().any(filter_has_unsupported_shape)
@@ -343,6 +338,7 @@ fn filter_has_unsupported_shape(filter: &TrackFilter) -> bool {
         TrackFilter::LanguageIn { .. }
         | TrackFilter::CodecIn { .. }
         | TrackFilter::Channels { .. }
+        | TrackFilter::Commentary
         | TrackFilter::Forced
         | TrackFilter::Default
         | TrackFilter::Font
@@ -476,12 +472,6 @@ fn evaluate_remux_track_operations(
 
     let facts = stream_facts(snapshot)?;
     if !facts.iter().any(|stream| stream.kind == TrackTarget::Video) {
-        return Err(RemuxPlanningBlock::UnsupportedMediaShape);
-    }
-    if facts
-        .iter()
-        .any(|stream| stream.kind == TrackTarget::Attachment)
-    {
         return Err(RemuxPlanningBlock::UnsupportedMediaShape);
     }
     if !has_track_operation {

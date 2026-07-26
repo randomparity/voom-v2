@@ -156,7 +156,8 @@ fn snapshot_with_attachment_stream(container: Option<&str>) -> MediaSnapshotInpu
         "index": 4,
         "kind": "attachment",
         "codec_name": "mjpeg",
-        "filename": "cover.jpg"
+        "filename": "cover.jpg",
+        "mime_type": "image/jpeg"
     }));
     snapshot
 }
@@ -594,7 +595,7 @@ fn defaults_best_blocks_instead_of_joining_executable_group() {
 }
 
 #[test]
-fn attachment_target_track_selection_blocks_before_remux_planning() {
+fn attachment_target_track_selection_is_plannable() {
     for operation in [
         CompiledOperation::KeepTracks {
             target: TrackTarget::Attachment,
@@ -607,24 +608,17 @@ fn attachment_target_track_selection_blocks_before_remux_planning() {
     ] {
         let plan = generate_plan(request(
             compiled_policy_with_ops(vec![operation]),
-            snapshot_mp4_with_video_audio_subtitle(),
+            snapshot_with_attachment_stream(Some("mkv")),
         ))
         .unwrap();
 
-        assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-        assert_eq!(
-            plan.diagnostics[0].code,
-            PlanningDiagnosticCode::UnsupportedMediaShape
-        );
-        assert_eq!(
-            plan.diagnostics[0].message,
-            "attachment track selection is not supported by remux planning"
-        );
+        assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+        assert_ne!(plan.nodes[0].status, NodeStatus::Blocked);
     }
 }
 
 #[test]
-fn container_remux_blocks_when_source_snapshot_has_attachment_streams() {
+fn container_remux_preserves_source_attachment_streams() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::SetContainer {
         container: "mkv".to_owned(),
     }]);
@@ -636,15 +630,25 @@ fn container_remux_blocks_when_source_snapshot_has_attachment_streams() {
     .unwrap();
 
     assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
-    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
-    assert_eq!(
-        plan.diagnostics[0].code,
-        PlanningDiagnosticCode::UnsupportedMediaShape
-    );
-    assert_eq!(
-        plan.diagnostics[0].message,
-        "media shape is not supported by remux planning"
-    );
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+}
+
+#[test]
+fn commentary_removal_plans_from_structured_disposition_facts() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::RemoveTracks {
+        target: TrackTarget::Audio,
+        filter: Some(TrackFilter::Commentary),
+    }]);
+    let mut snapshot = snapshot_with_streams(Some("mkv"));
+    snapshot.stream_summary["streams"][1]["disposition"]["commentary"] =
+        serde_json::Value::Bool(true);
+    snapshot.stream_summary["streams"][2]["disposition"]["commentary"] =
+        serde_json::Value::Bool(false);
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
 }
 
 #[test]

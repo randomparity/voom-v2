@@ -207,6 +207,36 @@ fn normalizes_stream_title_and_commentary_disposition() {
 }
 
 #[test]
+fn normalizes_attachment_filename_and_mime_type_tags() {
+    let raw = serde_json::json!({
+        "format": { "format_name": "matroska,webm" },
+        "streams": [
+            {
+                "index": 2,
+                "codec_type": "attachment",
+                "codec_name": "ttf",
+                "tags": {
+                    "FILENAME": "OpenSans.ttf",
+                    "MIMETYPE": "application/x-truetype-font"
+                }
+            }
+        ]
+    });
+
+    let snapshot_result = normalize_ffprobe_json(raw, "8.1", "2026-07-26T00:00:00Z");
+    assert!(snapshot_result.is_ok());
+    let Ok(snapshot) = snapshot_result else {
+        return;
+    };
+
+    assert_eq!(snapshot["streams"][0]["filename"], "OpenSans.ttf");
+    assert_eq!(
+        snapshot["streams"][0]["mime_type"],
+        "application/x-truetype-font"
+    );
+}
+
+#[test]
 fn normalizes_stream_language_and_disposition_for_mkv_subtitles() {
     let raw = serde_json::json!({
         "format": { "format_name": "matroska,webm" },
