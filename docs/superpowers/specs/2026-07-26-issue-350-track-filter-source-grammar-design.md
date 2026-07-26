@@ -51,12 +51,17 @@ title contains <quoted-string>
 Leaves compose through `not`, `and`, `or`, and balanced parentheses. Existing
 precedence remains `not`, then `and`, then `or`.
 
-A quoted token is one non-empty quoted lexical value. Language tokens retain
-the existing semantic restriction to `und` or a three-letter lowercase ASCII
-code. Codec tokens remain domain values interpreted by planning; #350 requires
-their quotes but does not add a codec allowlist. `title contains` requires one
-complete quoted string and permits escaped quotes through the existing quoted
-value reader.
+A quoted token decodes to one non-empty stable token containing only lowercase
+ASCII letters, ASCII digits, `_`, or `-`. It cannot contain whitespace, commas,
+quotes, backslashes, or escapes. Language tokens retain the existing semantic
+restriction to `und` or a three-letter lowercase ASCII code. Codec tokens
+remain domain values interpreted by planning; #350 requires their quotes and
+stable-token shape but does not add a codec allowlist.
+
+`title contains` requires one complete, non-empty quoted string. Its scanner
+decodes `\"` to `"` and `\\` to `\`; every other escape, a trailing backslash,
+or an unclosed string is invalid. The decoded string is the value persisted in
+`TrackFilter::TitleContains`.
 
 The following are not source grammar:
 
@@ -77,37 +82,45 @@ publishing parser spellings.
 
 ## Validation and lowering boundary
 
-`voom-policy` keeps one recursive track-filter recognizer in the validation
-layer. It must consume the complete supplied filter text. Each leaf check is
-grammar-specific:
+`voom-policy` replaces its separate validation recognizer and lowering parser
+with one recursive source parser returning `Option<TrackFilter>`. Validation
+uses success as its grammar decision and recursively applies the existing
+language-code check to parsed `LanguageIn` values. Lowering calls the same
+parser after validation. This makes “accepted implies lowerable” structural,
+rather than an assumption between two similar parsers. The parser must consume
+the complete supplied filter text. Each leaf check is grammar-specific:
 
-- language equality accepts exactly three lexical units and requires a quoted
-  right-hand side;
+- language equality requires the exact `language ==` prefix and one quoted
+  token;
 - language and codec lists require brackets, at least one quoted element,
   commas between elements, no empty elements, and no text after the closing
   bracket;
 - channels accepts exactly three lexical units, one of the six published
   comparators, and an ASCII `u64`;
 - fieldless predicates accept exactly one lexical unit; and
-- `title contains` requires a complete quoted value with no trailing input.
+- `title contains` requires one decoded quoted string with no trailing input.
+
+The quoted-token list reader is quote-aware and delimiter-aware; it never uses
+a generic comma split. The quoted-string reader and decoder is shared by
+validation and lowering, so an accepted escape cannot acquire different
+compiled semantics.
 
 Boolean splitting continues to occur only outside quoted strings and nested
 parentheses. A split is valid only when every child is non-empty and valid.
 Stripping an outer group is allowed only when that group is balanced and owns
 the complete expression.
 
-Every filter-consuming operation already routes its filter through
-`is_valid_track_filter`; #350 keeps that single operation-level boundary and
-adds table-driven coverage proving none bypass it. Validation errors continue
-to use `unknown_phase_statement_or_operation` and the existing actionable
-message `unknown track filter predicate`; no public error code changes.
+Every filter-consuming operation routes its filter through the shared parser;
+#350 adds table-driven coverage proving none bypass it. Validation errors
+continue to use `unknown_phase_statement_or_operation` and the existing
+actionable message `unknown track filter predicate`; no public error code
+changes.
 
-Lowering runs only after validation succeeds. Remove lowering branches that
-exist solely for unpublished source (`lang` and `title matches`) so a future
-internal caller cannot accidentally restore them. Keep the durable
-`TrackFilter::TitleMatches` variant because stored historical compiled policy
-JSON may contain it. General comparison lowering remains unchanged because
-non-track condition compatibility is outside #350.
+The shared parser has no branches for unpublished source (`lang` and
+`title matches`). Keep the durable `TrackFilter::TitleMatches` variant because
+stored historical compiled policy JSON may contain it. General comparison
+lowering remains unchanged because non-track condition compatibility is
+outside #350.
 
 ## Durable compatibility
 
@@ -121,10 +134,14 @@ annotation, database row, or migration. In particular:
 - existing stored compiled policy versions bypass source parsing and remain
   readable.
 
-A focused compatibility test deserializes a compiled operation containing the
-historical `title_matches` discriminator. Existing compiled fixture goldens
-must remain byte-for-byte semantically unchanged when their source fixtures are
-rewritten from aliases and bare values to published forms.
+A focused compatibility fixture deserializes a historical compiled policy
+containing the `title_matches` discriminator. For each source fixture rewritten
+from aliases or bare values, retain its pre-#350 compiled JSON as historical
+evidence. Compile the canonical source, assert its `source_hash` matches the new
+source bytes, then normalize only `source_hash` in the historical and current
+values and require complete JSON equality. The active compiled golden updates
+only its expected `source_hash`; every other field and operation remains
+byte-for-byte equal.
 
 ## Canonical source migration
 
@@ -168,7 +185,7 @@ the source span and stable diagnostic code.
 
 Behavior tests cover:
 
-- every published leaf;
+- every published leaf and its exact decoded compiled value;
 - all six channel comparators and `u64` boundaries;
 - nested grouping and `not`/`and`/`or` precedence;
 - all seven filter consumers;
@@ -177,7 +194,8 @@ Behavior tests cover:
   non-ASCII digits, and trailing input;
 - lowering of every accepted leaf to the existing compiled representation;
 - unchanged readable historical `title_matches` compiled JSON;
-- unchanged compiled goldens after canonical source rewrites; and
+- historical/current compiled fixture equality after normalizing only
+  `source_hash`; and
 - the cross-crate published grammar corpus.
 
 Focused verification:
@@ -197,5 +215,8 @@ The full repository guardrail remains `just ci`.
 
 ## Rollback
 
-Rollback is a source-validator revert only. No stored data or schema rollback
-is needed. Policies compiled before the change remain readable throughout.
+The shared source parser, validation call sites, and lowering call sites are one
+atomic rollback unit. Never restore acceptance of an alias without restoring
+its exact lowering semantics and accepted-implies-lowerable regression test.
+No stored data or schema rollback is needed. Policies compiled before the
+change remain readable throughout.
