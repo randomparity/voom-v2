@@ -1,5 +1,6 @@
 use serde_json::json;
 use voom_core::RemuxTrackGroup;
+use voom_policy::{TrackFilter, TrackTarget};
 
 use super::RemuxOperationPayload;
 
@@ -33,6 +34,27 @@ fn remux_payload_allows_missing_snapshot_id_for_planner_serialization() {
     let payload = RemuxOperationPayload::try_from_value(&payload_json).unwrap();
 
     assert_eq!(payload.source_media_snapshot_id, None);
+}
+
+#[test]
+fn remux_payload_accepts_attachment_actions_with_exact_filters() {
+    let payload_json = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 99,
+        "track_actions": [
+            {
+                "type": "keep_tracks",
+                "target": "attachment",
+                "filter": {"type": "font"}
+            }
+        ]
+    });
+
+    let payload = RemuxOperationPayload::try_from_execution_value(&payload_json).unwrap();
+
+    assert_eq!(payload.track_actions[0].target, TrackTarget::Attachment);
+    assert_eq!(payload.track_actions[0].filter, Some(TrackFilter::Font));
 }
 
 #[test]
@@ -76,15 +98,6 @@ fn remux_payload_rejects_invalid_contract_fields() {
             "track_actions": [{"type": "copy_tracks", "target": "audio"}]
         }),
         "remux track_actions[0] type `copy_tracks` is unsupported",
-    );
-    assert_remux_payload_error(
-        &json!({
-            "type": "remux",
-            "container": "mkv",
-            "source_media_snapshot_id": 99,
-            "track_actions": [{"type": "keep_tracks", "target": "attachment"}]
-        }),
-        "remux track_actions[0] target `attachment` is unsupported",
     );
     assert_remux_payload_error(
         &json!({

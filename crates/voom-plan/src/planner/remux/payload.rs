@@ -200,11 +200,6 @@ fn parse_track_action(index: usize, action: &Value) -> Result<RemuxTrackAction, 
         }
     };
     let target = parse_object_track_target(object, "track_actions", index, "target")?;
-    if target == TrackTarget::Attachment {
-        return Err(RemuxPayloadError::new(format!(
-            "remux track_actions[{index}] target `attachment` is unsupported"
-        )));
-    }
     let filter = match object.get("filter") {
         Some(Value::Null) | None => None,
         Some(filter) => Some(serde_json::from_value(filter.clone()).map_err(|err| {

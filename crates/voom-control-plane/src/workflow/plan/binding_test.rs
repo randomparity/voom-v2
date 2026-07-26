@@ -320,8 +320,8 @@ fn policy_remux_payload_rejects_malformed_track_action_entry() {
 }
 
 #[test]
-fn policy_remux_payload_rejects_attachment_track_action_target() {
-    let err = render_policy_remux_payload(
+fn policy_remux_payload_preserves_attachment_track_action_target() {
+    let rendered = render_policy_remux_payload(
         PolicyFileSource {
             file_version_id: FileVersionId(42),
             location_id: None,
@@ -338,11 +338,11 @@ fn policy_remux_payload_rejects_attachment_track_action_target() {
         std::path::Path::new("/library/remux"),
         EffectiveTiming::for_test(25, 10),
     )
-    .unwrap_err();
+    .unwrap();
 
     assert_eq!(
-        err.to_string(),
-        "remux track_actions[0] target `attachment` is unsupported"
+        rendered["remux"]["track_actions"],
+        serde_json::json!([{"type": "remove_tracks", "target": "attachment"}])
     );
 }
 

@@ -29,15 +29,6 @@ pub fn selection_from_payload_and_snapshot(
             "remux selection requires at least one video stream".to_owned(),
         ));
     }
-    if facts
-        .iter()
-        .any(|stream| stream.kind == TrackTarget::Attachment)
-    {
-        return Err(VoomError::Config(
-            "attachment remux selection is unsupported".to_owned(),
-        ));
-    }
-
     let mut keep_ids = facts
         .iter()
         .map(|stream| stream.snapshot_stream_id.clone())
@@ -46,11 +37,6 @@ pub fn selection_from_payload_and_snapshot(
         if action.target == TrackTarget::Video {
             return Err(VoomError::Config(
                 "video track policy is unsupported".to_owned(),
-            ));
-        }
-        if action.target == TrackTarget::Attachment {
-            return Err(VoomError::Config(
-                "attachment track policy is unsupported".to_owned(),
             ));
         }
         let matching_ids = matching_stream_ids(&facts, action.target, action.filter.as_ref())?;
