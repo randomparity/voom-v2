@@ -778,16 +778,27 @@ selection discards strategy actions for that target regardless of source
 position. Multiple explicit selections for one target block the file as an
 unsupported policy shape. The control plane repeats this reduction when
 validating the typed payload, which pins explicit-over-`best` precedence for
-language-ranked selection without trusting planner serialization.
+language-ranked selection without trusting planner serialization. If there is
+no explicit selection, multiple strategy actions for one target also block;
+source order never resolves conflicting strategies.
 
 An unshadowed `defaults audio|subtitle best` ranks retained target-kind streams
-by `config.languages` position, then ascending provider stream index. Missing
-languages rank as `und`; malformed languages block when a non-empty preference
-list is evaluated. If no configured language matches, or the list is empty,
-the first retained source stream wins. With no retained stream of the target
-kind, no default action is emitted. Planning carries the winner in
-`selected_snapshot_stream_id`; execution validates that identity and never
-reruns ranking. An unresolved `best` payload is invalid.
+by `config.languages` position, then ascending provider stream index. With a
+non-empty preference list, planning validates the language fact of every
+retained candidate before ranking. Missing languages rank as `und` and emit the
+per-file `UntaggedTrackLanguageDefaulted` warning; any present non-string
+language blocks the file even if another candidate would win. If no configured
+language matches, the first retained source stream wins. An empty preference
+list also selects the first retained source stream without reading language
+facts or emitting that warning. Shadowed `best` actions likewise do not read
+language facts. With no retained stream of the target kind, no default action
+is emitted.
+
+Planning carries a `best` winner in `selected_snapshot_stream_id`; execution
+validates that identity and never reruns ranking. At the typed-payload boundary,
+`preserve` plus a selected ID is the compiler's resolved explicit-filter shape,
+while `best` plus a selected ID is the resolved ranked-selection shape. A
+selected ID on `first` or `none`, or an unresolved `best`, is invalid.
 
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 
