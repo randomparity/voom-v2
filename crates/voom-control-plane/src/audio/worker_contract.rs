@@ -61,6 +61,7 @@ pub fn extract_audio_request_for(
             overwrite: false,
         },
         selection: selection.stream.clone(),
+        outputs: None,
     }
 }
 

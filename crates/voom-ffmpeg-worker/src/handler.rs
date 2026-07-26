@@ -551,6 +551,7 @@ pub async fn handle_extract_audio(
         selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
         output_language: probe.output_language,
         output_title: probe.output_title,
+        outputs: None,
     })
 }
 

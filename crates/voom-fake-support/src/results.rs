@@ -296,6 +296,7 @@ fn fake_extract_audio_result(
         selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
         output_language: None,
         output_title: None,
+        outputs: None,
     })
 }
 

@@ -792,6 +792,7 @@ impl ExtractAudioDispatcher for WritingExtractDispatcher {
             selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
             output_language: Some("eng".to_owned()),
             output_title: Some("Main".to_owned()),
+            outputs: None,
         })
     }
 }

@@ -2802,6 +2802,7 @@ async fn extract_audio_result_payload_for_request(request: &OperationRequest) ->
         selected_snapshot_stream_id: request.selection.snapshot_stream_id,
         output_language: Some("eng".to_owned()),
         output_title: Some("Commentary".to_owned()),
+        outputs: None,
     })
     .unwrap()
 }

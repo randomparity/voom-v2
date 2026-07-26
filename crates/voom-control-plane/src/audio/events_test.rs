@@ -214,6 +214,7 @@ fn extract_result() -> ExtractAudioResult {
         selected_snapshot_stream_id: "audio-2".to_owned(),
         output_language: Some("eng".to_owned()),
         output_title: Some("Commentary".to_owned()),
+        outputs: None,
     }
 }
 

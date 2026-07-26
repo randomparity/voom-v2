@@ -798,6 +798,7 @@ fn extract_audio_request(
             snapshot_stream_id: "stream-1".to_owned(),
             provider_stream_index: 1,
         },
+        outputs: None,
     }
 }
 

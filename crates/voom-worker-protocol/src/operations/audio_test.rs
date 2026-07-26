@@ -373,6 +373,7 @@ fn extract_audio_request_serializes_one_selected_stream_wire_shape() {
             snapshot_stream_id: "stream-3".to_owned(),
             provider_stream_index: 3,
         },
+        outputs: None,
     };
 
     let json = serde_json::to_value(&request).unwrap();
@@ -418,6 +419,7 @@ fn extract_audio_result_serializes_selected_stream_and_output_facts() {
         selected_snapshot_stream_id: "stream-3".to_owned(),
         output_language: Some("eng".to_owned()),
         output_title: Some("Commentary".to_owned()),
+        outputs: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -447,6 +449,369 @@ fn extract_audio_result_serializes_selected_stream_and_output_facts() {
             "output_title": "Commentary"
         })
     );
+}
+
+#[test]
+fn extract_audio_outputs_preserve_absent_null_and_empty_wire_meanings() {
+    let request = legacy_extract_request_json();
+    let legacy_request: ExtractAudioRequest = serde_json::from_value(request.clone()).unwrap();
+    assert_eq!(legacy_request.outputs, None);
+    assert!(
+        serde_json::to_value(&legacy_request)
+            .unwrap()
+            .get("outputs")
+            .is_none()
+    );
+
+    let mut null_request = request.clone();
+    null_request["outputs"] = serde_json::Value::Null;
+    assert!(
+        serde_json::from_value::<ExtractAudioRequest>(null_request)
+            .unwrap_err()
+            .to_string()
+            .contains("sequence")
+    );
+
+    let mut empty_request = request;
+    empty_request["outputs"] = serde_json::json!([]);
+    let parsed: ExtractAudioRequest = serde_json::from_value(empty_request).unwrap();
+    assert_eq!(parsed.outputs, Some(Vec::new()));
+    assert!(validate_extract_audio_request(&parsed).is_err());
+
+    let result = legacy_extract_result_json();
+    let parsed: ExtractAudioResult = serde_json::from_value(result.clone()).unwrap();
+    assert_eq!(parsed.outputs, None);
+    assert!(
+        serde_json::to_value(parsed)
+            .unwrap()
+            .get("outputs")
+            .is_none()
+    );
+
+    let mut null_result = result.clone();
+    null_result["outputs"] = serde_json::Value::Null;
+    assert!(
+        serde_json::from_value::<ExtractAudioResult>(null_result)
+            .unwrap_err()
+            .to_string()
+            .contains("sequence")
+    );
+
+    let mut empty_result = result;
+    empty_result["outputs"] = serde_json::json!([]);
+    let parsed: ExtractAudioResult = serde_json::from_value(empty_result).unwrap();
+    assert_eq!(parsed.outputs, Some(Vec::new()));
+    assert!(validate_extract_audio_result(&legacy_request, &parsed).is_err());
+}
+
+#[test]
+fn extract_audio_plural_contract_round_trips_and_validates_ordered_outputs() {
+    let request = plural_extract_request();
+    validate_extract_audio_request(&request).unwrap();
+    let request_json = serde_json::to_value(&request).unwrap();
+    assert_eq!(request_json["outputs"][1]["output_id"], "extract_output_2");
+    assert_eq!(
+        request_json["outputs"][1]["selection"]["provider_stream_index"],
+        4
+    );
+    assert_eq!(
+        request_json["outputs"][1]["output"]["path"],
+        "/tmp/voom-stage/ticket-2/lease-1/input.main.opus.ogg"
+    );
+    assert_eq!(
+        serde_json::from_value::<ExtractAudioRequest>(request_json).unwrap(),
+        request
+    );
+
+    let result = plural_extract_result();
+    validate_extract_audio_result(&request, &result).unwrap();
+    let result_json = serde_json::to_value(&result).unwrap();
+    assert_eq!(result_json["outputs"][1]["output_id"], "extract_output_2");
+    assert_eq!(
+        result_json["outputs"][1]["selection"]["snapshot_stream_id"],
+        "stream-4"
+    );
+    assert_eq!(
+        result_json["outputs"][1]["path"],
+        "/tmp/voom-stage/ticket-2/lease-1/input.main.opus.ogg"
+    );
+    assert_eq!(
+        serde_json::from_value::<ExtractAudioResult>(result_json).unwrap(),
+        result
+    );
+}
+
+#[test]
+fn extract_audio_request_validation_rejects_projection_and_identity_collisions() {
+    let mut projection = plural_extract_request();
+    projection.output.path.push_str(".different");
+    assert_contract_error(
+        validate_extract_audio_request(&projection),
+        "first output projection",
+    );
+
+    let mut duplicate_id = plural_extract_request();
+    duplicate_id.outputs.as_mut().unwrap()[1].output_id = "extract_output_1".to_owned();
+    assert_contract_error(
+        validate_extract_audio_request(&duplicate_id),
+        "duplicate output_id",
+    );
+
+    let mut duplicate_source = plural_extract_request();
+    duplicate_source.outputs.as_mut().unwrap()[1]
+        .selection
+        .snapshot_stream_id = "stream-3".to_owned();
+    assert_contract_error(
+        validate_extract_audio_request(&duplicate_source),
+        "duplicate source snapshot_stream_id",
+    );
+
+    let mut duplicate_index = plural_extract_request();
+    duplicate_index.outputs.as_mut().unwrap()[1]
+        .selection
+        .provider_stream_index = 3;
+    assert_contract_error(
+        validate_extract_audio_request(&duplicate_index),
+        "duplicate source provider_stream_index",
+    );
+
+    let mut out_of_order = plural_extract_request();
+    out_of_order.outputs.as_mut().unwrap()[1]
+        .selection
+        .provider_stream_index = 2;
+    assert_contract_error(
+        validate_extract_audio_request(&out_of_order),
+        "strictly increasing",
+    );
+
+    let mut duplicate_path = plural_extract_request();
+    duplicate_path.outputs.as_mut().unwrap()[1].output.path =
+        "/tmp/voom-stage/ticket-2/lease-1/./input.commentary.opus.ogg".to_owned();
+    assert_contract_error(
+        validate_extract_audio_request(&duplicate_path),
+        "duplicate normalized output path",
+    );
+
+    let mut case_duplicate_path = plural_extract_request();
+    case_duplicate_path.outputs.as_mut().unwrap()[1].output.path =
+        "/tmp/voom-stage/ticket-2/lease-1/INPUT.COMMENTARY.OPUS.OGG".to_owned();
+    assert_contract_error(
+        validate_extract_audio_request(&case_duplicate_path),
+        "duplicate normalized output path",
+    );
+}
+
+#[test]
+fn extract_audio_result_validation_rejects_missing_reordered_or_mismatched_outputs() {
+    let request = plural_extract_request();
+
+    let mut missing_list = plural_extract_result();
+    missing_list.outputs = None;
+    assert_contract_error(
+        validate_extract_audio_result(&request, &missing_list),
+        "missing the outputs list",
+    );
+
+    let legacy_request: ExtractAudioRequest =
+        serde_json::from_value(legacy_extract_request_json()).unwrap();
+    assert_contract_error(
+        validate_extract_audio_result(&legacy_request, &plural_extract_result()),
+        "unexpected outputs list",
+    );
+
+    let mut missing = plural_extract_result();
+    missing.outputs.as_mut().unwrap().pop();
+    assert_contract_error(
+        validate_extract_audio_result(&request, &missing),
+        "output count",
+    );
+
+    let mut reordered = plural_extract_result();
+    reordered.outputs.as_mut().unwrap().swap(0, 1);
+    assert_contract_error(
+        validate_extract_audio_result(&request, &reordered),
+        "first output projection",
+    );
+
+    let mut swapped_ids = plural_extract_result();
+    let outputs = swapped_ids.outputs.as_mut().unwrap();
+    let first_id = outputs[0].output_id.clone();
+    outputs[0].output_id = outputs[1].output_id.clone();
+    outputs[1].output_id = first_id;
+    assert_contract_error(
+        validate_extract_audio_result(&request, &swapped_ids),
+        "output_id",
+    );
+
+    let mut wrong_selection = plural_extract_result();
+    wrong_selection.outputs.as_mut().unwrap()[1]
+        .selection
+        .provider_stream_index = 9;
+    assert_contract_error(
+        validate_extract_audio_result(&request, &wrong_selection),
+        "selection",
+    );
+
+    let mut wrong_path = plural_extract_result();
+    wrong_path.outputs.as_mut().unwrap()[1]
+        .path
+        .push_str(".different");
+    assert_contract_error(validate_extract_audio_result(&request, &wrong_path), "path");
+}
+
+#[test]
+fn extract_audio_result_allows_identical_observed_facts_for_distinct_outputs() {
+    let request = plural_extract_request();
+    let mut result = plural_extract_result();
+    let first = result.outputs.as_ref().unwrap()[0].clone();
+    let second = &mut result.outputs.as_mut().unwrap()[1];
+    second.output = first.output;
+    second.output_language = first.output_language;
+    second.output_title = first.output_title;
+
+    validate_extract_audio_result(&request, &result).unwrap();
+}
+
+fn assert_contract_error(result: Result<(), ExtractAudioContractError>, expected_message: &str) {
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().contains(expected_message),
+        "expected `{expected_message}` in `{error}`"
+    );
+}
+
+fn plural_extract_request() -> ExtractAudioRequest {
+    let first_output = ExtractAudioOutput {
+        staging_root: "/tmp/voom-stage".to_owned(),
+        path: "/tmp/voom-stage/ticket-2/lease-1/input.commentary.opus.ogg".to_owned(),
+        container: "ogg".to_owned(),
+        audio_codec: "opus".to_owned(),
+        overwrite: false,
+    };
+    let first_selection = AudioStreamRef {
+        snapshot_stream_id: "stream-3".to_owned(),
+        provider_stream_index: 3,
+    };
+    ExtractAudioRequest {
+        input: ExtractAudioInput {
+            path: "/library/input.mkv".to_owned(),
+            expected: AudioExpectedFacts {
+                size_bytes: 1234,
+                content_hash: "blake3:abc".to_owned(),
+                modified_at: None,
+                local_file_key: None,
+            },
+        },
+        output: first_output.clone(),
+        selection: first_selection.clone(),
+        outputs: Some(vec![
+            ExtractAudioOutputDescriptor {
+                output_id: "extract_output_1".to_owned(),
+                selection: first_selection,
+                output: first_output,
+            },
+            ExtractAudioOutputDescriptor {
+                output_id: "extract_output_2".to_owned(),
+                selection: AudioStreamRef {
+                    snapshot_stream_id: "stream-4".to_owned(),
+                    provider_stream_index: 4,
+                },
+                output: ExtractAudioOutput {
+                    staging_root: "/tmp/voom-stage".to_owned(),
+                    path: "/tmp/voom-stage/ticket-2/lease-1/input.main.opus.ogg".to_owned(),
+                    container: "ogg".to_owned(),
+                    audio_codec: "opus".to_owned(),
+                    overwrite: false,
+                },
+            },
+        ]),
+    }
+}
+
+fn plural_extract_result() -> ExtractAudioResult {
+    let first_output = observed_facts("blake3:output-1");
+    ExtractAudioResult {
+        status: ExtractAudioStatus::Extracted,
+        provider: "ffmpeg".to_owned(),
+        provider_version: "ffmpeg version 7.0".to_owned(),
+        input_pre: observed_facts("blake3:input"),
+        input_post: observed_facts("blake3:input"),
+        output: first_output.clone(),
+        output_container: "ogg".to_owned(),
+        output_audio_codec: "opus".to_owned(),
+        selected_snapshot_stream_id: "stream-3".to_owned(),
+        output_language: Some("eng".to_owned()),
+        output_title: Some("Commentary".to_owned()),
+        outputs: Some(vec![
+            ExtractAudioOutputResult {
+                output_id: "extract_output_1".to_owned(),
+                selection: AudioStreamRef {
+                    snapshot_stream_id: "stream-3".to_owned(),
+                    provider_stream_index: 3,
+                },
+                path: "/tmp/voom-stage/ticket-2/lease-1/input.commentary.opus.ogg".to_owned(),
+                output: first_output,
+                output_container: "ogg".to_owned(),
+                output_audio_codec: "opus".to_owned(),
+                output_language: Some("eng".to_owned()),
+                output_title: Some("Commentary".to_owned()),
+            },
+            ExtractAudioOutputResult {
+                output_id: "extract_output_2".to_owned(),
+                selection: AudioStreamRef {
+                    snapshot_stream_id: "stream-4".to_owned(),
+                    provider_stream_index: 4,
+                },
+                path: "/tmp/voom-stage/ticket-2/lease-1/input.main.opus.ogg".to_owned(),
+                output: observed_facts("blake3:output-2"),
+                output_container: "ogg".to_owned(),
+                output_audio_codec: "opus".to_owned(),
+                output_language: Some("eng".to_owned()),
+                output_title: Some("Main".to_owned()),
+            },
+        ]),
+    }
+}
+
+fn legacy_extract_request_json() -> serde_json::Value {
+    serde_json::json!({
+        "input": {
+            "path": "/library/input.mkv",
+            "expected": {
+                "size_bytes": 1234,
+                "content_hash": "blake3:abc",
+                "modified_at": null,
+                "local_file_key": null
+            }
+        },
+        "output": {
+            "staging_root": "/tmp/voom-stage",
+            "path": "/tmp/voom-stage/ticket-2/lease-1/input.commentary.opus.ogg",
+            "container": "ogg",
+            "audio_codec": "opus",
+            "overwrite": false
+        },
+        "selection": {
+            "snapshot_stream_id": "stream-3",
+            "provider_stream_index": 3
+        }
+    })
+}
+
+fn legacy_extract_result_json() -> serde_json::Value {
+    serde_json::json!({
+        "status": "extracted",
+        "provider": "ffmpeg",
+        "provider_version": "ffmpeg version 7.0",
+        "input_pre": { "size_bytes": 1234, "content_hash": "blake3:input-before" },
+        "input_post": { "size_bytes": 1234, "content_hash": "blake3:input-after" },
+        "output": { "size_bytes": 321, "content_hash": "blake3:output" },
+        "output_container": "ogg",
+        "output_audio_codec": "opus",
+        "selected_snapshot_stream_id": "stream-3",
+        "output_language": "eng",
+        "output_title": "Commentary"
+    })
 }
 
 #[test]
