@@ -16,6 +16,7 @@
 //! - [`finalize`] — per-file/per-phase durable row writing and payload/sqlite helpers.
 //! - [`resume`] — resume reconciliation and chain-tip/snapshot projection.
 
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::future::Future;
 #[cfg(test)]
@@ -27,7 +28,8 @@ use voom_policy::PolicyInputSetDraft;
 use voom_store::repo::identity::MediaSnapshot;
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseSummary, NewFileRunStart, NewPhaseSummary, PhaseSummary, WorkflowSummary,
+    FilePhaseOutcome, FilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewPhaseSummary,
+    PhaseSummary, WorkflowSummary,
 };
 
 use crate::ControlPlane;
@@ -47,7 +49,7 @@ mod resume;
 use finalize::phase_ordinal;
 use planning::{
     classify_phase, initial_phase_files, job_grain_summary, phase_draft, phase_outcome,
-    regenerate_phase_report, reject_unhandled_on_error, zero_phase_summary,
+    regenerate_phase_report, reject_unhandled_on_error, resolved_phase_policy, zero_phase_summary,
 };
 use resume::{PreparedResumeSeed, ResumePreparation};
 
@@ -56,7 +58,7 @@ use finalize::{sqlite_i64, sqlite_u64};
 
 /// A file the coordinator is advancing through phases. `version_id`/`snapshot`
 /// track the file's current chain tip and are refreshed after each commit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PhaseFile {
     pub(super) asset_id: FileAssetId,
     pub(super) version_id: FileVersionId,
@@ -67,6 +69,9 @@ struct PhaseFile {
     /// resume reconciliation). The loop passes a file through phases below this
     /// untouched (#165).
     pub(super) resume_ordinal: u32,
+    /// Committed/skipped outcomes by phase ordinal. Fresh runs build this map
+    /// as phases finish; resumed runs restore the inherited durable projection.
+    pub(super) phase_history: BTreeMap<u32, FilePhaseOutcome>,
 }
 
 fn run_starts_for_files(files: &[PhaseFile]) -> Vec<NewFileRunStart> {
@@ -76,6 +81,77 @@ fn run_starts_for_files(files: &[PhaseFile]) -> Vec<NewFileRunStart> {
             branch_id: file.branch_id.clone(),
             starting_file_version_id: file.version_id,
             starting_phase_ordinal: 0,
+        })
+        .collect()
+}
+
+fn phase_gate_admission(
+    policy: &voom_policy::CompiledPolicy,
+    phase_name: &str,
+    files: &[PhaseFile],
+) -> Result<Vec<bool>, VoomError> {
+    let phase = policy
+        .phases
+        .iter()
+        .find(|phase| phase.name == phase_name)
+        .ok_or_else(|| {
+            VoomError::PolicyExecution(format!(
+                "phase `{phase_name}` is in phase_order but has no compiled phase"
+            ))
+        })?;
+    let Some(gate) = &phase.run_if else {
+        return Ok(vec![true; files.len()]);
+    };
+    let current_ordinal = policy
+        .phase_order
+        .iter()
+        .position(|name| name == phase_name);
+    let referenced_ordinal = policy
+        .phase_order
+        .iter()
+        .position(|name| name == &gate.phase);
+    let Some((current_ordinal, referenced_ordinal)) = current_ordinal.zip(referenced_ordinal)
+    else {
+        return Err(VoomError::PolicyExecution(format!(
+            "phase `{phase_name}` run_if references phase `{}` outside phase_order",
+            gate.phase
+        )));
+    };
+    if referenced_ordinal >= current_ordinal {
+        return Err(VoomError::PolicyExecution(format!(
+            "phase `{phase_name}` run_if must reference an earlier phase, got `{}`",
+            gate.phase
+        )));
+    }
+    let referenced_ordinal = u32::try_from(referenced_ordinal)
+        .map_err(|error| VoomError::Internal(format!("phase ordinal overflow: {error}")))?;
+
+    files
+        .iter()
+        .map(|file| {
+            let outcome = file.phase_history.get(&referenced_ordinal).ok_or_else(|| {
+                VoomError::PolicyExecution(format!(
+                    "phase `{phase_name}` run_if cannot evaluate branch `{}`: \
+                     phase `{}` outcome is missing",
+                    file.branch_id, gate.phase
+                ))
+            })?;
+            match (gate.trigger, outcome) {
+                (
+                    voom_policy::RunIfTrigger::Completed,
+                    FilePhaseOutcome::Committed | FilePhaseOutcome::Skipped,
+                )
+                | (voom_policy::RunIfTrigger::Modified, FilePhaseOutcome::Committed) => Ok(true),
+                (voom_policy::RunIfTrigger::Modified, FilePhaseOutcome::Skipped) => Ok(false),
+                (
+                    voom_policy::RunIfTrigger::Completed | voom_policy::RunIfTrigger::Modified,
+                    FilePhaseOutcome::Blocked,
+                ) => Err(VoomError::PolicyExecution(format!(
+                    "phase `{phase_name}` run_if found blocked predecessor `{}` \
+                     for surviving branch `{}`",
+                    gate.phase, file.branch_id
+                ))),
+            }
         })
         .collect()
 }
@@ -160,6 +236,7 @@ struct PlannedPhase {
     plan: ExecutionPlan,
     report: voom_plan::ComplianceReport,
     dispositions: Vec<Disposition>,
+    gate_admission: Vec<bool>,
 }
 
 #[cfg(test)]
@@ -232,13 +309,8 @@ impl<'a> PhaseLoop<'a> {
                     )
                     .await;
             }
-            self.persist_phase_outcome(
-                phase_ordinal,
-                phase_name,
-                &planned.dispositions,
-                &mut entry,
-            )
-            .await?;
+            self.persist_phase_outcome(phase_ordinal, phase_name, &planned, &mut entry)
+                .await?;
             self.recombine_survivors(entry);
         }
 
@@ -268,10 +340,24 @@ impl<'a> PhaseLoop<'a> {
         phase_name: &str,
         entering: &[PhaseFile],
     ) -> Result<PlannedPhase, VoomError> {
-        let draft = phase_draft(&self.base_draft, entering);
+        let gate_admission = phase_gate_admission(&self.policy, phase_name, entering)?;
+        let admitted = entering
+            .iter()
+            .zip(&gate_admission)
+            .filter(|(_, admitted)| **admitted)
+            .map(|(file, _)| file.clone())
+            .collect::<Vec<_>>();
+        let suppress_operations = admitted.is_empty();
+        let planning_files = if suppress_operations {
+            entering
+        } else {
+            admitted.as_slice()
+        };
+        let draft = phase_draft(&self.base_draft, planning_files);
+        let policy = resolved_phase_policy(&self.policy, phase_name, suppress_operations)?;
         let plan = voom_plan::plan_phase(
             PlanningRequest {
-                policy: self.policy.clone(),
+                policy,
                 input: draft,
                 context: self.context.clone(),
             },
@@ -285,6 +371,7 @@ impl<'a> PhaseLoop<'a> {
             plan,
             report,
             dispositions,
+            gate_admission,
         })
     }
 
@@ -312,7 +399,7 @@ impl<'a> PhaseLoop<'a> {
         &mut self,
         phase_ordinal: u32,
         phase_name: &str,
-        dispositions: &[Disposition],
+        planned: &PlannedPhase,
         entry: &mut PhaseEntry,
     ) -> Result<(), VoomError> {
         let (rows, refreshed) = self
@@ -321,7 +408,7 @@ impl<'a> PhaseLoop<'a> {
                 self.job_id,
                 phase_ordinal,
                 &mut entry.entering,
-                dispositions,
+                &planned.dispositions,
             )
             .await?;
         let outcome = phase_outcome(&rows.iter().map(|row| row.outcome).collect::<Vec<_>>());
@@ -332,6 +419,7 @@ impl<'a> PhaseLoop<'a> {
             &self.base_draft,
             phase_name,
             &refreshed,
+            &planned.gate_admission,
         )?;
         let phase_row = self
             .control_plane
@@ -485,7 +573,9 @@ impl ControlPlane {
         runtimes: WorkerRuntimeRegistry,
     ) -> Result<CoordinatorOutcome, CoordinatorError> {
         let starts = run_starts_for_files(&inputs.files);
-        let (job, _) = self.open_phase_barrier_job(&starts, Vec::new()).await?;
+        let (job, _) = self
+            .open_phase_barrier_job(&starts, Vec::new(), Vec::new())
+            .await?;
         let result = self
             .run_phase_barrier_in_job(job.id, inputs, options, runtimes)
             .await;
@@ -547,11 +637,14 @@ impl ControlPlane {
         let ResumePreparation {
             files,
             run_starts,
+            history,
             seeds,
         } = self
             .prepare_resume(prior_job_id, inputs.files, phase_count)
             .await?;
-        let (job, seed_file_phases) = self.open_phase_barrier_job(&run_starts, seeds).await?;
+        let (job, seed_file_phases) = self
+            .open_phase_barrier_job(&run_starts, history, seeds)
+            .await?;
         let result = self
             .drive_phase_loop(PhaseLoopInputs {
                 job_id: job.id,
@@ -622,7 +715,9 @@ impl ControlPlane {
     where
         F: FnOnce(JobId) -> CoordinatorFuture<'a>,
     {
-        let (job, _) = self.open_phase_barrier_job(&[], Vec::new()).await?;
+        let (job, _) = self
+            .open_phase_barrier_job(&[], Vec::new(), Vec::new())
+            .await?;
         let result = run(job.id).await;
         self.finish_phase_barrier_job(job.id, result).await
     }
@@ -630,6 +725,7 @@ impl ControlPlane {
     async fn open_phase_barrier_job(
         &self,
         run_starts: &[NewFileRunStart],
+        history: Vec<NewFileRunHistory>,
         seeds: Vec<PreparedResumeSeed>,
     ) -> Result<(voom_store::repo::jobs::Job, Vec<FilePhaseSummary>), VoomError> {
         let now = self.clock().now();
@@ -646,6 +742,9 @@ impl ControlPlane {
             .await?;
         self.workflow_summaries
             .insert_file_run_starts_in_tx(&mut tx, job.id, run_starts)
+            .await?;
+        self.workflow_summaries
+            .insert_file_run_history_in_tx(&mut tx, job.id, &history)
             .await?;
         let mut rows = Vec::with_capacity(seeds.len());
         for seed in seeds {

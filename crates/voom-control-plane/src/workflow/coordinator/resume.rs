@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 use voom_core::{FileVersionId, JobId, VoomError};
 use voom_store::repo::identity::{FileLocationKind, IdentityRepo};
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, FilePhaseSummary, FileRunStart, NewFileRunStart,
+    FilePhaseOutcome, FilePhaseSummary, FileRunHistory, FileRunStart, NewFileRunHistory,
+    NewFileRunStart,
 };
 
 use crate::ControlPlane;
@@ -30,6 +31,7 @@ pub(super) struct PreparedResumeSeed {
 pub(super) struct ResumePreparation {
     pub(super) files: Vec<PhaseFile>,
     pub(super) run_starts: Vec<NewFileRunStart>,
+    pub(super) history: Vec<NewFileRunHistory>,
     pub(super) seeds: Vec<PreparedResumeSeed>,
 }
 
@@ -96,21 +98,20 @@ impl ControlPlane {
             .workflow_summaries
             .file_phases_for_job(prior_job_id)
             .await?;
-        validate_branch_sets(&files, &starts, &rows)?;
+        let inherited = self
+            .workflow_summaries
+            .file_run_history_for_job(prior_job_id)
+            .await?;
+        validate_branch_sets(&files, &starts, &rows, &inherited)?;
 
         let starts = starts
             .into_iter()
             .map(|start| (start.branch_id.clone(), start))
             .collect::<BTreeMap<_, _>>();
-        let mut rows_by_branch = BTreeMap::<&str, Vec<&FilePhaseSummary>>::new();
-        for row in &rows {
-            rows_by_branch
-                .entry(row.branch_id.as_str())
-                .or_default()
-                .push(row);
-        }
+        let (rows_by_branch, inherited_by_branch) = index_prior_rows(&rows, &inherited);
         let mut survivors = Vec::with_capacity(files.len());
         let mut run_starts = Vec::with_capacity(files.len());
+        let mut history = Vec::new();
         let mut seeds = Vec::new();
         for mut file in files {
             let start = starts.get(&file.branch_id).ok_or_else(|| {
@@ -122,6 +123,11 @@ impl ControlPlane {
             self.validate_resume_lineage(&file, start, branch_rows)
                 .await?;
             let state = validate_prior_row_shape(start, branch_rows, phase_count)?;
+            let inherited_rows = inherited_by_branch
+                .get(file.branch_id.as_str())
+                .map_or(&[][..], Vec::as_slice);
+            let mut phase_history = validate_prior_history(start, inherited_rows, phase_count)?;
+            merge_prior_rows(&file.branch_id, &mut phase_history, branch_rows)?;
             let mut next_ordinal = state.next_ordinal;
             if state.terminal {
                 if file.version_id != state.recorded_tip {
@@ -138,6 +144,12 @@ impl ControlPlane {
                     branch_id: file.branch_id.clone(),
                     produced,
                 });
+                merge_phase_outcome(
+                    &file.branch_id,
+                    &mut phase_history,
+                    next_ordinal,
+                    FilePhaseOutcome::Committed,
+                )?;
                 next_ordinal += 1;
             }
             run_starts.push(NewFileRunStart {
@@ -145,14 +157,28 @@ impl ControlPlane {
                 starting_file_version_id: file.version_id,
                 starting_phase_ordinal: next_ordinal,
             });
+            history.extend(phase_history.iter().map(|(&phase_ordinal, &outcome)| {
+                NewFileRunHistory {
+                    branch_id: file.branch_id.clone(),
+                    phase_ordinal,
+                    outcome,
+                }
+            }));
             if next_ordinal < phase_count && !state.terminal {
                 file.resume_ordinal = next_ordinal;
+                file.phase_history = phase_history;
                 survivors.push(file);
             }
         }
+        history.sort_by(|left, right| {
+            left.branch_id
+                .cmp(&right.branch_id)
+                .then(left.phase_ordinal.cmp(&right.phase_ordinal))
+        });
         Ok(ResumePreparation {
             files: survivors,
             run_starts,
+            history,
             seeds,
         })
     }
@@ -217,10 +243,35 @@ struct PriorBranchState {
     terminal: bool,
 }
 
+type PhaseRowsByBranch<'a> = BTreeMap<&'a str, Vec<&'a FilePhaseSummary>>;
+type HistoryRowsByBranch<'a> = BTreeMap<&'a str, Vec<&'a FileRunHistory>>;
+
+fn index_prior_rows<'a>(
+    rows: &'a [FilePhaseSummary],
+    inherited: &'a [FileRunHistory],
+) -> (PhaseRowsByBranch<'a>, HistoryRowsByBranch<'a>) {
+    let mut rows_by_branch = PhaseRowsByBranch::new();
+    for row in rows {
+        rows_by_branch
+            .entry(row.branch_id.as_str())
+            .or_default()
+            .push(row);
+    }
+    let mut inherited_by_branch = HistoryRowsByBranch::new();
+    for row in inherited {
+        inherited_by_branch
+            .entry(row.branch_id.as_str())
+            .or_default()
+            .push(row);
+    }
+    (rows_by_branch, inherited_by_branch)
+}
+
 fn validate_branch_sets(
     files: &[PhaseFile],
     starts: &[FileRunStart],
     rows: &[FilePhaseSummary],
+    inherited: &[FileRunHistory],
 ) -> Result<(), VoomError> {
     let current = files
         .iter()
@@ -242,6 +293,74 @@ fn validate_branch_sets(
         return Err(resume_incomplete(format!(
             "phase row references unmatched branch {}",
             row.branch_id
+        )));
+    }
+    if let Some(row) = inherited
+        .iter()
+        .find(|row| !prior.contains(row.branch_id.as_str()))
+    {
+        return Err(resume_incomplete(format!(
+            "inherited phase outcome references unmatched branch {}",
+            row.branch_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_prior_history(
+    start: &FileRunStart,
+    rows: &[&FileRunHistory],
+    phase_count: u32,
+) -> Result<BTreeMap<u32, FilePhaseOutcome>, VoomError> {
+    let mut history = BTreeMap::new();
+    for row in rows {
+        if row.phase_ordinal >= start.starting_phase_ordinal || row.phase_ordinal >= phase_count {
+            return Err(resume_incomplete(format!(
+                "branch {} inherited phase {} is not before run start {} below {phase_count}",
+                start.branch_id, row.phase_ordinal, start.starting_phase_ordinal
+            )));
+        }
+        if row.outcome == FilePhaseOutcome::Blocked {
+            return Err(resume_incomplete(format!(
+                "branch {} inherited blocked phase {}",
+                start.branch_id, row.phase_ordinal
+            )));
+        }
+        merge_phase_outcome(
+            &start.branch_id,
+            &mut history,
+            row.phase_ordinal,
+            row.outcome,
+        )?;
+    }
+    Ok(history)
+}
+
+fn merge_prior_rows(
+    branch_id: &str,
+    history: &mut BTreeMap<u32, FilePhaseOutcome>,
+    rows: &[&FilePhaseSummary],
+) -> Result<(), VoomError> {
+    for row in rows {
+        if row.outcome == FilePhaseOutcome::Blocked {
+            continue;
+        }
+        merge_phase_outcome(branch_id, history, row.phase_ordinal, row.outcome)?;
+    }
+    Ok(())
+}
+
+fn merge_phase_outcome(
+    branch_id: &str,
+    history: &mut BTreeMap<u32, FilePhaseOutcome>,
+    phase_ordinal: u32,
+    outcome: FilePhaseOutcome,
+) -> Result<(), VoomError> {
+    if let Some(existing) = history.insert(phase_ordinal, outcome)
+        && existing != outcome
+    {
+        return Err(resume_incomplete(format!(
+            "branch {branch_id} has conflicting outcomes for phase {phase_ordinal}"
         )));
     }
     Ok(())

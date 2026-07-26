@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use voom_store::repo::identity::{
 use voom_store::repo::jobs::NewJob;
 use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workflow_summaries::{
-    FilePhaseOutcome, NewFilePhaseSummary, NewFileRunStart, NewWorkflowSummary,
+    FilePhaseOutcome, NewFilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewWorkflowSummary,
 };
 
 use crate::cases::cp;
@@ -565,6 +566,27 @@ fn policy_with_on_error(
     }
 }
 
+fn policy_with_run_if(trigger: voom_policy::RunIfTrigger) -> voom_policy::CompiledPolicy {
+    let mut policy = policy_with_on_error(None);
+    policy.phases.insert(
+        0,
+        voom_policy::CompiledPhase {
+            name: "inspect".to_owned(),
+            depends_on: Vec::new(),
+            run_if: None,
+            skip_if: None,
+            on_error: None,
+            operations: Vec::new(),
+        },
+    );
+    policy.phases[1].run_if = Some(voom_policy::CompiledRunIf {
+        trigger,
+        phase: "inspect".to_owned(),
+    });
+    policy.phase_order = vec!["inspect".to_owned(), "normalize".to_owned()];
+    policy
+}
+
 #[test]
 fn reject_unhandled_on_error_rejects_continue() {
     let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
@@ -665,6 +687,7 @@ async fn phase_file(
         branch_id: branch_id.to_owned(),
         ordinal: 1,
         resume_ordinal: 0,
+        phase_history: BTreeMap::new(),
     }
 }
 
@@ -783,6 +806,310 @@ async fn reconcile_resume_resumes_after_highest_recorded_phase() {
 }
 
 #[tokio::test]
+async fn phase_run_gate_evaluates_completed_and_modified_per_file() {
+    let (cp, _tmp) = cp().await;
+    let first = seed_version(
+        &cp,
+        "/lib/gates/first.mkv",
+        "hash-gate-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/gates/second.mkv",
+        "hash-gate-second",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut committed = phase_file(&cp, first, "first").await;
+    committed
+        .phase_history
+        .insert(0, FilePhaseOutcome::Committed);
+    let mut skipped = phase_file(&cp, second, "second").await;
+    skipped.phase_history.insert(0, FilePhaseOutcome::Skipped);
+    let files = vec![committed, skipped];
+
+    assert_eq!(
+        super::phase_gate_admission(
+            &policy_with_run_if(voom_policy::RunIfTrigger::Completed),
+            "normalize",
+            &files,
+        )
+        .unwrap(),
+        vec![true, true]
+    );
+    assert_eq!(
+        super::phase_gate_admission(
+            &policy_with_run_if(voom_policy::RunIfTrigger::Modified),
+            "normalize",
+            &files,
+        )
+        .unwrap(),
+        vec![true, false]
+    );
+}
+
+#[tokio::test]
+async fn phase_planning_applies_each_files_modified_gate_decision() {
+    let (cp, _tmp) = cp().await;
+    let first = seed_version(
+        &cp,
+        "/lib/gate-plan/first.mkv",
+        "hash-gate-plan-first",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let second = seed_version(
+        &cp,
+        "/lib/gate-plan/second.mkv",
+        "hash-gate-plan-second",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut committed = phase_file(&cp, first, "first").await;
+    committed
+        .phase_history
+        .insert(0, FilePhaseOutcome::Committed);
+    let mut skipped = phase_file(&cp, second, "second").await;
+    skipped.phase_history.insert(0, FilePhaseOutcome::Skipped);
+    let files = vec![committed, skipped];
+    let mut policy = policy_with_run_if(voom_policy::RunIfTrigger::Modified);
+    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags];
+    let phase_loop = super::PhaseLoop::new(
+        &cp,
+        super::PhaseLoopInputs {
+            job_id: JobId(1),
+            promotion_job_ids: Vec::new(),
+            policy,
+            context: voom_plan::PlanningContext::default(),
+            base_draft: file_draft(
+                "gate-planning",
+                &files
+                    .iter()
+                    .map(|file| file.snapshot.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            files: files.clone(),
+            seed_file_phases: Vec::new(),
+            options: ComplianceExecutionOptions::default(),
+            runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
+        },
+    );
+
+    let planned = phase_loop
+        .plan_phase_for_files("normalize", &files)
+        .unwrap();
+
+    assert!(
+        planned.plan.nodes.iter().all(|node| {
+            let TargetRef::FileVersion { id } = node.target else {
+                return false;
+            };
+            id == first
+        }),
+        "only the modified file should have phase nodes"
+    );
+    let super::Disposition::Skipped = &planned.dispositions[1] else {
+        panic!("the unmodified file must be classified as skipped");
+    };
+}
+
+#[tokio::test]
+async fn phase_planning_reports_zero_checks_when_no_files_pass_the_gate() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/gate-plan/unmodified.mkv",
+        "hash-gate-plan-unmodified",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let mut file = phase_file(&cp, version, "unmodified").await;
+    file.phase_history.insert(0, FilePhaseOutcome::Skipped);
+    let files = vec![file];
+    let mut policy = policy_with_run_if(voom_policy::RunIfTrigger::Modified);
+    policy.phases[1].operations = vec![voom_policy::CompiledOperation::ClearTags];
+    let phase_loop = super::PhaseLoop::new(
+        &cp,
+        super::PhaseLoopInputs {
+            job_id: JobId(1),
+            promotion_job_ids: Vec::new(),
+            policy,
+            context: voom_plan::PlanningContext::default(),
+            base_draft: file_draft("gate-planning-none", &[files[0].snapshot.clone()]),
+            files: files.clone(),
+            seed_file_phases: Vec::new(),
+            options: ComplianceExecutionOptions::default(),
+            runtimes: crate::workflow::WorkerRuntimeRegistry::new(),
+        },
+    );
+
+    let planned = phase_loop
+        .plan_phase_for_files("normalize", &files)
+        .unwrap();
+
+    assert!(planned.plan.nodes.is_empty());
+    assert_eq!(planned.report.summary.total_check_count, 0);
+    let super::Disposition::Skipped = &planned.dispositions[0] else {
+        panic!("the unmodified file must be classified as skipped");
+    };
+}
+
+#[tokio::test]
+async fn phase_run_gate_fails_loud_when_predecessor_history_is_missing() {
+    let (cp, _tmp) = cp().await;
+    let version = seed_version(
+        &cp,
+        "/lib/gates/missing.mkv",
+        "hash-gate-missing",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let files = vec![phase_file(&cp, version, "missing").await];
+
+    let error = super::phase_gate_admission(
+        &policy_with_run_if(voom_policy::RunIfTrigger::Completed),
+        "normalize",
+        &files,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "POLICY_EXECUTION_ERROR");
+    assert!(error.to_string().contains("outcome is missing"));
+    assert!(error.to_string().contains("missing"));
+}
+
+#[tokio::test]
+async fn phase_finalization_updates_survivors_gate_history() {
+    let (cp, _tmp) = cp().await;
+    let skipped_version = seed_version(
+        &cp,
+        "/lib/gate-finalize/skipped.mkv",
+        "hash-gate-finalize-skipped",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let committed_parent = seed_version(
+        &cp,
+        "/lib/gate-finalize/committed.mkv",
+        "hash-gate-finalize-parent",
+        reprobe_payload("h264"),
+    )
+    .await;
+    let skipped = phase_file(&cp, skipped_version, "skipped").await;
+    let committed = phase_file(&cp, committed_parent, "committed").await;
+    let committed_tip = advance_chain_tip(
+        &cp,
+        committed_parent,
+        "hash-gate-finalize-tip",
+        reprobe_payload("hevc"),
+    )
+    .await;
+    let job_id = open_workflow_job(&cp).await;
+    let mut files = vec![skipped, committed];
+
+    cp.finalize_phase(
+        job_id,
+        0,
+        &mut files,
+        &[
+            super::Disposition::Skipped,
+            super::Disposition::Planned {
+                node_id: "committed-node".to_owned(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        files[0].phase_history.get(&0),
+        Some(&FilePhaseOutcome::Skipped)
+    );
+    assert_eq!(files[1].version_id, committed_tip);
+    assert_eq!(
+        files[1].phase_history.get(&0),
+        Some(&FilePhaseOutcome::Committed)
+    );
+}
+
+#[tokio::test]
+async fn resume_carries_phase_history_across_repeated_new_jobs() {
+    let (cp, _tmp) = cp().await;
+    let prior = open_workflow_job(&cp).await;
+    let version = seed_version(
+        &cp,
+        "/lib/history-carry/movie.mkv",
+        "hash-history-carry",
+        reprobe_payload("h264"),
+    )
+    .await;
+    record_run_start(&cp, prior, "movie", version, 0).await;
+    record_file_phase(
+        &cp,
+        prior,
+        0,
+        "movie",
+        FilePhaseOutcome::Committed,
+        Some(version),
+    )
+    .await;
+    record_file_phase(&cp, prior, 1, "movie", FilePhaseOutcome::Skipped, None).await;
+
+    let prepared = cp
+        .prepare_resume(prior, vec![phase_file(&cp, version, "movie").await], 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.files[0].phase_history,
+        BTreeMap::from([
+            (0, FilePhaseOutcome::Committed),
+            (1, FilePhaseOutcome::Skipped),
+        ])
+    );
+    assert_eq!(
+        prepared.history,
+        vec![
+            NewFileRunHistory {
+                branch_id: "movie".to_owned(),
+                phase_ordinal: 0,
+                outcome: FilePhaseOutcome::Committed,
+            },
+            NewFileRunHistory {
+                branch_id: "movie".to_owned(),
+                phase_ordinal: 1,
+                outcome: FilePhaseOutcome::Skipped,
+            },
+        ]
+    );
+
+    let (next_job, _) = cp
+        .open_phase_barrier_job(
+            &prepared.run_starts,
+            prepared.history.clone(),
+            prepared.seeds,
+        )
+        .await
+        .unwrap();
+    let repeated = cp
+        .prepare_resume(
+            next_job.id,
+            vec![phase_file(&cp, version, "movie").await],
+            4,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repeated.files[0].phase_history,
+        prepared.files[0].phase_history
+    );
+    assert_eq!(repeated.history, prepared.history);
+    assert_eq!(repeated.files[0].resume_ordinal, 2);
+}
+
+#[tokio::test]
 async fn reconcile_resume_excludes_blocked_file() {
     let (cp, _tmp) = cp().await;
     let prior = open_workflow_job(&cp).await;
@@ -853,7 +1180,7 @@ async fn reconcile_resume_backfills_committed_tip_without_row() {
     assert_eq!(prepared.seeds[0].phase_ordinal, 1);
     assert_eq!(prepared.run_starts[0].starting_phase_ordinal, 2);
     let (new_job, backfilled) = cp
-        .open_phase_barrier_job(&prepared.run_starts, prepared.seeds)
+        .open_phase_barrier_job(&prepared.run_starts, prepared.history, prepared.seeds)
         .await
         .unwrap();
 
@@ -1203,7 +1530,7 @@ async fn phase_barrier_job_open_rolls_back_job_event_starts_and_seed() {
     let before = durable_resume_counts(&cp).await;
 
     let error = cp
-        .open_phase_barrier_job(&prepared.run_starts, prepared.seeds)
+        .open_phase_barrier_job(&prepared.run_starts, prepared.history, prepared.seeds)
         .await
         .unwrap_err();
 
@@ -1211,7 +1538,7 @@ async fn phase_barrier_job_open_rolls_back_job_event_starts_and_seed() {
     assert_eq!(durable_resume_counts(&cp).await, before);
 }
 
-async fn durable_resume_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64) {
+async fn durable_resume_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64, i64) {
     let jobs = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
         .fetch_one(&cp.pool)
         .await
@@ -1224,11 +1551,15 @@ async fn durable_resume_counts(cp: &crate::ControlPlane) -> (i64, i64, i64, i64)
         .fetch_one(&cp.pool)
         .await
         .unwrap();
+    let history = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_file_run_history")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap();
     let phases = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_file_phase_summaries")
         .fetch_one(&cp.pool)
         .await
         .unwrap();
-    (jobs, events, starts, phases)
+    (jobs, events, starts, history, phases)
 }
 
 #[tokio::test]

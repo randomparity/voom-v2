@@ -353,6 +353,8 @@ impl ControlPlane {
                         None,
                     )
                     .await?;
+                file.phase_history
+                    .insert(phase_ordinal, FilePhaseOutcome::Skipped);
                 Ok((row, file.snapshot.clone(), Some(file)))
             }
             Disposition::Planned { node_id } => {
@@ -381,6 +383,8 @@ impl ControlPlane {
                             None,
                         )
                         .await?;
+                    file.phase_history
+                        .insert(phase_ordinal, FilePhaseOutcome::Skipped);
                     return Ok((row, file.snapshot.clone(), Some(file)));
                 }
                 let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
@@ -396,6 +400,8 @@ impl ControlPlane {
                     .await?;
                 file.version_id = tip.id;
                 file.snapshot = snapshot;
+                file.phase_history
+                    .insert(phase_ordinal, FilePhaseOutcome::Committed);
                 Ok((row, file.snapshot.clone(), Some(file)))
             }
         }
