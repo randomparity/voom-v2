@@ -30,10 +30,15 @@ Add failing `voom-plan` tests for:
 3. empty or malformed resolved IDs fail parsing;
 4. zero/multiple defaults matches produce their diagnostic codes/messages;
 5. zero/multiple order-head matches produce their diagnostic codes/messages;
-6. matching only a removed stream counts as zero retained matches.
+6. matching only a removed stream counts as zero retained matches;
+7. missing or malformed `default`, `forced`, and `commentary` facts block
+   positive and negated filters;
+8. absent language still evaluates as `und`, while a malformed language value
+   blocks planning.
 
 Implement additive payload fields and one shared retained-stream cardinality
-resolver.
+resolver. Preserve fact presence and validity through snapshot parsing so
+negation cannot turn an unknown fact into a match.
 
 Focused guardrail:
 
@@ -54,7 +59,8 @@ Add behavior tests for:
 2. head-only order changes and `NoOp`;
 3. head-plus-group order changes and `NoOp`;
 4. stable provider-stream order tie handling;
-5. attachments excluded from head candidates.
+5. attachments excluded from head candidates;
+6. shuffled stream-summary arrays produce the same desired order and payload.
 
 Focused guardrail:
 
@@ -71,7 +77,9 @@ Add failing `voom-control-plane` tests for:
 3. empty `track_order` is valid only with a resolved head;
 4. removed, missing, wrong-kind, and duplicate resolved identities fail with
    actionable configuration errors;
-5. strategy defaults remain unchanged.
+5. strategy defaults remain unchanged;
+6. retained stream references are sorted by ascending provider stream index
+   before execution selection is constructed.
 
 Implement pinned-snapshot ID validation without filter reevaluation.
 
@@ -82,7 +90,29 @@ cargo test -p voom-control-plane --lib remux::selection::tests
 cargo clippy -p voom-control-plane --all-targets --all-features -- -D warnings
 ```
 
-## Step 4 — Record head selection in durable events
+## Step 4 — Make the worker boundary head-aware and canonical
+
+Add failing `voom-mkvtoolnix-worker` tests for:
+
+1. duplicate heads and heads outside `keep_streams` fail before provider
+   execution;
+2. attachment heads fail before provider execution;
+3. output inspection accepts the emitted head-first order;
+4. output inspection rejects an output that ignores the head;
+5. shuffled `keep_streams` vectors still emit and inspect ascending
+   provider-index source order within the head/group/remainder algorithm.
+
+Make argument construction and expected-output inspection share the same
+ordering semantics. Do not silently discard unresolved head references.
+
+Focused guardrail:
+
+```bash
+cargo test -p voom-mkvtoolnix-worker --all-features
+cargo clippy -p voom-mkvtoolnix-worker --all-targets --all-features -- -D warnings
+```
+
+## Step 5 — Record head selection in durable events
 
 Add default-empty `head_streams` to all durable remux event content structs and
 populate them from the execution selection. Test old JSON deserialization and
@@ -96,7 +126,7 @@ cargo test -p voom-control-plane --lib remux
 just check-payload-deny-unknown
 ```
 
-## Step 5 — Prove generated-media behavior
+## Step 6 — Prove generated-media behavior
 
 Change the generated remux policy to use:
 
@@ -119,7 +149,7 @@ Focused guardrail:
 cargo test -p voom-control-plane --all-features --test remux_flow -- --nocapture
 ```
 
-## Step 6 — Documentation, review, and ship
+## Step 7 — Documentation, review, and ship
 
 Update ADR 0023 and the control-plane design spec to remove the interim inert
 state. Run focused checks, `just ci`, adversarial review, simplification review,

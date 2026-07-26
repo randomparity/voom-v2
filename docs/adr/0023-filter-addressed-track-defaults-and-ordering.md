@@ -129,6 +129,18 @@ candidates. Bare `order tracks where <filter>` carries an empty group order plus
 one resolved head stream, so every remaining ordinary track stays in source
 order.
 
+Source order is ascending provider stream index, independent of the snapshot
+JSON array or request-vector order. The control plane canonicalizes retained
+references before dispatch. The worker applies that same ordering rule to both
+`--track-order` construction and output inspection, and rejects head references
+that are duplicated, outside the retained set, or attachments.
+
+Fact evaluation fails closed when a referenced structured fact is missing or
+malformed, including below `not`. The language filter retains its published
+special case: an absent language tag is `und`, while a present non-string value
+is malformed. Disposition filters require a boolean fact rather than treating
+missing or malformed values as false.
+
 ## Consequences
 
 - A policy using `defaults audio where …` or `order tracks … where …` compiles,
