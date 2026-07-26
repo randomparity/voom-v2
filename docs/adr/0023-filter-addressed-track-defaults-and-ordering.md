@@ -82,7 +82,9 @@ same target group regardless of source position. One explicit action discards
 all strategy actions for that target. Multiple explicit actions for one target
 are an unsupported policy shape and block the file with an actionable message.
 The planner performs this reduction before payload construction, and the
-control plane repeats it at the execution trust boundary.
+control plane repeats it at the execution trust boundary. A shadowed `best`
+action is discarded before strategy support is checked; an unshadowed `best`
+remains blocked until issue #336 supplies its ranking behavior.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
@@ -134,10 +136,12 @@ one resolved head stream, so every remaining ordinary track stays in source
 order.
 
 Source order is ascending provider stream index, independent of the snapshot
-JSON array or request-vector order. The control plane canonicalizes retained
-references before dispatch. The worker applies that same ordering rule to both
-`--track-order` construction and output inspection, and rejects head references
-that are duplicated, outside the retained set, or attachments.
+JSON array or request-vector order. Provider indexes must be unique within a
+snapshot; duplicates are insufficient facts and block planning. The control
+plane canonicalizes retained references before dispatch. The worker applies
+that same ordering rule to both `--track-order` construction and output
+inspection, and rejects head references that are duplicated, outside the
+retained set, or attachments.
 
 Fact evaluation fails closed when a referenced structured fact is missing or
 malformed, including below `not`. The language filter retains its published

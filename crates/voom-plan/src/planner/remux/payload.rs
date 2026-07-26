@@ -12,6 +12,7 @@ pub struct RemuxOperationPayload {
     pub source_media_snapshot_id: Option<u64>,
     pub track_actions: Vec<RemuxTrackAction>,
     pub track_order: Vec<RemuxTrackGroup>,
+    /// Snapshot stream pinned to the head of the requested output order.
     pub head_snapshot_stream_id: Option<String>,
     pub defaults: Vec<RemuxDefaultAction>,
 }
@@ -168,6 +169,7 @@ pub enum RemuxTrackActionKind {
 pub struct RemuxDefaultAction {
     pub target: TrackTarget,
     pub strategy: DefaultStrategy,
+    /// Snapshot stream selected by an explicit defaults filter.
     pub selected_snapshot_stream_id: Option<String>,
 }
 

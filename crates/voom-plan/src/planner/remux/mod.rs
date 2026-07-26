@@ -38,7 +38,10 @@ pub(super) fn candidate_kind(operation: &CompiledOperation) -> Option<PlanOperat
     }
 }
 
-pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSupport {
+pub(super) fn candidate_support(
+    operation: &CompiledOperation,
+    explicit_default_targets: &[TrackTarget],
+) -> CandidateSupport {
     match operation {
         CompiledOperation::SetContainer { container } if container.eq_ignore_ascii_case("mkv") => {
             CandidateSupport::Supported
@@ -60,9 +63,10 @@ pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSuppo
             }
         }
         CompiledOperation::SetDefaults {
+            target,
             strategy: DefaultStrategy::Best,
             ..
-        } => CandidateSupport::Unsupported(
+        } if !explicit_default_targets.contains(target) => CandidateSupport::Unsupported(
             "default strategy best is not supported by remux planning",
         ),
         CompiledOperation::ReorderTracks { targets, .. } => {
@@ -248,7 +252,8 @@ fn with_untagged_language_warning(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
 ) -> OperationPlan {
-    if plan.status == NodeStatus::Blocked || !remux_defaults_untagged_language(snapshot, operations)
+    if plan.status == NodeStatus::Blocked
+        || !remux_has_untagged_language_filter(snapshot, operations)
     {
         return plan;
     }
@@ -263,7 +268,7 @@ fn with_untagged_language_warning(
     )
 }
 
-fn remux_defaults_untagged_language(
+fn remux_has_untagged_language_filter(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
 ) -> bool {
@@ -271,15 +276,23 @@ fn remux_defaults_untagged_language(
         return false;
     };
     operations.iter().any(|operation| {
-        let (CompiledOperation::KeepTracks { target, filter }
-        | CompiledOperation::RemoveTracks { target, filter }) = operation
-        else {
-            return false;
+        let (target, filter, excludes_attachments) = match operation {
+            CompiledOperation::KeepTracks { target, filter }
+            | CompiledOperation::RemoveTracks { target, filter }
+            | CompiledOperation::SetDefaults { target, filter, .. } => {
+                (Some(*target), filter.as_ref(), false)
+            }
+            CompiledOperation::ReorderTracks { head_filter, .. } => {
+                (None, head_filter.as_ref(), true)
+            }
+            _ => return false,
         };
-        filter.as_ref().is_some_and(|filter| {
+        filter.is_some_and(|filter| {
             filter_references_language(filter)
                 && facts.iter().any(|stream| {
-                    stream.kind == *target && stream.language == SnapshotFact::Missing
+                    target.is_none_or(|target| stream.kind == target)
+                        && (!excludes_attachments || stream.kind != TrackTarget::Attachment)
+                        && stream.language == SnapshotFact::Missing
                 })
         })
     })

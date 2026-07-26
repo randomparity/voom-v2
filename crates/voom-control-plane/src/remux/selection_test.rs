@@ -364,6 +364,29 @@ fn selection_sorts_retained_streams_by_provider_index() {
 }
 
 #[test]
+fn selection_rejects_duplicate_provider_indexes() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": []
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+    snapshot.payload["streams"][2]["index"] = json!(1);
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("remux snapshot has insufficient stream facts"),
+        "{err}"
+    );
+}
+
+#[test]
 fn selection_keeps_default_streams_empty_for_non_default_video() {
     let payload = json!({
         "type": "remux",

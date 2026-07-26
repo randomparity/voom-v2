@@ -85,6 +85,19 @@ fn remux_stream_facts_missing_stream_id_blocks_planning() {
 }
 
 #[test]
+fn remux_stream_facts_reject_duplicate_provider_indexes() {
+    let streams = json!([
+        {"id": "stream-1", "index": 1, "kind": "audio"},
+        {"id": "stream-2", "index": 1, "kind": "subtitle"}
+    ]);
+
+    assert_eq!(
+        stream_facts(&snapshot_with_streams(&streams)),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
 fn remux_language_filter_untagged_matches_as_und() {
     // A missing language tag is treated as `und` (ISO 639-2 undetermined) rather
     // than blocking planning (ADR 0021, issue #272): excluded by a non-`und` value
