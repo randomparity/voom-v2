@@ -160,7 +160,7 @@ fn selection_rejects_keep_remove_video_policy() {
 }
 
 #[test]
-fn selection_rejects_attachment_source_stream_before_keep_ids() {
+fn selection_preserves_attachment_source_stream_without_attachment_action() {
     let payload = json!({
         "type": "remux",
         "container": "mkv",
@@ -181,12 +181,91 @@ fn selection_rejects_attachment_source_stream_before_keep_ids() {
             "filename": "cover.jpg"
         }));
 
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert!(
+        selection
+            .keep_streams
+            .iter()
+            .any(|stream| stream.snapshot_stream_id == "stream-2")
+    );
+}
+
+#[test]
+fn selection_executes_commentary_and_font_actions_without_touching_other_kinds() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [
+            {
+                "type": "remove_tracks",
+                "target": "audio",
+                "filter": {"type": "commentary"}
+            },
+            {
+                "type": "keep_tracks",
+                "target": "attachment",
+                "filter": {"type": "font"}
+            }
+        ],
+        "track_order": ["video", "audio", "subtitle"],
+        "defaults": []
+    });
+    let snapshot = snapshot_with_remux_selector_facts();
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+    let kept = selection
+        .keep_streams
+        .iter()
+        .map(|stream| stream.snapshot_stream_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(kept, ["video", "main", "subtitle", "font"]);
+}
+
+#[test]
+fn selection_rejects_commentary_removal_that_would_remove_final_audio() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [{
+            "type": "remove_tracks",
+            "target": "audio",
+            "filter": {"type": "commentary"}
+        }]
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng"]);
+    snapshot.payload["streams"][1]["disposition"]["commentary"] = json!(true);
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("no audio"), "{err}");
+}
+
+#[test]
+fn selection_blocks_commentary_filter_when_fact_is_missing() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [{
+            "type": "remove_tracks",
+            "target": "audio",
+            "filter": {"type": "commentary"}
+        }]
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+
     let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
     assert!(
         err.to_string()
-            .contains("attachment remux selection is unsupported")
+            .contains("remux snapshot has insufficient stream facts"),
+        "{err}"
     );
 }
 
@@ -430,5 +509,62 @@ fn snapshot_with_video_audio_languages<const N: usize>(languages: [&str; N]) -> 
         probed_by: None,
         probed_at: OffsetDateTime::UNIX_EPOCH,
         payload: json!({ "streams": streams }),
+    }
+}
+
+fn snapshot_with_remux_selector_facts() -> MediaSnapshot {
+    MediaSnapshot {
+        id: MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: OffsetDateTime::UNIX_EPOCH,
+        payload: json!({
+            "streams": [
+                {
+                    "id": "video",
+                    "index": 0,
+                    "kind": "video",
+                    "codec_name": "h264",
+                    "disposition": {"default": true}
+                },
+                {
+                    "id": "main",
+                    "index": 1,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "disposition": {"commentary": false}
+                },
+                {
+                    "id": "commentary",
+                    "index": 2,
+                    "kind": "audio",
+                    "codec_name": "aac",
+                    "disposition": {"commentary": true}
+                },
+                {
+                    "id": "subtitle",
+                    "index": 3,
+                    "kind": "subtitle",
+                    "codec_name": "subrip",
+                    "disposition": {"forced": true}
+                },
+                {
+                    "id": "font",
+                    "index": 4,
+                    "kind": "attachment",
+                    "codec_name": "ttf",
+                    "filename": "OpenSans.ttf",
+                    "mime_type": "font/ttf"
+                },
+                {
+                    "id": "cover",
+                    "index": 5,
+                    "kind": "attachment",
+                    "codec_name": "mjpeg",
+                    "filename": "cover.jpg",
+                    "mime_type": "image/jpeg"
+                }
+            ]
+        }),
     }
 }
