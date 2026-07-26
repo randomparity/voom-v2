@@ -178,6 +178,31 @@ fn optional_filter_lowering_failure_is_diagnostic() {
 }
 
 #[test]
+fn malformed_optional_filter_clauses_cannot_lower_as_absent() {
+    for source in [
+        "policy \"p\" {\n  phase a {\n    keep audio where\n  }\n}",
+        "policy \"p\" {\n  phase a {\n    keep audio\twhere\tcommentary\n  }\n}",
+    ] {
+        let diagnostics = compile_ast_errors(source);
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "unexpected diagnostics for `{source}`"
+        );
+        assert_eq!(
+            diagnostics[0].stage,
+            crate::DiagnosticStage::Compile,
+            "unexpected stage for `{source}`"
+        );
+        assert_eq!(
+            diagnostics[0].message, "validated track filter could not be lowered",
+            "unexpected message for `{source}`"
+        );
+    }
+}
+
+#[test]
 fn required_filter_lowering_failure_is_diagnostic() {
     let source = "policy \"p\" {\n  phase a {\n    \
                   synthesize audio from lang in [\"eng\"] { codec aac channels 2 }\n  }\n}";
