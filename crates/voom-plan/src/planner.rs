@@ -304,6 +304,20 @@ impl<'a> PlanBuilder<'a> {
         operations: &[CompiledOperation],
     ) {
         let operations = snapshot_operations(snapshot, operations);
+        let explicit_default_targets = operations
+            .iter()
+            .filter_map(|operation| {
+                let SnapshotOperation::Operation(CompiledOperation::SetDefaults {
+                    target,
+                    filter: Some(_),
+                    ..
+                }) = operation
+                else {
+                    return None;
+                };
+                Some(*target)
+            })
+            .collect::<Vec<_>>();
         let mut remux_operations = Vec::new();
         let mut remux_source_index = None;
         let mut items = Vec::new();
@@ -312,7 +326,7 @@ impl<'a> PlanBuilder<'a> {
             match operation {
                 SnapshotOperation::Operation(operation) => {
                     if remux::candidate_kind(operation).is_some() {
-                        match remux::candidate_support(operation) {
+                        match remux::candidate_support(operation, &explicit_default_targets) {
                             remux::CandidateSupport::Supported => {
                                 remux_source_index.get_or_insert(source_index);
                                 remux_operations.push(operation);

@@ -768,16 +768,19 @@ schema, resolved per-file payload identity, wire
 Filter facts fail closed when a required structured value is missing or
 malformed, including beneath negation. An absent language tag remains the
 published `und` value, but a present non-string language is malformed. Source
-order is ascending provider stream index; planning, control-plane selection,
-worker argument construction, and output inspection do not derive order from
-snapshot-array or request-vector serialization order.
+order is ascending provider stream index, which must be unique within a
+snapshot; duplicate indexes block as insufficient facts. Planning,
+control-plane selection, worker argument construction, and output inspection
+do not derive order from snapshot-array or request-vector serialization order.
 
 Defaults actions reduce per target before dispatch. A single explicit resolved
 selection discards strategy actions for that target regardless of source
 position. Multiple explicit selections for one target block the file as an
 unsupported policy shape. The control plane repeats this reduction when
 validating the typed payload, which pins explicit-over-`best` precedence for
-language-ranked selection without trusting planner serialization.
+language-ranked selection without trusting planner serialization. The planner
+also discards a shadowed `best` before checking its deferred strategy support;
+an unshadowed `best` remains blocked until issue #336.
 
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 

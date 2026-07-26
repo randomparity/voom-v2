@@ -55,6 +55,8 @@ absent fields remain readable and retain their meaning.
   missing or non-boolean `default`, `forced`, or `commentary` disposition do not
   silently evaluate as false.
 - Source order is the stable `provider_stream_index` order.
+- Duplicate provider indexes are malformed snapshot identity and block
+  planning before any ordering decision.
 
 The resolver returns the final keep set, resolved default actions, resolved
 head stream, requested group order, and whether the final observable state
@@ -86,7 +88,9 @@ boundary:
   behavior.
 
 This mechanically gives issue #336 its precedence rule: strategy-based `best`
-selection cannot override an explicit filter-addressed selection.
+selection cannot override an explicit filter-addressed selection. A shadowed
+`best` action is discarded before its deferred strategy support is checked;
+an unshadowed `best` remains blocked until #336.
 
 The head field is absent when no order filter exists. It may be present while
 `track_order` is empty, representing bare `order tracks where ...`.

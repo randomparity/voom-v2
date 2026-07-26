@@ -413,6 +413,40 @@ fn remux_keep_untagged_language_emits_per_file_warning() {
 }
 
 #[test]
+fn remux_filter_addressed_operations_emit_untagged_language_warning() {
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("und", false), ("eng", true)]);
+    snapshot.stream_summary["streams"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("language");
+    let language_filter = TrackFilter::LanguageIn {
+        values: vec!["eng".to_owned()],
+    };
+
+    for operation in [
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(language_filter.clone()),
+        },
+        CompiledOperation::ReorderTracks {
+            targets: vec![TrackTarget::Video, TrackTarget::Audio],
+            head_filter: Some(language_filter.clone()),
+        },
+    ] {
+        let plan = generate_plan(request(policy(operation), snapshot.clone())).unwrap();
+
+        assert!(
+            plan.diagnostics.iter().any(|diagnostic| diagnostic.code
+                == PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted),
+            "{:?}",
+            plan.diagnostics
+        );
+    }
+}
+
+#[test]
 fn language_filter_over_fully_tagged_audio_emits_no_untagged_warning() {
     let plan = generate_plan(request_with_transcode_audio(
         snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
@@ -899,31 +933,33 @@ fn track_remux_explicit_default_overrides_strategy_in_both_source_orders() {
             values: vec!["eng".to_owned()],
         }),
     };
-    let strategy = CompiledOperation::SetDefaults {
-        target: TrackTarget::Audio,
-        strategy: DefaultStrategy::None,
-        filter: None,
-    };
+    for strategy in [DefaultStrategy::None, DefaultStrategy::Best] {
+        let strategy = CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy,
+            filter: None,
+        };
+        for operations in [
+            vec![explicit.clone(), strategy.clone()],
+            vec![strategy.clone(), explicit.clone()],
+        ] {
+            let plan = generate_plan(request(
+                compiled_policy_with_ops(operations),
+                snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+            ))
+            .unwrap();
 
-    for operations in [
-        vec![explicit.clone(), strategy.clone()],
-        vec![strategy.clone(), explicit.clone()],
-    ] {
-        let plan = generate_plan(request(
-            compiled_policy_with_ops(operations),
-            snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
-        ))
-        .unwrap();
-
-        assert_eq!(
-            plan.nodes[0].operation_payload["defaults"],
-            serde_json::json!([{
-                "target": "audio",
-                "strategy": "preserve",
-                "selected_snapshot_stream_id": "stream-1"
-            }])
-        );
-        assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+            assert_eq!(plan.nodes.len(), 1);
+            assert_eq!(
+                plan.nodes[0].operation_payload["defaults"],
+                serde_json::json!([{
+                    "target": "audio",
+                    "strategy": "preserve",
+                    "selected_snapshot_stream_id": "stream-1"
+                }])
+            );
+            assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+        }
     }
 }
 
@@ -1138,6 +1174,34 @@ fn track_remux_resolution_ignores_stream_summary_array_order() {
         canonical.nodes[0].operation_payload,
         shuffled.nodes[0].operation_payload
     );
+}
+
+#[test]
+fn track_remux_rejects_duplicate_provider_indexes_before_ordering() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![TrackTarget::Video, TrackTarget::Audio],
+        head_filter: None,
+    }]);
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
+    snapshot.stream_summary["streams"][2]["index"] = serde_json::json!(1);
+
+    for should_shuffle in [false, true] {
+        let mut snapshot = snapshot.clone();
+        if should_shuffle {
+            snapshot.stream_summary["streams"]
+                .as_array_mut()
+                .unwrap()
+                .swap(1, 2);
+        }
+        let plan = generate_plan(request(policy.clone(), snapshot)).unwrap();
+
+        assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+        assert_eq!(
+            plan.diagnostics[0].code,
+            PlanningDiagnosticCode::InsufficientSnapshotFacts
+        );
+    }
 }
 
 #[test]

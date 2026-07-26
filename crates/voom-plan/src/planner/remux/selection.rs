@@ -7,9 +7,13 @@ use voom_policy::{ComparisonOp, MediaSnapshotInput, TrackFilter, TrackTarget};
 use super::{RemuxTrackAction, RemuxTrackActionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Presence and validity of one structured snapshot fact.
 pub enum SnapshotFact<T> {
+    /// The producer omitted the fact or stored it as JSON null.
     Missing,
+    /// The producer stored a value with the wrong JSON type.
     Malformed,
+    /// The producer supplied a value of the required type.
     Value(T),
 }
 
@@ -30,6 +34,7 @@ pub struct SnapshotStreamFact {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Filter-addressed remux operation used in cardinality diagnostics.
 pub enum RemuxFilterOperation {
     Defaults(TrackTarget),
     OrderTracks,
@@ -60,6 +65,7 @@ pub fn stream_facts(
         .and_then(Value::as_array)
         .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
     let mut ids = HashSet::with_capacity(streams.len());
+    let mut provider_indexes = HashSet::with_capacity(streams.len());
     let mut facts = Vec::with_capacity(streams.len());
 
     for stream in streams {
@@ -75,6 +81,9 @@ pub fn stream_facts(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
+        if !provider_indexes.insert(provider_stream_index) {
+            return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
+        }
         let kind = match required_string(stream.get("kind"))?.as_str() {
             "video" => TrackTarget::Video,
             "audio" => TrackTarget::Audio,
