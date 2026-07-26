@@ -246,6 +246,8 @@ pub struct ArtifactRemuxStartedPayload {
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
     pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    #[serde(default)]
+    pub head_streams: Vec<ArtifactRemuxStreamPayload>,
     pub track_order: Vec<String>,
     pub provider: Option<String>,
     pub provider_version: Option<String>,
@@ -263,6 +265,8 @@ pub struct ArtifactRemuxProgressPayload {
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
     pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    #[serde(default)]
+    pub head_streams: Vec<ArtifactRemuxStreamPayload>,
     pub percent_bps: Option<u16>,
     pub message: Option<String>,
     pub provider: Option<String>,
@@ -283,6 +287,8 @@ pub struct ArtifactRemuxSucceededPayload {
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
     pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    #[serde(default)]
+    pub head_streams: Vec<ArtifactRemuxStreamPayload>,
     pub kept_snapshot_stream_ids: Vec<String>,
     pub default_snapshot_stream_ids: Vec<String>,
     pub output_container: String,
@@ -304,6 +310,8 @@ pub struct ArtifactRemuxFailedPayload {
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
     pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    #[serde(default)]
+    pub head_streams: Vec<ArtifactRemuxStreamPayload>,
     pub failure_class: FailureClass,
     pub error_code: String,
     pub message: String,
