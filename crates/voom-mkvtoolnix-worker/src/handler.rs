@@ -11,7 +11,7 @@ use voom_worker_protocol::{
     RemuxRequest, RemuxResult, RemuxStatus, RemuxStreamRef, RemuxTrackGroup,
 };
 
-use crate::mkvmerge::{identify_output, identify_tracks, run_mkvmerge_remux};
+use crate::mkvmerge::{identify_output, identify_tracks, ordered_keep_streams, run_mkvmerge_remux};
 use crate::observe::{ObserveError, observe_file_facts};
 use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
 
@@ -242,6 +242,7 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
         "clear_default_streams",
         &request.selection.clear_default_streams,
     )?;
+    reject_duplicate_refs("head_streams", &request.selection.head_streams)?;
     validate_ref_subset(
         "default_streams",
         &request.selection.default_streams,
@@ -250,6 +251,11 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
     validate_ref_subset(
         "clear_default_streams",
         &request.selection.clear_default_streams,
+        &request.selection.keep_streams,
+    )?;
+    validate_ref_subset(
+        "head_streams",
+        &request.selection.head_streams,
         &request.selection.keep_streams,
     )?;
     Ok(())
@@ -603,32 +609,7 @@ fn expected_output_stream_order<'a>(
     request: &'a RemuxRequest,
     input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
 ) -> Result<Vec<&'a RemuxStreamRef>, MkvtoolnixWorkerError> {
-    let mut ordered = Vec::new();
-    let mut used = BTreeSet::new();
-    for group in &request.selection.track_order {
-        for (index, stream) in request.selection.keep_streams.iter().enumerate() {
-            let track = input_mapping
-                .track_for_provider_index(stream.provider_stream_index)
-                .ok_or_else(|| {
-                    malformed_worker_result(
-                        "output_probe",
-                        format!(
-                            "selected stream mismatch: missing input track for provider index {}",
-                            stream.provider_stream_index
-                        ),
-                    )
-                })?;
-            if track.kind.matches_group(*group) && used.insert(index) {
-                ordered.push(stream);
-            }
-        }
-    }
-    for (index, stream) in request.selection.keep_streams.iter().enumerate() {
-        if used.insert(index) {
-            ordered.push(stream);
-        }
-    }
-    Ok(ordered)
+    ordered_keep_streams(&request.selection, input_mapping).map_err(MkvtoolnixWorkerError::from)
 }
 
 fn success_dispatch(

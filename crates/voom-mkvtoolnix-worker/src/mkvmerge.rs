@@ -310,7 +310,7 @@ pub fn build_mkvmerge_args(
     );
     extend_default_flags(&mut args, &request.selection, mapping)?;
     extend_forced_flags(&mut args, &request.selection, mapping)?;
-    if let Some(track_order) = track_order(&request.selection, &keep, mapping) {
+    if let Some(track_order) = track_order(&request.selection, mapping)? {
         args.push("--track-order".to_owned());
         args.push(track_order);
     }
@@ -418,7 +418,9 @@ fn selected_tracks<'a>(
     refs: &[RemuxStreamRef],
     mapping: &'a MkvmergeTrackMapping,
 ) -> Result<Vec<&'a MkvmergeTrack>, MkvtoolnixError> {
-    refs.iter()
+    let mut refs = refs.iter().collect::<Vec<_>>();
+    refs.sort_by_key(|stream| stream.provider_stream_index);
+    refs.into_iter()
         .map(|stream| {
             mapping
                 .track_for_provider_index(stream.provider_stream_index)
@@ -541,53 +543,101 @@ fn extend_forced_flags(
     Ok(())
 }
 
-/// Build the `--track-order` value. `head_streams` (resolved through `mapping`
-/// and restricted to kept tracks) pin to the front, ahead of the `track_order`
-/// group order; any remaining kept tracks follow in mapping order. Returns
-/// `None` only when neither a head stream nor a group order is requested.
-fn track_order(
-    selection: &RemuxSelection,
-    keep: &[&MkvmergeTrack],
+pub(crate) fn ordered_keep_streams<'a>(
+    selection: &'a RemuxSelection,
     mapping: &MkvmergeTrackMapping,
-) -> Option<String> {
-    if selection.track_order.is_empty() && selection.head_streams.is_empty() {
-        return None;
-    }
-    let head_ids = selection
-        .head_streams
-        .iter()
-        .filter_map(|stream| {
-            mapping.mkvmerge_track_id_for_provider_index(stream.provider_stream_index)
-        })
-        .collect::<Vec<_>>();
-    let mut ordered = Vec::new();
-    let mut used = BTreeSet::new();
-    for head_id in head_ids {
-        for track in keep {
-            if track.kind != MkvmergeTrackKind::Attachment
-                && track.id == head_id
-                && used.insert(track.id)
-            {
-                ordered.push(format!("0:{}", track.id));
-            }
+) -> Result<Vec<&'a RemuxStreamRef>, MkvtoolnixError> {
+    let mut source = selection.keep_streams.iter().collect::<Vec<_>>();
+    source.sort_by_key(|stream| stream.provider_stream_index);
+    for stream in &source {
+        if mapping
+            .track_for_provider_index(stream.provider_stream_index)
+            .is_none()
+        {
+            return Err(MkvtoolnixError::ConfigInvalid(format!(
+                "missing mkvmerge track id for provider stream index {}",
+                stream.provider_stream_index
+            )));
         }
+    }
+
+    validate_head_refs(selection)?;
+    let mut heads = selection.head_streams.iter().collect::<Vec<_>>();
+    heads.sort_by_key(|stream| stream.provider_stream_index);
+    let mut ordered = Vec::with_capacity(source.len());
+    let mut used = BTreeSet::new();
+    for head in heads {
+        push_matching_stream(&source, &mut ordered, &mut used, |stream| {
+            stream.snapshot_stream_id == head.snapshot_stream_id
+                && stream.provider_stream_index == head.provider_stream_index
+        });
     }
     for group in &selection.track_order {
-        for track in keep {
-            if track.kind != MkvmergeTrackKind::Attachment
-                && track.kind.matches_group(*group)
-                && used.insert(track.id)
-            {
-                ordered.push(format!("0:{}", track.id));
-            }
+        push_matching_stream(&source, &mut ordered, &mut used, |stream| {
+            mapping
+                .track_for_provider_index(stream.provider_stream_index)
+                .is_some_and(|track| track.kind.matches_group(*group))
+        });
+    }
+    push_matching_stream(&source, &mut ordered, &mut used, |_| true);
+    Ok(ordered)
+}
+
+fn validate_head_refs(selection: &RemuxSelection) -> Result<(), MkvtoolnixError> {
+    let mut snapshot_ids = BTreeSet::new();
+    let mut provider_indexes = BTreeSet::new();
+    for head in &selection.head_streams {
+        if !snapshot_ids.insert(head.snapshot_stream_id.as_str())
+            || !provider_indexes.insert(head.provider_stream_index)
+        {
+            return Err(MkvtoolnixError::ConfigInvalid(
+                "duplicate stream reference in head_streams".to_owned(),
+            ));
+        }
+        if !selection.keep_streams.iter().any(|kept| kept == head) {
+            return Err(MkvtoolnixError::ConfigInvalid(
+                "head_streams must be a subset of keep_streams".to_owned(),
+            ));
         }
     }
-    for track in keep {
-        if track.kind != MkvmergeTrackKind::Attachment && used.insert(track.id) {
+    Ok(())
+}
+
+fn push_matching_stream<'a>(
+    source: &[&'a RemuxStreamRef],
+    ordered: &mut Vec<&'a RemuxStreamRef>,
+    used: &mut BTreeSet<u32>,
+    predicate: impl Fn(&RemuxStreamRef) -> bool,
+) {
+    for stream in source {
+        if predicate(stream) && used.insert(stream.provider_stream_index) {
+            ordered.push(*stream);
+        }
+    }
+}
+
+fn track_order(
+    selection: &RemuxSelection,
+    mapping: &MkvmergeTrackMapping,
+) -> Result<Option<String>, MkvtoolnixError> {
+    if selection.track_order.is_empty() && selection.head_streams.is_empty() {
+        return Ok(None);
+    }
+    let mut ordered = Vec::new();
+    for stream in ordered_keep_streams(selection, mapping)? {
+        let track = mapping
+            .track_for_provider_index(stream.provider_stream_index)
+            .ok_or_else(|| {
+                MkvtoolnixError::ConfigInvalid(format!(
+                    "missing mkvmerge track id for provider stream index {}",
+                    stream.provider_stream_index
+                ))
+            })?;
+        if track.kind != MkvmergeTrackKind::Attachment {
             ordered.push(format!("0:{}", track.id));
         }
     }
-    Some(ordered.join(","))
+    Ok(Some(ordered.join(",")))
 }
 
 async fn identify_json(config: &MkvmergeConfig, path: &Path) -> Result<Value, MkvtoolnixError> {
