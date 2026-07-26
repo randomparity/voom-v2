@@ -22,8 +22,16 @@ pub fn selection_from_payload_and_snapshot(
             payload.container
         )));
     }
+    if payload.source_media_snapshot_id != Some(snapshot.id.0) {
+        return Err(VoomError::Config(format!(
+            "remux payload pins media snapshot {}, but execution loaded snapshot {}",
+            payload.source_media_snapshot_id.unwrap_or_default(),
+            snapshot.id.0
+        )));
+    }
     let snapshot_input = crate::media_snapshot::planning_input(1, snapshot);
-    let facts = stream_facts(&snapshot_input).map_err(remux_block_error)?;
+    let mut facts = stream_facts(&snapshot_input).map_err(remux_block_error)?;
+    facts.sort_by_key(|stream| stream.provider_stream_index);
     if !facts.iter().any(|stream| stream.kind == TrackTarget::Video) {
         return Err(VoomError::Config(
             "remux selection requires at least one video stream".to_owned(),
@@ -55,17 +63,20 @@ pub fn selection_from_payload_and_snapshot(
         .filter(|stream| keep_ids.contains(&stream.snapshot_stream_id))
         .map(stream_ref)
         .collect::<Vec<_>>();
-    let (default_streams, clear_default_streams) =
-        default_refs(&payload.defaults, &facts, &keep_ids)?;
+    let defaults = effective_default_actions(&payload.defaults)?;
+    let (default_streams, clear_default_streams) = default_refs(&defaults, &facts, &keep_ids)?;
+    let head_streams = head_refs(
+        payload.head_snapshot_stream_id.as_deref(),
+        &facts,
+        &keep_ids,
+    )?;
 
     Ok(RemuxSelection {
         keep_streams,
         default_streams,
         clear_default_streams,
         track_order: payload.track_order,
-        // ADR 0023 (#277): filter-addressed head/forced streams are populated by
-        // the deferred planner/control-plane follow-up; empty until then.
-        head_streams: Vec::new(),
+        head_streams,
         forced_streams: Vec::new(),
         clear_forced_streams: Vec::new(),
     })
@@ -94,13 +105,28 @@ fn reject_empty_audio(
 }
 
 fn default_refs(
-    defaults: &[voom_plan::remux::RemuxDefaultAction],
+    defaults: &[&voom_plan::remux::RemuxDefaultAction],
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
 ) -> Result<(Vec<RemuxStreamRef>, Vec<RemuxStreamRef>), VoomError> {
     let mut default_streams = Vec::new();
     let mut clear_default_streams = Vec::new();
     for action in defaults {
+        if let Some(selected_id) = &action.selected_snapshot_stream_id {
+            let selected = resolved_kept_stream(selected_id, Some(action.target), facts, keep_ids)?;
+            default_streams.push(stream_ref(selected));
+            clear_default_streams.extend(
+                facts
+                    .iter()
+                    .filter(|stream| {
+                        stream.kind == action.target
+                            && stream.snapshot_stream_id != *selected_id
+                            && keep_ids.contains(&stream.snapshot_stream_id)
+                    })
+                    .map(stream_ref),
+            );
+            continue;
+        }
         if matches!(action.strategy, DefaultStrategy::Best) {
             return Err(VoomError::Config(
                 "default strategy best is unsupported".to_owned(),
@@ -162,6 +188,87 @@ fn default_refs(
         dedupe_refs(default_streams),
         dedupe_refs(clear_default_streams),
     ))
+}
+
+fn effective_default_actions(
+    defaults: &[voom_plan::remux::RemuxDefaultAction],
+) -> Result<Vec<&voom_plan::remux::RemuxDefaultAction>, VoomError> {
+    let mut explicit_targets = Vec::new();
+    for action in defaults {
+        if action.selected_snapshot_stream_id.is_none() {
+            continue;
+        }
+        if explicit_targets.contains(&action.target) {
+            return Err(VoomError::Config(format!(
+                "multiple explicit defaults actions target {}",
+                track_target_name(action.target)
+            )));
+        }
+        explicit_targets.push(action.target);
+    }
+    Ok(defaults
+        .iter()
+        .filter(|action| {
+            action.selected_snapshot_stream_id.is_some()
+                || !explicit_targets.contains(&action.target)
+        })
+        .collect())
+}
+
+fn head_refs(
+    head_id: Option<&str>,
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<Vec<RemuxStreamRef>, VoomError> {
+    let Some(head_id) = head_id else {
+        return Ok(Vec::new());
+    };
+    let stream = resolved_kept_stream(head_id, None, facts, keep_ids)?;
+    if stream.kind == TrackTarget::Attachment {
+        return Err(VoomError::Config(format!(
+            "resolved head stream `{head_id}` cannot be an attachment"
+        )));
+    }
+    Ok(vec![stream_ref(stream)])
+}
+
+fn resolved_kept_stream<'a>(
+    snapshot_stream_id: &str,
+    expected_target: Option<TrackTarget>,
+    facts: &'a [SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<&'a SnapshotStreamFact, VoomError> {
+    let Some(stream) = facts
+        .iter()
+        .find(|stream| stream.snapshot_stream_id == snapshot_stream_id)
+    else {
+        return Err(VoomError::Config(format!(
+            "resolved stream `{snapshot_stream_id}` is missing from the pinned snapshot"
+        )));
+    };
+    if !keep_ids.contains(snapshot_stream_id) {
+        return Err(VoomError::Config(format!(
+            "resolved stream `{snapshot_stream_id}` did not survive remux track actions"
+        )));
+    }
+    if let Some(target) = expected_target
+        && stream.kind != target
+    {
+        return Err(VoomError::Config(format!(
+            "resolved stream `{snapshot_stream_id}` is not an expected {} stream",
+            track_target_name(target)
+        )));
+    }
+    Ok(stream)
+}
+
+fn track_target_name(target: TrackTarget) -> &'static str {
+    match target {
+        TrackTarget::Video => "video",
+        TrackTarget::Audio => "audio",
+        TrackTarget::Subtitle => "subtitle",
+        TrackTarget::Attachment => "attachment",
+    }
 }
 
 fn dedupe_refs(streams: Vec<RemuxStreamRef>) -> Vec<RemuxStreamRef> {
