@@ -652,6 +652,53 @@ fn commentary_removal_plans_from_structured_disposition_facts() {
 }
 
 #[test]
+fn counteracting_audio_track_actions_no_op_after_ordered_resolution() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::RemoveTracks {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::Commentary),
+        },
+        CompiledOperation::KeepTracks {
+            target: TrackTarget::Audio,
+            filter: None,
+        },
+    ]);
+    let mut snapshot = snapshot_with_streams(Some("mkv"));
+    snapshot.stream_summary["streams"][1]["disposition"]["commentary"] =
+        serde_json::Value::Bool(true);
+    snapshot.stream_summary["streams"][2]["disposition"]["commentary"] =
+        serde_json::Value::Bool(false);
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
+fn counteracting_attachment_track_actions_no_op_after_ordered_resolution() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::RemoveTracks {
+            target: TrackTarget::Attachment,
+            filter: None,
+        },
+        CompiledOperation::KeepTracks {
+            target: TrackTarget::Attachment,
+            filter: None,
+        },
+    ]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_with_attachment_stream(Some("mkv")),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
 fn track_remux_keep_audio_language_selection_no_ops_when_output_matches_snapshot() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::KeepTracks {
         target: TrackTarget::Audio,

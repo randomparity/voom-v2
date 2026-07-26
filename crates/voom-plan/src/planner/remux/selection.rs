@@ -1,7 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde_json::Value;
+use voom_core::is_font_attachment_mime_type;
 use voom_policy::{ComparisonOp, MediaSnapshotInput, TrackFilter, TrackTarget};
+
+use super::{RemuxTrackAction, RemuxTrackActionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotStreamFact {
@@ -146,6 +149,45 @@ pub fn evaluate_filter(
     }
 }
 
+pub fn resolve_track_keep_ids(
+    facts: &[SnapshotStreamFact],
+    actions: &[RemuxTrackAction],
+) -> Result<BTreeSet<String>, RemuxPlanningBlock> {
+    let mut keep_ids = facts
+        .iter()
+        .map(|stream| stream.snapshot_stream_id.clone())
+        .collect::<BTreeSet<_>>();
+    for action in actions {
+        let target_streams = facts
+            .iter()
+            .filter(|stream| stream.kind == action.target)
+            .collect::<Vec<_>>();
+        if action.kind == RemuxTrackActionKind::KeepTracks {
+            for stream in &target_streams {
+                keep_ids.remove(&stream.snapshot_stream_id);
+            }
+        }
+        for stream in target_streams {
+            let matched = match &action.filter {
+                Some(filter) => evaluate_filter(filter, stream)?,
+                None => true,
+            };
+            if !matched {
+                continue;
+            }
+            match action.kind {
+                RemuxTrackActionKind::KeepTracks => {
+                    keep_ids.insert(stream.snapshot_stream_id.clone());
+                }
+                RemuxTrackActionKind::RemoveTracks => {
+                    keep_ids.remove(&stream.snapshot_stream_id);
+                }
+            }
+        }
+    }
+    Ok(keep_ids)
+}
+
 fn required_string(value: Option<&Value>) -> Result<String, RemuxPlanningBlock> {
     value
         .and_then(Value::as_str)
@@ -177,24 +219,7 @@ fn evaluate_font_filter(stream: &SnapshotStreamFact) -> Result<bool, RemuxPlanni
         .mime_type
         .as_deref()
         .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
-    Ok(is_font_mime_type(mime_type))
-}
-
-fn is_font_mime_type(mime_type: &str) -> bool {
-    [
-        "font/sfnt",
-        "font/ttf",
-        "font/otf",
-        "font/collection",
-        "font/woff",
-        "font/woff2",
-        "application/x-truetype-font",
-        "application/x-font-ttf",
-        "application/vnd.ms-opentype",
-        "application/font-sfnt",
-        "application/font-woff",
-    ]
-    .contains(&mime_type)
+    Ok(is_font_attachment_mime_type(mime_type))
 }
 
 fn compare_u64(left: u64, op: ComparisonOp, right: u64) -> bool {

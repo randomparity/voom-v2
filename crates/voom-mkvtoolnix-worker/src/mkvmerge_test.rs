@@ -145,6 +145,44 @@ fn track_fingerprint_distinguishes_commentary_disposition() {
 }
 
 #[test]
+fn attachment_fingerprint_accepts_font_mime_canonicalization() {
+    let legacy = serde_json::json!({
+        "file_name": "OpenSans.ttf",
+        "content_type": "application/x-truetype-font",
+        "size": 26
+    });
+    let registered = serde_json::json!({
+        "file_name": "OpenSans.ttf",
+        "content_type": "font/ttf",
+        "size": 26
+    });
+
+    assert_eq!(
+        MkvmergeTrackFingerprint::from_attachment(&legacy).unwrap(),
+        MkvmergeTrackFingerprint::from_attachment(&registered).unwrap()
+    );
+}
+
+#[test]
+fn attachment_fingerprint_distinguishes_non_font_mime_types() {
+    let binary = serde_json::json!({
+        "file_name": "payload.bin",
+        "content_type": "application/octet-stream",
+        "size": 26
+    });
+    let image = serde_json::json!({
+        "file_name": "payload.bin",
+        "content_type": "image/png",
+        "size": 26
+    });
+
+    assert_ne!(
+        MkvmergeTrackFingerprint::from_attachment(&binary).unwrap(),
+        MkvmergeTrackFingerprint::from_attachment(&image).unwrap()
+    );
+}
+
+#[test]
 fn reads_real_mkvmerge_container_type_string() {
     let identify = serde_json::json!({
         "container": {

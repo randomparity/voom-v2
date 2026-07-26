@@ -55,7 +55,8 @@ pub mod operation_kind {
 
 pub mod remux {
     pub use crate::media::remux::{
-        REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container,
+        REMUX_CONTAINER_MKV, RemuxTrackGroup, is_font_attachment_mime_type,
+        is_supported_remux_container,
     };
 }
 
@@ -96,7 +97,10 @@ pub use ids::{
 };
 pub use issue::{IssuePriority, IssueSeverity};
 pub use operation_kind::OperationKind;
-pub use remux::{REMUX_CONTAINER_MKV, RemuxTrackGroup, is_supported_remux_container};
+pub use remux::{
+    REMUX_CONTAINER_MKV, RemuxTrackGroup, is_font_attachment_mime_type,
+    is_supported_remux_container,
+};
 pub use taxonomy::execution_vocab::{NodeKind, NodeStatus, WorkerKind, WorkerStatus};
 pub use ticket_operation::TicketOperation;
 pub use transcode_video_profile::{

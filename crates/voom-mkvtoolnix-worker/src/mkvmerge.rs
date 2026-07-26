@@ -5,6 +5,7 @@ use std::path::Path;
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::{Duration, timeout};
+use voom_core::is_font_attachment_mime_type;
 use voom_worker_protocol::{RemuxRequest, RemuxSelection, RemuxStreamRef, RemuxTrackGroup};
 
 use crate::preflight::{MkvmergeConfig, MkvtoolnixError};
@@ -58,14 +59,21 @@ impl MkvmergeTrackFingerprint {
 
     fn from_attachment(attachment: &Value) -> Result<Self, MkvtoolnixError> {
         let file_name = required_attachment_string(attachment, "file_name")?;
-        required_attachment_string(attachment, "content_type")?;
+        let content_type = required_attachment_string(attachment, "content_type")?;
+        let mime_identity = if is_font_attachment_mime_type(content_type) {
+            "class:font".to_owned()
+        } else {
+            format!("exact:{content_type}")
+        };
         let size = attachment
             .get("size")
             .and_then(Value::as_u64)
             .ok_or_else(|| {
                 MkvtoolnixError::IdentifyFailed("identify attachment missing size".to_owned())
             })?;
-        Ok(Self(format!("/file_name={file_name:?}\n/size={size}")))
+        Ok(Self(format!(
+            "/file_name={file_name:?}\n/mime_identity={mime_identity:?}\n/size={size}"
+        )))
     }
 }
 

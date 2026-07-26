@@ -10,7 +10,9 @@ pub use payload::{
     RemuxDefaultAction, RemuxOperationPayload, RemuxPayloadError, RemuxTrackAction,
     RemuxTrackActionKind,
 };
-pub use selection::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts};
+pub use selection::{
+    RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, resolve_track_keep_ids, stream_facts,
+};
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
 
@@ -478,16 +480,29 @@ fn evaluate_remux_track_operations(
         return Ok(false);
     }
 
-    let mut changed = false;
+    let track_actions = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            CompiledOperation::KeepTracks { target, filter } => Some(RemuxTrackAction {
+                kind: RemuxTrackActionKind::KeepTracks,
+                target: *target,
+                filter: filter.clone(),
+            }),
+            CompiledOperation::RemoveTracks { target, filter } => Some(RemuxTrackAction {
+                kind: RemuxTrackActionKind::RemoveTracks,
+                target: *target,
+                filter: filter.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let keep_ids = resolve_track_keep_ids(&facts, &track_actions)?;
+    let mut changed = facts
+        .iter()
+        .any(|stream| !keep_ids.contains(&stream.snapshot_stream_id));
     let mut seen_reorder = false;
     for operation in operations {
         match operation {
-            CompiledOperation::KeepTracks { target, filter } => {
-                changed |= keep_tracks_changes(&facts, *target, filter.as_ref())?;
-            }
-            CompiledOperation::RemoveTracks { target, filter } => {
-                changed |= remove_tracks_changes(&facts, *target, filter.as_ref())?;
-            }
             CompiledOperation::SetDefaults {
                 target, strategy, ..
             } => {
@@ -505,44 +520,14 @@ fn evaluate_remux_track_operations(
                 seen_reorder = true;
                 changed |= reorder_tracks_changes(&facts, targets)?;
             }
-            CompiledOperation::SetContainer { .. } => {}
+            CompiledOperation::KeepTracks { .. }
+            | CompiledOperation::RemoveTracks { .. }
+            | CompiledOperation::SetContainer { .. } => {}
             _ => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
         }
     }
 
     Ok(changed)
-}
-
-fn keep_tracks_changes(
-    facts: &[SnapshotStreamFact],
-    target: TrackTarget,
-    filter: Option<&TrackFilter>,
-) -> Result<bool, RemuxPlanningBlock> {
-    let Some(filter) = filter else {
-        return Ok(false);
-    };
-    for stream in facts.iter().filter(|stream| stream.kind == target) {
-        if !evaluate_filter(filter, stream)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn remove_tracks_changes(
-    facts: &[SnapshotStreamFact],
-    target: TrackTarget,
-    filter: Option<&TrackFilter>,
-) -> Result<bool, RemuxPlanningBlock> {
-    let Some(filter) = filter else {
-        return Ok(facts.iter().any(|stream| stream.kind == target));
-    };
-    for stream in facts.iter().filter(|stream| stream.kind == target) {
-        if evaluate_filter(filter, stream)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn set_defaults_changes(
