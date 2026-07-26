@@ -166,15 +166,29 @@ the old planner again blocks an unshadowed `best` when generating a new plan.
 An already-materialized resolved `best` operation remains executable by the old
 control plane because `selected_snapshot_stream_id` predates this change and
 the old selector already treats a present selected ID as authoritative. Pending
-ranked-default work therefore must be drained or cancelled separately if an
-operator intends rollback to stop it. No migration or data rewrite is required.
+ranked-default work therefore continues across downgrade. The published CLI and
+API expose no job-cancellation action, so rollback is not a way to stop that
+work: operators must either let it drain before downgrade or quiesce workers and
+leave it pending. The missing operator cancellation surface is tracked
+independently in #364 and is not added by this issue. No migration or data
+rewrite is required.
 
 ## Test strategy
 
-- Planner tests cover language-list priority, same-language ties, `und`,
-  unmatched and empty-list fallback, malformed language, zero candidates,
-  shuffled snapshot arrays, `NoOp` replanning, conflicting strategies, and
-  explicit-over-`best` in both source orders.
+- Planner tests cover both audio and subtitle `best`. The audio matrix covers
+  language-list priority, same-language ties, unmatched and empty-list fallback,
+  zero candidates, shuffled snapshot arrays, and `NoOp` replanning; a focused
+  subtitle case proves the same target-independent resolver selects and pins the
+  configured-language winner.
+- Fact-boundary tests prove that non-empty preferences validate every retained
+  candidate: a malformed non-winner blocks, and any missing language emits the
+  `und` warning. With empty preferences, malformed or missing languages are not
+  read, the first retained stream wins, and no warning is emitted. A shadowed
+  `best` likewise ignores malformed or missing language facts and emits no
+  warning in both source orders.
+- Reduction tests block `best` combined with another same-target strategy in
+  both source orders while preserving legacy multi-strategy behavior that does
+  not include `best`.
 - Control-plane tests accept a resolved `best`, reject an unresolved `best`,
   reject invalid selected-ID shapes and `best` conflicts, preserve legacy
   non-`best` composition, and prove no second ranking occurs. Acceptance of the
