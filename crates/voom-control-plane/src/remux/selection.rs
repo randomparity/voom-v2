@@ -127,9 +127,9 @@ fn default_refs(
             );
             continue;
         }
-        if matches!(action.strategy, DefaultStrategy::Best) {
+        if action.strategy == DefaultStrategy::Best {
             return Err(VoomError::Config(
-                "default strategy best is unsupported".to_owned(),
+                "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
             ));
         }
         let kept_target = facts
@@ -195,7 +195,8 @@ fn effective_default_actions(
 ) -> Result<Vec<&voom_plan::remux::RemuxDefaultAction>, VoomError> {
     let mut explicit_targets = Vec::new();
     for action in defaults {
-        if action.selected_snapshot_stream_id.is_none() {
+        validate_selected_default_shape(action)?;
+        if !is_resolved_explicit_default(action) {
             continue;
         }
         if explicit_targets.contains(&action.target) {
@@ -206,13 +207,56 @@ fn effective_default_actions(
         }
         explicit_targets.push(action.target);
     }
-    Ok(defaults
+    let effective = defaults
         .iter()
         .filter(|action| {
-            action.selected_snapshot_stream_id.is_some()
-                || !explicit_targets.contains(&action.target)
+            is_resolved_explicit_default(action) || !explicit_targets.contains(&action.target)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    validate_best_default_strategy_conflicts(&effective)?;
+    Ok(effective)
+}
+
+fn validate_selected_default_shape(
+    action: &voom_plan::remux::RemuxDefaultAction,
+) -> Result<(), VoomError> {
+    if action.selected_snapshot_stream_id.is_none() {
+        return Ok(());
+    }
+    match action.strategy {
+        DefaultStrategy::Preserve | DefaultStrategy::Best => Ok(()),
+        DefaultStrategy::First => Err(VoomError::Config(
+            "selected_snapshot_stream_id is invalid with default strategy first".to_owned(),
+        )),
+        DefaultStrategy::None => Err(VoomError::Config(
+            "selected_snapshot_stream_id is invalid with default strategy none".to_owned(),
+        )),
+    }
+}
+
+fn is_resolved_explicit_default(action: &voom_plan::remux::RemuxDefaultAction) -> bool {
+    action.selected_snapshot_stream_id.is_some() && action.strategy == DefaultStrategy::Preserve
+}
+
+fn validate_best_default_strategy_conflicts(
+    defaults: &[&voom_plan::remux::RemuxDefaultAction],
+) -> Result<(), VoomError> {
+    for action in defaults {
+        if action.strategy != DefaultStrategy::Best {
+            continue;
+        }
+        let same_target_count = defaults
+            .iter()
+            .filter(|candidate| candidate.target == action.target)
+            .count();
+        if same_target_count > 1 {
+            return Err(VoomError::Config(format!(
+                "multiple defaults strategy actions target {} and include best",
+                track_target_name(action.target)
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn head_refs(

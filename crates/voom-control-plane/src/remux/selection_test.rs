@@ -148,6 +148,94 @@ fn selection_executes_resolved_default_and_clears_other_target_streams() {
 }
 
 #[test]
+fn selection_executes_resolved_best_without_ranking_snapshot_languages() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": [{
+            "target": "audio",
+            "strategy": "best",
+            "selected_snapshot_stream_id": "stream-2"
+        }]
+    });
+    let mut snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+    snapshot.payload["streams"][1]["language"] = json!(17);
+    snapshot.payload["streams"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("language");
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert!(
+        selection
+            .default_streams
+            .iter()
+            .any(|stream| stream.snapshot_stream_id == "stream-2")
+    );
+    assert!(
+        selection
+            .clear_default_streams
+            .iter()
+            .any(|stream| stream.snapshot_stream_id == "stream-1")
+    );
+}
+
+#[test]
+fn selection_rejects_unresolved_best() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": [{"target": "audio", "strategy": "best"}]
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+
+    let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("best requires a resolved selected_snapshot_stream_id"),
+        "{err}"
+    );
+}
+
+#[test]
+fn selection_rejects_selected_id_on_unresolved_strategies() {
+    for strategy in ["first", "none"] {
+        let payload = json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 1,
+            "track_actions": [],
+            "track_order": ["video", "audio"],
+            "defaults": [{
+                "target": "audio",
+                "strategy": strategy,
+                "selected_snapshot_stream_id": "stream-1"
+            }]
+        });
+        let snapshot = snapshot_with_video_audio_languages(["eng"]);
+
+        let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+
+        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+        assert!(
+            err.to_string().contains(&format!(
+                "selected_snapshot_stream_id is invalid with default strategy {strategy}"
+            )),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn selection_executes_resolved_head_with_empty_group_order() {
     let payload = json!({
         "type": "remux",
@@ -268,10 +356,58 @@ fn selection_explicit_default_overrides_strategy_in_both_payload_orders() {
         "strategy": "preserve",
         "selected_snapshot_stream_id": "stream-2"
     });
-    let strategy = json!({"target": "audio", "strategy": "none"});
+    for strategy in [
+        json!({"target": "audio", "strategy": "none"}),
+        json!({
+            "target": "audio",
+            "strategy": "best",
+            "selected_snapshot_stream_id": "stream-1"
+        }),
+    ] {
+        for defaults in [
+            vec![explicit.clone(), strategy.clone()],
+            vec![strategy.clone(), explicit.clone()],
+        ] {
+            let payload = json!({
+                "type": "remux",
+                "container": "mkv",
+                "source_media_snapshot_id": 1,
+                "track_actions": [],
+                "track_order": ["video", "audio"],
+                "defaults": defaults
+            });
+            let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+
+            let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+            assert!(
+                selection
+                    .default_streams
+                    .iter()
+                    .any(|stream| stream.snapshot_stream_id == "stream-2")
+            );
+            assert!(
+                selection
+                    .clear_default_streams
+                    .iter()
+                    .any(|stream| stream.snapshot_stream_id == "stream-1")
+            );
+        }
+    }
+}
+
+#[test]
+fn selection_rejects_best_combined_with_another_same_target_strategy() {
+    let best = json!({
+        "target": "audio",
+        "strategy": "best",
+        "selected_snapshot_stream_id": "stream-2"
+    });
+    let none = json!({"target": "audio", "strategy": "none"});
     for defaults in [
-        vec![explicit.clone(), strategy.clone()],
-        vec![strategy.clone(), explicit.clone()],
+        vec![best.clone(), none.clone()],
+        vec![none, best.clone()],
+        vec![best.clone(), best],
     ] {
         let payload = json!({
             "type": "remux",
@@ -283,21 +419,42 @@ fn selection_explicit_default_overrides_strategy_in_both_payload_orders() {
         });
         let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
 
-        let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+        let err = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
 
+        assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
         assert!(
-            selection
-                .default_streams
-                .iter()
-                .any(|stream| stream.snapshot_stream_id == "stream-2")
-        );
-        assert!(
-            selection
-                .clear_default_streams
-                .iter()
-                .any(|stream| stream.snapshot_stream_id == "stream-1")
+            err.to_string()
+                .contains("multiple defaults strategy actions target audio and include best"),
+            "{err}"
         );
     }
+}
+
+#[test]
+fn selection_preserves_legacy_non_best_strategy_composition() {
+    let payload = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 1,
+        "track_actions": [],
+        "track_order": ["video", "audio"],
+        "defaults": [
+            {"target": "audio", "strategy": "none"},
+            {"target": "audio", "strategy": "preserve"}
+        ]
+    });
+    let snapshot = snapshot_with_video_audio_languages(["eng", "spa"]);
+
+    let selection = selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
+
+    assert_eq!(
+        selection
+            .clear_default_streams
+            .iter()
+            .map(|stream| stream.snapshot_stream_id.as_str())
+            .collect::<Vec<_>>(),
+        ["stream-1", "stream-2"]
+    );
 }
 
 #[test]
