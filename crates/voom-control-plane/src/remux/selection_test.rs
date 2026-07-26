@@ -358,6 +358,7 @@ fn selection_explicit_default_overrides_strategy_in_both_payload_orders() {
     });
     for strategy in [
         json!({"target": "audio", "strategy": "none"}),
+        json!({"target": "audio", "strategy": "best"}),
         json!({
             "target": "audio",
             "strategy": "best",
