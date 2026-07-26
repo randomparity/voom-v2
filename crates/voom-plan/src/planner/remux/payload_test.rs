@@ -15,6 +15,7 @@ fn remux_payload_defaults_optional_collections() {
 
     assert!(payload.track_actions.is_empty());
     assert!(payload.defaults.is_empty());
+    assert_eq!(payload.head_snapshot_stream_id, None);
     assert_eq!(
         payload.track_order,
         vec![
@@ -23,6 +24,35 @@ fn remux_payload_defaults_optional_collections() {
             RemuxTrackGroup::Subtitle,
         ]
     );
+}
+
+#[test]
+fn remux_payload_round_trips_resolved_filter_selections() {
+    let payload_json = json!({
+        "type": "remux",
+        "container": "mkv",
+        "source_media_snapshot_id": 99,
+        "track_actions": [],
+        "track_order": [],
+        "head_snapshot_stream_id": "audio-main",
+        "defaults": [{
+            "target": "audio",
+            "strategy": "preserve",
+            "selected_snapshot_stream_id": "audio-main"
+        }]
+    });
+
+    let payload = RemuxOperationPayload::try_from_execution_value(&payload_json).unwrap();
+
+    assert_eq!(
+        payload.head_snapshot_stream_id.as_deref(),
+        Some("audio-main")
+    );
+    assert_eq!(
+        payload.defaults[0].selected_snapshot_stream_id.as_deref(),
+        Some("audio-main")
+    );
+    assert_eq!(payload.into_value(), payload_json);
 }
 
 #[test]
@@ -116,6 +146,37 @@ fn remux_payload_rejects_invalid_contract_fields() {
             "track_order": ["video", "audio", "audio"]
         }),
         "remux track_order[2] duplicates target `audio`",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "head_snapshot_stream_id": ""
+        }),
+        "remux payload `head_snapshot_stream_id` must be a non-empty string",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "head_snapshot_stream_id": 1
+        }),
+        "remux payload `head_snapshot_stream_id` must be a non-empty string",
+    );
+    assert_remux_payload_error(
+        &json!({
+            "type": "remux",
+            "container": "mkv",
+            "source_media_snapshot_id": 99,
+            "defaults": [{
+                "target": "audio",
+                "strategy": "preserve",
+                "selected_snapshot_stream_id": " "
+            }]
+        }),
+        "remux defaults[0] `selected_snapshot_stream_id` must be a non-empty string",
     );
 }
 

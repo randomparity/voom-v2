@@ -492,6 +492,14 @@ fn snapshot_for(
         "codec_name": video_codec,
     })];
     streams.extend(audio);
+    streams.push(json!({
+        "id": format!("{target_key}-s-100"),
+        "index": 100,
+        "kind": "subtitle",
+        "codec_name": "subrip",
+        "language": "eng",
+        "disposition": {"default": true, "forced": true, "commentary": false},
+    }));
     MediaSnapshotInput {
         ordinal: 0,
         target: synthetic_target(target_key),

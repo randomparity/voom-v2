@@ -12,6 +12,7 @@ pub struct RemuxOperationPayload {
     pub source_media_snapshot_id: Option<u64>,
     pub track_actions: Vec<RemuxTrackAction>,
     pub track_order: Vec<RemuxTrackGroup>,
+    pub head_snapshot_stream_id: Option<String>,
     pub defaults: Vec<RemuxDefaultAction>,
 }
 
@@ -66,6 +67,15 @@ impl RemuxOperationPayload {
             }
             None => default_track_order(),
         };
+        let head_snapshot_stream_id =
+            parse_optional_stream_id(object.get("head_snapshot_stream_id"), || {
+                "remux payload `head_snapshot_stream_id` must be a non-empty string".to_owned()
+            })?;
+        if track_order.is_empty() && head_snapshot_stream_id.is_none() {
+            return Err(RemuxPayloadError::new(
+                "remux track_order must include at least one group",
+            ));
+        }
         let defaults = match object.get("defaults") {
             Some(value) => {
                 let defaults = value.as_array().ok_or_else(|| {
@@ -81,6 +91,7 @@ impl RemuxOperationPayload {
             source_media_snapshot_id,
             track_actions,
             track_order,
+            head_snapshot_stream_id,
             defaults,
         })
     }
@@ -130,6 +141,9 @@ impl RemuxOperationPayload {
                     .collect(),
             ),
         );
+        if let Some(id) = self.head_snapshot_stream_id {
+            object.insert("head_snapshot_stream_id".to_owned(), Value::String(id));
+        }
         if let Some(id) = self.source_media_snapshot_id {
             object.insert("source_media_snapshot_id".to_owned(), Value::from(id));
         }
@@ -154,6 +168,7 @@ pub enum RemuxTrackActionKind {
 pub struct RemuxDefaultAction {
     pub target: TrackTarget,
     pub strategy: DefaultStrategy,
+    pub selected_snapshot_stream_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,11 +232,6 @@ fn parse_track_action(index: usize, action: &Value) -> Result<RemuxTrackAction, 
 }
 
 fn parse_track_order(order: &[Value]) -> Result<Vec<RemuxTrackGroup>, RemuxPayloadError> {
-    if order.is_empty() {
-        return Err(RemuxPayloadError::new(
-            "remux track_order must include at least one group",
-        ));
-    }
     let mut seen = Vec::with_capacity(order.len());
     let mut groups = Vec::with_capacity(order.len());
     for (index, value) in order.iter().enumerate() {
@@ -268,9 +278,32 @@ fn parse_defaults(defaults: &[Value]) -> Result<Vec<RemuxDefaultAction>, RemuxPa
             Ok(RemuxDefaultAction {
                 target: parse_object_track_target(object, "defaults", index, "target")?,
                 strategy: parse_object_default_strategy(object, "defaults", index, "strategy")?,
+                selected_snapshot_stream_id: parse_optional_stream_id(
+                    object.get("selected_snapshot_stream_id"),
+                    || {
+                        format!(
+                            "remux defaults[{index}] `selected_snapshot_stream_id` must be a \
+                             non-empty string"
+                        )
+                    },
+                )?,
             })
         })
         .collect()
+}
+
+fn parse_optional_stream_id(
+    value: Option<&Value>,
+    error: impl FnOnce() -> String,
+) -> Result<Option<String>, RemuxPayloadError> {
+    match value {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| Some(id.to_owned()))
+            .ok_or_else(|| RemuxPayloadError::new(error())),
+    }
 }
 
 fn required_object_string<'a>(
@@ -366,6 +399,12 @@ fn remux_default_action_value(action: &RemuxDefaultAction) -> Value {
         "strategy".to_owned(),
         Value::String(default_strategy_name(action.strategy).to_owned()),
     );
+    if let Some(id) = &action.selected_snapshot_stream_id {
+        object.insert(
+            "selected_snapshot_stream_id".to_owned(),
+            Value::String(id.clone()),
+        );
+    }
     Value::Object(object)
 }
 

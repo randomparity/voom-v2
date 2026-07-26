@@ -135,10 +135,37 @@ fn snapshot_with_streams(container: Option<&str>) -> MediaSnapshotInput {
     snapshot.stream_summary = serde_json::json!({
         "video_stream_count": 1,
         "streams": [
-            {"id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"},
-            {"id": "stream-1", "index": 1, "kind": "audio", "codec_name": "aac", "language": "eng"},
-            {"id": "stream-2", "index": 2, "kind": "audio", "codec_name": "aac", "language": "und"},
-            {"id": "stream-3", "index": 3, "kind": "subtitle", "codec_name": "subrip", "language": "spa"}
+            {
+                "id": "stream-0",
+                "index": 0,
+                "kind": "video",
+                "codec_name": "h264",
+                "disposition": {"default": false, "forced": false, "commentary": false}
+            },
+            {
+                "id": "stream-1",
+                "index": 1,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "eng",
+                "disposition": {"default": false, "forced": false, "commentary": false}
+            },
+            {
+                "id": "stream-2",
+                "index": 2,
+                "kind": "audio",
+                "codec_name": "aac",
+                "language": "und",
+                "disposition": {"default": false, "forced": false, "commentary": false}
+            },
+            {
+                "id": "stream-3",
+                "index": 3,
+                "kind": "subtitle",
+                "codec_name": "subrip",
+                "language": "spa",
+                "disposition": {"default": false, "forced": false, "commentary": false}
+            }
         ]
     });
     snapshot
@@ -744,6 +771,200 @@ fn track_remux_set_default_first_no_ops_when_first_audio_is_only_default() {
 }
 
 #[test]
+fn track_remux_filter_default_carries_the_unique_retained_stream() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Preserve,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", true)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"],
+        serde_json::json!([{
+            "target": "audio",
+            "strategy": "preserve",
+            "selected_snapshot_stream_id": "stream-1"
+        }])
+    );
+}
+
+#[test]
+fn track_remux_filter_default_no_ops_when_unique_stream_is_already_default() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Preserve,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"],
+        "stream-1"
+    );
+}
+
+#[test]
+fn track_remux_filter_default_reports_empty_and_ambiguous_retained_matches() {
+    let plan_for = |languages: &[(&str, bool)]| {
+        generate_plan(request(
+            compiled_policy_with_ops(vec![CompiledOperation::SetDefaults {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Preserve,
+                filter: Some(TrackFilter::LanguageIn {
+                    values: vec!["eng".to_owned()],
+                }),
+            }]),
+            snapshot_mkv_with_audio_languages_and_defaults(languages),
+        ))
+        .unwrap()
+    };
+
+    let empty = plan_for(&[("spa", false)]);
+    assert_eq!(empty.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        empty.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyTrackFilterSelection
+    );
+    assert!(empty.nodes[0].status_reason.contains("defaults audio"));
+    assert!(empty.nodes[0].status_reason.contains("0 retained streams"));
+
+    let ambiguous = plan_for(&[("eng", false), ("eng", true)]);
+    assert_eq!(ambiguous.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        ambiguous.diagnostics[0].code,
+        PlanningDiagnosticCode::AmbiguousTrackFilterSelection
+    );
+    assert!(ambiguous.nodes[0].status_reason.contains("defaults audio"));
+    assert!(
+        ambiguous.nodes[0]
+            .status_reason
+            .contains("2 retained streams")
+    );
+}
+
+#[test]
+fn track_remux_filter_default_does_not_match_a_removed_stream() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::RemoveTracks {
+            target: TrackTarget::Audio,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        },
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        },
+    ]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyTrackFilterSelection
+    );
+}
+
+#[test]
+fn track_remux_explicit_default_overrides_strategy_in_both_source_orders() {
+    let explicit = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Preserve,
+        filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }),
+    };
+    let strategy = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::None,
+        filter: None,
+    };
+
+    for operations in [
+        vec![explicit.clone(), strategy.clone()],
+        vec![strategy.clone(), explicit.clone()],
+    ] {
+        let plan = generate_plan(request(
+            compiled_policy_with_ops(operations),
+            snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            plan.nodes[0].operation_payload["defaults"],
+            serde_json::json!([{
+                "target": "audio",
+                "strategy": "preserve",
+                "selected_snapshot_stream_id": "stream-1"
+            }])
+        );
+        assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    }
+}
+
+#[test]
+fn track_remux_multiple_explicit_defaults_for_one_target_block() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        },
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["spa".to_owned()],
+            }),
+        },
+    ]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::UnsupportedMediaShape
+    );
+    assert!(
+        plan.nodes[0]
+            .status_reason
+            .contains("multiple explicit defaults operations target audio")
+    );
+}
+
+#[test]
 fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
     let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
         targets: vec![
@@ -761,6 +982,161 @@ fn track_remux_reorder_no_ops_when_group_order_already_matches_snapshot() {
     assert_eq!(
         plan.nodes[0].status_reason,
         "container is already mkv and track selection is unchanged"
+    );
+}
+
+#[test]
+fn track_remux_order_filter_carries_head_and_detects_compliance() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![
+            TrackTarget::Video,
+            TrackTarget::Audio,
+            TrackTarget::Subtitle,
+        ],
+        head_filter: Some(TrackFilter::LanguageIn {
+            values: vec!["eng".to_owned()],
+        }),
+    }]);
+
+    let changed = generate_plan(request(
+        policy.clone(),
+        snapshot_mkv_with_video_audio_subtitle(),
+    ))
+    .unwrap();
+    assert_eq!(changed.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        changed.nodes[0].operation_payload["head_snapshot_stream_id"],
+        "stream-1"
+    );
+
+    let mut compliant = snapshot_mkv_with_video_audio_subtitle();
+    compliant.stream_summary["streams"] = serde_json::json!([
+        {"id": "stream-1", "index": 0, "kind": "audio", "codec_name": "aac", "language": "eng"},
+        {"id": "stream-0", "index": 1, "kind": "video", "codec_name": "h264"},
+        {"id": "stream-2", "index": 2, "kind": "audio", "codec_name": "aac", "language": "und"},
+        {"id": "stream-3", "index": 3, "kind": "subtitle", "codec_name": "subrip", "language": "spa"}
+    ]);
+    let unchanged = generate_plan(request(policy, compliant)).unwrap();
+    assert_eq!(unchanged.nodes[0].status, NodeStatus::NoOp);
+}
+
+#[test]
+fn track_remux_order_filter_reports_empty_and_ambiguous_retained_matches() {
+    let plan_for = |values: &[&str]| {
+        generate_plan(request(
+            compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+                targets: vec![TrackTarget::Video, TrackTarget::Audio],
+                head_filter: Some(TrackFilter::LanguageIn {
+                    values: values.iter().map(|value| (*value).to_owned()).collect(),
+                }),
+            }]),
+            snapshot_mkv_with_video_audio_subtitle(),
+        ))
+        .unwrap()
+    };
+
+    let empty = plan_for(&["jpn"]);
+    assert_eq!(empty.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        empty.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyTrackFilterSelection
+    );
+    assert!(empty.nodes[0].status_reason.contains("order tracks"));
+    assert!(empty.nodes[0].status_reason.contains("0 retained streams"));
+
+    let ambiguous = plan_for(&["eng", "spa"]);
+    assert_eq!(ambiguous.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        ambiguous.diagnostics[0].code,
+        PlanningDiagnosticCode::AmbiguousTrackFilterSelection
+    );
+    assert!(
+        ambiguous.nodes[0]
+            .status_reason
+            .contains("2 retained streams")
+    );
+}
+
+#[test]
+fn track_remux_order_filter_excludes_attachments_from_candidates() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: vec![TrackTarget::Video, TrackTarget::Audio],
+        head_filter: Some(TrackFilter::Font),
+    }]);
+    let mut snapshot = snapshot_with_attachment_stream(Some("mkv"));
+    snapshot.stream_summary["streams"][4]["codec_name"] = serde_json::json!("ttf");
+    snapshot.stream_summary["streams"][4]["filename"] = serde_json::json!("font.ttf");
+    snapshot.stream_summary["streams"][4]["mime_type"] = serde_json::json!("font/ttf");
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::EmptyTrackFilterSelection
+    );
+}
+
+#[test]
+fn track_remux_bare_order_filter_preserves_remaining_source_order() {
+    let policy = compiled_policy_with_ops(vec![CompiledOperation::ReorderTracks {
+        targets: Vec::new(),
+        head_filter: Some(TrackFilter::LanguageIn {
+            values: vec!["spa".to_owned()],
+        }),
+    }]);
+
+    let plan = generate_plan(request(policy, snapshot_mkv_with_video_audio_subtitle())).unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].operation_payload["track_order"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        plan.nodes[0].operation_payload["head_snapshot_stream_id"],
+        "stream-3"
+    );
+}
+
+#[test]
+fn track_remux_resolution_ignores_stream_summary_array_order() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: Some(TrackFilter::LanguageIn {
+                values: vec!["eng".to_owned()],
+            }),
+        },
+        CompiledOperation::ReorderTracks {
+            targets: vec![
+                TrackTarget::Video,
+                TrackTarget::Audio,
+                TrackTarget::Subtitle,
+            ],
+            head_filter: Some(TrackFilter::LanguageIn {
+                values: vec!["spa".to_owned()],
+            }),
+        },
+    ]);
+    let canonical_snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
+    let mut shuffled_snapshot = canonical_snapshot.clone();
+    shuffled_snapshot
+        .stream_summary
+        .get_mut("streams")
+        .and_then(serde_json::Value::as_array_mut)
+        .unwrap()
+        .swap(0, 2);
+
+    let canonical = generate_plan(request(policy.clone(), canonical_snapshot)).unwrap();
+    let shuffled = generate_plan(request(policy, shuffled_snapshot)).unwrap();
+
+    assert_eq!(canonical.nodes[0].status, shuffled.nodes[0].status);
+    assert_eq!(
+        canonical.nodes[0].operation_payload,
+        shuffled.nodes[0].operation_payload
     );
 }
 

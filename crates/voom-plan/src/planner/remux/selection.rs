@@ -7,25 +7,48 @@ use voom_policy::{ComparisonOp, MediaSnapshotInput, TrackFilter, TrackTarget};
 use super::{RemuxTrackAction, RemuxTrackActionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotFact<T> {
+    Missing,
+    Malformed,
+    Value(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotStreamFact {
     pub snapshot_stream_id: String,
     pub provider_stream_index: u32,
     pub kind: TrackTarget,
     pub codec_name: Option<String>,
-    pub language: Option<String>,
+    pub language: SnapshotFact<String>,
     pub channels: Option<u32>,
     pub title: Option<String>,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
-    pub commentary: Option<bool>,
-    pub is_default: bool,
-    pub is_forced: bool,
+    pub commentary: SnapshotFact<bool>,
+    pub is_default: SnapshotFact<bool>,
+    pub is_forced: SnapshotFact<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemuxFilterOperation {
+    Defaults(TrackTarget),
+    OrderTracks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemuxPlanningBlock {
     InsufficientSnapshotFacts,
     UnsupportedMediaShape,
+    EmptyTrackFilterSelection {
+        operation: RemuxFilterOperation,
+    },
+    AmbiguousTrackFilterSelection {
+        operation: RemuxFilterOperation,
+        match_count: usize,
+    },
+    ConflictingExplicitDefaults {
+        target: TrackTarget,
+    },
 }
 
 pub fn stream_facts(
@@ -65,7 +88,7 @@ pub fn stream_facts(
             provider_stream_index,
             kind,
             codec_name: optional_string(stream.get("codec_name")),
-            language: optional_string(stream.get("language")),
+            language: optional_string_fact(stream.get("language")),
             channels: stream
                 .get("channels")
                 .and_then(Value::as_u64)
@@ -73,9 +96,9 @@ pub fn stream_facts(
             title: optional_string(stream.get("title")),
             mime_type: optional_string(stream.get("mime_type")),
             filename: optional_string(stream.get("filename")),
-            commentary: disposition_optional_bool(stream.get("disposition"), "commentary"),
-            is_default: disposition_flag(stream.get("disposition"), "default"),
-            is_forced: disposition_flag(stream.get("disposition"), "forced"),
+            commentary: disposition_fact(stream.get("disposition"), "commentary"),
+            is_default: disposition_fact(stream.get("disposition"), "default"),
+            is_forced: disposition_fact(stream.get("disposition"), "forced"),
         });
     }
 
@@ -88,9 +111,13 @@ pub fn evaluate_filter(
 ) -> Result<bool, RemuxPlanningBlock> {
     match filter {
         TrackFilter::LanguageIn { values } => {
-            // A missing language tag matches as `und` (ISO 639-2 undetermined)
-            // rather than blocking planning (ADR 0021, issue #272).
-            let language = stream.language.as_deref().unwrap_or("und");
+            let language = match &stream.language {
+                SnapshotFact::Missing => "und",
+                SnapshotFact::Value(language) => language,
+                SnapshotFact::Malformed => {
+                    return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
+                }
+            };
             Ok(values.iter().any(|value| value == language))
         }
         TrackFilter::CodecIn { values } => {
@@ -106,12 +133,10 @@ pub fn evaluate_filter(
                 .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts)?;
             Ok(compare_u64(u64::from(channels), *op, *value))
         }
-        TrackFilter::Commentary => stream
-            .commentary
-            .ok_or(RemuxPlanningBlock::InsufficientSnapshotFacts),
+        TrackFilter::Commentary => required_bool_fact(&stream.commentary),
         TrackFilter::TitleMatches { .. } => Err(RemuxPlanningBlock::UnsupportedMediaShape),
-        TrackFilter::Forced => Ok(stream.is_forced),
-        TrackFilter::Default => Ok(stream.is_default),
+        TrackFilter::Forced => required_bool_fact(&stream.is_forced),
+        TrackFilter::Default => required_bool_fact(&stream.is_default),
         TrackFilter::Font => evaluate_font_filter(stream),
         TrackFilter::TitleContains { value } => {
             let title = stream
@@ -137,6 +162,13 @@ pub fn evaluate_filter(
                     Err(RemuxPlanningBlock::InsufficientSnapshotFacts) => insufficient = true,
                     Err(RemuxPlanningBlock::UnsupportedMediaShape) => {
                         return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+                    }
+                    Err(
+                        block @ (RemuxPlanningBlock::EmptyTrackFilterSelection { .. }
+                        | RemuxPlanningBlock::AmbiguousTrackFilterSelection { .. }
+                        | RemuxPlanningBlock::ConflictingExplicitDefaults { .. }),
+                    ) => {
+                        return Err(block);
                     }
                 }
             }
@@ -200,15 +232,39 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).map(str::to_owned)
 }
 
-fn disposition_optional_bool(disposition: Option<&Value>, key: &str) -> Option<bool> {
-    disposition
-        .and_then(Value::as_object)
-        .and_then(|object| object.get(key))
-        .and_then(Value::as_bool)
+fn optional_string_fact(value: Option<&Value>) -> SnapshotFact<String> {
+    match value {
+        Some(Value::String(value)) => SnapshotFact::Value(value.clone()),
+        Some(Value::Null) | None => SnapshotFact::Missing,
+        Some(_) => SnapshotFact::Malformed,
+    }
 }
 
-fn disposition_flag(disposition: Option<&Value>, key: &str) -> bool {
-    disposition_optional_bool(disposition, key).unwrap_or(false)
+fn disposition_fact(disposition: Option<&Value>, key: &str) -> SnapshotFact<bool> {
+    let Some(disposition) = disposition else {
+        return SnapshotFact::Missing;
+    };
+    let Some(disposition) = disposition.as_object() else {
+        return if disposition.is_null() {
+            SnapshotFact::Missing
+        } else {
+            SnapshotFact::Malformed
+        };
+    };
+    match disposition.get(key) {
+        Some(Value::Bool(value)) => SnapshotFact::Value(*value),
+        Some(Value::Null) | None => SnapshotFact::Missing,
+        Some(_) => SnapshotFact::Malformed,
+    }
+}
+
+fn required_bool_fact(fact: &SnapshotFact<bool>) -> Result<bool, RemuxPlanningBlock> {
+    match fact {
+        SnapshotFact::Value(value) => Ok(*value),
+        SnapshotFact::Missing | SnapshotFact::Malformed => {
+            Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+        }
+    }
 }
 
 fn evaluate_font_filter(stream: &SnapshotStreamFact) -> Result<bool, RemuxPlanningBlock> {

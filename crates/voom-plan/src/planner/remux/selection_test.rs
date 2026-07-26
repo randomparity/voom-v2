@@ -3,7 +3,7 @@ use voom_policy::{
     ComparisonOp, MediaSnapshotInput, TargetKind, TargetRef, TrackFilter, TrackTarget,
 };
 
-use super::{RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, stream_facts};
+use super::{RemuxPlanningBlock, SnapshotFact, SnapshotStreamFact, evaluate_filter, stream_facts};
 
 #[test]
 fn remux_stream_facts_parse_normalized_streams() {
@@ -42,28 +42,28 @@ fn remux_stream_facts_parse_normalized_streams() {
                 provider_stream_index: 0,
                 kind: TrackTarget::Video,
                 codec_name: Some("h264".to_owned()),
-                language: None,
+                language: SnapshotFact::Missing,
                 channels: None,
                 title: None,
                 mime_type: None,
                 filename: None,
-                commentary: None,
-                is_default: true,
-                is_forced: false,
+                commentary: SnapshotFact::Missing,
+                is_default: SnapshotFact::Value(true),
+                is_forced: SnapshotFact::Missing,
             },
             SnapshotStreamFact {
                 snapshot_stream_id: "stream-1".to_owned(),
                 provider_stream_index: 1,
                 kind: TrackTarget::Audio,
                 codec_name: Some("aac".to_owned()),
-                language: Some("eng".to_owned()),
+                language: SnapshotFact::Value("eng".to_owned()),
                 channels: Some(6),
                 title: Some("Main".to_owned()),
                 mime_type: None,
                 filename: None,
-                commentary: None,
-                is_default: false,
-                is_forced: true,
+                commentary: SnapshotFact::Missing,
+                is_default: SnapshotFact::Missing,
+                is_forced: SnapshotFact::Value(true),
             },
         ]
     );
@@ -136,6 +136,64 @@ fn remux_language_filter_explicit_und_matches_like_untagged() {
 }
 
 #[test]
+fn remux_language_filter_blocks_on_non_string_value() {
+    let streams = json!([{
+        "id": "malformed",
+        "index": 1,
+        "kind": "audio",
+        "language": 7
+    }]);
+    let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
+
+    assert_eq!(
+        evaluate_filter(
+            &TrackFilter::LanguageIn {
+                values: vec!["und".to_owned()],
+            },
+            &facts[0],
+        ),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
+fn remux_default_and_forced_filters_require_boolean_facts_under_negation() {
+    let streams = json!([
+        {
+            "id": "missing",
+            "index": 1,
+            "kind": "audio",
+            "disposition": {}
+        },
+        {
+            "id": "malformed",
+            "index": 2,
+            "kind": "audio",
+            "disposition": {"default": 0, "forced": "false"}
+        }
+    ]);
+    let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
+
+    for fact in &facts {
+        for filter in [TrackFilter::Default, TrackFilter::Forced] {
+            assert_eq!(
+                evaluate_filter(&filter, fact),
+                Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+            );
+            assert_eq!(
+                evaluate_filter(
+                    &TrackFilter::Not {
+                        inner: Box::new(filter),
+                    },
+                    fact,
+                ),
+                Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+            );
+        }
+    }
+}
+
+#[test]
 fn remux_or_returns_true_before_later_insufficient_child() {
     // A title-less stream makes `title contains` insufficient; `Or` must return
     // true from the matching codec child without surfacing the later block.
@@ -190,14 +248,14 @@ fn remux_title_contains_is_case_sensitive() {
         provider_stream_index: 0,
         kind: TrackTarget::Audio,
         codec_name: Some("aac".to_owned()),
-        language: Some("eng".to_owned()),
+        language: SnapshotFact::Value("eng".to_owned()),
         channels: Some(2),
         title: Some("Main Audio".to_owned()),
         mime_type: None,
         filename: None,
-        commentary: None,
-        is_default: false,
-        is_forced: false,
+        commentary: SnapshotFact::Missing,
+        is_default: SnapshotFact::Value(false),
+        is_forced: SnapshotFact::Value(false),
     };
 
     let matched = evaluate_filter(
@@ -218,14 +276,14 @@ fn remux_channels_filter_uses_comparison_op() {
         provider_stream_index: 0,
         kind: TrackTarget::Audio,
         codec_name: Some("aac".to_owned()),
-        language: Some("eng".to_owned()),
+        language: SnapshotFact::Value("eng".to_owned()),
         channels: Some(6),
         title: None,
         mime_type: None,
         filename: None,
-        commentary: None,
-        is_default: false,
-        is_forced: false,
+        commentary: SnapshotFact::Missing,
+        is_default: SnapshotFact::Value(false),
+        is_forced: SnapshotFact::Value(false),
     };
 
     let matched = evaluate_filter(
@@ -247,14 +305,14 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
         provider_stream_index: 0,
         kind: TrackTarget::Attachment,
         codec_name: None,
-        language: None,
+        language: SnapshotFact::Missing,
         channels: None,
         title: None,
         mime_type: Some("image/jpeg".to_owned()),
         filename: Some("cover.jpg".to_owned()),
-        commentary: None,
-        is_default: false,
-        is_forced: false,
+        commentary: SnapshotFact::Missing,
+        is_default: SnapshotFact::Value(false),
+        is_forced: SnapshotFact::Value(false),
     };
 
     let matched = evaluate_filter(&TrackFilter::Font, &stream).unwrap();
@@ -361,14 +419,14 @@ fn attachment_stream(mime_type: Option<&str>) -> SnapshotStreamFact {
         provider_stream_index: 2,
         kind: TrackTarget::Attachment,
         codec_name: Some("ttf".to_owned()),
-        language: None,
+        language: SnapshotFact::Missing,
         channels: None,
         title: None,
         mime_type: mime_type.map(str::to_owned),
         filename: Some("OpenSans.ttf".to_owned()),
-        commentary: None,
-        is_default: false,
-        is_forced: false,
+        commentary: SnapshotFact::Missing,
+        is_default: SnapshotFact::Value(false),
+        is_forced: SnapshotFact::Value(false),
     }
 }
 
@@ -378,14 +436,16 @@ fn audio_stream(language: Option<&str>) -> SnapshotStreamFact {
         provider_stream_index: 0,
         kind: TrackTarget::Audio,
         codec_name: Some("aac".to_owned()),
-        language: language.map(str::to_owned),
+        language: language.map_or(SnapshotFact::Missing, |language| {
+            SnapshotFact::Value(language.to_owned())
+        }),
         channels: Some(2),
         title: None,
         mime_type: None,
         filename: None,
-        commentary: None,
-        is_default: false,
-        is_forced: false,
+        commentary: SnapshotFact::Missing,
+        is_default: SnapshotFact::Value(false),
+        is_forced: SnapshotFact::Value(false),
     }
 }
 
