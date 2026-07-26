@@ -17,18 +17,23 @@ use crate::workflow::summary::WorkflowRunSummary;
 pub struct WorkflowRunError {
     pub summary: WorkflowRunSummary,
     pub source: VoomError,
+    pub(crate) job_failed: bool,
 }
 
 impl WorkflowExecutor {
     pub(super) async fn first_failed_ticket_error(
         &self,
         job_id: JobId,
+        workflow_id: &str,
     ) -> Result<Option<VoomError>, VoomError> {
         let row = sqlx::query(
             "SELECT id, kind, payload FROM tickets \
-             WHERE job_id = ? AND state = 'failed' ORDER BY id ASC LIMIT 1",
+             WHERE job_id = ? AND state = 'failed' \
+               AND json_extract(payload, '$.workflow_id') = ? \
+             ORDER BY id ASC LIMIT 1",
         )
         .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
         .fetch_optional(&self.control_plane.pool)
         .await
         .map_err(|e| {

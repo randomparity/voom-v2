@@ -30,9 +30,11 @@ successful no-op before it can write honest per-file rows.
 
 2. Each coordinator phase supplies a unique workflow invocation id derived
    from the job and phase ordinal. Ready-work, completion, retry, and failed-
-   ticket queries are scoped to that invocation. Summary counters remain
-   intentionally job-cumulative. This prevents a failed ticket retained from a
-   continued phase from being rediscovered as the error for every later phase.
+   ticket queries are scoped to that invocation. Durable ticket, retry, and
+   failure counts remain job-cumulative; invocation-local dispatch/success
+   telemetry is accumulated by the coordinator across phases. This prevents a
+   failed ticket retained from a continued phase from being rediscovered as the
+   error for every later phase without losing whole-run reporting.
 
 3. Errors that cannot be assigned to a terminal ticket remain fatal and fail
    the job immediately. This includes plan validation, bridge errors, database

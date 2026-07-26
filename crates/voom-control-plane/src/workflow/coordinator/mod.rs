@@ -38,7 +38,9 @@ use crate::cases::policy::plans::plan_compiled_policy_with_input;
 use crate::cases::{begin_tx, commit_tx};
 
 use super::execution::WorkerRuntimeRegistry;
-use super::execution::executor::{WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions};
+use super::execution::executor::{
+    RunFailureMode, WORKFLOW_JOB_KIND, WorkflowExecutor, WorkflowExecutorOptions,
+};
 use super::plan::policy_bridge::{WorkflowExecutionShape, workflow_plan_from_compliance};
 
 mod finalize;
@@ -299,7 +301,7 @@ impl<'a> PhaseLoop<'a> {
                 continue;
             };
             let planned = self.plan_phase_for_files(phase_name, &entry.entering)?;
-            if let Err(failure) = self.dispatch_phase_work(&planned).await {
+            if let Err(failure) = self.dispatch_phase_work(phase_ordinal, &planned).await {
                 return self
                     .persist_failed_phase(
                         phase_ordinal,
@@ -377,6 +379,7 @@ impl<'a> PhaseLoop<'a> {
 
     async fn dispatch_phase_work(
         &mut self,
+        phase_ordinal: u32,
         planned: &PlannedPhase,
     ) -> Result<(), PhaseDispatchFailure> {
         let run = self
@@ -384,6 +387,7 @@ impl<'a> PhaseLoop<'a> {
             .dispatch_phase(
                 &self.executor,
                 self.job_id,
+                phase_ordinal,
                 &planned.plan,
                 &planned.report,
                 &planned.dispositions,
@@ -875,6 +879,7 @@ impl ControlPlane {
         &self,
         executor: &WorkflowExecutor,
         job_id: JobId,
+        phase_ordinal: u32,
         plan: &ExecutionPlan,
         report: &voom_plan::ComplianceReport,
         dispositions: &[Disposition],
@@ -906,11 +911,19 @@ impl ControlPlane {
         // carry its run summary so the partial outcome reports the job-cumulative
         // counts including the failure.
         let run = executor
-            .submit_and_run_in_job(job_id, workflow)
+            .submit_and_run_invocation_in_job(
+                job_id,
+                &format!("phase-{phase_ordinal}"),
+                workflow,
+                RunFailureMode::AbortJob,
+            )
             .await
-            .map_err(|err| PhaseDispatchFailure {
-                source: err.source,
-                run_summary: Some(err.summary),
+            .map_err(|err| {
+                debug_assert!(err.job_failed);
+                PhaseDispatchFailure {
+                    source: err.source,
+                    run_summary: Some(err.summary),
+                }
             })?;
         Ok(Some(run))
     }

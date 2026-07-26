@@ -6,8 +6,8 @@
 - Add an internal failure-handling mode and a coordinator-facing entry point
   that continues independent branches after durable ticket failure.
 - Give every phase a unique workflow invocation id and scope ready, retry,
-  completion, and failed-ticket queries to it while keeping summaries
-  job-cumulative.
+  completion, and failed-ticket queries to it. Preserve job-wide durable
+  counts and add coordinator accumulation for invocation-local telemetry.
 - Keep validation, database, join, and inconsistent-state failures fatal.
 - First write tests that fail because an undispatched sibling is abandoned and
   the shared job is marked failed, plus a two-invocation test that exposes a

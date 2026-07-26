@@ -213,12 +213,18 @@ impl WorkflowExecutor {
         Ok(tickets)
     }
 
-    pub(super) async fn workflow_finished(&self, job_id: JobId) -> Result<bool, VoomError> {
+    pub(super) async fn workflow_finished(
+        &self,
+        job_id: JobId,
+        workflow_id: &str,
+    ) -> Result<bool, VoomError> {
         let (unfinished,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM tickets \
-             WHERE job_id = ? AND state IN ('pending', 'ready', 'leased')",
+             WHERE job_id = ? AND state IN ('pending', 'ready', 'leased') \
+               AND json_extract(payload, '$.workflow_id') = ?",
         )
         .bind(sqlite_i64(job_id.0))
+        .bind(workflow_id)
         .fetch_one(&self.control_plane.pool)
         .await
         .map_err(|e| {

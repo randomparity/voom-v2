@@ -27,7 +27,8 @@ a complete partial result.
 2. Continue mode dispatches every independent branch that can still run and
    returns only after active work is drained.
 3. Each phase execution has a unique workflow invocation id. Ticket scheduling
-   and failure detection are invocation-scoped; metrics remain job-scoped.
+   and failure detection are invocation-scoped. Durable counts remain
+   job-scoped; the coordinator accumulates invocation-local dispatch telemetry.
 4. A planned file is committed, skipped, or blocked from durable terminal
    ticket state plus chain-tip advancement; it is never inferred from the
    aggregate error alone.
@@ -56,8 +57,10 @@ When all runnable tickets are terminal, a remembered ticket failure returns an
 error and leaves the job open. Success still returns normally and leaves the
 job open. A coordinator-supplied invocation id, derived from job id and phase
 ordinal, scopes root tickets, ready-work, retry, completion, and first-failure
-queries. Job summary refresh remains cumulative. The coordinator alone decides
-the final shared-job status.
+queries. Durable ticket/retry/failure counts remain job-cumulative. The
+coordinator combines each invocation's dispatch, success, elapsed, and peak
+telemetry before writing the final summary. The coordinator alone decides the
+final shared-job status.
 
 ## Coordinator state
 
