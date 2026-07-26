@@ -27,8 +27,8 @@ policy "remux track selection" {
     remove audio where commentary
     keep attachment where font
     remove subtitle where forced
-    order tracks [video, audio, subtitle]
-    defaults audio: first
+    order tracks [video, audio, subtitle] where codec in ["aac"] and not commentary
+    defaults audio where language == "eng" and not commentary
     defaults subtitle: none
   }
 }
@@ -98,6 +98,15 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
     assert_eq!(
         plan.plan.nodes[0].operation_payload["source_media_snapshot_id"],
         source_media_snapshot_id.0
+    );
+    assert_eq!(
+        plan.plan.nodes[0].operation_payload["head_snapshot_stream_id"],
+        plan.plan.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"]
+    );
+    assert!(
+        plan.plan.nodes[0].operation_payload["head_snapshot_stream_id"]
+            .as_str()
+            .is_some()
     );
 
     let mut worker = RemuxWorkerLaunch::start(&cp).await.unwrap();
@@ -294,7 +303,7 @@ fn assert_remux_result_streams(streams: &[serde_json::Value]) {
             .iter()
             .map(|stream| stream["kind"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["video", "audio", "subtitle", "attachment"]
+        ["audio", "video", "subtitle", "attachment"]
     );
     let audio = streams
         .iter()
