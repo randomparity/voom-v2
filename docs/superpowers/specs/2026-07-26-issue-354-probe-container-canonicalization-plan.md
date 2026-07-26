@@ -47,9 +47,9 @@ or malformed values as an absent container fact.
    copied:
 
    ```sh
-   cargo test -p voom-control-plane media_snapshot
-   cargo test -p voom-control-plane stored_stream
-   cargo test -p voom-control-plane coordinator
+   cargo test -p voom-control-plane --all-features --lib media_snapshot
+   cargo test -p voom-control-plane --all-features --lib stored_stream
+   cargo test -p voom-control-plane --all-features --lib coordinator
    ```
 
 ## Task 2: Pin real-media replanning and independent lineage
