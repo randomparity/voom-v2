@@ -84,7 +84,11 @@ are an unsupported policy shape and block the file with an actionable message.
 The planner performs this reduction before payload construction, and the
 control plane repeats it at the execution trust boundary. A shadowed `best`
 action is discarded before strategy support is checked; an unshadowed `best`
-remains blocked until issue #336 supplies its ranking behavior.
+uses `config.languages` order and then provider stream index to resolve one
+retained target-kind stream. With no preferred-language match or an empty
+preference list, the first retained source stream wins. With no retained target
+stream, the action is omitted. A missing language is `und`; a malformed
+language blocks when preferences are evaluated.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
@@ -128,6 +132,11 @@ snapshot identity stored in the per-file remux payload.
 `voom-control-plane/remux` owns validation of that identity against the pinned
 snapshot and conversion to `RemuxStreamRef`. The MKVToolNix worker receives only
 resolved stream references.
+
+For `defaults ... best`, planning uses the same resolved snapshot-ID payload
+field as an explicit filter selection while retaining `strategy: "best"` as
+the source intent. Execution never repeats the language ranking. An unresolved
+`best` payload is invalid at that boundary.
 
 Defaults filters are scoped to kept streams of their declared target kind.
 Order filters range over kept ordinary tracks; attachments are not track-order
