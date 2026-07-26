@@ -45,3 +45,4 @@ are append-only — supersede an ADR with a new one rather than rewriting histor
 | [0037](0037-durable-file-run-starts-for-resume.md) | Persist per-file run starts for resume reconciliation |
 | [0038](0038-carry-inherited-phase-outcomes-for-run-if.md) | Carry inherited phase outcomes for per-file run gates |
 | [0039](0039-isolate-continued-ticket-failures-per-file.md) | Isolate continued ticket failures per file |
+| [0040](0040-structured-remux-attachment-selection.md) | Resolve remux attachments from structured provider facts |
