@@ -115,7 +115,15 @@ async fn remux_flow_verifies_commits_and_records_result_snapshot() {
         .unwrap();
     worker.shutdown().unwrap();
 
-    assert_remux_execution_result(&url, &out_dir, &executed).await;
+    let (result_version, result_snapshot) =
+        assert_remux_execution_result(&url, &out_dir, &executed).await;
+    assert_result_replans_from_authoritative_snapshot(
+        &cp,
+        policy.version.id,
+        result_version,
+        result_snapshot,
+    )
+    .await;
 }
 
 trait ScanSummaryExt {
@@ -178,7 +186,7 @@ async fn assert_remux_execution_result(
     url: &str,
     out_dir: &Path,
     executed: &voom_control_plane::policy::ComplianceExecuteData,
-) {
+) -> (FileVersionId, MediaSnapshotId) {
     let result = ticket_result(url, executed.summary.job_id, "remux").await;
     let staged_artifact_handle_id = result["staged_artifact_handle_id"].as_u64().unwrap();
     let verification_id = result["verification_id"].as_u64().unwrap();
@@ -264,6 +272,36 @@ async fn assert_remux_execution_result(
     assert!(!streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("subtitle") && stream["disposition"]["forced"] == true
     }));
+    (result_file_version_id, result_media_snapshot_id)
+}
+
+async fn assert_result_replans_from_authoritative_snapshot(
+    cp: &ControlPlane,
+    policy_version_id: voom_core::PolicyVersionId,
+    result_file_version_id: FileVersionId,
+    result_media_snapshot_id: MediaSnapshotId,
+) {
+    let result_input = cp
+        .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+            slug: "movie-remux-result".to_owned(),
+            file_version_id: result_file_version_id,
+            media_snapshot_id: result_media_snapshot_id,
+            container: "mkv".to_owned(),
+            video_codec: "h264".to_owned(),
+        })
+        .await
+        .unwrap();
+    let report = cp
+        .generate_compliance_report(policy_version_id, result_input.input_set_id)
+        .await
+        .unwrap();
+
+    assert_eq!(report.plan.nodes.len(), 1);
+    assert_eq!(report.plan.nodes[0].status, voom_plan::NodeStatus::NoOp);
+    assert_eq!(
+        report.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "mkv"
+    );
 }
 
 async fn assert_row_exists(pool: &sqlx::SqlitePool, sql: &str, id: u64) {

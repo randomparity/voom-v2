@@ -83,3 +83,69 @@ fn planning_input_projects_video_dimensions() {
     assert_eq!(input.width, Some(3840));
     assert_eq!(input.height, Some(2160));
 }
+
+#[test]
+fn planning_input_canonicalizes_supported_container_names() {
+    let cases = [
+        ("mkv", "mkv"),
+        ("matroska", "mkv"),
+        ("matroska,webm", "mkv"),
+        ("mp4", "mp4"),
+        ("mov,mp4", "mp4"),
+        ("mov,mp4,m4a,3gp,3g2,mj2", "mp4"),
+        ("ogg", "ogg"),
+    ];
+
+    for (durable, canonical) in cases {
+        for container in [
+            json!(durable),
+            json!({"format_name": durable, "format_long_name": "inspection only"}),
+        ] {
+            let input = planning_input(1, &snapshot_with_payload(json!({"container": container})));
+
+            assert_eq!(
+                input.container.as_deref(),
+                Some(canonical),
+                "durable container {durable:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn planning_input_rejects_unknown_or_malformed_container_names() {
+    let cases = [
+        json!(null),
+        json!(true),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!({"format_long_name": "Matroska"}),
+        json!({"format_name": null}),
+        json!({"format_name": ["matroska,webm"]}),
+        json!(""),
+        json!(" matroska,webm"),
+        json!("matroska,webm "),
+        json!("MATROSKA,WEBM"),
+        json!("webm"),
+        json!("mov"),
+        json!("m4a"),
+        json!("webm,matroska"),
+        json!("matroska,webm,webm"),
+        json!("mov,mp4,m4a,3gp,3g2"),
+        json!("mov,mp4,m4a,3gp,3g2,mj2,unknown"),
+    ];
+
+    assert_eq!(
+        planning_input(1, &snapshot_with_payload(json!({}))).container,
+        None
+    );
+    for container in cases {
+        let input = planning_input(
+            1,
+            &snapshot_with_payload(json!({"container": container.clone()})),
+        );
+
+        assert_eq!(input.container, None, "durable container {container}");
+    }
+}

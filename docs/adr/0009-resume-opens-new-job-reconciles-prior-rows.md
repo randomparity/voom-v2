@@ -33,11 +33,11 @@ Three decisions the spec and ADR-0007 leave open:
    terminal states are terminal, with no `Failed → Open` transition. So a resumed
    run cannot continue *inside* the failed job. Does resume reopen the prior job,
    reuse its id, or open a fresh job?
-2. **How a resumed run learns which `(file, phase)` pairs are done.** ADR-0007
-   notes that re-planning a container-canonicalizing transform against an
-   already-produced artifact re-runs it rather than seeing a no-op (raw probe
-   container names are compared verbatim). So replanning alone is **not** a safe
-   idempotency signal — a recorded-phase check is required.
+2. **How a resumed run learns which `(file, phase)` pairs are done.** A current
+   plan describes required work from current facts; it is not durable evidence
+   that a prior phase committed. Replanning alone is therefore not a safe
+   idempotency signal, even though supported produced containers canonicalize
+   and may now replan as no-ops. A recorded-phase check is required.
 3. **Unsupported `on_error`.** Non-default `CompiledPhase.on_error`
    (`continue`/`skip`) is out of scope this sprint (spec §6, §11); it must not
    silently regress into partial honoring.
@@ -131,8 +131,8 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
 - Idempotency rests on two facts, not on replanning: (a) fully-recorded `(file,
   phase)` pairs are skipped by the recorded-row check, and (b) committed
   artifacts are append-only and are the active version the next phase plans
-  against. A container-canonicalizing transform that ADR-0007 would re-run on
-  replanning is therefore **not** re-run on resume for any recorded phase.
+  against. Canonical container facts improve convergent planning, but recorded
+  phase rows remain the authority for whether resume may re-enter a phase.
 - The backfill path reuses the same re-probe (`active_version_with_snapshot` +
   `ProducedRefs::resolve`) the failure path uses, so resume adds no second probe
   or commit path (spec §2/§6).
@@ -168,9 +168,11 @@ read-only reconciliation source addressed by an explicit `prior_job_id`.**
   chain hides multiple sibling commits the single backfill cannot absorb and is a
   caller-contract violation; cross-job per-file cursors that would make any job in
   the chain safe are deferred (§11).
-- **Rely on replanning seeing a no-op for already-advanced files.** Rejected: ADR-0007
-  documents that a container transform re-runs on replanning against the produced
-  artifact, so this would re-mutate recorded phases — exactly what spec §8 forbids.
+- **Rely on replanning seeing a no-op for already-advanced files.** Rejected:
+  supported containers now converge to canonical no-ops, but that verdict is
+  not durable proof that a particular phase committed and does not cover every
+  operation. Recorded phase rows are the idempotency authority required by
+  spec §8.
 - **Re-derive the backfilled row's `ticket_ids` by replanning the missing phase
   to recover its node id and querying the prior job's tickets.** Rejected: it
   couples a new job's row to the prior job's tickets and adds a replan whose only

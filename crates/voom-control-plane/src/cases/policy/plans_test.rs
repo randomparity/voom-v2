@@ -266,7 +266,7 @@ async fn stored_stream_plan_and_report_use_current_snapshot_facts() {
         &cp,
         "/srv/current-container.mkv",
         serde_json::json!({
-            "container": {"format_name": "mkv"},
+            "container": {"format_name": "matroska,webm"},
             "streams": [{"id": "video-0", "kind": "video", "codec_name": "h264"}]
         }),
     )
@@ -293,6 +293,76 @@ async fn stored_stream_plan_and_report_use_current_snapshot_facts() {
 
     assert_eq!(plan.nodes[0].status, voom_plan::NodeStatus::NoOp);
     assert_eq!(report.plan.nodes[0].status, voom_plan::NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "mkv"
+    );
+    assert_eq!(
+        report.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
+        "mkv"
+    );
+}
+
+#[tokio::test]
+async fn stored_stream_plan_and_report_block_unknown_or_malformed_containers() {
+    let (cp, _tmp) = cp().await;
+    let policy = cp
+        .create_policy_document(
+            "stored-invalid-container",
+            "policy \"stored invalid container\" { phase normalize { container mkv } }",
+        )
+        .await
+        .unwrap();
+
+    for (index, container) in [
+        serde_json::json!("matroska,unknown"),
+        serde_json::json!({"format_name": 42}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = format!("/srv/invalid-container-{index}.mkv");
+        let (file_version_id, media_snapshot_id) = seed_stored_snapshot(
+            &cp,
+            &path,
+            serde_json::json!({
+                "container": container,
+                "streams": [{"id": "video-0", "kind": "video", "codec_name": "h264"}]
+            }),
+        )
+        .await;
+        let input = cp
+            .create_policy_input_set_from_scan(PolicyInputFromScanInput {
+                slug: format!("invalid-container-{index}"),
+                file_version_id,
+                media_snapshot_id,
+                container: "mkv".to_owned(),
+                video_codec: "h264".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        let plan = cp
+            .plan_accepted_policy_version_with_input_set(policy.version.id, input.input_set_id)
+            .await
+            .unwrap();
+        let report = cp
+            .generate_compliance_report(policy.version.id, input.input_set_id)
+            .await
+            .unwrap();
+
+        for checked in [&plan, &report.plan] {
+            assert_eq!(checked.nodes[0].status, voom_plan::NodeStatus::Blocked);
+            assert_eq!(
+                checked.nodes[0].status_reason,
+                "snapshot container is unknown"
+            );
+            assert_eq!(
+                checked.diagnostics[0].code,
+                voom_plan::PlanningDiagnosticCode::InsufficientSnapshotFacts
+            );
+        }
+    }
 }
 
 #[tokio::test]

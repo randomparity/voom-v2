@@ -142,6 +142,81 @@ fn project_media_snapshot_input_preserves_missing_stream_inventory() {
     assert_eq!(input.stream_summary["video_stream_count"], 0);
 }
 
+#[test]
+fn regenerated_phase_report_canonicalizes_probe_container() {
+    let snapshot = MediaSnapshot {
+        id: voom_core::MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: T0,
+        payload: json!({
+            "container": {"format_name": "matroska,webm"},
+            "streams": [
+                {"id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"}
+            ]
+        }),
+    };
+    let policy = voom_policy::compile_policy(
+        "policy \"canonical container\" { phase normalize { container mkv } }",
+    )
+    .unwrap()
+    .policy;
+    let report = super::regenerate_phase_report(
+        &policy,
+        &voom_plan::PlanningContext::default(),
+        &file_draft(
+            "canonical-container-report",
+            std::slice::from_ref(&snapshot),
+        ),
+        "normalize",
+        &[(1, snapshot)],
+        &[true],
+    )
+    .unwrap();
+    let check = &report.report["checks"][0];
+
+    assert_eq!(check["check_status"], "compliant");
+    assert_eq!(check["observed_state"]["container"], "mkv");
+}
+
+#[test]
+fn regenerated_phase_report_blocks_malformed_probe_container() {
+    let snapshot = MediaSnapshot {
+        id: voom_core::MediaSnapshotId(1),
+        file_version_id: FileVersionId(1),
+        probed_by: None,
+        probed_at: T0,
+        payload: json!({
+            "container": {"format_name": 42},
+            "streams": [
+                {"id": "stream-0", "index": 0, "kind": "video", "codec_name": "h264"}
+            ]
+        }),
+    };
+    let policy = voom_policy::compile_policy(
+        "policy \"malformed container\" { phase normalize { container mkv } }",
+    )
+    .unwrap()
+    .policy;
+    let report = super::regenerate_phase_report(
+        &policy,
+        &voom_plan::PlanningContext::default(),
+        &file_draft(
+            "malformed-container-report",
+            std::slice::from_ref(&snapshot),
+        ),
+        "normalize",
+        &[(1, snapshot)],
+        &[true],
+    )
+    .unwrap();
+    let check = &report.report["checks"][0];
+
+    assert_eq!(check["check_status"], "blocked");
+    assert_eq!(check["reason"], "snapshot container is unknown");
+    assert_eq!(check["execution_eligibility"], "blocked");
+}
+
 #[tokio::test]
 async fn active_version_with_snapshot_picks_latest_committed_tip() {
     let (cp, _tmp) = crate::cases::cp().await;

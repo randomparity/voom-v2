@@ -43,13 +43,13 @@ expression: json
         "phase_ordinal": 0,
         "phase_name": "normalize",
         "outcome": "completed",
-        "report_id": "report_2e7c6be6d5b8ea5d",
+        "report_id": "report_88b2ed675ba7f956",
         "report": {
           "schema_version": 1,
-          "report_id": "report_2e7c6be6d5b8ea5d",
-          "report_hash": "blake3:c68046db9adcf579fdb913634b676eb062c76ad2b406275f318894fe482fbff4",
-          "plan_id": "plan_0c253ab63547fceb",
-          "plan_hash": "blake3:0c253ab63547fceb3ea445d232b5652c9765501d21030694fee8762168e27351",
+          "report_id": "report_88b2ed675ba7f956",
+          "report_hash": "blake3:1e94641eb3fe5158027ccd08b399b813bea68ef4621343cd351cdc8794608763",
+          "plan_id": "plan_c161ec1aa94eea89",
+          "plan_hash": "blake3:c161ec1aa94eea89b768adeded5b044aaaf384536fe6fc23ea28bacf341fd344",
           "policy": {
             "slug": "container-metadata",
             "source_hash": "efc80d0415953f5ed3fa23a052d98561c4153bbfb346f579ccf9270281c1f89b",
@@ -79,7 +79,7 @@ expression: json
           },
           "checks": [
             {
-              "check_id": "check_49507a113d8c2440",
+              "check_id": "check_d811611bfc7809dd",
               "node_id": "node_d9b6b0cc4caf4781",
               "target": {
                 "type": "file_version",
@@ -100,15 +100,15 @@ expression: json
                 "source_media_snapshot_id": 2
               },
               "observed_state": {
-                "container": "mov,mp4,m4a,3gp,3g2,mj2"
+                "container": "mp4"
               },
               "check_status": "noncompliant",
-              "reason": "container mov,mp4,m4a,3gp,3g2,mj2 will be changed to mkv",
+              "reason": "container mp4 will be changed to mkv",
               "issue_action_hint": "create_or_update_planned",
               "execution_eligibility": "supported"
             },
             {
-              "check_id": "check_19f91748b21d28e3",
+              "check_id": "check_241a1d00e698be90",
               "node_id": "node_c520b9e0e0a4da73",
               "target": {
                 "type": "file_version",
@@ -125,7 +125,7 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_85adf294915c4a33",
+              "check_id": "check_2bc16b6889cb5aae",
               "node_id": "node_2cb1f04bb88984c6",
               "target": {
                 "type": "file_version",
@@ -150,7 +150,7 @@ expression: json
               "execution_eligibility": "unsupported"
             },
             {
-              "check_id": "check_f4b79d86f8200842",
+              "check_id": "check_ac8b47fd75cb4bf5",
               "node_id": "node_7e472d6411e7638f",
               "target": {
                 "type": "file_version",
@@ -173,9 +173,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation clear_tags is not supported by compliance reports",
-              "plan_id": "plan_0c253ab63547fceb",
+              "plan_id": "plan_c161ec1aa94eea89",
               "node_id": "node_c520b9e0e0a4da73",
-              "check_id": "check_19f91748b21d28e3",
+              "check_id": "check_241a1d00e698be90",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -185,9 +185,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation set_tag is not supported by compliance reports",
-              "plan_id": "plan_0c253ab63547fceb",
+              "plan_id": "plan_c161ec1aa94eea89",
               "node_id": "node_2cb1f04bb88984c6",
-              "check_id": "check_85adf294915c4a33",
+              "check_id": "check_2bc16b6889cb5aae",
               "target": {
                 "type": "file_version",
                 "id": 2
@@ -197,9 +197,9 @@ expression: json
               "severity": "warning",
               "code": "unsupported_compliance_operation",
               "message": "operation delete_tag is not supported by compliance reports",
-              "plan_id": "plan_0c253ab63547fceb",
+              "plan_id": "plan_c161ec1aa94eea89",
               "node_id": "node_7e472d6411e7638f",
-              "check_id": "check_f4b79d86f8200842",
+              "check_id": "check_ac8b47fd75cb4bf5",
               "target": {
                 "type": "file_version",
                 "id": 2
