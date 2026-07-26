@@ -54,6 +54,9 @@ pub enum RemuxPlanningBlock {
     ConflictingExplicitDefaults {
         target: TrackTarget,
     },
+    ConflictingBestDefaultStrategies {
+        target: TrackTarget,
+    },
 }
 
 pub fn stream_facts(
@@ -175,7 +178,8 @@ pub fn evaluate_filter(
                     Err(
                         block @ (RemuxPlanningBlock::EmptyTrackFilterSelection { .. }
                         | RemuxPlanningBlock::AmbiguousTrackFilterSelection { .. }
-                        | RemuxPlanningBlock::ConflictingExplicitDefaults { .. }),
+                        | RemuxPlanningBlock::ConflictingExplicitDefaults { .. }
+                        | RemuxPlanningBlock::ConflictingBestDefaultStrategies { .. }),
                     ) => {
                         return Err(block);
                     }

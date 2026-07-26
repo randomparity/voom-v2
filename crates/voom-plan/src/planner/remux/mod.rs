@@ -151,6 +151,9 @@ pub(super) fn plan_group(
     preferred_languages: &[String],
 ) -> OperationPlan {
     let resolution = resolve_remux_operations(snapshot, operations, preferred_languages);
+    let best_used_untagged_language = resolution
+        .as_ref()
+        .is_ok_and(|resolution| resolution.best_used_untagged_language);
     let payload = match &resolution {
         Ok(resolution) => resolution.payload.clone().into_value(),
         Err(_) => remux_payload(snapshot, operations),
@@ -231,27 +234,34 @@ pub(super) fn plan_group(
         snapshot,
         PlanOperationKind::Remux,
     );
-    with_untagged_language_warning(plan, phase_name, snapshot, operations)
+    with_untagged_language_warning(
+        plan,
+        phase_name,
+        snapshot,
+        operations,
+        best_used_untagged_language,
+    )
 }
 
-/// Attach a per-file `Warning` when a remux language filter is evaluated against a
-/// file that has an untagged track of the filtered kind (defaulted to `und`,
-/// ADR 0021). Skipped on blocked nodes.
+/// Attach a per-file `Warning` when remux language selection evaluates an
+/// untagged track as `und` under ADR 0021. Skipped on blocked nodes.
 fn with_untagged_language_warning(
     plan: OperationPlan,
     phase_name: &str,
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
+    best_used_untagged_language: bool,
 ) -> OperationPlan {
     if plan.status == NodeStatus::Blocked
-        || !remux_has_untagged_language_filter(snapshot, operations)
+        || !(best_used_untagged_language
+            || remux_has_untagged_language_filter(snapshot, operations))
     {
         return plan;
     }
     plan.with_diagnostic(
         PlanningDiagnostic::warning(
             PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted,
-            "an untagged track was matched as language und by a remux filter",
+            "an untagged track was evaluated as language und by remux language selection",
         )
         .with_phase(phase_name)
         .with_operation_kind(PlanOperationKind::Remux.as_str())
@@ -322,6 +332,17 @@ enum RemuxGroupShape {
 struct RemuxResolution {
     payload: RemuxOperationPayload,
     track_selection_changed: bool,
+    best_used_untagged_language: bool,
+}
+
+struct RemuxDefaultsResolution {
+    actions: Vec<RemuxDefaultAction>,
+    used_untagged_language: bool,
+}
+
+struct RemuxBestDefaultResolution {
+    selected_snapshot_stream_id: Option<String>,
+    used_untagged_language: bool,
 }
 
 fn with_optional_diagnostic(
@@ -515,6 +536,7 @@ fn resolve_remux_operations(
         return Ok(RemuxResolution {
             payload,
             track_selection_changed: false,
+            best_used_untagged_language: false,
         });
     }
 
@@ -526,6 +548,7 @@ fn resolve_remux_operations(
         return Ok(RemuxResolution {
             payload,
             track_selection_changed: false,
+            best_used_untagged_language: false,
         });
     }
 
@@ -533,7 +556,8 @@ fn resolve_remux_operations(
     let mut changed = facts
         .iter()
         .any(|stream| !keep_ids.contains(&stream.snapshot_stream_id));
-    payload.defaults = resolve_default_actions(operations, &facts, &keep_ids, preferred_languages)?;
+    let defaults = resolve_default_actions(operations, &facts, &keep_ids, preferred_languages)?;
+    payload.defaults = defaults.actions;
     changed |= defaults_change(&payload.defaults, &facts, &keep_ids)?;
     let (track_order, head_snapshot_stream_id, order_changed) =
         resolve_track_order(operations, &facts, &keep_ids)?;
@@ -544,6 +568,7 @@ fn resolve_remux_operations(
     Ok(RemuxResolution {
         payload,
         track_selection_changed: changed,
+        best_used_untagged_language: defaults.used_untagged_language,
     })
 }
 
@@ -552,9 +577,11 @@ fn resolve_default_actions(
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
     preferred_languages: &[String],
-) -> Result<Vec<RemuxDefaultAction>, RemuxPlanningBlock> {
+) -> Result<RemuxDefaultsResolution, RemuxPlanningBlock> {
     let explicit_targets = explicit_default_targets(operations)?;
+    validate_best_default_strategy_conflicts(operations, &explicit_targets)?;
     let mut defaults = Vec::new();
+    let mut used_untagged_language = false;
     for operation in operations {
         let CompiledOperation::SetDefaults {
             target,
@@ -573,10 +600,14 @@ fn resolve_default_actions(
                 filter,
                 RemuxFilterOperation::Defaults(*target),
             )?),
-            (None, DefaultStrategy::Best) => resolve_best_default(
-                retained_streams(facts, keep_ids, Some(*target)),
-                preferred_languages,
-            )?,
+            (None, DefaultStrategy::Best) => {
+                let resolution = resolve_best_default(
+                    retained_streams(facts, keep_ids, Some(*target)),
+                    preferred_languages,
+                )?;
+                used_untagged_language |= resolution.used_untagged_language;
+                resolution.selected_snapshot_stream_id
+            }
             (None, _) => None,
         };
         if *strategy == DefaultStrategy::Best && selected_snapshot_stream_id.is_none() {
@@ -588,26 +619,39 @@ fn resolve_default_actions(
             selected_snapshot_stream_id,
         });
     }
-    Ok(defaults)
+    Ok(RemuxDefaultsResolution {
+        actions: defaults,
+        used_untagged_language,
+    })
 }
 
 fn resolve_best_default(
     streams: Vec<&SnapshotStreamFact>,
     preferred_languages: &[String],
-) -> Result<Option<String>, RemuxPlanningBlock> {
+) -> Result<RemuxBestDefaultResolution, RemuxPlanningBlock> {
     let Some(first) = streams.first() else {
-        return Ok(None);
+        return Ok(RemuxBestDefaultResolution {
+            selected_snapshot_stream_id: None,
+            used_untagged_language: false,
+        });
     };
     if preferred_languages.is_empty() {
-        return Ok(Some(first.snapshot_stream_id.clone()));
+        return Ok(RemuxBestDefaultResolution {
+            selected_snapshot_stream_id: Some(first.snapshot_stream_id.clone()),
+            used_untagged_language: false,
+        });
     }
 
     let mut selected = *first;
     let mut selected_rank = usize::MAX;
+    let mut used_untagged_language = false;
     for stream in streams {
         let language = match &stream.language {
             SnapshotFact::Value(language) => language.as_str(),
-            SnapshotFact::Missing => "und",
+            SnapshotFact::Missing => {
+                used_untagged_language = true;
+                "und"
+            }
             SnapshotFact::Malformed => {
                 return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
             }
@@ -621,7 +665,47 @@ fn resolve_best_default(
             selected_rank = rank;
         }
     }
-    Ok(Some(selected.snapshot_stream_id.clone()))
+    Ok(RemuxBestDefaultResolution {
+        selected_snapshot_stream_id: Some(selected.snapshot_stream_id.clone()),
+        used_untagged_language,
+    })
+}
+
+fn validate_best_default_strategy_conflicts(
+    operations: &[&CompiledOperation],
+    explicit_targets: &[TrackTarget],
+) -> Result<(), RemuxPlanningBlock> {
+    for operation in operations {
+        let CompiledOperation::SetDefaults {
+            target,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        } = operation
+        else {
+            continue;
+        };
+        if explicit_targets.contains(target) {
+            continue;
+        }
+        let mut strategy_count = 0;
+        for candidate in operations {
+            let CompiledOperation::SetDefaults {
+                target: candidate_target,
+                filter: None,
+                ..
+            } = candidate
+            else {
+                continue;
+            };
+            if candidate_target == target {
+                strategy_count += 1;
+            }
+        }
+        if strategy_count > 1 {
+            return Err(RemuxPlanningBlock::ConflictingBestDefaultStrategies { target: *target });
+        }
+    }
+    Ok(())
 }
 
 fn explicit_default_targets(
@@ -845,6 +929,15 @@ fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {
             RemuxGroupShape::UnsupportedShape(format!(
                 "multiple explicit defaults operations target {}; keep exactly one `defaults {} \
                  where` operation",
+                track_target_label(target),
+                track_target_label(target)
+            ))
+        }
+        RemuxPlanningBlock::ConflictingBestDefaultStrategies { target } => {
+            RemuxGroupShape::UnsupportedShape(format!(
+                "multiple defaults strategy operations target {} and include best; keep exactly \
+                 one `defaults {}` strategy or one `defaults {} where` operation",
+                track_target_label(target),
                 track_target_label(target),
                 track_target_label(target)
             ))
