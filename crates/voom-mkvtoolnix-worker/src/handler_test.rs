@@ -167,7 +167,10 @@ async fn handler_rejects_attachment_track_order_before_provider_run() {
     let err = handle_remux(&request, &fixture.config).await.unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("unsupported attachment remux"));
+    assert!(
+        err.to_string()
+            .contains("track_order cannot contain attachment")
+    );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 

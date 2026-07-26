@@ -244,7 +244,7 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
     {
         return Err(config_invalid(
             "selection",
-            "unsupported attachment remux selection".to_owned(),
+            "track_order cannot contain attachment".to_owned(),
         ));
     }
     reject_duplicate_refs("keep_streams", &request.selection.keep_streams)?;
