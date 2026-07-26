@@ -772,6 +772,13 @@ order is ascending provider stream index; planning, control-plane selection,
 worker argument construction, and output inspection do not derive order from
 snapshot-array or request-vector serialization order.
 
+Defaults actions reduce per target before dispatch. A single explicit resolved
+selection discards strategy actions for that target regardless of source
+position. Multiple explicit selections for one target block the file as an
+unsupported policy shape. The control plane repeats this reduction when
+validating the typed payload, which pins explicit-over-`best` precedence for
+language-ranked selection without trusting planner serialization.
+
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 
 Audio can be *added* as a new track derived from an existing one, not only

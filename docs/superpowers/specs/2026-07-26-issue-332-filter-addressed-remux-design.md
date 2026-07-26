@@ -74,9 +74,19 @@ For a filter-addressed default,
 selected ID as authoritative and does not consult the strategy.
 
 For strategy defaults, the selected ID is absent and existing behavior is
-unchanged. This also gives issue #336 an explicit precedence rule: if any
-default action for a target has a selected snapshot ID, strategy-based `best`
-selection for that target cannot override it.
+unchanged when no explicit action targets the same kind. Defaults actions reduce
+per target before payload construction and again at the execution trust
+boundary:
+
+- zero explicit actions preserve the existing strategy actions;
+- exactly one explicit action is the sole effective action for that target, so
+  every strategy action is discarded regardless of source position;
+- multiple explicit actions for one target block the file as an unsupported,
+  actionable policy shape rather than relying on worker set/clear collision
+  behavior.
+
+This mechanically gives issue #336 its precedence rule: strategy-based `best`
+selection cannot override an explicit filter-addressed selection.
 
 The head field is absent when no order filter exists. It may be present while
 `track_order` is empty, representing bare `order tracks where ...`.
@@ -146,6 +156,8 @@ Focused tests cover:
 - shuffled snapshot arrays and request vectors proving that provider stream
   index, not serialization order, defines source order;
 - exact default set/clear vectors;
+- explicit-plus-strategy defaults in both source orders, and rejection of
+  multiple explicit defaults for one target;
 - payload parsing of old forms and rejection of malformed resolved IDs;
 - control-plane rejection of IDs missing from or inconsistent with the pinned
   snapshot;

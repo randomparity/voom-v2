@@ -60,7 +60,11 @@ Add behavior tests for:
 3. head-plus-group order changes and `NoOp`;
 4. stable provider-stream order tie handling;
 5. attachments excluded from head candidates;
-6. shuffled stream-summary arrays produce the same desired order and payload.
+6. shuffled stream-summary arrays produce the same desired order and payload;
+7. an explicit default is the sole effective action for its target before or
+   after a strategy action;
+8. multiple explicit defaults for one target block with an actionable
+   unsupported-policy-shape message.
 
 Focused guardrail:
 
@@ -79,7 +83,9 @@ Add failing `voom-control-plane` tests for:
    actionable configuration errors;
 5. strategy defaults remain unchanged;
 6. retained stream references are sorted by ascending provider stream index
-   before execution selection is constructed.
+   before execution selection is constructed;
+7. execution independently enforces explicit-over-strategy precedence and
+   rejects multiple explicit actions for one target.
 
 Implement pinned-snapshot ID validation without filter reevaluation.
 

@@ -77,8 +77,12 @@ diagnostics.
 Planning carries the resolved snapshot stream ID in the typed remux payload.
 The control plane validates that ID against the pinned snapshot and populates
 `default_streams` or `head_streams`; it does not reevaluate the filter. Explicit
-filter-addressed defaults are authoritative over strategy selection for the same
-target group.
+filter-addressed defaults are authoritative over strategy selection for the
+same target group regardless of source position. One explicit action discards
+all strategy actions for that target. Multiple explicit actions for one target
+are an unsupported policy shape and block the file with an actionable message.
+The planner performs this reduction before payload construction, and the
+control plane repeats it at the execution trust boundary.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
