@@ -357,8 +357,8 @@ fn assert_probed_result_snapshot(
 /// draft. This proves the probed result snapshot round-trips: the projection
 /// reads `payload["streams"]`, which only exists because the post-commit probe
 /// recorded a real observation. A synthesized stub (no `streams`) would project
-/// to `video_stream_count: 0` and block before reaching the raw container-alias
-/// behavior asserted below.
+/// to `video_stream_count: 0` and block instead of proving that the produced
+/// artifact replans as compliant from canonical facts.
 async fn assert_replans_from_authoritative_snapshot(
     cp: &ControlPlane,
     policy_version_id: PolicyVersionId,

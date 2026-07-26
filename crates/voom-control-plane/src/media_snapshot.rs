@@ -5,9 +5,9 @@ use voom_store::repo::identity::MediaSnapshot;
 /// Convert a durable [`MediaSnapshot`] row into the planning-layer
 /// [`MediaSnapshotInput`] shared by the audio and remux runtime selection paths.
 ///
-/// Derives `video_stream_count` from the payload's `streams`, copies the
-/// container and video codec, and leaves the remaining optional fact fields at
-/// their defaults (selection only consults stream/video facts).
+/// Derives stream facts, canonicalizes supported container names, projects the
+/// video codec and dimensions, and leaves unsupported optional facts at their
+/// defaults.
 pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSnapshotInput {
     let payload = &snapshot.payload;
     let video_stream = payload
