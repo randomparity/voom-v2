@@ -46,6 +46,7 @@ Checked migration inventory:
 | Current compiler test source | `src/compile/compiled_test.rs`, `pipeline_test.rs`, `validate_test.rs` | Rewrite positive and unrelated-negative source; leave only cases explicitly reassigned to Step 2 rejection |
 | `voom-plan` test source | `crates/voom-plan/src/fixtures_test.rs` | Rewrite |
 | CLI test source | `crates/voom-cli/tests/multi_phase_preview_envelope.rs` | Rewrite |
+| CLI generated snapshot | `crates/voom-cli/tests/snapshots/multi_phase_preview_envelope__compliance_report_previews_combined_multi_phase_policy.snap` | Review and accept changed source/plan/report hashes plus their derived IDs; all descriptive facts remain unchanged |
 | Control-plane integration source | `audio_extract_flow.rs`, `audio_transcode_flow.rs`, `remux_flow.rs`, `phase_barrier_flow.rs`, `phase_barrier_combined_flow.rs` | Rewrite policy text and matching live test comments |
 | Operator policy source | `tests/fixtures/policies/language-cleanup.voom`, `reference-user.voom` | Rewrite |
 | Operator policy tests | `tests/sample_policies_plan.rs` | Run against rewritten fixture files |
@@ -62,6 +63,31 @@ Historical/current golden pairs:
 | `fixtures/compiled/historical-track-filter-source/audio-transcode-extract.json` | `fixtures/compiled/audio-transcode-extract.json` |
 | `fixtures/compiled/historical-track-filter-source/filter-addressed-tracks.json` | `fixtures/compiled/filter-addressed-tracks.json` |
 
+Before changing parser/lowering code, also add this exact historical source at
+`crates/voom-policy/fixtures/historical/escaped-title-filters.voom` and capture
+its current compiled JSON at
+`crates/voom-policy/fixtures/compiled/historical-track-filter-source/escaped-title-filters.json`:
+
+```text
+policy "escaped-title-filters" {
+  phase escaped_quote {
+    keep subtitle where title contains "Director \"Cut\""
+  }
+  phase escaped_backslash {
+    keep subtitle where title contains "Path\\Name"
+  }
+  phase interior_quotes {
+    keep subtitle where title contains "\"Quoted\" middle"
+  }
+  phase other_pair {
+    keep subtitle where title contains "Other\qPair"
+  }
+}
+```
+
+Step 2 recompiles these identical bytes and requires complete JSON equality,
+including the unchanged `source_hash`, for all four historical values.
+
 Tests:
 
 - rewritten source fixtures have the hash of their canonical source;
@@ -74,10 +100,28 @@ Tests:
   permissive compiler; and
 - the published corpus guard still accepts every canonical corpus file.
 
-Before committing, run the exact noncanonical-source `rg --pcre2` inventory from
-the design review and reconcile every remaining match to one of: Step 2
-implementation, Step 2 rejection test, parser-only source, historical record,
-or grammar placeholder. An unclassified match blocks the commit.
+Before committing, run this exact inventory:
+
+```text
+rg -n --pcre2 \
+  '\blang\b|language\s*==\s*[a-z]|language\s+in\s+\[(?!\s*")|codec\s+in\s+\[(?!\s*")' \
+  crates docs/runbooks -g '*.rs' -g '*.voom' -g '*.md'
+```
+
+Every result must appear in the checked table above or be one of these explicit
+Step 2/unchanged classes:
+
+- Step 2 implementation:
+  `compile/validate/conditions.rs`, `compile/validate/operations.rs`,
+  `compile/lower/conditions.rs`;
+- Step 2 rejection/conformance tests:
+  `compile/pipeline_test.rs`, `compile/validate_test.rs`,
+  `compile/compiled_test.rs`, `published_grammar_corpus.rs`;
+- parser-only: `syntax/parser_test.rs`;
+- grammar placeholder:
+  `published-grammar-coverage.md`.
+
+An unclassified result blocks the commit.
 
 Implementation:
 
@@ -105,6 +149,7 @@ cargo test -p voom-policy policy_fixtures
 cargo test -p voom-policy
 cargo test -p voom-plan fixtures
 cargo test -p voom-cli --test multi_phase_preview_envelope
+cargo insta review
 cargo test -p voom-control-plane --test published_grammar_corpus
 cargo test -p voom-control-plane --test remux_flow
 cargo test -p voom-control-plane --test audio_transcode_flow
@@ -132,7 +177,9 @@ Files:
 - `crates/voom-policy/src/compile/lower/conditions.rs`
 - `crates/voom-policy/src/compile/lower/operations.rs`
 - `crates/voom-policy/src/compile/compiled_test.rs`
-- the dedicated historical compiled track-filter fixture.
+- `crates/voom-control-plane/tests/published_grammar_corpus.rs`;
+- `crates/voom-policy/fixtures/historical/escaped-title-filters.voom`; and
+- `crates/voom-policy/fixtures/compiled/historical-track-filter-source/escaped-title-filters.json`.
 
 Red tests:
 
@@ -146,11 +193,12 @@ Red tests:
   unpublished comparators, malformed lists, missing Boolean operands,
   unbalanced/empty groups, numeric overflow, non-ASCII digits, and trailing
   input;
-- both equality and list token readers accept lowercase ASCII letters, ASCII
-  digits, `_`, and `-`;
-- both readers reject empty tokens, uppercase ASCII, non-ASCII, `.`, `/`, `+`,
-  `:`, whitespace, commas/delimiters, quotes, backslashes, and escapes;
-- codec-filter cases exercise the complete token matrix independently of
+- a property-style direct parser test iterates every ASCII byte for both
+  `language == "<token>"` and `codec in ["<token>"]`: bytes in `a-z`, `0-9`,
+  `_`, and `-` are accepted inside a non-empty token, and every other ASCII byte
+  is rejected;
+- empty tokens and representative non-ASCII scalars are rejected separately;
+- codec-list cases prove the byte-domain result independently of semantic
   language-code validation;
 - title strings retain the exact historical `strip_quotes` result, including
   escaped quote, escaped backslash, terminal escaped quote, and other
@@ -164,17 +212,13 @@ Red tests:
   the sibling or panicking;
 - three-or-more top-level `and` and `or` children retain n-ary compiled arrays
   in source order, with mixed precedence and grouping unchanged;
-- a direct `compile_ast` test bypasses validation with an invalid optional
-  filter AST and proves compile-stage `unknown_phase_statement_or_operation`,
-  the exact filter-lowering message, statement span/location, one diagnostic,
-  and no operation result;
-- a separate direct `compile_ast` test does the same for required
-  `synthesize audio from`;
-- an unterminated string asserts outer `POLICY_PARSE_ERROR`, one parse-stage
-  `unexpected_token`, exact message, and source span/location;
-- a complete malformed clause asserts outer `POLICY_VALIDATION_ERROR`, one
-  validation-stage `unknown_phase_statement_or_operation`, message
-  `unknown track filter predicate`, and statement span/location; and
+- a direct `compile_ast` test bypasses validation with the optional-filter
+  fixture below and expects exactly the listed compile diagnostic and no
+  operation result;
+- a separate direct `compile_ast` test uses the required-filter fixture below
+  with its listed compile diagnostic and no operation result;
+- the unterminated and complete-malformed public fixtures below assert their
+  complete listed diagnostic objects; and
 - historical compiled `title_matches` JSON still deserializes.
 
 Expected failure before implementation:
@@ -202,6 +246,62 @@ Implementation:
 - recursively validate parsed language values with the existing diagnostic;
 - omit unpublished `lang` and `title matches` source branches; and
 - leave the compiled enum and serde behavior unchanged.
+
+Exact diagnostic fixtures and oracles:
+
+```text
+optional lowering:
+policy "p" {
+  phase a {
+    keep audio where lang in ["eng"]
+  }
+}
+```
+
+Direct `compile_ast`: one diagnostic with code
+`unknown_phase_statement_or_operation`, severity `error`, stage `compile`,
+message `validated track filter could not be lowered`, span `29..61`, location
+line 3 column 5, `suggestion: null`, and empty `related`.
+
+```text
+required lowering:
+policy "p" {
+  phase a {
+    synthesize audio from lang in ["eng"] { codec aac channels 2 }
+  }
+}
+```
+
+Direct `compile_ast`: the same code, severity, stage, message, suggestion, and
+related values; span `29..91`, location line 3 column 5.
+
+```text
+unterminated:
+policy "p" {
+  phase a {
+    keep subtitle where title contains "broken
+  }
+}
+```
+
+Public `compile_policy`: outer code `POLICY_PARSE_ERROR`; one diagnostic with
+code `unexpected_token`, severity `error`, stage `parse`, message
+`unterminated string`, span `64..65`, location line 3 column 40,
+`suggestion: null`, and empty `related`.
+
+```text
+complete malformed:
+policy "p" {
+  phase a {
+    keep audio where language in ["eng",]
+  }
+}
+```
+
+Public `compile_policy`: outer code `POLICY_VALIDATION_ERROR`; one diagnostic
+with code `unknown_phase_statement_or_operation`, severity `error`, stage
+`validate`, message `unknown track filter predicate`, span `29..66`, location
+line 3 column 5, `suggestion: null`, and empty `related`.
 
 Verification:
 
