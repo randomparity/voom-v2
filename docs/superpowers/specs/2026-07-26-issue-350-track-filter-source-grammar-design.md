@@ -58,10 +58,12 @@ restriction to `und` or a three-letter lowercase ASCII code. Codec tokens
 remain domain values interpreted by planning; #350 requires their quotes and
 stable-token shape but does not add a codec allowlist.
 
-`title contains` requires one complete, non-empty quoted string. Its scanner
-decodes `\"` to `"` and `\\` to `\`; every other escape, a trailing backslash,
-or an unclosed string is invalid. The decoded string is the value persisted in
-`TrackFilter::TitleContains`.
+`title contains` requires one complete, non-empty quoted string. A backslash
+escapes the next character only for locating the closing quote. The compiled
+value remains the exact source bytes between the outer quotes, including each
+backslash escape pair. This preserves the current meaning of already accepted
+source such as `title contains "Director \"Cut\""`. A trailing backslash or
+unclosed string is invalid.
 
 The following are not source grammar:
 
@@ -87,8 +89,14 @@ with one recursive source parser returning `Option<TrackFilter>`. Validation
 uses success as its grammar decision and recursively applies the existing
 language-code check to parsed `LanguageIn` values. Lowering calls the same
 parser after validation. This makes “accepted implies lowerable” structural,
-rather than an assumption between two similar parsers. The parser must consume
-the complete supplied filter text. Each leaf check is grammar-specific:
+rather than an assumption between two similar parsers.
+
+The parser receives a remaining-depth budget of 64, matching the general policy
+parser. Descending through `not`, one balanced outer group, or a Boolean child
+consumes one level. Exceeding the budget is ordinary validation failure, never a
+panic. Outer groups are stripped one at a time so they cannot bypass the
+budget. The parser must consume the complete supplied filter text. Each leaf
+check is grammar-specific:
 
 - language equality requires the exact `language ==` prefix and one quoted
   token;
@@ -98,17 +106,25 @@ the complete supplied filter text. Each leaf check is grammar-specific:
 - channels accepts exactly three lexical units, one of the six published
   comparators, and an ASCII `u64`;
 - fieldless predicates accept exactly one lexical unit; and
-- `title contains` requires one decoded quoted string with no trailing input.
+- `title contains` requires one complete quoted string with no trailing input.
 
 The quoted-token list reader is quote-aware and delimiter-aware; it never uses
-a generic comma split. The quoted-string reader and decoder is shared by
-validation and lowering, so an accepted escape cannot acquire different
-compiled semantics.
+a generic comma split. The quoted-string scanner is shared by validation and
+lowering, so an accepted escape cannot acquire different compiled semantics.
 
 Boolean splitting continues to occur only outside quoted strings and nested
 parentheses. A split is valid only when every child is non-empty and valid.
 Stripping an outer group is allowed only when that group is balanced and owns
-the complete expression.
+the complete expression. A top-level run of the same operator lowers to the
+existing n-ary shape in source order:
+
+```text
+a and b and c -> And { filters: [a, b, c] }
+a or b or c   -> Or { filters: [a, b, c] }
+```
+
+Mixed operators keep the existing `and`-before-`or` nesting, and parentheses
+change grouping without adding a compiled wrapper.
 
 Every filter-consuming operation routes its filter through the shared parser;
 #350 adds table-driven coverage proving none bypass it. Validation errors
@@ -168,15 +184,19 @@ Invalid filter source fails during policy validation before `compile_ast`.
 There is no partial compiled policy and no persistence. Every consumer emits an
 error diagnostic for the same invalid filter.
 
-Malformed lists and Boolean expressions fail closed. The recognizer never
+Malformed lists and Boolean expressions fail closed. The source parser never
 recovers by discarding empty elements, choosing the first valid prefix, or
 ignoring trailing input. Numeric overflow and non-ASCII digits fail validation.
+More than 64 recursive filter levels fails with the same validation diagnostic
+instead of exhausting the process stack.
 
 ## Security and observability
 
 Policy source is untrusted text. Complete consumption prevents an accepted
 prefix from hiding a trailing operation-like token or parser-only spelling.
-Quoted-string scanning honors escapes and never executes content.
+Quoted-string scanning honors escape boundaries, preserves literal source
+content, and never executes content. The 64-level filter budget bounds recursive
+work independently of the general parser's AST depth.
 
 No logging or telemetry change is required. Existing compile diagnostics expose
 the source span and stable diagnostic code.
@@ -185,13 +205,18 @@ the source span and stable diagnostic code.
 
 Behavior tests cover:
 
-- every published leaf and its exact decoded compiled value;
+- every published leaf and its exact compiled value;
 - all six channel comparators and `u64` boundaries;
 - nested grouping and `not`/`and`/`or` precedence;
+- exact n-ary compiled shapes for three-or-more `and` and `or` operands;
 - all seven filter consumers;
 - aliases, bare equality/list values, `title matches`, unpublished comparators,
   malformed/empty lists, missing operands, unbalanced/empty groups, overflow,
   non-ASCII digits, and trailing input;
+- 64 accepted recursive levels plus rejection beyond the bound for repeated
+  `not` and nested groups;
+- literal compiled values for escaped quote, escaped backslash, and other
+  backslash pairs in title strings;
 - lowering of every accepted leaf to the existing compiled representation;
 - unchanged readable historical `title_matches` compiled JSON;
 - historical/current compiled fixture equality after normalizing only
