@@ -105,41 +105,37 @@ fn reject_empty_audio(
 }
 
 fn default_refs(
-    defaults: &[&voom_plan::remux::RemuxDefaultAction],
+    defaults: &[ValidatedDefaultAction<'_>],
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
 ) -> Result<(Vec<RemuxStreamRef>, Vec<RemuxStreamRef>), VoomError> {
     let mut default_streams = Vec::new();
     let mut clear_default_streams = Vec::new();
     for action in defaults {
-        if let Some(selected_id) = &action.selected_snapshot_stream_id {
-            let selected = resolved_kept_stream(selected_id, Some(action.target), facts, keep_ids)?;
-            default_streams.push(stream_ref(selected));
-            clear_default_streams.extend(
-                facts
-                    .iter()
-                    .filter(|stream| {
-                        stream.kind == action.target
-                            && stream.snapshot_stream_id != *selected_id
-                            && keep_ids.contains(&stream.snapshot_stream_id)
-                    })
-                    .map(stream_ref),
-            );
-            continue;
-        }
-        if action.strategy == DefaultStrategy::Best {
-            return Err(VoomError::Config(
-                "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
-            ));
-        }
-        let kept_target = facts
-            .iter()
-            .filter(|stream| {
-                stream.kind == action.target && keep_ids.contains(&stream.snapshot_stream_id)
-            })
-            .collect::<Vec<_>>();
-        match action.strategy {
-            DefaultStrategy::First => {
+        match *action {
+            ValidatedDefaultAction::ResolvedExplicit {
+                target,
+                selected_id,
+            }
+            | ValidatedDefaultAction::ResolvedBest {
+                target,
+                selected_id,
+            } => {
+                let selected = resolved_kept_stream(selected_id, Some(target), facts, keep_ids)?;
+                default_streams.push(stream_ref(selected));
+                clear_default_streams.extend(
+                    facts
+                        .iter()
+                        .filter(|stream| {
+                            stream.kind == target
+                                && stream.snapshot_stream_id != selected_id
+                                && keep_ids.contains(&stream.snapshot_stream_id)
+                        })
+                        .map(stream_ref),
+                );
+            }
+            ValidatedDefaultAction::First { target } => {
+                let kept_target = kept_target_streams(facts, keep_ids, target);
                 let Some(first) = kept_target
                     .iter()
                     .min_by_key(|stream| stream.provider_stream_index)
@@ -154,10 +150,12 @@ fn default_refs(
                         .map(|stream| stream_ref(stream)),
                 );
             }
-            DefaultStrategy::None => {
+            ValidatedDefaultAction::None { target } => {
+                let kept_target = kept_target_streams(facts, keep_ids, target);
                 clear_default_streams.extend(kept_target.into_iter().map(stream_ref));
             }
-            DefaultStrategy::Preserve => {
+            ValidatedDefaultAction::Preserve { target } => {
+                let kept_target = kept_target_streams(facts, keep_ids, target);
                 default_streams.extend(
                     kept_target
                         .into_iter()
@@ -165,7 +163,6 @@ fn default_refs(
                         .map(stream_ref),
                 );
             }
-            DefaultStrategy::Best => {}
         }
     }
     for target in [
@@ -173,7 +170,7 @@ fn default_refs(
         TrackTarget::Audio,
         TrackTarget::Subtitle,
     ] {
-        if defaults.iter().any(|action| action.target == target) {
+        if defaults.iter().any(|action| action.target() == target) {
             continue;
         }
         for stream in facts.iter().filter(|stream| {
@@ -190,69 +187,155 @@ fn default_refs(
     ))
 }
 
+fn kept_target_streams<'a>(
+    facts: &'a [SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+    target: TrackTarget,
+) -> Vec<&'a SnapshotStreamFact> {
+    facts
+        .iter()
+        .filter(|stream| stream.kind == target && keep_ids.contains(&stream.snapshot_stream_id))
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum ValidatedDefaultAction<'a> {
+    ResolvedExplicit {
+        target: TrackTarget,
+        selected_id: &'a str,
+    },
+    ResolvedBest {
+        target: TrackTarget,
+        selected_id: &'a str,
+    },
+    First {
+        target: TrackTarget,
+    },
+    None {
+        target: TrackTarget,
+    },
+    Preserve {
+        target: TrackTarget,
+    },
+}
+
+impl ValidatedDefaultAction<'_> {
+    fn target(self) -> TrackTarget {
+        match self {
+            Self::ResolvedExplicit { target, .. }
+            | Self::ResolvedBest { target, .. }
+            | Self::First { target }
+            | Self::None { target }
+            | Self::Preserve { target } => target,
+        }
+    }
+
+    fn is_resolved_explicit(self) -> bool {
+        match self {
+            Self::ResolvedExplicit { .. } => true,
+            Self::ResolvedBest { .. }
+            | Self::First { .. }
+            | Self::None { .. }
+            | Self::Preserve { .. } => false,
+        }
+    }
+
+    fn is_best(self) -> bool {
+        match self {
+            Self::ResolvedBest { .. } => true,
+            Self::ResolvedExplicit { .. }
+            | Self::First { .. }
+            | Self::None { .. }
+            | Self::Preserve { .. } => false,
+        }
+    }
+}
+
 fn effective_default_actions(
     defaults: &[voom_plan::remux::RemuxDefaultAction],
-) -> Result<Vec<&voom_plan::remux::RemuxDefaultAction>, VoomError> {
+) -> Result<Vec<ValidatedDefaultAction<'_>>, VoomError> {
+    let validated = defaults
+        .iter()
+        .map(validate_default_action)
+        .collect::<Result<Vec<_>, _>>()?;
     let mut explicit_targets = Vec::new();
-    for action in defaults {
-        validate_selected_default_shape(action)?;
-        if !is_resolved_explicit_default(action) {
+    for action in &validated {
+        if !action.is_resolved_explicit() {
             continue;
         }
-        if explicit_targets.contains(&action.target) {
+        let target = action.target();
+        if explicit_targets.contains(&target) {
             return Err(VoomError::Config(format!(
                 "multiple explicit defaults actions target {}",
-                track_target_name(action.target)
+                track_target_name(target)
             )));
         }
-        explicit_targets.push(action.target);
+        explicit_targets.push(target);
     }
-    let effective = defaults
-        .iter()
+    let effective = validated
+        .into_iter()
         .filter(|action| {
-            is_resolved_explicit_default(action) || !explicit_targets.contains(&action.target)
+            action.is_resolved_explicit() || !explicit_targets.contains(&action.target())
         })
         .collect::<Vec<_>>();
     validate_best_default_strategy_conflicts(&effective)?;
     Ok(effective)
 }
 
-fn validate_selected_default_shape(
+fn validate_default_action(
     action: &voom_plan::remux::RemuxDefaultAction,
-) -> Result<(), VoomError> {
-    if action.selected_snapshot_stream_id.is_none() {
-        return Ok(());
-    }
-    match action.strategy {
-        DefaultStrategy::Preserve | DefaultStrategy::Best => Ok(()),
-        DefaultStrategy::First => Err(VoomError::Config(
+) -> Result<ValidatedDefaultAction<'_>, VoomError> {
+    match (
+        action.strategy,
+        action.selected_snapshot_stream_id.as_deref(),
+    ) {
+        (DefaultStrategy::Preserve, Some(selected_id)) => {
+            Ok(ValidatedDefaultAction::ResolvedExplicit {
+                target: action.target,
+                selected_id,
+            })
+        }
+        (DefaultStrategy::Best, Some(selected_id)) => Ok(ValidatedDefaultAction::ResolvedBest {
+            target: action.target,
+            selected_id,
+        }),
+        (DefaultStrategy::First, None) => Ok(ValidatedDefaultAction::First {
+            target: action.target,
+        }),
+        (DefaultStrategy::None, None) => Ok(ValidatedDefaultAction::None {
+            target: action.target,
+        }),
+        (DefaultStrategy::Preserve, None) => Ok(ValidatedDefaultAction::Preserve {
+            target: action.target,
+        }),
+        (DefaultStrategy::Best, None) => Err(VoomError::Config(
+            "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
+        )),
+        (DefaultStrategy::First, Some(_)) => Err(VoomError::Config(
             "selected_snapshot_stream_id is invalid with default strategy first".to_owned(),
         )),
-        DefaultStrategy::None => Err(VoomError::Config(
+        (DefaultStrategy::None, Some(_)) => Err(VoomError::Config(
             "selected_snapshot_stream_id is invalid with default strategy none".to_owned(),
         )),
     }
 }
 
-fn is_resolved_explicit_default(action: &voom_plan::remux::RemuxDefaultAction) -> bool {
-    action.selected_snapshot_stream_id.is_some() && action.strategy == DefaultStrategy::Preserve
-}
-
 fn validate_best_default_strategy_conflicts(
-    defaults: &[&voom_plan::remux::RemuxDefaultAction],
+    defaults: &[ValidatedDefaultAction<'_>],
 ) -> Result<(), VoomError> {
     for action in defaults {
-        if action.strategy != DefaultStrategy::Best {
+        if !action.is_best() {
             continue;
         }
+        let target = action.target();
         let same_target_count = defaults
             .iter()
-            .filter(|candidate| candidate.target == action.target)
+            .filter(|candidate| candidate.target() == target)
             .count();
         if same_target_count > 1 {
             return Err(VoomError::Config(format!(
                 "multiple defaults strategy actions target {} and include best",
-                track_target_name(action.target)
+                track_target_name(target)
             )));
         }
     }

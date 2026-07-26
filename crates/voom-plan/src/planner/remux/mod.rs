@@ -151,9 +151,9 @@ pub(super) fn plan_group(
     preferred_languages: &[String],
 ) -> OperationPlan {
     let resolution = resolve_remux_operations(snapshot, operations, preferred_languages);
-    let best_used_untagged_language = resolution
+    let best_evaluated_untagged_language = resolution
         .as_ref()
-        .is_ok_and(|resolution| resolution.best_used_untagged_language);
+        .is_ok_and(|resolution| resolution.best_evaluated_untagged_language);
     let payload = match &resolution {
         Ok(resolution) => resolution.payload.clone().into_value(),
         Err(_) => remux_payload(snapshot, operations),
@@ -239,7 +239,7 @@ pub(super) fn plan_group(
         phase_name,
         snapshot,
         operations,
-        best_used_untagged_language,
+        best_evaluated_untagged_language,
     )
 }
 
@@ -250,10 +250,10 @@ fn with_untagged_language_warning(
     phase_name: &str,
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
-    best_used_untagged_language: bool,
+    best_evaluated_untagged_language: bool,
 ) -> OperationPlan {
     if plan.status == NodeStatus::Blocked
-        || !(best_used_untagged_language
+        || !(best_evaluated_untagged_language
             || remux_has_untagged_language_filter(snapshot, operations))
     {
         return plan;
@@ -332,17 +332,17 @@ enum RemuxGroupShape {
 struct RemuxResolution {
     payload: RemuxOperationPayload,
     track_selection_changed: bool,
-    best_used_untagged_language: bool,
+    best_evaluated_untagged_language: bool,
 }
 
 struct RemuxDefaultsResolution {
     actions: Vec<RemuxDefaultAction>,
-    used_untagged_language: bool,
+    evaluated_untagged_language: bool,
 }
 
-struct RemuxBestDefaultResolution {
-    selected_snapshot_stream_id: Option<String>,
-    used_untagged_language: bool,
+struct ResolvedBestDefault {
+    selected_snapshot_stream_id: String,
+    evaluated_untagged_language: bool,
 }
 
 fn with_optional_diagnostic(
@@ -536,7 +536,7 @@ fn resolve_remux_operations(
         return Ok(RemuxResolution {
             payload,
             track_selection_changed: false,
-            best_used_untagged_language: false,
+            best_evaluated_untagged_language: false,
         });
     }
 
@@ -548,7 +548,7 @@ fn resolve_remux_operations(
         return Ok(RemuxResolution {
             payload,
             track_selection_changed: false,
-            best_used_untagged_language: false,
+            best_evaluated_untagged_language: false,
         });
     }
 
@@ -568,7 +568,7 @@ fn resolve_remux_operations(
     Ok(RemuxResolution {
         payload,
         track_selection_changed: changed,
-        best_used_untagged_language: defaults.used_untagged_language,
+        best_evaluated_untagged_language: defaults.evaluated_untagged_language,
     })
 }
 
@@ -581,7 +581,7 @@ fn resolve_default_actions(
     let explicit_targets = explicit_default_targets(operations)?;
     validate_best_default_strategy_conflicts(operations, &explicit_targets)?;
     let mut defaults = Vec::new();
-    let mut used_untagged_language = false;
+    let mut evaluated_untagged_language = false;
     for operation in operations {
         let CompiledOperation::SetDefaults {
             target,
@@ -601,18 +601,18 @@ fn resolve_default_actions(
                 RemuxFilterOperation::Defaults(*target),
             )?),
             (None, DefaultStrategy::Best) => {
-                let resolution = resolve_best_default(
+                let Some(resolved) = resolve_best_default(
                     retained_streams(facts, keep_ids, Some(*target)),
                     preferred_languages,
-                )?;
-                used_untagged_language |= resolution.used_untagged_language;
-                resolution.selected_snapshot_stream_id
+                )?
+                else {
+                    continue;
+                };
+                evaluated_untagged_language |= resolved.evaluated_untagged_language;
+                Some(resolved.selected_snapshot_stream_id)
             }
             (None, _) => None,
         };
-        if *strategy == DefaultStrategy::Best && selected_snapshot_stream_id.is_none() {
-            continue;
-        }
         defaults.push(RemuxDefaultAction {
             target: *target,
             strategy: *strategy,
@@ -621,35 +621,32 @@ fn resolve_default_actions(
     }
     Ok(RemuxDefaultsResolution {
         actions: defaults,
-        used_untagged_language,
+        evaluated_untagged_language,
     })
 }
 
 fn resolve_best_default(
     streams: Vec<&SnapshotStreamFact>,
     preferred_languages: &[String],
-) -> Result<RemuxBestDefaultResolution, RemuxPlanningBlock> {
+) -> Result<Option<ResolvedBestDefault>, RemuxPlanningBlock> {
     let Some(first) = streams.first() else {
-        return Ok(RemuxBestDefaultResolution {
-            selected_snapshot_stream_id: None,
-            used_untagged_language: false,
-        });
+        return Ok(None);
     };
     if preferred_languages.is_empty() {
-        return Ok(RemuxBestDefaultResolution {
-            selected_snapshot_stream_id: Some(first.snapshot_stream_id.clone()),
-            used_untagged_language: false,
-        });
+        return Ok(Some(ResolvedBestDefault {
+            selected_snapshot_stream_id: first.snapshot_stream_id.clone(),
+            evaluated_untagged_language: false,
+        }));
     }
 
     let mut selected = *first;
     let mut selected_rank = usize::MAX;
-    let mut used_untagged_language = false;
+    let mut evaluated_untagged_language = false;
     for stream in streams {
         let language = match &stream.language {
             SnapshotFact::Value(language) => language.as_str(),
             SnapshotFact::Missing => {
-                used_untagged_language = true;
+                evaluated_untagged_language = true;
                 "und"
             }
             SnapshotFact::Malformed => {
@@ -665,10 +662,10 @@ fn resolve_best_default(
             selected_rank = rank;
         }
     }
-    Ok(RemuxBestDefaultResolution {
-        selected_snapshot_stream_id: Some(selected.snapshot_stream_id.clone()),
-        used_untagged_language,
-    })
+    Ok(Some(ResolvedBestDefault {
+        selected_snapshot_stream_id: selected.snapshot_stream_id.clone(),
+        evaluated_untagged_language,
+    }))
 }
 
 fn validate_best_default_strategy_conflicts(
@@ -821,13 +818,15 @@ fn defaults_change(
 ) -> Result<bool, RemuxPlanningBlock> {
     let mut changed = false;
     for action in defaults {
-        let streams = retained_streams(facts, keep_ids, Some(action.target));
         if let Some(selected_id) = &action.selected_snapshot_stream_id {
-            for stream in streams {
+            for stream in facts.iter().filter(|stream| {
+                stream.kind == action.target && keep_ids.contains(&stream.snapshot_stream_id)
+            }) {
                 changed |= required_default(stream)? != (stream.snapshot_stream_id == *selected_id);
             }
             continue;
         }
+        let streams = retained_streams(facts, keep_ids, Some(action.target));
         match action.strategy {
             DefaultStrategy::First => {
                 let Some(first) = streams.first() else {
