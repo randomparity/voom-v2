@@ -130,7 +130,7 @@ pub(crate) fn strip_outer_group(text: &str) -> &str {
     }
 }
 
-fn quoted_text_end(text: &str) -> Option<usize> {
+pub(crate) fn quoted_text_end(text: &str) -> Option<usize> {
     let mut cursor = 1usize;
     let mut escaped = false;
     while cursor < text.len() {
