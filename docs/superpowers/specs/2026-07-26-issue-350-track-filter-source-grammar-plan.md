@@ -44,15 +44,19 @@ Red tests:
   unbalanced/empty groups, numeric overflow, non-ASCII digits, and trailing
   input;
 - quoted tokens reject whitespace, commas, quotes, backslashes, and escapes;
-- title strings retain the exact bytes between their outer quotes, including
-  escaped quote, escaped backslash, and other backslash pairs;
+- title strings retain the exact historical `strip_quotes` result, including
+  escaped quote, escaped backslash, terminal escaped quote, and other
+  backslash pairs under the identical source hash;
 - 64 recursive filter levels compile while deeper repeated `not` and grouped
   filters fail validation without panicking;
 - more than 64 flat `and` and `or` siblings compile because each child receives
   an independent copy of the path-local remaining-depth budget;
 - three-or-more top-level `and` and `or` children retain n-ary compiled arrays
   in source order, with mixed precedence and grouping unchanged;
-- every validator-accepted filter lowers to `Some(TrackFilter)`; and
+- a present optional or required filter that fails second-pass parsing returns
+  a compile diagnostic and can never lower to `None`;
+- unterminated strings retain their general-parser diagnostic while complete
+  malformed clauses use the track-filter validation diagnostic; and
 - historical compiled `title_matches` JSON still deserializes.
 
 Expected failure before implementation:
@@ -63,13 +67,17 @@ Expected failure before implementation:
 Implementation:
 
 - replace separate validation/lowering recognizers with one recursive parser
-  that returns the compiled `TrackFilter`;
-- add a quote-aware stable-token list reader and literal quoted-string scanner;
+  that returns `Result<TrackFilter, ParseError>`;
+- add shared optional/required clause extractors that preserve absence but
+  distinguish every present-clause failure;
+- add a quote-aware stable-token list reader and quoted-string scanner that
+  applies the unchanged historical `strip_quotes` value transformation;
 - enforce a 64-level remaining-depth budget across `not`, groups, and Boolean
   child descent without decrementing one shared budget across siblings;
 - preserve n-ary same-operator lowering and existing mixed precedence;
 - reuse the six-comparator and ASCII `u64` checks;
-- route operation validation and lowering through the one parser;
+- route operation validation and diagnostics-bearing lowering through the same
+  extractor and parser;
 - recursively validate parsed language values with the existing diagnostic;
 - omit unpublished `lang` and `title matches` source branches; and
 - leave the compiled enum and serde behavior unchanged.
