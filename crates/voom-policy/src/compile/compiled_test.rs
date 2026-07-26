@@ -116,6 +116,24 @@ fn compiled_policy_without_config_field_remains_readable() {
 }
 
 #[test]
+fn historical_compiled_title_matches_filter_remains_readable() {
+    let json = serde_json::json!({
+        "type": "title_matches",
+        "value": "^Director"
+    });
+
+    let filter: TrackFilter = serde_json::from_value(json.clone()).unwrap();
+
+    assert_eq!(
+        filter,
+        TrackFilter::TitleMatches {
+            value: "^Director".to_owned(),
+        }
+    );
+    assert_eq!(serde_json::to_value(filter).unwrap(), json);
+}
+
+#[test]
 fn compiled_config_rejects_invalid_typed_and_legacy_languages() {
     let cases = [
         serde_json::json!({"languages": ["EN"]}),

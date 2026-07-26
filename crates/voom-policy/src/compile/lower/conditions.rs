@@ -1,11 +1,6 @@
-use crate::text::{
-    comparison_rhs, is_single_value, list_values, split_bool_expression, strip_outer_group,
-    text_after_list, title_filter_value, words,
-};
+use crate::text::{comparison_rhs, split_bool_expression, strip_outer_group, words};
 
-use super::super::compiled::{
-    ComparisonOp, CompiledCondition, CompiledValue, TrackFilter, TrackTarget,
-};
+use super::super::compiled::{ComparisonOp, CompiledCondition, CompiledValue, TrackTarget};
 
 pub(super) fn condition_from_text(text: &str) -> CompiledCondition {
     let text = strip_outer_group(text.trim());
@@ -28,7 +23,7 @@ pub(super) fn condition_from_text(text: &str) -> CompiledCondition {
     if tokens.first() == Some(&"exists") {
         return CompiledCondition::Exists {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
-            filter: track_filter(text),
+            filter: None,
         };
     }
     if tokens.first() == Some(&"count") {
@@ -63,20 +58,6 @@ pub(super) fn condition_from_text(text: &str) -> CompiledCondition {
     CompiledCondition::Predicate {
         name: text.to_owned(),
     }
-}
-
-pub(super) fn track_filter(text: &str) -> Option<TrackFilter> {
-    let where_text = text
-        .split_once(" where ")
-        .map(|(_, filter)| filter.trim())?;
-    filter_from_text(where_text)
-}
-
-/// Parse a bare track-filter clause (already extracted from its keyword, e.g.
-/// the text after `synthesize audio from`). Unlike [`track_filter`], it does not
-/// split on ` where `.
-pub(super) fn track_filter_clause(text: &str) -> Option<TrackFilter> {
-    filter_from_text(text.trim())
 }
 
 pub(super) fn compiled_value(text: &str) -> CompiledValue {
@@ -126,81 +107,6 @@ fn split_bool_condition<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a st
         return None;
     }
     split_bool_expression(text, delimiter)
-}
-
-fn filter_from_text(text: &str) -> Option<TrackFilter> {
-    let text = strip_outer_group(text.trim());
-    if let Some(parts) = split_bool_filter(text, " or ") {
-        let filters = parts
-            .into_iter()
-            .map(filter_from_text)
-            .collect::<Option<Vec<_>>>()?;
-        return Some(TrackFilter::Or { filters });
-    }
-    if let Some(parts) = split_bool_filter(text, " and ") {
-        let filters = parts
-            .into_iter()
-            .map(filter_from_text)
-            .collect::<Option<Vec<_>>>()?;
-        return Some(TrackFilter::And { filters });
-    }
-    if let Some(inner) = text.trim().strip_prefix("not ") {
-        return filter_from_text(inner.trim()).map(|inner| TrackFilter::Not {
-            inner: Box::new(inner),
-        });
-    }
-    let tokens = words(text);
-    match tokens.as_slice() {
-        ["lang" | "language", "in", ..]
-            if !list_values(text).is_empty()
-                && text_after_list(text).is_some_and(str::is_empty) =>
-        {
-            Some(TrackFilter::LanguageIn {
-                values: list_values(text).into_iter().map(strip_quotes).collect(),
-            })
-        }
-        ["lang" | "language", "==", value] if !value.is_empty() => Some(TrackFilter::LanguageIn {
-            values: vec![strip_quotes(value)],
-        }),
-        ["codec", "in", ..]
-            if !list_values(text).is_empty()
-                && text_after_list(text).is_some_and(str::is_empty) =>
-        {
-            Some(TrackFilter::CodecIn {
-                values: list_values(text).into_iter().map(strip_quotes).collect(),
-            })
-        }
-        ["channels", op, value] => Some(TrackFilter::Channels {
-            op: comparison_op(Some(op))?,
-            value: value.parse::<u64>().ok()?,
-        }),
-        ["title", "contains", ..] => title_filter_value(text, "contains")
-            .filter(|value| is_single_value(value))
-            .map(|value| TrackFilter::TitleContains {
-                value: strip_quotes(value),
-            }),
-        ["title", "matches", ..] => title_filter_value(text, "matches")
-            .filter(|value| is_single_value(value))
-            .map(|value| TrackFilter::TitleMatches {
-                value: strip_quotes(value),
-            }),
-        [first, ..] => filter_predicate(Some(first)),
-        [] => None,
-    }
-}
-
-fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
-    split_bool_expression(text, delimiter)
-}
-
-fn filter_predicate(token: Option<&str>) -> Option<TrackFilter> {
-    match token {
-        Some("commentary") => Some(TrackFilter::Commentary),
-        Some("forced") => Some(TrackFilter::Forced),
-        Some("default") => Some(TrackFilter::Default),
-        Some("font") => Some(TrackFilter::Font),
-        _ => None,
-    }
 }
 
 fn comparison_op(token: Option<&str>) -> Option<ComparisonOp> {
