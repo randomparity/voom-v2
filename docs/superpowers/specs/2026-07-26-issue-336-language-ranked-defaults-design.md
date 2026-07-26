@@ -177,9 +177,11 @@ rewrite is required.
 
 - Planner tests cover both audio and subtitle `best`. The audio matrix covers
   language-list priority, same-language ties, unmatched and empty-list fallback,
-  zero candidates, shuffled snapshot arrays, and `NoOp` replanning; a focused
-  subtitle case proves the same target-independent resolver selects and pins the
-  configured-language winner.
+  shuffled snapshot arrays, and `NoOp` replanning. Focused subtitle cases prove
+  the same target-independent resolver selects and pins the configured-language
+  winner and that no retained subtitles omit the action without blocking.
+- A duplicate-preference case such as `["eng", "spa", "eng"]` proves the first
+  occurrence supplies a language's rank by asserting the selected snapshot ID.
 - Fact-boundary tests prove that non-empty preferences validate every retained
   candidate: a malformed non-winner blocks, and any missing language emits the
   `und` warning. With empty preferences, malformed or missing languages are not
