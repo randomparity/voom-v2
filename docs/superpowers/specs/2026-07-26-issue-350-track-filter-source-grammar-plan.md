@@ -17,7 +17,75 @@ Guardrails:
 - `prek run`
 - `just ci`
 
-## Step 1: Pin the exact source boundary
+## Step 1: Canonicalize active policy sources without narrowing behavior
+
+Files:
+
+- every active valid or invalid `.voom` fixture under
+  `crates/voom-policy/fixtures/`;
+- current policy strings in `voom-policy`, `voom-plan`, `voom-cli`, and
+  `voom-control-plane` tests;
+- current operator fixtures under
+  `crates/voom-control-plane/tests/fixtures/policies/`;
+- `crates/voom-policy/src/fixtures/policy_fixtures_test.rs`;
+- `crates/voom-control-plane/tests/published_grammar_corpus.rs`;
+- `docs/runbooks/operator-real-media-execution.md`;
+- active compiled goldens whose source hashes change;
+- retained pre-#350 compiled fixtures used as historical comparison evidence;
+  and
+- `crates/voom-policy/fixtures/diagnostics/production-normalize-reduced.json`
+  when canonical source movement changes only its span offsets.
+
+Tests:
+
+- rewritten source fixtures have the hash of their canonical source;
+- each retained historical compiled fixture and its canonical replacement are
+  completely equal after normalizing only `source_hash`;
+- `production-normalize-reduced.voom` continues to emit exactly its one intended
+  filtered-`exists` diagnostic with the same code, stage, message, and
+  suggestion; only source-derived span/location values may change;
+- all active valid fixtures and integration policies remain green under the old
+  permissive compiler; and
+- the published corpus guard still accepts every canonical corpus file.
+
+Implementation:
+
+- capture the pre-#350 compiled fixture JSON before changing source;
+- replace aliases with `language`;
+- quote every language and codec token value;
+- canonicalize active invalid fixtures as well as valid ones so grammar
+  enforcement adds no unrelated diagnostic;
+- preserve parser-only tests and historical docs that are not compiled current
+  source;
+- update active compiled-golden hashes and source-derived invalid-fixture
+  locations only; and
+- add normalized historical/current compatibility assertions.
+
+Expected state before the commit:
+
+- canonical rewrites compile with the current permissive compiler;
+- active golden hashes and later diagnostic locations fail until updated;
+- normalized historical/current values already match.
+
+Verification:
+
+```text
+cargo test -p voom-policy policy_fixtures
+cargo test -p voom-policy
+cargo test -p voom-plan fixtures
+cargo test -p voom-cli --test multi_phase_preview_envelope
+cargo test -p voom-control-plane --test published_grammar_corpus
+cargo test -p voom-control-plane --test remux_flow
+cargo test -p voom-control-plane --test audio_transcode_flow
+cargo test -p voom-control-plane --test audio_extract_flow
+prek run
+```
+
+Commit:
+
+`test(policy): use canonical track filter sources`
+
+## Step 2: Pin the exact source boundary
 
 Files:
 
@@ -28,8 +96,9 @@ Files:
 - `crates/voom-policy/src/compile/track_filter.rs`
 - `crates/voom-policy/src/compile/mod.rs`
 - `crates/voom-policy/src/compile/lower/conditions.rs`
+- `crates/voom-policy/src/compile/lower/operations.rs`
 - `crates/voom-policy/src/compile/compiled_test.rs`
-- a dedicated historical compiled track-filter fixture
+- the dedicated historical compiled track-filter fixture.
 
 Red tests:
 
@@ -51,10 +120,15 @@ Red tests:
   filters fail validation without panicking;
 - more than 64 flat `and` and `or` siblings compile because each child receives
   an independent copy of the path-local remaining-depth budget;
+- a Boolean split plus 63 nested `not` descents on one child succeeds, while the
+  same split plus 64 nested `not` descents fails validation without affecting
+  the sibling or panicking;
 - three-or-more top-level `and` and `or` children retain n-ary compiled arrays
   in source order, with mixed precedence and grouping unchanged;
-- a present optional or required filter that fails second-pass parsing returns
-  a compile diagnostic and can never lower to `None`;
+- a forced second-pass failure in an optional consumer returns a compile
+  diagnostic and cannot lower to `None`;
+- a separate forced second-pass failure in required `synthesize audio from`
+  returns a compile diagnostic and cannot lower to `None`;
 - unterminated strings retain their general-parser diagnostic while complete
   malformed clauses use the track-filter validation diagnostic; and
 - historical compiled `title_matches` JSON still deserializes.
@@ -78,6 +152,8 @@ Implementation:
 - reuse the six-comparator and ASCII `u64` checks;
 - route operation validation and diagnostics-bearing lowering through the same
   extractor and parser;
+- change `lower_operation` and `lower_synthesize` call chains to propagate
+  optional and required filter parse errors as `PolicyDiagnostic` values;
 - recursively validate parsed language values with the existing diagnostic;
 - omit unpublished `lang` and `title matches` source branches; and
 - leave the compiled enum and serde behavior unchanged.
@@ -92,59 +168,6 @@ cargo test -p voom-policy compiled
 Commit:
 
 `fix(policy): enforce published track filter grammar`
-
-## Step 2: Canonicalize active policy sources
-
-Files:
-
-- current compilable `.voom` fixtures under `crates/voom-policy/fixtures/`;
-- current policy strings in `voom-policy`, `voom-plan`, `voom-cli`, and
-  `voom-control-plane` tests;
-- current operator fixtures under
-  `crates/voom-control-plane/tests/fixtures/policies/`;
-- `crates/voom-control-plane/tests/published_grammar_corpus.rs`; and
-- `docs/runbooks/operator-real-media-execution.md`;
-- active compiled goldens whose source hashes change; and
-- retained pre-#350 compiled fixtures used as historical comparison evidence.
-
-Red tests:
-
-- the narrowed compiler identifies every active fixture or integration policy
-  still using an alias or bare token;
-- rewritten source fixtures have the hash of their canonical source;
-- historical and canonical compiled fixtures are completely equal after
-  normalizing only `source_hash`; and
-- the published corpus rejects representative unpublished bare-value forms.
-
-Expected failure before implementation:
-
-- active tests and fixtures depend on `lang` and unquoted list values.
-
-Implementation:
-
-- replace aliases with `language`;
-- quote every language and codec token value;
-- preserve parser-only and historical documentation examples that are not
-  current compilable policy;
-- extend the corpus source guard without claiming execution behavior; and
-- update active compiled-golden hashes while retaining the pre-#350 values as
-  compatibility fixtures.
-
-Verification:
-
-```text
-cargo test -p voom-policy
-cargo test -p voom-plan fixtures
-cargo test -p voom-cli --test multi_phase_preview_envelope
-cargo test -p voom-control-plane --test published_grammar_corpus
-cargo test -p voom-control-plane --test remux_flow
-cargo test -p voom-control-plane --test audio_transcode_flow
-cargo test -p voom-control-plane --test audio_extract_flow
-```
-
-Commit:
-
-`test(policy): use canonical track filter sources`
 
 ## Step 3: Review and ship
 
