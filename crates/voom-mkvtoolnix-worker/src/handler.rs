@@ -177,8 +177,9 @@ pub async fn handle_remux(
             "selection must include at least one video stream".to_owned(),
         ));
     }
-    validate_no_attachment_refs(request, &input_mapping)?;
     validate_all_source_video_streams_kept(request, &input_mapping)?;
+    validate_source_audio_preserved(request, &input_mapping)?;
+    validate_track_only_selection_refs(request, &input_mapping)?;
     run_mkvmerge_remux(config, request, &input_mapping)
         .await
         .map_err(MkvtoolnixWorkerError::from)?;
@@ -345,29 +346,6 @@ async fn reject_existing_output_path(output_path: &Path) -> Result<(), Mkvtoolni
     }
 }
 
-fn validate_no_attachment_refs(
-    request: &RemuxRequest,
-    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
-) -> Result<(), MkvtoolnixWorkerError> {
-    let refs = request
-        .selection
-        .keep_streams
-        .iter()
-        .chain(request.selection.default_streams.iter())
-        .chain(request.selection.clear_default_streams.iter());
-    for stream in refs {
-        if input_mapping
-            .provider_index_matches_group(stream.provider_stream_index, RemuxTrackGroup::Attachment)
-        {
-            return Err(config_invalid(
-                "selection",
-                "unsupported attachment remux selection".to_owned(),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_all_source_video_streams_kept(
     request: &RemuxRequest,
     input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
@@ -392,6 +370,67 @@ fn validate_all_source_video_streams_kept(
             "unsupported media shape: must keep all source video streams; missing provider indexes {missing_video_indexes:?}"
         ),
     ))
+}
+
+fn validate_source_audio_preserved(
+    request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixWorkerError> {
+    let source_audio_indexes = input_mapping.provider_indexes_for_group(RemuxTrackGroup::Audio);
+    if source_audio_indexes.is_empty() {
+        return Ok(());
+    }
+    let keeps_source_audio = request
+        .selection
+        .keep_streams
+        .iter()
+        .any(|stream| source_audio_indexes.contains(&stream.provider_stream_index));
+    if keeps_source_audio {
+        return Ok(());
+    }
+    Err(config_invalid(
+        "selection",
+        "selection must include at least one source audio stream".to_owned(),
+    ))
+}
+
+fn validate_track_only_selection_refs(
+    request: &RemuxRequest,
+    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixWorkerError> {
+    let selection_fields = [
+        (
+            "default_streams",
+            request.selection.default_streams.as_slice(),
+        ),
+        (
+            "clear_default_streams",
+            request.selection.clear_default_streams.as_slice(),
+        ),
+        ("head_streams", request.selection.head_streams.as_slice()),
+        (
+            "forced_streams",
+            request.selection.forced_streams.as_slice(),
+        ),
+        (
+            "clear_forced_streams",
+            request.selection.clear_forced_streams.as_slice(),
+        ),
+    ];
+    for (field, streams) in selection_fields {
+        for stream in streams {
+            let is_attachment = input_mapping
+                .track_for_provider_index(stream.provider_stream_index)
+                .is_some_and(|track| track.kind.matches_group(RemuxTrackGroup::Attachment));
+            if is_attachment {
+                return Err(config_invalid(
+                    "selection",
+                    format!("{field} cannot contain attachments"),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn canonical_existing_dir_no_symlink(path: &Path) -> Result<PathBuf, MkvtoolnixWorkerError> {
@@ -558,14 +597,6 @@ fn validate_output_track_identity(
     expected_track: &crate::mkvmerge::MkvmergeTrack,
     output_track: &crate::mkvmerge::MkvmergeTrack,
 ) -> Result<(), MkvtoolnixWorkerError> {
-    if input_mapping
-        .provider_indexes_for_kind(expected_track.kind)
-        .len()
-        <= 1
-    {
-        return Ok(());
-    }
-
     let matching_input_indexes = input_mapping
         .provider_indexes_matching_identity(expected_track.kind, &expected_track.fingerprint);
     if matching_input_indexes.len() > 1 {
@@ -576,6 +607,25 @@ fn validate_output_track_identity(
                 kept_stream.snapshot_stream_id
             ),
         ));
+    }
+    if expected_track.kind == crate::mkvmerge::MkvmergeTrackKind::Attachment {
+        if output_track.fingerprint == expected_track.fingerprint {
+            return Ok(());
+        }
+        return Err(malformed_worker_result(
+            "output_probe",
+            format!(
+                "selected stream identity mismatch: expected {} at output index {output_index}",
+                kept_stream.snapshot_stream_id
+            ),
+        ));
+    }
+    if input_mapping
+        .provider_indexes_for_kind(expected_track.kind)
+        .len()
+        <= 1
+    {
+        return Ok(());
     }
     if output_track.fingerprint != expected_track.fingerprint {
         return Err(malformed_worker_result(

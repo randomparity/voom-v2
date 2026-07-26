@@ -56,6 +56,18 @@ impl MkvmergeTrackFingerprint {
     fn synthetic(kind: MkvmergeTrackKind) -> Self {
         Self(format!("type={kind:?}"))
     }
+
+    fn from_attachment(attachment: &Value) -> Result<Self, MkvtoolnixError> {
+        let file_name = required_attachment_string(attachment, "file_name")?;
+        required_attachment_string(attachment, "content_type")?;
+        let size = attachment
+            .get("size")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                MkvtoolnixError::IdentifyFailed("identify attachment missing size".to_owned())
+            })?;
+        Ok(Self(format!("/file_name={file_name:?}\n/size={size}")))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,15 +137,6 @@ impl MkvmergeTrackMapping {
             .collect()
     }
 
-    pub(crate) fn provider_index_matches_group(
-        &self,
-        provider_index: u32,
-        group: RemuxTrackGroup,
-    ) -> bool {
-        self.track_for_provider_index(provider_index)
-            .is_some_and(|track| track.kind.matches_group(group))
-    }
-
     pub(crate) fn provider_indexes_matching_identity(
         &self,
         kind: MkvmergeTrackKind,
@@ -181,9 +184,58 @@ pub fn track_mapping_from_identify(
             },
         );
     }
+    let attachments = optional_identify_attachments(identify)?;
+    for (offset, attachment) in attachments.iter().enumerate() {
+        let provider_index = tracks
+            .len()
+            .checked_add(offset)
+            .and_then(|index| u32::try_from(index).ok())
+            .ok_or_else(|| {
+                MkvtoolnixError::IdentifyFailed(
+                    "identify attachment provider index exceeds u32".to_owned(),
+                )
+            })?;
+        let id = attachment
+            .get("id")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                MkvtoolnixError::IdentifyFailed("identify attachment missing id".to_owned())
+            })?;
+        mapped.insert(
+            provider_index,
+            MkvmergeTrack {
+                id,
+                kind: MkvmergeTrackKind::Attachment,
+                default: false,
+                fingerprint: MkvmergeTrackFingerprint::from_attachment(attachment)?,
+            },
+        );
+    }
     Ok(MkvmergeTrackMapping {
         tracks_by_provider_index: mapped,
     })
+}
+
+fn optional_identify_attachments(identify: &Value) -> Result<&[Value], MkvtoolnixError> {
+    let Some(attachments) = identify.get("attachments") else {
+        return Ok(&[]);
+    };
+    attachments.as_array().map(Vec::as_slice).ok_or_else(|| {
+        MkvtoolnixError::IdentifyFailed("identify JSON attachments must be an array".to_owned())
+    })
+}
+
+fn required_attachment_string<'a>(
+    attachment: &'a Value,
+    field: &str,
+) -> Result<&'a str, MkvtoolnixError> {
+    attachment
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            MkvtoolnixError::IdentifyFailed(format!("identify attachment missing {field}"))
+        })
 }
 
 const TRACK_FINGERPRINT_FIELDS: &[&str] = &["type"];
@@ -210,14 +262,6 @@ pub fn build_mkvmerge_args(
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Vec<String>, MkvtoolnixError> {
     let keep = selected_tracks(&request.selection.keep_streams, mapping)?;
-    if keep
-        .iter()
-        .any(|track| track.kind == MkvmergeTrackKind::Attachment)
-    {
-        return Err(MkvtoolnixError::ConfigInvalid(
-            "unsupported attachment remux selection".to_owned(),
-        ));
-    }
     let mut args = vec![
         "--output".to_owned(),
         request.output.path.clone(),
@@ -238,7 +282,13 @@ pub fn build_mkvmerge_args(
         &keep,
         MkvmergeTrackKind::Subtitle,
     );
-    args.push("--no-attachments".to_owned());
+    extend_optional_group_selection(
+        &mut args,
+        "--attachments",
+        "--no-attachments",
+        &keep,
+        MkvmergeTrackKind::Attachment,
+    );
     extend_default_flags(&mut args, &request.selection, mapping)?;
     extend_forced_flags(&mut args, &request.selection, mapping)?;
     if let Some(track_order) = track_order(&request.selection, &keep, mapping) {
@@ -458,20 +508,26 @@ fn track_order(
     let mut used = BTreeSet::new();
     for head_id in head_ids {
         for track in keep {
-            if track.id == head_id && used.insert(track.id) {
+            if track.kind != MkvmergeTrackKind::Attachment
+                && track.id == head_id
+                && used.insert(track.id)
+            {
                 ordered.push(format!("0:{}", track.id));
             }
         }
     }
     for group in &selection.track_order {
         for track in keep {
-            if track.kind.matches_group(*group) && used.insert(track.id) {
+            if track.kind != MkvmergeTrackKind::Attachment
+                && track.kind.matches_group(*group)
+                && used.insert(track.id)
+            {
                 ordered.push(format!("0:{}", track.id));
             }
         }
     }
     for track in keep {
-        if used.insert(track.id) {
+        if track.kind != MkvmergeTrackKind::Attachment && used.insert(track.id) {
             ordered.push(format!("0:{}", track.id));
         }
     }

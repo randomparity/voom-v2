@@ -141,6 +141,24 @@ async fn handler_rejects_dropping_source_video_tracks_before_provider_run() {
 }
 
 #[tokio::test]
+async fn handler_rejects_dropping_final_source_audio_before_provider_run() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![video_ref("stream-0", 0)];
+    request.selection.default_streams = vec![];
+    request.selection.clear_default_streams = vec![video_ref("stream-0", 0)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string().contains("at least one source audio"),
+        "{err}"
+    );
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
 async fn handler_rejects_attachment_track_order_before_provider_run() {
     let fixture = remux_fixture().await;
     let mut request = fixture.request;
@@ -154,17 +172,60 @@ async fn handler_rejects_attachment_track_order_before_provider_run() {
 }
 
 #[tokio::test]
-async fn handler_rejects_attachment_keep_stream_before_provider_run() {
-    let fixture = remux_fixture_with_attachment_track_and_forbidden_provider_run().await;
+async fn handler_executes_and_validates_attachment_keep_stream() {
+    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf").await;
     let mut request = fixture.request;
-    request.selection.keep_streams = vec![video_ref("stream-0", 0), attachment_ref("stream-2", 2)];
-    request.selection.default_streams = vec![];
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        attachment_ref("stream-2", 2),
+    ];
+
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
+
+    assert_eq!(
+        result.kept_snapshot_stream_ids,
+        ["stream-0", "stream-1", "stream-2"]
+    );
+    assert!(tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn handler_rejects_changed_output_attachment_identity() {
+    let fixture = remux_fixture_with_attachment_output("renamed.ttf").await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        attachment_ref("stream-2", 2),
+    ];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(err.to_string().contains("stream-2"), "{err}");
+}
+
+#[tokio::test]
+async fn handler_rejects_attachment_in_track_flag_selection() {
+    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf").await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        attachment_ref("stream-2", 2),
+    ];
+    request.selection.default_streams = vec![attachment_ref("stream-2", 2)];
     request.selection.clear_default_streams = vec![];
 
     let err = handle_remux(&request, &fixture.config).await.unwrap_err();
 
     assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(err.to_string().contains("unsupported attachment remux"));
+    assert!(
+        err.to_string()
+            .contains("default_streams cannot contain attachments"),
+        "{err}"
+    );
     assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
 }
 
@@ -349,6 +410,55 @@ async fn handler_rejects_ambiguous_same_kind_selected_track_identity() {
     assert!(
         err.to_string()
             .contains("selected stream identity is ambiguous")
+    );
+}
+
+#[test]
+fn output_validation_rejects_ambiguous_attachment_identity() {
+    let input_mapping = crate::mkvmerge::track_mapping_from_identify(&serde_json::json!({
+        "tracks": [],
+        "attachments": [
+            {
+                "id": 3,
+                "file_name": "font.ttf",
+                "content_type": "font/ttf",
+                "size": 26
+            },
+            {
+                "id": 5,
+                "file_name": "font.ttf",
+                "content_type": "application/x-truetype-font",
+                "size": 26
+            }
+        ]
+    }))
+    .unwrap();
+    let output_mapping = crate::mkvmerge::track_mapping_from_identify(&serde_json::json!({
+        "tracks": [],
+        "attachments": [{
+            "id": 7,
+            "file_name": "font.ttf",
+            "content_type": "font/ttf",
+            "size": 26
+        }]
+    }))
+    .unwrap();
+    let expected = input_mapping.track_for_provider_index(0).unwrap();
+    let output = output_mapping.track_for_provider_index(0).unwrap();
+
+    let err = validate_output_track_identity(
+        &input_mapping,
+        &attachment_ref("stream-0", 0),
+        0,
+        expected,
+        output,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("selected stream identity is ambiguous"),
+        "{err}"
     );
 }
 
@@ -604,9 +714,8 @@ async fn remux_fixture_with_two_input_videos_and_forbidden_provider_run() -> Rem
         .await
 }
 
-async fn remux_fixture_with_attachment_track_and_forbidden_provider_run() -> RemuxFixture {
-    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_attachment_track_forbidden_provider_run())
-        .await
+async fn remux_fixture_with_attachment_output(output_name: &str) -> RemuxFixture {
+    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_attachment_output(output_name)).await
 }
 
 async fn remux_fixture_with_mkvmerge(body: &str) -> RemuxFixture {
@@ -976,19 +1085,36 @@ exit 42
     .to_owned()
 }
 
-fn fake_mkvmerge_body_with_attachment_track_forbidden_provider_run() -> String {
-    r#"#!/bin/sh
+fn fake_mkvmerge_body_with_attachment_output(output_name: &str) -> String {
+    format!(
+        r#"#!/bin/sh
 set -eu
-if [ "${1:-}" = "--identify" ]; then
-  cat <<'JSON'
-{"container":{"properties":{"container_type":"MP4"}},"tracks":[{"id":7,"type":"video","properties":{"number":1}},{"id":12,"type":"audio","properties":{"number":2}},{"id":99,"type":"attachments","properties":{"number":3}}],"attachments":[{"id":99,"file_name":"cover.jpg"}]}
+if [ "${{1:-}}" = "--identify" ]; then
+  last=""
+  for arg in "$@"; do last="$arg"; done
+  case "$last" in
+    *out.mkv)
+      cat <<'JSON'
+{{"container":{{"type":"Matroska"}},"tracks":[{{"id":20,"type":"video","properties":{{"default_track":false,"number":1}}}},{{"id":21,"type":"audio","properties":{{"default_track":true,"number":2}}}}],"attachments":[{{"id":5,"file_name":"{output_name}","content_type":"font/ttf","size":26}}]}}
 JSON
+      ;;
+    *)
+      cat <<'JSON'
+{{"container":{{"type":"Matroska"}},"tracks":[{{"id":7,"type":"video","properties":{{"default_track":false,"number":1}}}},{{"id":12,"type":"audio","properties":{{"default_track":true,"number":2}}}}],"attachments":[{{"id":3,"file_name":"OpenSans.ttf","content_type":"application/x-truetype-font","size":26}}]}}
+JSON
+      ;;
+  esac
   exit 0
 fi
-printf '%s\n' 'provider run forbidden' >&2
-exit 42
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--output" ]; then out="$arg"; fi
+  prev="$arg"
+done
+printf output > "$out"
 "#
-    .to_owned()
+    )
 }
 
 fn fake_mkvmerge_body_with_provider_failure() -> String {

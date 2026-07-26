@@ -23,6 +23,45 @@ fn maps_snapshot_provider_indexes_to_mkvmerge_track_ids() {
 }
 
 #[test]
+fn maps_top_level_attachments_after_ordinary_tracks() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 7, "type": "video", "properties": {"number": 1}},
+            {"id": 12, "type": "audio", "properties": {"number": 2}}
+        ],
+        "attachments": [
+            {
+                "id": 3,
+                "file_name": "OpenSans.ttf",
+                "content_type": "font/ttf",
+                "size": 26
+            }
+        ]
+    });
+
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let attachment = mapping.track_for_provider_index(2).unwrap();
+
+    assert_eq!(attachment.id, 3);
+    assert_eq!(attachment.kind, MkvmergeTrackKind::Attachment);
+}
+
+#[test]
+fn identify_rejects_attachment_without_structured_identity_facts() {
+    let identify = serde_json::json!({
+        "tracks": [{"id": 7, "type": "video", "properties": {"number": 1}}],
+        "attachments": [{"id": 3, "file_name": "OpenSans.ttf"}]
+    });
+
+    let err = track_mapping_from_identify(&identify).unwrap_err();
+
+    assert!(
+        err.to_string().contains("attachment missing content_type"),
+        "{err}"
+    );
+}
+
+#[test]
 fn track_fingerprint_ignores_remux_changed_fields() {
     let before = serde_json::json!({
         "tracks": [
@@ -158,6 +197,40 @@ fn build_args_disable_unselected_audio_subtitles_and_attachments() {
     assert!(args.contains(&"--no-audio".to_owned()));
     assert!(args.contains(&"--no-subtitles".to_owned()));
     assert!(args.contains(&"--no-attachments".to_owned()));
+}
+
+#[test]
+fn build_args_selects_attachments_without_putting_them_in_track_order() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 7, "type": "video", "properties": {"number": 1}},
+            {"id": 12, "type": "audio", "properties": {"number": 2}}
+        ],
+        "attachments": [
+            {
+                "id": 3,
+                "file_name": "OpenSans.ttf",
+                "content_type": "font/ttf",
+                "size": 26
+            },
+            {
+                "id": 5,
+                "file_name": "cover.jpg",
+                "content_type": "image/jpeg",
+                "size": 42
+            }
+        ]
+    });
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.track_order = vec![RemuxTrackGroup::Video, RemuxTrackGroup::Audio];
+    let request = remux_request(selection);
+
+    let args = build_mkvmerge_args(&request, &mapping).unwrap();
+
+    assert_eq!(first_arg_value(&args, "--attachments"), Some("3"));
+    assert!(!args.contains(&"--no-attachments".to_owned()));
+    assert_eq!(first_arg_value(&args, "--track-order"), Some("0:7,0:12"));
 }
 
 fn stream(provider_stream_index: u32) -> RemuxStreamRef {
