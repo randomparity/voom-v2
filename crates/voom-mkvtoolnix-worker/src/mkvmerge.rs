@@ -82,6 +82,7 @@ pub(crate) struct MkvmergeTrack {
     pub(crate) id: u64,
     pub(crate) kind: MkvmergeTrackKind,
     pub(crate) default: bool,
+    pub(crate) commentary: Option<bool>,
     pub(crate) fingerprint: MkvmergeTrackFingerprint,
 }
 
@@ -103,6 +104,7 @@ impl MkvmergeTrackMapping {
                             id,
                             kind: MkvmergeTrackKind::Video,
                             default: false,
+                            commentary: None,
                             fingerprint: MkvmergeTrackFingerprint::synthetic(
                                 MkvmergeTrackKind::Video,
                             ),
@@ -183,6 +185,9 @@ pub fn track_mapping_from_identify(
             .pointer("/properties/default_track")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let commentary = track
+            .pointer("/properties/flag_commentary")
+            .and_then(Value::as_bool);
         mapped.insert(
             u32::try_from(provider_index)
                 .map_err(|err| MkvtoolnixError::IdentifyFailed(err.to_string()))?,
@@ -190,6 +195,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind,
                 default,
+                commentary,
                 fingerprint: MkvmergeTrackFingerprint::from_identify(track),
             },
         );
@@ -217,6 +223,7 @@ pub fn track_mapping_from_identify(
                 id,
                 kind: MkvmergeTrackKind::Attachment,
                 default: false,
+                commentary: None,
                 fingerprint: MkvmergeTrackFingerprint::from_attachment(attachment)?,
             },
         );

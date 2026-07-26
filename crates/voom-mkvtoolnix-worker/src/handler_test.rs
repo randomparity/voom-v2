@@ -411,6 +411,31 @@ async fn handler_rejects_wrong_same_kind_selected_track() {
 }
 
 #[tokio::test]
+async fn handler_rejects_changed_single_audio_commentary_disposition() {
+    let fixture = remux_fixture_with_input_specs_and_output_specs(
+        vec![
+            input_track("video"),
+            input_track_with_commentary("audio", true),
+        ],
+        vec![
+            output_track("video", false),
+            output_track_with_commentary("audio", true, false),
+        ],
+    )
+    .await;
+
+    let err = handle_remux(&fixture.request, &fixture.config)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        err.to_string().contains("commentary disposition mismatch"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
 async fn handler_rejects_ambiguous_same_kind_selected_track_identity() {
     let fixture = remux_fixture_with_input_specs_and_output_specs(
         vec![
@@ -908,12 +933,14 @@ printf output > "$out"
 struct InputTrackSpec {
     kind: &'static str,
     language: Option<&'static str>,
+    commentary: Option<bool>,
 }
 
 fn input_track(kind: &'static str) -> InputTrackSpec {
     InputTrackSpec {
         kind,
         language: None,
+        commentary: None,
     }
 }
 
@@ -921,6 +948,15 @@ fn input_track_with_language(kind: &'static str, language: &'static str) -> Inpu
     InputTrackSpec {
         kind,
         language: Some(language),
+        commentary: None,
+    }
+}
+
+fn input_track_with_commentary(kind: &'static str, commentary: bool) -> InputTrackSpec {
+    InputTrackSpec {
+        kind,
+        language: None,
+        commentary: Some(commentary),
     }
 }
 
@@ -929,6 +965,7 @@ struct OutputTrackSpec {
     kind: &'static str,
     default: bool,
     language: Option<&'static str>,
+    commentary: Option<bool>,
 }
 
 fn output_track(kind: &'static str, default: bool) -> OutputTrackSpec {
@@ -936,6 +973,7 @@ fn output_track(kind: &'static str, default: bool) -> OutputTrackSpec {
         kind,
         default,
         language: None,
+        commentary: None,
     }
 }
 
@@ -948,6 +986,20 @@ fn output_track_with_language(
         kind,
         default,
         language: Some(language),
+        commentary: None,
+    }
+}
+
+fn output_track_with_commentary(
+    kind: &'static str,
+    default: bool,
+    commentary: bool,
+) -> OutputTrackSpec {
+    OutputTrackSpec {
+        kind,
+        default,
+        language: None,
+        commentary: Some(commentary),
     }
 }
 
@@ -960,9 +1012,9 @@ fn fake_mkvmerge_body_with_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let language = language_property(spec.language);
+            let properties = track_properties(spec.language, spec.commentary);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{language}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{properties}}}}}"#,
                 index + 20,
                 spec.kind,
                 spec.default,
@@ -983,9 +1035,9 @@ fn fake_mkvmerge_body_with_input_and_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let language = language_property(spec.language);
+            let properties = track_properties(spec.language, spec.commentary);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"number":{}{language}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"number":{}{properties}}}}}"#,
                 index + 7,
                 spec.kind,
                 index + 1,
@@ -997,9 +1049,9 @@ fn fake_mkvmerge_body_with_input_and_output_specs(
         .iter()
         .enumerate()
         .map(|(index, spec)| {
-            let language = language_property(spec.language);
+            let properties = track_properties(spec.language, spec.commentary);
             format!(
-                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{language}}}}}"#,
+                r#"{{"id":{},"type":"{}","properties":{{"default_track":{},"number":{}{properties}}}}}"#,
                 index + 20,
                 spec.kind,
                 spec.default,
@@ -1011,10 +1063,18 @@ fn fake_mkvmerge_body_with_input_and_output_specs(
     fake_mkvmerge_body_from_input_and_output_tracks(&input_tracks, &output_tracks, output_container)
 }
 
-fn language_property(language: Option<&str>) -> String {
-    language.map_or_else(String::new, |language| {
+fn track_properties(language: Option<&str>, commentary: Option<bool>) -> String {
+    let mut properties = language.map_or_else(String::new, |language| {
         format!(r#","language":"{language}""#)
-    })
+    });
+    if let Some(commentary) = commentary {
+        properties.push_str(if commentary {
+            r#","flag_commentary":true"#
+        } else {
+            r#","flag_commentary":false"#
+        });
+    }
+    properties
 }
 
 fn fake_mkvmerge_body_from_input_and_output_tracks(

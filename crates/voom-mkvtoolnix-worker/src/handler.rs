@@ -558,6 +558,15 @@ fn validate_output_track_identity(
             ),
         ));
     }
+    if output_track.commentary != expected_track.commentary {
+        return Err(malformed_worker_result(
+            "output_probe",
+            format!(
+                "commentary disposition mismatch: expected {} at output index {output_index}",
+                kept_stream.snapshot_stream_id
+            ),
+        ));
+    }
     let identity_must_match = expected_track.kind == crate::mkvmerge::MkvmergeTrackKind::Attachment
         || input_mapping
             .provider_indexes_for_kind(expected_track.kind)

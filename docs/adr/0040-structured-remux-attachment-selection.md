@@ -93,6 +93,10 @@ The output probe maps attachments the same way and validates:
 - ordinary-track fingerprints and order as before;
 - attachment filename, byte-size, and MIME-identity fingerprints.
 
+Commentary disposition is compared explicitly for every selected ordinary track, including when
+the source has only one track of that kind. A provider cannot bypass the check through an
+otherwise-unambiguous single-track mapping.
+
 MIME identity maps every recognized legacy or registered font MIME type to one `font` class and
 keeps every non-font MIME value exact. MKVToolNix 99 and later may therefore canonicalize a legacy
 font MIME type without causing a false identity mismatch, while a font-to-non-font change fails
