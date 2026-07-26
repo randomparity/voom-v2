@@ -27,6 +27,7 @@ Explicitly excluded:
 - general condition grammar outside track filters;
 - parser AST permissiveness;
 - broad compiled-policy JSON strictness owned by #344; and
+- corrected quoted-filter value semantics owned by #358; and
 - any new DSL production, alias, comparator, predicate, or compatibility shim.
 
 An excluded concern returns to scope only if this change depends on it or makes
@@ -59,11 +60,16 @@ remain domain values interpreted by planning; #350 requires their quotes and
 stable-token shape but does not add a codec allowlist.
 
 `title contains` requires one complete, non-empty quoted string. A backslash
-escapes the next character only for locating the closing quote. The compiled
-value remains the exact source bytes between the outer quotes, including each
-backslash escape pair. This preserves the current meaning of already accepted
-source such as `title contains "Director \"Cut\""`. A trailing backslash or
-unclosed string is invalid.
+escapes the next character only for locating the closing quote. After the
+scanner validates the complete lexeme, lowering applies the existing
+`strip_quotes` transformation unchanged. This intentionally preserves every
+historical result for identical source bytes, including its unintuitive removal
+of consecutive terminal quote characters in a value such as
+`title contains "Director \"Cut\""`. Correcting that value semantics is outside
+#350 because it would let one immutable `source_hash` denote two compiled
+meanings. A trailing backslash or unclosed string is invalid.
+Issue #358 owns a future, explicitly versioned correction; #350 neither depends
+on nor worsens the pre-existing value behavior.
 
 The following are not source grammar:
 
@@ -85,11 +91,27 @@ publishing parser spellings.
 ## Validation and lowering boundary
 
 `voom-policy` replaces its separate validation recognizer and lowering parser
-with one recursive source parser returning `Option<TrackFilter>`. Validation
-uses success as its grammar decision and recursively applies the existing
-language-code check to parsed `LanguageIn` values. Lowering calls the same
-parser after validation. This makes “accepted implies lowerable” structural,
-rather than an assumption between two similar parsers.
+with one recursive source parser returning `Result<TrackFilter, ParseError>`.
+One shared clause extractor provides:
+
+```text
+parse_optional_filter(operation text)
+    -> Ok(None) only when no filter clause exists
+    -> Ok(Some(filter)) when a complete clause parses
+    -> Err when a clause is present but invalid
+
+parse_required_filter(clause text)
+    -> Ok(filter) only for a complete valid clause
+    -> Err otherwise
+```
+
+Validation uses success as its grammar decision and recursively applies the
+existing language-code check to parsed `LanguageIn` values. Lowering calls the
+same extractor and parser after validation, propagates `Err` through the
+existing diagnostics-bearing compile path, and never converts a failed present
+or required clause to `None`. `synthesize audio from` uses the required form;
+the other consumers use the optional operation-text form. Thus `None` means
+only that source omitted an optional clause, never that reparsing failed.
 
 The parser receives a remaining-depth budget of 64, matching the general policy
 parser. Descending through `not`, one balanced outer group, or a Boolean child
@@ -109,11 +131,13 @@ supplied filter text. Each leaf check is grammar-specific:
 - channels accepts exactly three lexical units, one of the six published
   comparators, and an ASCII `u64`;
 - fieldless predicates accept exactly one lexical unit; and
-- `title contains` requires one complete quoted string with no trailing input.
+- `title contains` requires one complete quoted string with no trailing input
+  and lowers through the unchanged historical `strip_quotes`.
 
 The quoted-token list reader is quote-aware and delimiter-aware; it never uses
-a generic comma split. The quoted-string scanner is shared by validation and
-lowering, so an accepted escape cannot acquire different compiled semantics.
+a generic comma split. The quoted-string scanner, clause extractor, and
+historical value transformation are shared by validation and lowering, so an
+accepted escape cannot acquire different compiled semantics.
 
 Boolean splitting continues to occur only outside quoted strings and nested
 parentheses. A split is valid only when every child is non-empty and valid.
@@ -154,13 +178,15 @@ annotation, database row, or migration. In particular:
   readable.
 
 A focused compatibility fixture deserializes a historical compiled policy
-containing the `title_matches` discriminator. For each source fixture rewritten
-from aliases or bare values, retain its pre-#350 compiled JSON as historical
-evidence. Compile the canonical source, assert its `source_hash` matches the new
-source bytes, then normalize only `source_hash` in the historical and current
-values and require complete JSON equality. The active compiled golden updates
-only its expected `source_hash`; every other field and operation remains
-byte-for-byte equal.
+containing the `title_matches` discriminator. Another compiles identical
+escaped-title source before and after the refactor and pins the historical
+`strip_quotes` value under the same source hash. For each source fixture
+rewritten from aliases or bare values, retain its pre-#350 compiled JSON as
+historical evidence. Compile the canonical source, assert its `source_hash`
+matches the new source bytes, then normalize only `source_hash` in the
+historical and current values and require complete JSON equality. The active
+compiled golden updates only its expected `source_hash`; every other field and
+operation remains byte-for-byte equal.
 
 ## Canonical source migration
 
@@ -183,9 +209,17 @@ cover the complete rejection set.
 
 ## Failure behavior
 
-Invalid filter source fails during policy validation before `compile_ast`.
-There is no partial compiled policy and no persistence. Every consumer emits an
-error diagnostic for the same invalid filter.
+Complete statements containing an unpublished or malformed filter clause fail
+during policy validation before `compile_ast`, with
+`unknown_phase_statement_or_operation` and `unknown track filter predicate`.
+Lexically incomplete source that the general parser cannot represent, such as
+an unterminated quoted string, fails earlier with its existing parse-stage
+`unexpected_token` diagnostic. There is no partial compiled policy or
+persistence in either case.
+
+If validation/lowering integration ever supplies different clause text and the
+lowering parse fails, `compile_ast` returns a compile diagnostic rather than
+emitting an operation with `filter: null`.
 
 Malformed lists and Boolean expressions fail closed. The source parser never
 recovers by discarding empty elements, choosing the first valid prefix, or
@@ -220,8 +254,13 @@ Behavior tests cover:
   non-ASCII digits, and trailing input;
 - 64 accepted recursive levels plus rejection beyond the bound for repeated
   `not` and nested groups;
-- literal compiled values for escaped quote, escaped backslash, and other
-  backslash pairs in title strings;
+- historical `strip_quotes` compiled values for escaped quote, escaped
+  backslash, terminal escaped quote, and other backslash pairs in title
+  strings under identical source hashes;
+- parse-stage diagnostics for unterminated strings versus validation-stage
+  diagnostics for complete malformed clauses;
+- a forced second-pass parse failure proving present/required filters cannot
+  lower as `None`;
 - lowering of every accepted leaf to the existing compiled representation;
 - unchanged readable historical `title_matches` compiled JSON;
 - historical/current compiled fixture equality after normalizing only
