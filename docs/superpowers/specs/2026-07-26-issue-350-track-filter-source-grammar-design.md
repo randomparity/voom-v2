@@ -93,10 +93,13 @@ rather than an assumption between two similar parsers.
 
 The parser receives a remaining-depth budget of 64, matching the general policy
 parser. Descending through `not`, one balanced outer group, or a Boolean child
-consumes one level. Exceeding the budget is ordinary validation failure, never a
-panic. Outer groups are stripped one at a time so they cannot bypass the
-budget. The parser must consume the complete supplied filter text. Each leaf
-check is grammar-specific:
+consumes one level on that path. The budget is immutable and path-local: every
+Boolean child receives its own `remaining - 1`; siblings never consume one
+another's budget. A terminal leaf is valid at zero remaining after exactly 64
+descents, while another recursive construct fails. Exceeding the budget is
+ordinary validation failure, never a panic. Outer groups are stripped one at a
+time so they cannot bypass the budget. The parser must consume the complete
+supplied filter text. Each leaf check is grammar-specific:
 
 - language equality requires the exact `language ==` prefix and one quoted
   token;
@@ -209,6 +212,8 @@ Behavior tests cover:
 - all six channel comparators and `u64` boundaries;
 - nested grouping and `not`/`and`/`or` precedence;
 - exact n-ary compiled shapes for three-or-more `and` and `or` operands;
+- acceptance of more than 64 flat `and` operands and more than 64 flat `or`
+  operands, proving width does not consume the path-local depth budget;
 - all seven filter consumers;
 - aliases, bare equality/list values, `title matches`, unpublished comparators,
   malformed/empty lists, missing operands, unbalanced/empty groups, overflow,

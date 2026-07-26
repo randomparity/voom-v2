@@ -48,6 +48,8 @@ Red tests:
   escaped quote, escaped backslash, and other backslash pairs;
 - 64 recursive filter levels compile while deeper repeated `not` and grouped
   filters fail validation without panicking;
+- more than 64 flat `and` and `or` siblings compile because each child receives
+  an independent copy of the path-local remaining-depth budget;
 - three-or-more top-level `and` and `or` children retain n-ary compiled arrays
   in source order, with mixed precedence and grouping unchanged;
 - every validator-accepted filter lowers to `Some(TrackFilter)`; and
@@ -64,7 +66,7 @@ Implementation:
   that returns the compiled `TrackFilter`;
 - add a quote-aware stable-token list reader and literal quoted-string scanner;
 - enforce a 64-level remaining-depth budget across `not`, groups, and Boolean
-  child descent;
+  child descent without decrementing one shared budget across siblings;
 - preserve n-ary same-operator lowering and existing mixed precedence;
 - reuse the six-comparator and ASCII `u64` checks;
 - route operation validation and lowering through the one parser;
