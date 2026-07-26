@@ -15,6 +15,7 @@ use voom_store::repo::leases::NewLease;
 use voom_store::repo::tickets::{Ticket, TicketState};
 
 use crate::workflow::execution::dispatch::{DispatchOutcome, DispatchTerminal, dispatch_ticket};
+use crate::workflow::execution::executor::RunFailureMode;
 use crate::workflow::execution::executor::WorkflowExecutor;
 use crate::workflow::execution::executor::errors::{
     selector_failure_class, sqlite_u32, sqlite_u64,
@@ -114,7 +115,9 @@ impl WorkflowExecutor {
         job_id: JobId,
         reservations: &mut HashMap<WorkerId, u32>,
         summary: &mut WorkflowRunSummary,
-        terminal_error: &mut Option<VoomError>,
+        failure_mode: RunFailureMode,
+        fatal_error: &mut Option<VoomError>,
+        isolated_error: &mut Option<VoomError>,
     ) {
         let outcome = match joined {
             Ok(outcome) => outcome,
@@ -137,7 +140,7 @@ impl WorkflowExecutor {
                     .expand_successful_ticket(plan, workflow_id, job_id, outcome.ticket_id)
                     .await
                 {
-                    *terminal_error = Some(source);
+                    *fatal_error = Some(source);
                 }
             }
             DispatchTerminal::Failure { source } => {
@@ -146,24 +149,29 @@ impl WorkflowExecutor {
                     Ok(None) => failure_class_for_error(&source),
                     Err(err) => {
                         summary.record_failure(outcome.operation, failure_class_for_error(&source));
-                        *terminal_error = Some(err);
+                        *fatal_error = Some(err);
                         return;
                     }
                 };
                 summary.record_failure(outcome.operation, class);
                 match self.control_plane.tickets.get(outcome.ticket_id).await {
-                    Ok(Some(ticket)) if ticket.state == TicketState::Failed => {
-                        *terminal_error = Some(source);
-                    }
+                    Ok(Some(ticket)) if ticket.state == TicketState::Failed => match failure_mode {
+                        RunFailureMode::AbortJob => *fatal_error = Some(source),
+                        RunFailureMode::ContinueIndependent => {
+                            if isolated_error.is_none() {
+                                *isolated_error = Some(source);
+                            }
+                        }
+                    },
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        *terminal_error = Some(VoomError::NotFound(format!(
+                        *fatal_error = Some(VoomError::NotFound(format!(
                             "ticket {} vanished after dispatch failure",
                             outcome.ticket_id
                         )));
                     }
                     Err(err) => {
-                        *terminal_error = Some(err);
+                        *fatal_error = Some(err);
                     }
                 }
             }

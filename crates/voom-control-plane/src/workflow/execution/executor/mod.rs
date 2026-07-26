@@ -34,6 +34,12 @@ pub struct WorkflowExecutor {
     options: WorkflowExecutorOptions,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunFailureMode {
+    AbortJob,
+    ContinueIndependent,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowExecutorOptions {
     pub timing: WorkflowTimingOptions,
@@ -103,7 +109,15 @@ struct RunLoopState {
     reservations: HashMap<WorkerId, u32>,
     active: JoinSet<DispatchOutcome>,
     summary: WorkflowRunSummary,
-    terminal_error: Option<VoomError>,
+    fatal_error: Option<VoomError>,
+    isolated_error: Option<VoomError>,
+}
+
+struct RunInvocation<'a> {
+    job_id: JobId,
+    workflow_id: &'a str,
+    plan: &'a WorkflowPlan,
+    failure_mode: RunFailureMode,
 }
 
 impl RunLoopState {
@@ -112,7 +126,8 @@ impl RunLoopState {
             reservations: HashMap::new(),
             active: JoinSet::new(),
             summary: WorkflowRunSummary::empty(job_id, elapsed),
-            terminal_error: None,
+            fatal_error: None,
+            isolated_error: None,
         }
     }
 
@@ -124,16 +139,31 @@ impl RunLoopState {
         self.active.len() < max_in_flight
     }
 
-    fn record_terminal_error(&mut self, source: VoomError) {
-        self.terminal_error = Some(source);
+    fn record_fatal_error(&mut self, source: VoomError) {
+        self.fatal_error = Some(source);
     }
 
-    fn has_terminal_error(&self) -> bool {
-        self.terminal_error.is_some()
+    fn record_ticket_failure(&mut self, mode: RunFailureMode, source: VoomError) {
+        match mode {
+            RunFailureMode::AbortJob => self.record_fatal_error(source),
+            RunFailureMode::ContinueIndependent => {
+                if self.isolated_error.is_none() {
+                    self.isolated_error = Some(source);
+                }
+            }
+        }
     }
 
-    fn take_terminal_error(&mut self) -> Option<VoomError> {
-        self.terminal_error.take()
+    fn has_fatal_error(&self) -> bool {
+        self.fatal_error.is_some()
+    }
+
+    fn take_fatal_error(&mut self) -> Option<VoomError> {
+        self.fatal_error.take()
+    }
+
+    fn take_isolated_error(&mut self) -> Option<VoomError> {
+        self.isolated_error.take()
     }
 
     async fn refresh(&mut self, control: &ControlPlane, job_id: JobId, started: Instant) {
@@ -166,6 +196,22 @@ impl RunLoopState {
         WorkflowRunError {
             summary: self.summary.clone(),
             source,
+            job_failed: true,
+        }
+    }
+
+    async fn finish_isolated_failure(
+        &mut self,
+        control: &ControlPlane,
+        job_id: JobId,
+        source: VoomError,
+        started: Instant,
+    ) -> WorkflowRunError {
+        self.refresh(control, job_id, started).await;
+        WorkflowRunError {
+            summary: self.summary.clone(),
+            source,
+            job_failed: false,
         }
     }
 
@@ -178,7 +224,14 @@ impl RunLoopState {
         source: VoomError,
         started: Instant,
     ) -> WorkflowRunError {
-        self.drain_active(executor, plan, workflow_id, job_id).await;
+        self.drain_active(
+            executor,
+            plan,
+            workflow_id,
+            job_id,
+            RunFailureMode::ContinueIndependent,
+        )
+        .await;
         self.fail_job(&executor.control_plane, job_id, source, started)
             .await
     }
@@ -189,9 +242,10 @@ impl RunLoopState {
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
+        failure_mode: RunFailureMode,
     ) {
         while let Some(joined) = self.active.try_join_next() {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
+            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
                 .await;
         }
     }
@@ -202,9 +256,10 @@ impl RunLoopState {
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
+        failure_mode: RunFailureMode,
     ) {
         while let Some(joined) = self.active.join_next().await {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
+            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
                 .await;
         }
     }
@@ -215,9 +270,10 @@ impl RunLoopState {
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
+        failure_mode: RunFailureMode,
     ) {
         if let Some(joined) = self.active.join_next().await {
-            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id)
+            self.process_joined_dispatch(executor, joined, plan, workflow_id, job_id, failure_mode)
                 .await;
         }
     }
@@ -244,6 +300,7 @@ impl RunLoopState {
         plan: &WorkflowPlan,
         workflow_id: &str,
         job_id: JobId,
+        failure_mode: RunFailureMode,
     ) {
         executor
             .process_joined_dispatch(
@@ -253,13 +310,66 @@ impl RunLoopState {
                 job_id,
                 &mut self.reservations,
                 &mut self.summary,
-                &mut self.terminal_error,
+                failure_mode,
+                &mut self.fatal_error,
+                &mut self.isolated_error,
             )
             .await;
     }
 }
 
 impl WorkflowExecutor {
+    async fn dispatch_ready_tickets(
+        &self,
+        state: &mut RunLoopState,
+        invocation: &RunInvocation<'_>,
+    ) -> bool {
+        let mut made_progress = false;
+        let max_in_flight = invocation.plan.concurrency.max_in_flight_dispatches;
+        while state.has_dispatch_capacity(max_in_flight) {
+            let tickets = match self
+                .ready_workflow_tickets(invocation.job_id, invocation.workflow_id)
+                .await
+            {
+                Ok(tickets) if tickets.is_empty() => break,
+                Ok(tickets) => tickets,
+                Err(source) => {
+                    state.record_fatal_error(source);
+                    return true;
+                }
+            };
+            let mut batch_made_progress = false;
+            for ticket in tickets {
+                if !state.has_dispatch_capacity(max_in_flight) {
+                    break;
+                }
+                match state.try_spawn_dispatch(self, ticket).await {
+                    Ok(SpawnOutcome::PreLeaseTerminal(source)) => {
+                        state.record_ticket_failure(invocation.failure_mode, source);
+                        made_progress = true;
+                        batch_made_progress = true;
+                        if invocation.failure_mode == RunFailureMode::AbortJob {
+                            break;
+                        }
+                    }
+                    Err(source) => {
+                        state.record_fatal_error(source);
+                        return true;
+                    }
+                    Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
+                        made_progress = true;
+                        batch_made_progress = true;
+                    }
+                    Ok(SpawnOutcome::CapacityDeferred) => {}
+                }
+            }
+            if state.has_fatal_error() || !batch_made_progress {
+                break;
+            }
+        }
+        made_progress
+    }
+
     #[must_use]
     pub fn with_options(
         control_plane: ControlPlane,
@@ -284,7 +394,11 @@ impl WorkflowExecutor {
             .map_err(|e| VoomError::Config(format!("workflow plan invalid: {e}")))
         {
             let summary = WorkflowRunSummary::empty(JobId(0), started.elapsed());
-            return Err(WorkflowRunError { summary, source });
+            return Err(WorkflowRunError {
+                summary,
+                source,
+                job_failed: false,
+            });
         }
 
         let now = self.control_plane.clock().now();
@@ -300,11 +414,24 @@ impl WorkflowExecutor {
             Ok(job) => job,
             Err(source) => {
                 let summary = WorkflowRunSummary::empty(JobId(0), started.elapsed());
-                return Err(WorkflowRunError { summary, source });
+                return Err(WorkflowRunError {
+                    summary,
+                    source,
+                    job_failed: false,
+                });
             }
         };
 
-        let summary = self.run_plan_in_job(job.id, plan, started).await?;
+        let workflow_id = format!("workflow-{}", job.id.0);
+        let summary = self
+            .run_plan_in_job(
+                job.id,
+                &workflow_id,
+                plan,
+                started,
+                RunFailureMode::AbortJob,
+            )
+            .await?;
         let _ = self
             .control_plane
             .succeed_job(job.id, self.control_plane.clock().now())
@@ -312,34 +439,27 @@ impl WorkflowExecutor {
         Ok(summary)
     }
 
-    /// Run one plan inside a caller-owned, already-open job.
-    ///
-    /// Unlike the test-only `submit_and_run` helper, this does not open or succeed the job:
-    /// the caller owns the job lifecycle. The phase-barrier coordinator (#162)
-    /// calls this once per phase against a single job and calls `succeed_job`
-    /// itself after the last phase. On an in-phase ticket failure the job is
-    /// failed here (whole job fails); on a plan-validation error the existing
-    /// job is also failed since the caller cannot otherwise observe the cause.
-    /// First caller is the phase-barrier coordinator (#162 Phase 3); shipped as
-    /// a crate surface ahead of that caller, like `submit_and_run`.
-    pub async fn submit_and_run_in_job(
+    /// Run one phase invocation inside a caller-owned, already-open job.
+    pub(crate) async fn submit_and_run_invocation_in_job(
         &self,
         job_id: JobId,
+        invocation_id: &str,
         plan: WorkflowPlan,
+        failure_mode: RunFailureMode,
     ) -> Result<WorkflowRunSummary, WorkflowRunError> {
         let started = Instant::now();
         if let Err(source) = plan
             .validate()
             .map_err(|e| VoomError::Config(format!("workflow plan invalid: {e}")))
         {
-            let _ = self
-                .control_plane
-                .fail_job(job_id, source.to_string(), self.control_plane.clock().now())
-                .await;
-            let summary = WorkflowRunSummary::empty(job_id, started.elapsed());
-            return Err(WorkflowRunError { summary, source });
+            let mut state = RunLoopState::new(job_id, started.elapsed());
+            return Err(state
+                .fail_job(&self.control_plane, job_id, source, started)
+                .await);
         }
-        self.run_plan_in_job(job_id, plan, started).await
+        let workflow_id = format!("workflow-{}-{invocation_id}", job_id.0);
+        self.run_plan_in_job(job_id, &workflow_id, plan, started, failure_mode)
+            .await
     }
 
     /// Drive a validated plan to completion within an open job.
@@ -354,16 +474,23 @@ impl WorkflowExecutor {
     async fn run_plan_in_job(
         &self,
         job_id: JobId,
+        workflow_id: &str,
         plan: WorkflowPlan,
         started: Instant,
+        failure_mode: RunFailureMode,
     ) -> Result<WorkflowRunSummary, WorkflowRunError> {
         let now = self.control_plane.clock().now();
-        let workflow_id = format!("workflow-{}", job_id.0);
         let mut state = RunLoopState::new(job_id, started.elapsed());
         let control = &self.control_plane;
+        let invocation = RunInvocation {
+            job_id,
+            workflow_id,
+            plan: &plan,
+            failure_mode,
+        };
 
         if let Err(source) = self
-            .create_root_tickets(&plan, &workflow_id, job_id, now)
+            .create_root_tickets(&plan, workflow_id, job_id, now)
             .await
         {
             return Err(state.fail_job(control, job_id, source, started).await);
@@ -371,74 +498,50 @@ impl WorkflowExecutor {
 
         loop {
             state
-                .process_completed_dispatches(self, &plan, &workflow_id, job_id)
+                .process_completed_dispatches(self, &plan, workflow_id, job_id, failure_mode)
                 .await;
 
             state.refresh(control, job_id, started).await;
-            if let Some(source) = state.take_terminal_error() {
+            if let Some(source) = state.take_fatal_error() {
                 return Err(state
-                    .fail_after_drain(self, &plan, &workflow_id, job_id, source, started)
+                    .fail_after_drain(self, &plan, workflow_id, job_id, source, started)
                     .await);
             }
-            let finished = match self.workflow_finished(job_id).await {
+            let finished = match self.workflow_finished(job_id, workflow_id).await {
                 Ok(finished) => finished,
                 Err(source) => {
                     return Err(state.fail_job(control, job_id, source, started).await);
                 }
             };
             if state.active_is_empty() && finished {
-                match self.first_failed_ticket_error(job_id).await {
+                match self.first_failed_ticket_error(job_id, workflow_id).await {
                     Ok(None) => {
                         return Ok(state.finish_success(control, job_id, started).await);
                     }
-                    Ok(Some(source)) | Err(source) => {
+                    Ok(Some(source)) => {
+                        let source = state.take_isolated_error().unwrap_or(source);
+                        return match failure_mode {
+                            RunFailureMode::AbortJob => {
+                                Err(state.fail_job(control, job_id, source, started).await)
+                            }
+                            RunFailureMode::ContinueIndependent => Err(state
+                                .finish_isolated_failure(control, job_id, source, started)
+                                .await),
+                        };
+                    }
+                    Err(source) => {
                         return Err(state.fail_job(control, job_id, source, started).await);
                     }
                 }
             }
 
-            let mut dispatched_or_failed = false;
-            let max_in_flight = plan.concurrency.max_in_flight_dispatches;
-            while state.has_dispatch_capacity(max_in_flight) {
-                let tickets = match self.ready_workflow_tickets(job_id, &workflow_id).await {
-                    Ok(tickets) if tickets.is_empty() => break,
-                    Ok(tickets) => tickets,
-                    Err(source) => {
-                        state.record_terminal_error(source);
-                        dispatched_or_failed = true;
-                        break;
-                    }
-                };
-                let mut batch_made_progress = false;
-                for ticket in tickets {
-                    if !state.has_dispatch_capacity(max_in_flight) {
-                        break;
-                    }
-                    match state.try_spawn_dispatch(self, ticket).await {
-                        Ok(SpawnOutcome::PreLeaseTerminal(source)) | Err(source) => {
-                            state.record_terminal_error(source);
-                            dispatched_or_failed = true;
-                            batch_made_progress = true;
-                            break;
-                        }
-                        Ok(SpawnOutcome::Spawned | SpawnOutcome::PreLeaseRetriable) => {
-                            dispatched_or_failed = true;
-                            batch_made_progress = true;
-                        }
-                        Ok(SpawnOutcome::CapacityDeferred) => {}
-                    }
-                }
-                if state.has_terminal_error() || !batch_made_progress {
-                    break;
-                }
-            }
-            if dispatched_or_failed {
+            if self.dispatch_ready_tickets(&mut state, &invocation).await {
                 continue;
             }
 
             if state.active_is_empty() {
                 match self
-                    .retry_delay(job_id, &workflow_id, self.control_plane.clock().now())
+                    .retry_delay(job_id, workflow_id, self.control_plane.clock().now())
                     .await
                 {
                     Ok(Some(delay)) => {
@@ -455,7 +558,9 @@ impl WorkflowExecutor {
                 ));
                 return Err(state.fail_job(control, job_id, source, started).await);
             }
-            state.wait_for_one(self, &plan, &workflow_id, job_id).await;
+            state
+                .wait_for_one(self, &plan, workflow_id, job_id, failure_mode)
+                .await;
         }
     }
 }

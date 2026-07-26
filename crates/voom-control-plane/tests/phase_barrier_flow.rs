@@ -535,6 +535,93 @@ async fn phase_barrier_records_committed_sibling_when_a_file_fails() {
     assert_eq!(job_state(&url, partial.job_id).await, "failed");
 }
 
+#[tokio::test]
+async fn phase_barrier_continue_blocks_failed_file_and_promotes_committed_sibling() {
+    let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
+    cargo_build_package("voom-ffprobe-worker").unwrap();
+    cargo_build_package("voom-verify-artifact-worker").unwrap();
+    cargo_build_package("voom-ffmpeg-worker").unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let good = root.join("Good.mp4");
+    let doomed = root.join("Doomed.mp4");
+    generate_h264_fixture(&good);
+    generate_h264_fixture(&doomed);
+    let db = NamedTempFile::new().unwrap();
+    let url = format!("sqlite://{}", db.path().display());
+    voom_store::init(&url).await.unwrap();
+    let pool = voom_store::connect(&url).await.unwrap();
+    let cp = ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap();
+    let good_file = scan_one(&cp, &good).await;
+    let doomed_file = scan_one(&cp, &doomed).await;
+    std::fs::write(&doomed, b"not a video anymore").unwrap();
+    let source = "policy \"video transcode hevc\" {\n  \
+        config { on_error: continue }\n  \
+        phase normalize { transcode video to hevc }\n  \
+        phase finalize { depends_on: [normalize] }\n}\n";
+    let policy = cp
+        .create_policy_document("video-transcode-hevc", source)
+        .await
+        .unwrap();
+    let input = cp
+        .create_policy_input_set(two_file_input(&[
+            ("good", good_file),
+            ("doomed", doomed_file),
+        ]))
+        .await
+        .unwrap();
+    let mut worker = TranscodeWorkerLaunch::start(&cp).await.unwrap();
+    let out_dir = root.join("out");
+
+    let failed = cp
+        .run_phase_barrier(
+            policy.version.id,
+            input.id,
+            ComplianceExecutionOptions {
+                transcode_staging_root: root.join("stage"),
+                transcode_target_dir: out_dir.clone(),
+                ..ComplianceExecutionOptions::default()
+            },
+        )
+        .await
+        .expect_err("continued ticket failure must keep the final job failed");
+    worker.shutdown().unwrap();
+    let partial = failed
+        .partial
+        .expect("continued failure reports partial rows");
+
+    assert!(
+        partial
+            .file_phases
+            .iter()
+            .any(|row| { row.branch_id == "Good" && row.outcome == FilePhaseOutcome::Committed })
+    );
+    assert!(
+        partial
+            .file_phases
+            .iter()
+            .any(|row| { row.branch_id == "Doomed" && row.outcome == FilePhaseOutcome::Blocked })
+    );
+    assert!(partial.file_phases.iter().any(|row| {
+        row.branch_id == "Good"
+            && row.phase_ordinal == 1
+            && row.outcome == FilePhaseOutcome::Skipped
+    }));
+    assert!(
+        partial
+            .file_phases
+            .iter()
+            .all(|row| row.branch_id != "Doomed" || row.phase_ordinal == 0),
+        "failed file must not enter the later phase"
+    );
+    assert_eq!(job_state(&url, partial.job_id).await, "failed");
+    assert!(out_dir.join("Good.default-hevc.hevc.mkv").is_file());
+    assert!(!out_dir.join("Doomed.default-hevc.hevc.mkv").exists());
+}
+
 /// Partial-barrier failure + resume (issue #165, spec §8). Two files transcode in
 /// one phase: `Good` commits, `Doomed` (corrupted after scan) fails and fails the
 /// whole job. After restoring `Doomed`'s bytes, resuming against the failed job

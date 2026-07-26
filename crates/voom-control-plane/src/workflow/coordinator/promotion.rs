@@ -354,6 +354,60 @@ impl ControlPlane {
         Ok(location_ids)
     }
 
+    pub(super) async fn promotion_location_ids_for_branches(
+        &self,
+        file_phases: &[FilePhaseSummary],
+        branches: &[String],
+    ) -> Result<Vec<FileLocationId>, VoomError> {
+        let branches = branches.iter().map(String::as_str).collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        let mut ticket_ids = HashSet::new();
+        let mut location_ids = Vec::new();
+        for row in file_phases {
+            if !branches.contains(row.branch_id.as_str()) {
+                continue;
+            }
+            ticket_ids.extend(row.ticket_ids.iter().copied());
+            if let Some(location_id) = row.produced_file_location_id
+                && seen.insert(location_id)
+            {
+                location_ids.push(location_id);
+            }
+        }
+        if ticket_ids.is_empty() {
+            return Ok(location_ids);
+        }
+        let ticket_ids = ticket_ids
+            .into_iter()
+            .map(|id| i64::try_from(id.0))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                VoomError::Internal(format!("promotion ticket id overflow: {error}"))
+            })?;
+        let ticket_ids = serde_json::to_string(&ticket_ids)
+            .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT json_extract(result, '$.result_file_location_id') FROM tickets \
+             WHERE id IN (SELECT value FROM json_each(?)) \
+               AND state = 'succeeded' AND result IS NOT NULL \
+               AND json_type(result, '$.result_file_location_id') = 'integer' \
+             ORDER BY id ASC",
+        )
+        .bind(ticket_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VoomError::database_context("branch promotion results", error))?;
+        for (id,) in rows {
+            let location_id = FileLocationId(u64::try_from(id).map_err(|error| {
+                VoomError::Internal(format!("promotion location id invalid: {error}"))
+            })?);
+            if seen.insert(location_id) {
+                location_ids.push(location_id);
+            }
+        }
+        Ok(location_ids)
+    }
+
     /// The directory of an asset's original scanned source: the earliest
     /// `file_version`'s first local-path location. `None` when the asset has no
     /// such location (it then promotes flat). Add-only commits keep the earliest

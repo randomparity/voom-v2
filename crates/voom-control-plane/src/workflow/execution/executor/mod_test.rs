@@ -350,7 +350,12 @@ async fn malformed_ready_ticket_payload_reports_read_error() {
     let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
 
     let err = executor
-        .submit_and_run_in_job(job_id, independent_hash_plan(0))
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "malformed-ready",
+            independent_hash_plan(0),
+            super::RunFailureMode::AbortJob,
+        )
         .await
         .unwrap_err();
 
@@ -390,13 +395,18 @@ async fn malformed_failure_event_payload_reports_event_id() {
 }
 
 #[tokio::test]
-async fn submit_and_run_in_job_leaves_job_open_and_accumulates_across_calls() {
+async fn invoked_runs_leave_job_open_and_accumulate_durable_counts() {
     let fixture = ExecutorFixture::with_ready_tickets(1).await;
     let job_id = fixture.open_workflow_job().await;
     let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
 
     let first = executor
-        .submit_and_run_in_job(job_id, independent_hash_plan(1))
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "first",
+            independent_hash_plan(1),
+            super::RunFailureMode::AbortJob,
+        )
         .await
         .unwrap();
     assert_eq!(first.job_id, job_id);
@@ -413,7 +423,12 @@ async fn submit_and_run_in_job_leaves_job_open_and_accumulates_across_calls() {
     );
 
     let second = executor
-        .submit_and_run_in_job(job_id, independent_hash_plan(1))
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "second",
+            independent_hash_plan(1),
+            super::RunFailureMode::AbortJob,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -427,7 +442,7 @@ async fn submit_and_run_in_job_leaves_job_open_and_accumulates_across_calls() {
 }
 
 #[tokio::test]
-async fn submit_and_run_in_job_drains_in_flight_dispatches_before_failing() {
+async fn aborting_invocation_drains_in_flight_dispatches_before_failing() {
     let mut fixture = ExecutorFixture::without_workers(3).await;
     fixture
         .register_worker(
@@ -449,7 +464,7 @@ async fn submit_and_run_in_job_drains_in_flight_dispatches_before_failing() {
     let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
 
     let err = executor
-        .submit_and_run_in_job(job_id, plan)
+        .submit_and_run_invocation_in_job(job_id, "drain", plan, super::RunFailureMode::AbortJob)
         .await
         .unwrap_err();
 
@@ -465,6 +480,86 @@ async fn submit_and_run_in_job_drains_in_flight_dispatches_before_failing() {
         0,
         "no dispatch may still be in flight (ticket left leased) once the runner returns"
     );
+}
+
+#[tokio::test]
+async fn continued_invocation_dispatches_every_independent_branch_and_leaves_job_open() {
+    let mut fixture = ExecutorFixture::without_workers(3).await;
+    fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Crash,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let mut plan = independent_hash_plan(3);
+    plan.concurrency.max_in_flight_dispatches = 1;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+
+    let error = executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "phase-0",
+            plan,
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.summary.dispatch_count, 3);
+    assert!(!error.job_failed);
+    assert_eq!(fixture.job_state(job_id).await, "open");
+}
+
+#[tokio::test]
+async fn later_invocation_ignores_a_continued_prior_failure() {
+    let mut fixture = ExecutorFixture::without_workers(1).await;
+    fixture
+        .register_worker(
+            "hash-worker",
+            OperationKind::HashFile,
+            1,
+            FakeBehavior::Crash,
+        )
+        .await;
+    fixture
+        .register_worker(
+            "identify-worker",
+            OperationKind::IdentifyMedia,
+            1,
+            FakeBehavior::Success,
+        )
+        .await;
+    let job_id = fixture.open_workflow_job().await;
+    let executor = fixture.executor_with_options(WorkflowExecutorOptions::for_tests());
+    executor
+        .submit_and_run_invocation_in_job(
+            job_id,
+            "phase-0",
+            independent_hash_plan(1),
+            super::RunFailureMode::ContinueIndependent,
+        )
+        .await
+        .unwrap_err();
+    let mut later = independent_hash_plan(1);
+    later.id = "later-identify-plan".to_owned();
+    later.nodes[0].id = "identify-0".to_owned();
+    later.nodes[0].operation = OperationKind::IdentifyMedia;
+
+    let summary = executor
+        .submit_and_run_invocation_in_job(job_id, "phase-1", later, super::RunFailureMode::AbortJob)
+        .await
+        .unwrap();
+
+    assert_eq!(summary.failure_count, 1);
+    assert_eq!(summary.ticket_count, 2);
+    assert_eq!(
+        summary.dispatch_count, 1,
+        "dispatch telemetry is local to this invocation"
+    );
+    assert_eq!(fixture.job_state(job_id).await, "open");
 }
 
 #[tokio::test]
@@ -1976,7 +2071,7 @@ impl ExecutorFixture {
 
     async fn seed_malformed_ready_workflow_ticket(&self, job_id: JobId) {
         let operation = OperationKind::HashFile;
-        let workflow_id = format!("workflow-{}", job_id.0);
+        let workflow_id = format!("workflow-{}-malformed-ready", job_id.0);
         let payload = WorkflowTicketPayload::new_for_test(
             &workflow_id,
             "executor-test-0",

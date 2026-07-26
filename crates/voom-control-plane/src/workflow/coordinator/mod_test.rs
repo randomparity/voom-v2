@@ -12,7 +12,7 @@ use voom_store::repo::identity::{
     ProducedBy,
 };
 use voom_store::repo::jobs::NewJob;
-use voom_store::repo::tickets::NewTicket;
+use voom_store::repo::tickets::{NewTicket, TicketState};
 use voom_store::repo::workflow_summaries::{
     FilePhaseOutcome, NewFilePhaseSummary, NewFileRunHistory, NewFileRunStart, NewWorkflowSummary,
 };
@@ -588,25 +588,8 @@ fn policy_with_run_if(trigger: voom_policy::RunIfTrigger) -> voom_policy::Compil
 }
 
 #[test]
-fn reject_unhandled_on_error_rejects_continue() {
-    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
-        voom_policy::ErrorStrategy::Continue,
-    )))
-    .unwrap_err();
-    assert_eq!(err.code(), "POLICY_VALIDATION_ERROR");
-    assert!(
-        err.to_string().contains("normalize"),
-        "names the phase: {err}"
-    );
-    assert!(
-        err.to_string().contains("continue"),
-        "names the strategy: {err}"
-    );
-}
-
-#[test]
-fn reject_unhandled_on_error_rejects_skip() {
-    let err = super::reject_unhandled_on_error(&policy_with_on_error(Some(
+fn reject_unpublished_on_error_rejects_skip() {
+    let err = super::reject_unpublished_on_error(&policy_with_on_error(Some(
         voom_policy::ErrorStrategy::Skip,
     )))
     .unwrap_err();
@@ -616,14 +599,59 @@ fn reject_unhandled_on_error_rejects_skip() {
 }
 
 #[test]
-fn reject_unhandled_on_error_allows_abort_and_unset() {
+fn reject_unpublished_on_error_allows_published_strategies_and_unset() {
     assert!(
-        super::reject_unhandled_on_error(&policy_with_on_error(Some(
+        super::reject_unpublished_on_error(&policy_with_on_error(Some(
+            voom_policy::ErrorStrategy::Continue
+        )))
+        .is_ok()
+    );
+    assert!(
+        super::reject_unpublished_on_error(&policy_with_on_error(Some(
             voom_policy::ErrorStrategy::Abort
         )))
         .is_ok()
     );
-    assert!(super::reject_unhandled_on_error(&policy_with_on_error(None)).is_ok());
+    assert!(super::reject_unpublished_on_error(&policy_with_on_error(None)).is_ok());
+}
+
+#[test]
+fn continued_disposition_blocks_failed_nodes_and_preserves_successful_nodes() {
+    let failed = super::continued_disposition(
+        &super::Disposition::Planned {
+            node_id: "failed".to_owned(),
+        },
+        &[TicketState::Failed],
+    )
+    .unwrap();
+    let succeeded = super::continued_disposition(
+        &super::Disposition::Planned {
+            node_id: "succeeded".to_owned(),
+        },
+        &[TicketState::Succeeded],
+    )
+    .unwrap();
+
+    let super::Disposition::Blocked = failed else {
+        panic!("failed node must be blocked");
+    };
+    let super::Disposition::Planned { node_id } = succeeded else {
+        panic!("successful node must remain planned");
+    };
+    assert_eq!(node_id, "succeeded");
+}
+
+#[test]
+fn continued_disposition_rejects_missing_or_non_terminal_ticket_state() {
+    let disposition = super::Disposition::Planned {
+        node_id: "node".to_owned(),
+    };
+
+    let missing = super::continued_disposition(&disposition, &[]).unwrap_err();
+    let ready = super::continued_disposition(&disposition, &[TicketState::Ready]).unwrap_err();
+
+    assert!(missing.to_string().contains("has no tickets"));
+    assert!(ready.to_string().contains("non-terminal"));
 }
 
 async fn open_workflow_job(cp: &crate::ControlPlane) -> JobId {
@@ -1703,7 +1731,7 @@ async fn resume_phase_barrier_rejects_unknown_prior_job() {
 }
 
 #[tokio::test]
-async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
+async fn resume_loads_legacy_continue_before_resume_state_validation() {
     let (cp, _tmp) = cp().await;
     let source = "policy \"on-error-guard\" {\n  config {\n    \
         languages: [\"eng\"]\n    on_error: continue\n  }\n  \
@@ -1762,8 +1790,9 @@ async fn resume_phase_barrier_rejects_unhandled_on_error_before_opening_job() {
         )
         .await
         .unwrap_err();
-    assert_eq!(err.source.code(), "POLICY_VALIDATION_ERROR");
-    // The on_error reject precedes open_job, so resume opens no new job — only the
+    assert_eq!(err.source.code(), "POLICY_EXECUTION_ERROR");
+    assert!(err.source.to_string().contains("resume state"));
+    // Resume validation still precedes opening the replacement job, so only the
     // pre-existing prior job remains.
     let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
         .fetch_one(&cp.pool)
@@ -1950,6 +1979,47 @@ async fn promotion_location_ids_rejects_negative_ticket_result_location_id() {
         err.to_string().contains("-7"),
         "error should include the invalid persisted value: {err}"
     );
+}
+
+#[tokio::test]
+async fn phase_ticket_lookup_ignores_matching_nodes_from_other_invocations() {
+    let (cp, _db) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let mut tickets = Vec::new();
+    for workflow_id in [
+        format!("workflow-{}-phase-0", job.id.0),
+        format!("workflow-{}-phase-1", job.id.0),
+    ] {
+        tickets.push(
+            cp.create_ticket(NewTicket {
+                job_id: Some(job.id),
+                kind: TicketOperation::new("synthetic.workflow.operation.test").unwrap(),
+                priority: 0,
+                payload: json!({
+                    "workflow_id": workflow_id,
+                    "node_id": "policy-node-normalize"
+                }),
+                max_attempts: 1,
+                created_at: T0,
+            })
+            .await
+            .unwrap(),
+        );
+    }
+
+    let found = cp
+        .ticket_ids_for_phase_node(job.id, 1, "policy-node-normalize")
+        .await
+        .unwrap();
+
+    assert_eq!(found, vec![tickets[1].id]);
 }
 
 #[test]
