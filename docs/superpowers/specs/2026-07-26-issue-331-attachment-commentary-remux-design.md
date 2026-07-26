@@ -185,7 +185,8 @@ attachments in source order.
 
 Validation compares item count, kind, ordinary-track identity, attachment
 filename/size/MIME identity, video presence, and default flags. A mismatch is a malformed worker
-result and prevents commit.
+result and prevents commit. Commentary disposition is compared for every selected ordinary track,
+even when only one track of that kind exists.
 
 ## Compatibility and migration
 
