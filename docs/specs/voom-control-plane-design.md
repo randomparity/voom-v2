@@ -746,14 +746,11 @@ order tracks [<target-list>] where <track-filter>
   the head of the track order, ahead of the existing group order. The optional
   `<target-list>` retains its group-ordering meaning for the remaining tracks.
 
-The forced flag is also addressable, but its DSL surface (a `forced … where`
-production and compiled `SetForced` operation) is **deferred**; ADR 0023
-delivers forced only at the wire (`RemuxSelection.forced_streams` /
-`clear_forced_streams`) and mkvmerge worker (`--forced-track-flag id:1|0`) layer
-for now. Until the planner follow-up lands, the two DSL forms above compile but
-are not yet plannable — `defaults … where` and `order tracks [<targets>] where`
-are inert, and bare `order tracks where <filter>` (no target list) is blocked at
-plan time — so policies should not adopt them in production until then.
+The forced flag is also addressable at the worker boundary, but its DSL surface
+(a `forced … where` production and compiled `SetForced` operation) is
+**deferred**. ADR 0023 delivers forced only at the wire
+(`RemuxSelection.forced_streams` / `clear_forced_streams`) and mkvmerge worker
+(`--forced-track-flag id:1|0`) layer for now.
 
 The `defaults … where` and `order tracks … where` filters **must select exactly
 one track at plan time**; zero or many matches fail the file with a plan-time
@@ -763,11 +760,10 @@ only the planner, resolving the filter against snapshot facts, can count
 matches. This is additive: the strategy form of `defaults` and the group form of
 `order tracks` are unchanged, and the compiled `SetDefaults` / `ReorderTracks`
 gain optional filter fields (absent ⇒ existing meaning). See ADR 0023 for the
-schema, wire (`RemuxSelection.head_streams` / `forced_streams` /
+schema, resolved per-file payload identity, wire
+(`RemuxSelection.head_streams` / `forced_streams` /
 `clear_forced_streams`), and mkvmerge (`--forced-track-flag`, head-pinned
-`--track-order`) contracts, and for the ownership split — this spec delta plus
-the compiler edges land first; filter resolution, the single-match diagnostic,
-and the deferred forced DSL land with the planner work.
+`--track-order`) contracts. The deferred forced DSL remains separate.
 
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 
