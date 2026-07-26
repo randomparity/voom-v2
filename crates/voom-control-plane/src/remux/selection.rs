@@ -105,7 +105,7 @@ fn reject_empty_audio(
 }
 
 fn default_refs(
-    defaults: &[ValidatedDefaultAction<'_>],
+    defaults: &[EffectiveDefaultAction<'_>],
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
 ) -> Result<(Vec<RemuxStreamRef>, Vec<RemuxStreamRef>), VoomError> {
@@ -113,11 +113,7 @@ fn default_refs(
     let mut clear_default_streams = Vec::new();
     for action in defaults {
         match *action {
-            ValidatedDefaultAction::ResolvedExplicit {
-                target,
-                selected_id,
-            }
-            | ValidatedDefaultAction::ResolvedBest {
+            EffectiveDefaultAction::Resolved {
                 target,
                 selected_id,
             } => {
@@ -134,7 +130,7 @@ fn default_refs(
                         .map(stream_ref),
                 );
             }
-            ValidatedDefaultAction::First { target } => {
+            EffectiveDefaultAction::First { target } => {
                 let kept_target = kept_target_streams(facts, keep_ids, target);
                 let Some(first) = kept_target
                     .iter()
@@ -150,11 +146,11 @@ fn default_refs(
                         .map(|stream| stream_ref(stream)),
                 );
             }
-            ValidatedDefaultAction::None { target } => {
+            EffectiveDefaultAction::None { target } => {
                 let kept_target = kept_target_streams(facts, keep_ids, target);
                 clear_default_streams.extend(kept_target.into_iter().map(stream_ref));
             }
-            ValidatedDefaultAction::Preserve { target } => {
+            EffectiveDefaultAction::Preserve { target } => {
                 let kept_target = kept_target_streams(facts, keep_ids, target);
                 default_streams.extend(
                     kept_target
@@ -199,12 +195,88 @@ fn kept_target_streams<'a>(
 }
 
 #[derive(Clone, Copy)]
-enum ValidatedDefaultAction<'a> {
+enum ClassifiedDefaultAction<'a> {
     ResolvedExplicit {
         target: TrackTarget,
         selected_id: &'a str,
     },
     ResolvedBest {
+        target: TrackTarget,
+        selected_id: &'a str,
+    },
+    UnresolvedBest {
+        target: TrackTarget,
+    },
+    First {
+        target: TrackTarget,
+    },
+    None {
+        target: TrackTarget,
+    },
+    Preserve {
+        target: TrackTarget,
+    },
+}
+
+impl<'a> ClassifiedDefaultAction<'a> {
+    fn target(self) -> TrackTarget {
+        match self {
+            Self::ResolvedExplicit { target, .. }
+            | Self::ResolvedBest { target, .. }
+            | Self::UnresolvedBest { target }
+            | Self::First { target }
+            | Self::None { target }
+            | Self::Preserve { target } => target,
+        }
+    }
+
+    fn is_resolved_explicit(self) -> bool {
+        match self {
+            Self::ResolvedExplicit { .. } => true,
+            Self::ResolvedBest { .. }
+            | Self::UnresolvedBest { .. }
+            | Self::First { .. }
+            | Self::None { .. }
+            | Self::Preserve { .. } => false,
+        }
+    }
+
+    fn is_best(self) -> bool {
+        match self {
+            Self::ResolvedBest { .. } | Self::UnresolvedBest { .. } => true,
+            Self::ResolvedExplicit { .. }
+            | Self::First { .. }
+            | Self::None { .. }
+            | Self::Preserve { .. } => false,
+        }
+    }
+
+    fn into_effective(self) -> Result<EffectiveDefaultAction<'a>, VoomError> {
+        match self {
+            Self::ResolvedExplicit {
+                target,
+                selected_id,
+            }
+            | Self::ResolvedBest {
+                target,
+                selected_id,
+            } => Ok(EffectiveDefaultAction::Resolved {
+                target,
+                selected_id,
+            }),
+            Self::UnresolvedBest { .. } => Err(VoomError::Config(
+                "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
+            )),
+            Self::First { target } => Ok(EffectiveDefaultAction::First { target }),
+            Self::None { target } => Ok(EffectiveDefaultAction::None { target }),
+            Self::Preserve { target } => Ok(EffectiveDefaultAction::Preserve { target }),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EffectiveDefaultAction<'a> {
+    Resolved {
         target: TrackTarget,
         selected_id: &'a str,
     },
@@ -219,47 +291,26 @@ enum ValidatedDefaultAction<'a> {
     },
 }
 
-impl ValidatedDefaultAction<'_> {
+impl EffectiveDefaultAction<'_> {
     fn target(self) -> TrackTarget {
         match self {
-            Self::ResolvedExplicit { target, .. }
-            | Self::ResolvedBest { target, .. }
+            Self::Resolved { target, .. }
             | Self::First { target }
             | Self::None { target }
             | Self::Preserve { target } => target,
-        }
-    }
-
-    fn is_resolved_explicit(self) -> bool {
-        match self {
-            Self::ResolvedExplicit { .. } => true,
-            Self::ResolvedBest { .. }
-            | Self::First { .. }
-            | Self::None { .. }
-            | Self::Preserve { .. } => false,
-        }
-    }
-
-    fn is_best(self) -> bool {
-        match self {
-            Self::ResolvedBest { .. } => true,
-            Self::ResolvedExplicit { .. }
-            | Self::First { .. }
-            | Self::None { .. }
-            | Self::Preserve { .. } => false,
         }
     }
 }
 
 fn effective_default_actions(
     defaults: &[voom_plan::remux::RemuxDefaultAction],
-) -> Result<Vec<ValidatedDefaultAction<'_>>, VoomError> {
-    let validated = defaults
+) -> Result<Vec<EffectiveDefaultAction<'_>>, VoomError> {
+    let classified = defaults
         .iter()
-        .map(validate_default_action)
+        .map(classify_default_action)
         .collect::<Result<Vec<_>, _>>()?;
     let mut explicit_targets = Vec::new();
-    for action in &validated {
+    for action in &classified {
         if !action.is_resolved_explicit() {
             continue;
         }
@@ -272,45 +323,48 @@ fn effective_default_actions(
         }
         explicit_targets.push(target);
     }
-    let effective = validated
+    let effective = classified
         .into_iter()
         .filter(|action| {
             action.is_resolved_explicit() || !explicit_targets.contains(&action.target())
         })
         .collect::<Vec<_>>();
     validate_best_default_strategy_conflicts(&effective)?;
-    Ok(effective)
+    effective
+        .into_iter()
+        .map(ClassifiedDefaultAction::into_effective)
+        .collect()
 }
 
-fn validate_default_action(
+fn classify_default_action(
     action: &voom_plan::remux::RemuxDefaultAction,
-) -> Result<ValidatedDefaultAction<'_>, VoomError> {
+) -> Result<ClassifiedDefaultAction<'_>, VoomError> {
     match (
         action.strategy,
         action.selected_snapshot_stream_id.as_deref(),
     ) {
         (DefaultStrategy::Preserve, Some(selected_id)) => {
-            Ok(ValidatedDefaultAction::ResolvedExplicit {
+            Ok(ClassifiedDefaultAction::ResolvedExplicit {
                 target: action.target,
                 selected_id,
             })
         }
-        (DefaultStrategy::Best, Some(selected_id)) => Ok(ValidatedDefaultAction::ResolvedBest {
+        (DefaultStrategy::Best, Some(selected_id)) => Ok(ClassifiedDefaultAction::ResolvedBest {
             target: action.target,
             selected_id,
         }),
-        (DefaultStrategy::First, None) => Ok(ValidatedDefaultAction::First {
+        (DefaultStrategy::First, None) => Ok(ClassifiedDefaultAction::First {
             target: action.target,
         }),
-        (DefaultStrategy::None, None) => Ok(ValidatedDefaultAction::None {
+        (DefaultStrategy::None, None) => Ok(ClassifiedDefaultAction::None {
             target: action.target,
         }),
-        (DefaultStrategy::Preserve, None) => Ok(ValidatedDefaultAction::Preserve {
+        (DefaultStrategy::Preserve, None) => Ok(ClassifiedDefaultAction::Preserve {
             target: action.target,
         }),
-        (DefaultStrategy::Best, None) => Err(VoomError::Config(
-            "default strategy best requires a resolved selected_snapshot_stream_id".to_owned(),
-        )),
+        (DefaultStrategy::Best, None) => Ok(ClassifiedDefaultAction::UnresolvedBest {
+            target: action.target,
+        }),
         (DefaultStrategy::First, Some(_)) => Err(VoomError::Config(
             "selected_snapshot_stream_id is invalid with default strategy first".to_owned(),
         )),
@@ -321,7 +375,7 @@ fn validate_default_action(
 }
 
 fn validate_best_default_strategy_conflicts(
-    defaults: &[ValidatedDefaultAction<'_>],
+    defaults: &[ClassifiedDefaultAction<'_>],
 ) -> Result<(), VoomError> {
     for action in defaults {
         if !action.is_best() {
