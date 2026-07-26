@@ -483,17 +483,35 @@ fn build_args_head_stream_precedes_group_order() {
 }
 
 #[test]
-fn build_args_ignores_head_stream_not_kept() {
+fn build_args_rejects_head_stream_not_kept() {
     let mut selection = base_selection(vec![stream(0)]);
     selection.head_streams = vec![stream(1)];
     let request = remux_request(selection);
     let mapping = MkvmergeTrackMapping::from_pairs([(0, 7), (1, 12)]);
 
+    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+
+    assert!(err.to_string().contains("head_streams must be a subset"));
+}
+
+#[test]
+fn build_args_uses_provider_index_order_for_group_remainder() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 7, "type": "video", "properties": {"number": 1}},
+            {"id": 12, "type": "audio", "properties": {"number": 2}},
+            {"id": 14, "type": "subtitles", "properties": {"number": 3}}
+        ]
+    });
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let mut selection = base_selection(vec![stream(2), stream(0), stream(1)]);
+    selection.track_order = vec![RemuxTrackGroup::Video];
+    let request = remux_request(selection);
+
     let args = build_mkvmerge_args(&request, &mapping).unwrap();
 
-    let order = first_arg_value(&args, "--track-order").unwrap();
     assert_eq!(
-        order, "0:7",
-        "unkept head stream must not be pinned: {order}"
+        first_arg_value(&args, "--track-order"),
+        Some("0:7,0:12,0:14")
     );
 }

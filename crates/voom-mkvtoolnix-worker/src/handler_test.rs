@@ -277,6 +277,53 @@ async fn handler_rejects_clear_default_streams_outside_keep_streams() {
 }
 
 #[tokio::test]
+async fn handler_rejects_duplicate_head_refs_before_provider_run() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.head_streams = vec![audio_ref("stream-1", 1), audio_ref("stream-1", 1)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("duplicate snapshot_stream_id"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn handler_rejects_head_streams_outside_keep_streams_before_provider_run() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.head_streams = vec![audio_ref("stream-2", 2)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(err.to_string().contains("head_streams must be a subset"));
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
+async fn handler_rejects_attachment_head_before_remux_run() {
+    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf", "font/ttf").await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        attachment_ref("stream-2", 2),
+    ];
+    request.selection.head_streams = vec![attachment_ref("stream-2", 2)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
+    assert!(
+        err.to_string()
+            .contains("head_streams cannot contain attachments")
+    );
+    assert!(!tokio::fs::try_exists(&request.output.path).await.unwrap());
+}
+
+#[tokio::test]
 async fn handler_rejects_input_drift_after_provider_run() {
     let fixture = remux_fixture_with_fake_mkvmerge_that_mutates_input().await;
 
@@ -536,6 +583,36 @@ async fn handler_accepts_output_reordered_by_track_order() {
 
     assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
     assert_eq!(result.default_snapshot_stream_ids, ["stream-1"]);
+}
+
+#[tokio::test]
+async fn handler_accepts_output_reordered_by_head_selection() {
+    let fixture = remux_fixture_with_output_specs(vec![
+        output_track("audio", true),
+        output_track("video", false),
+    ])
+    .await;
+    let mut request = fixture.request;
+    request.selection.head_streams = vec![audio_ref("stream-1", 1)];
+
+    let result = handle_remux(&request, &fixture.config).await.unwrap();
+
+    assert_eq!(result.kept_snapshot_stream_ids, ["stream-0", "stream-1"]);
+}
+
+#[tokio::test]
+async fn handler_rejects_output_that_ignores_head_selection() {
+    let fixture = remux_fixture().await;
+    let mut request = fixture.request;
+    request.selection.head_streams = vec![audio_ref("stream-1", 1)];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(
+        err.to_string().contains("selected stream mismatch"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
