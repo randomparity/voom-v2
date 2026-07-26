@@ -120,7 +120,7 @@ async fn audio_extract_flow_verifies_commits_and_adds_sidecar_to_source_bundle()
 }
 
 #[tokio::test]
-async fn audio_extract_multi_match_blocks_before_sidecar_commit() {
+async fn audio_extract_multi_match_plans_without_sidecar_commit() {
     let _guard = AUDIO_EXTRACT_FLOW_LOCK.lock().await;
     require_command("ffmpeg", &["-version"]);
     cargo_build_package("voom-ffprobe-worker").unwrap();
@@ -167,12 +167,7 @@ async fn audio_extract_multi_match_blocks_before_sidecar_commit() {
         plan.plan.nodes[0].operation_kind,
         PlanOperationKind::ExtractAudio
     );
-    assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Blocked);
-    assert!(
-        plan.plan.nodes[0]
-            .status_reason
-            .contains("multiple audio streams")
-    );
+    assert_eq!(plan.plan.nodes[0].status, voom_plan::NodeStatus::Planned);
     assert_table_count(&pool, "artifact_commit_records", 0).await;
     assert!(!tmp.path().join("out").exists());
 }

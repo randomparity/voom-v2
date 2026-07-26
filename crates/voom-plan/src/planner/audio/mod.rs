@@ -6,12 +6,13 @@ mod selection;
 
 pub use payload::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioOperationPayload,
-    AudioOperationType, AudioPayloadError,
+    AudioOperationType, AudioPayloadError, ExtractAudioOutputDescriptor, extract_output_id,
 };
 pub use selection::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
-    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    selected_audio_streams, stream_facts, synthesize_audio_shape, transcode_audio_shape,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_outputs, extract_audio_shape,
+    extraction_role, selected_audio_streams, stream_facts, synthesize_audio_shape,
+    transcode_audio_shape,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
@@ -28,10 +29,12 @@ pub(super) fn plan_transcode(
     let operation_kind = PlanOperationKind::TranscodeAudio;
     let payload = AudioOperationPayload {
         operation_type: AudioOperationType::TranscodeAudio,
+        operation_id: None,
         target_codec: target_codec.to_owned(),
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
+        outputs: None,
         target_channels: None,
     }
     .into_value();
@@ -74,20 +77,24 @@ pub(super) fn plan_extract(
     target_codec: &str,
     container: &str,
     filter: Option<&TrackFilter>,
+    operation_id: &str,
 ) -> OperationPlan {
     let operation_kind = PlanOperationKind::ExtractAudio;
+    let outputs = extract_audio_outputs(snapshot, filter, operation_id, target_codec);
     let payload = AudioOperationPayload {
         operation_type: AudioOperationType::ExtractAudio,
+        operation_id: Some(operation_id.to_owned()),
         target_codec: target_codec.to_owned(),
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
+        outputs: outputs.clone().ok(),
         target_channels: None,
     }
     .into_value();
     let observed_state = audio_observed_state(snapshot, filter);
     let (status, status_reason, capability, diagnostic) =
-        match extract_audio_shape(snapshot, filter) {
+        match outputs.map_or_else(AudioPlanShape::Blocked, |_| AudioPlanShape::Planned) {
             AudioPlanShape::NoOp => (
                 NodeStatus::NoOp,
                 format!("selected audio is already extracted as {target_codec} in {container}"),
@@ -131,10 +138,12 @@ pub(super) fn plan_synthesize(
     let operation_kind = PlanOperationKind::TranscodeAudio;
     let payload = AudioOperationPayload {
         operation_type: AudioOperationType::SynthesizeAudio,
+        operation_id: None,
         target_codec: target_codec.to_owned(),
         container: container.to_owned(),
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         filter: filter.cloned(),
+        outputs: None,
         target_channels: Some(target_channels),
     }
     .into_value();
@@ -296,10 +305,6 @@ fn audio_block_diagnostic(
                 "transcode_audio selector matched zero audio streams"
             },
         ),
-        AudioPlanningBlock::MultipleMatches => (
-            PlanningDiagnosticCode::UnsupportedMediaShape,
-            "extract_audio selector matched multiple audio streams",
-        ),
         AudioPlanningBlock::NoVideo => (
             PlanningDiagnosticCode::UnsupportedMediaShape,
             "audio planning requires at least one video stream",
@@ -307,6 +312,10 @@ fn audio_block_diagnostic(
         AudioPlanningBlock::UnsupportedMediaShape => (
             PlanningDiagnosticCode::UnsupportedMediaShape,
             "media shape is not supported by audio planning",
+        ),
+        AudioPlanningBlock::MultipleMatches => (
+            PlanningDiagnosticCode::UnsupportedMediaShape,
+            "extract_audio selector matched multiple audio streams",
         ),
         AudioPlanningBlock::SynthesisNotDownmix => (
             PlanningDiagnosticCode::UnsupportedMediaShape,

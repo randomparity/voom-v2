@@ -4,10 +4,11 @@ use voom_policy::ComparisonOp;
 
 use super::{
     AudioBundleRole, AudioDispositionFact, AudioPlanShape, AudioPlanningBlock,
-    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape, extraction_role,
-    stream_facts, synthesize_audio_shape, transcode_audio_shape,
+    SnapshotAudioStreamFact, evaluate_audio_filter, extract_audio_shape,
+    extract_output_name_suffixes, extraction_role, stream_facts, synthesize_audio_shape,
+    transcode_audio_shape,
 };
-use crate::planner::audio::AUDIO_TRANSCODE_CONTAINER;
+use crate::planner::audio::{AUDIO_TRANSCODE_CONTAINER, ExtractAudioOutputDescriptor};
 
 fn surround_fact() -> SnapshotAudioStreamFact {
     SnapshotAudioStreamFact {
@@ -105,6 +106,45 @@ fn stream_facts_parse_audio_streams_with_disposition_commentary() {
             },
             commentary: Some(true),
         }]
+    );
+}
+
+#[test]
+fn stream_facts_reject_duplicate_provider_indexes() {
+    let snapshot = snapshot_with_audio_facts(vec![
+        audio_fact(Some(false)),
+        SnapshotAudioStreamFact {
+            snapshot_stream_id: "stream-2".to_owned(),
+            ..audio_fact(Some(false))
+        },
+    ]);
+
+    assert_eq!(
+        stream_facts(&snapshot),
+        Err(AudioPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
+fn extract_names_resolve_collision_created_by_first_suffix_pass() {
+    let outputs = [
+        output_descriptor("Audio/1", "extract_output_deadbeefdeadbeef"),
+        output_descriptor("audio:1", "extract_output_cafebabecafebabe"),
+        output_descriptor(
+            "audio-1-deadbeefdeadbeef",
+            "extract_output_0123456789abcdef",
+        ),
+    ];
+
+    let names = extract_output_name_suffixes(&outputs, "opus").unwrap();
+
+    assert_eq!(
+        names,
+        vec![
+            "Audio-1-deadbeefdeadbeef.opus.ogg",
+            "audio-1-cafebabecafebabe.opus.ogg",
+            "audio-1-deadbeefdeadbeef-0123456789abcdef.opus.ogg",
+        ]
     );
 }
 
@@ -291,6 +331,19 @@ fn audio_fact(commentary: Option<bool>) -> SnapshotAudioStreamFact {
             commentary,
         },
         commentary,
+    }
+}
+
+fn output_descriptor(
+    source_snapshot_stream_id: &str,
+    output_id: &str,
+) -> ExtractAudioOutputDescriptor {
+    ExtractAudioOutputDescriptor {
+        output_id: output_id.to_owned(),
+        source_snapshot_stream_id: source_snapshot_stream_id.to_owned(),
+        source_provider_stream_index: 1,
+        name_suffix: String::new(),
+        bundle_role: AudioBundleRole::ExternalAudio,
     }
 }
 

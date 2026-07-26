@@ -35,10 +35,11 @@ Tests first:
 - Zero matches remain blocked; one match remains planned.
 - Multiple known-role matches plan one descriptor each.
 - Any unknown role or duplicate provider index blocks the whole node.
-- Every plural output receives a deterministic fixed-width hash suffix while a
-  one-output name remains unchanged.
-- A crafted base that would collide with a selectively suffixed name remains
-  unique, and a final normalized-name uniqueness check fails closed.
+- Unique and one-output names remain unchanged; every member of a normalized
+  collision group receives a deterministic fixed-width hash suffix.
+- A deterministically constructed base that collides with a first-pass
+  suffixed name is resolved by another pass, and an all-suffixed normalized
+  collision fails closed.
 - Repeated plans emit identical operation/output identities and an exact known
   output-ID preimage has the documented value.
 
@@ -55,8 +56,8 @@ Implementation:
 - Add typed plan output descriptors and additive optional payload fields.
 - Use the deterministic node ID as `operation_id`.
 - Generate exact domain-separated `extract_output_...` IDs.
-- Build all plural suffixes after sanitization and case folding, then assert
-  final normalized-name uniqueness.
+- Iteratively suffix unsuffixed members of final normalized-name collision
+  groups; fail closed if a collision remains with no unsuffixed member.
 
 Verification:
 

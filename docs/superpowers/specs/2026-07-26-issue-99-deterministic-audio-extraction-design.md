@@ -129,20 +129,21 @@ Collision detection happens after this complete sanitization and after ASCII
 case-folding, matching case-insensitive target filesystems. No later stage may
 sanitize the descriptor suffix again.
 
-For a singleton operation, the name is unchanged. This preserves the existing
-one-output behavior. For every output in a plural operation, the planner
-appends the output identity's 16 hexadecimal characters:
+Names that are unique after sanitization and case-folding remain unchanged,
+including every singleton. For every member of an initial collision group, the
+planner appends the output identity's 16 hexadecimal characters:
 
 ```text
 <sanitized-id>-<output-hash>.opus.ogg
 ```
 
-The hash has a fixed width and every plural member carries one. Two final names
-can therefore be equal only if both their sanitized bases and truncated output
-hashes are equal. The planner performs one final ASCII-case-folded uniqueness
-check over the emitted names and blocks instead of emitting aliases if that
-cryptographic collision ever occurs. Descriptors remain ordered by provider
-stream index, not by their filenames.
+Suffixing can collide with another descriptor's previously unique base. The
+planner therefore repeats collision detection over the complete final,
+ASCII-case-folded names. Any still-unsuffixed member of a new collision receives
+its own fixed-width hash suffix. If a collision contains only already-suffixed
+members, the truncated output hashes themselves collided and planning blocks
+instead of emitting aliases. Descriptors remain ordered by provider stream
+index, not by their filenames.
 
 ## Worker request and result
 
@@ -298,9 +299,9 @@ release rule.
 
 - Planner behavior tests cover bare and broad selectors, canonical ordering
   despite shuffled JSON, zero/one/many matches, unknown roles, duplicate
-  indexes, deterministic plural names after sanitization/case-folding,
-  second-order collision attempts, final uniqueness, exact output-ID preimages,
-  and identical identities across repeated plans.
+  indexes, deterministic collision names after sanitization/case-folding,
+  a constructed second-order collision, final uniqueness, exact output-ID
+  preimages, and identical identities across repeated plans.
 - Payload tests read historical extract payloads without descriptors and
   round-trip new ordered descriptors.
 - Workflow tests generate a real plural plan, bridge/render/persist/reload its

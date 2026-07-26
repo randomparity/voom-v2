@@ -44,12 +44,13 @@ design. Identity is fixed before ticket creation and reused by retry/resume.
 ### Detect final-name collisions
 
 The one-output suffix remains
-`<sanitized-stream-id>.opus.ogg`. For a plural operation, every descriptor
-receives its fixed-width output hash suffix after the exact sanitization and
-ASCII case-folding consumed by target paths. Fixed-width trailing hashes make
-the rewrite injective unless the truncated output hash itself collides. A final
-global normalized-name uniqueness assertion fails closed in that case. No
-later layer re-sanitizes descriptor names.
+`<sanitized-stream-id>.opus.ogg`. Unique plural names also remain unchanged.
+Every member of a collision group receives its fixed-width output hash suffix
+after the exact sanitization and ASCII case-folding consumed by target paths.
+Collision detection repeats over rewritten names so a suffix cannot alias
+another descriptor's prior base. A collision containing only already-suffixed
+members fails closed as a truncated-hash collision. No later layer re-sanitizes
+descriptor names.
 
 ### Evolve the worker contract additively
 
@@ -82,7 +83,7 @@ No grammar or compiled-policy change is made.
 - Zero matches and malformed/insufficient source identity still fail visibly
   before execution.
 - One-match policy behavior, target naming, and legacy singular JSON remain
-  readable and unchanged. Plural names always carry output hashes.
+  readable and unchanged. Unique plural names are unchanged as well.
 - Worker execution can produce every planned sidecar under one operation while
   the host cannot accidentally commit a subset before #337.
 - The worker wire shape contains a redundant first-output projection. The
