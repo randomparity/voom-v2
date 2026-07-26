@@ -6,12 +6,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use time::OffsetDateTime;
 use voom_core::{ErrorCode, FailureClass, LeaseId};
 use voom_worker_protocol::{
-    AudioExpectedFacts, AudioObservedFacts, ExtractAudioRequest, ExtractAudioResult,
-    ExtractAudioStatus, OperationDispatch, OperationFuture, OperationHandler, OperationKind,
-    OperationRequest, OperationResponse, ProgressFrame, ProtocolError, TranscodeAudioRequest,
-    TranscodeAudioResult, TranscodeAudioStatus, TranscodeVideoExpectedFacts,
-    TranscodeVideoObservedFacts, TranscodeVideoProfile, TranscodeVideoRequest,
-    TranscodeVideoResult, TranscodeVideoStatus,
+    AudioExpectedFacts, AudioObservedFacts, ExtractAudioOutputDescriptor, ExtractAudioOutputResult,
+    ExtractAudioRequest, ExtractAudioResult, ExtractAudioStatus, OperationDispatch,
+    OperationFuture, OperationHandler, OperationKind, OperationRequest, OperationResponse,
+    ProgressFrame, ProtocolError, TranscodeAudioRequest, TranscodeAudioResult,
+    TranscodeAudioStatus, TranscodeVideoExpectedFacts, TranscodeVideoObservedFacts,
+    TranscodeVideoProfile, TranscodeVideoRequest, TranscodeVideoResult, TranscodeVideoStatus,
+    validate_extract_audio_request, validate_extract_audio_result,
 };
 
 use crate::ffmpeg::{
@@ -513,45 +514,98 @@ pub async fn handle_extract_audio(
     request: &ExtractAudioRequest,
     config: &FfmpegConfig,
 ) -> Result<ExtractAudioResult, ExtractAudioError> {
-    if request.output.overwrite {
-        return Err(config_invalid(
-            "request",
-            "overwrite must be false".to_owned(),
-        ));
-    }
     validate_extract_audio_contract(request)?;
     let input_path = PathBuf::from(&request.input.path);
-    let output_path = PathBuf::from(&request.output.path);
-    let input_pre = prepare_audio_operation(
-        &input_path,
-        &output_path,
-        Path::new(&request.output.staging_root),
-        &request.input.expected,
-    )
-    .await?;
-    let probe = run_ffmpeg_extract_audio(config, &input_path, &output_path, request)
-        .await
-        .map_err(TranscodeVideoError::from)?;
-    let (input_post, output) =
-        finalize_audio_operation(&input_path, &output_path, &input_pre).await?;
-
-    Ok(ExtractAudioResult {
+    let targets = extract_audio_targets(request);
+    let input_pre = prepare_extract_audio_operation(&input_path, &targets, request).await?;
+    let mut outputs = Vec::with_capacity(targets.len());
+    for target in &targets {
+        outputs.push(execute_extract_audio_target(config, &input_path, request, target).await?);
+    }
+    let input_post = observe_audio_file_facts(&input_path).await?;
+    verify_audio_observed_match("input_post", &input_pre, &input_post)?;
+    let Some(first) = outputs.first() else {
+        return Err(config_invalid(
+            "request",
+            "extract_audio must contain at least one output".to_owned(),
+        ));
+    };
+    let result = ExtractAudioResult {
         status: ExtractAudioStatus::Extracted,
         provider: PROVIDER.to_owned(),
         provider_version: config.provider_version.clone(),
         input_pre,
         input_post,
+        output: first.output.clone(),
+        output_container: first.output_container.clone(),
+        output_audio_codec: first.output_audio_codec.clone(),
+        selected_snapshot_stream_id: first.selection.snapshot_stream_id.clone(),
+        output_language: first.output_language.clone(),
+        output_title: first.output_title.clone(),
+        outputs: request.outputs.as_ref().map(|_| outputs),
+    };
+    validate_extract_audio_result(request, &result)
+        .map_err(|error| malformed_worker_result("result_contract", error.to_string()))?;
+    Ok(result)
+}
+
+fn extract_audio_targets(request: &ExtractAudioRequest) -> Vec<ExtractAudioOutputDescriptor> {
+    request.outputs.clone().unwrap_or_else(|| {
+        vec![ExtractAudioOutputDescriptor {
+            output_id: "legacy_singleton".to_owned(),
+            selection: request.selection.clone(),
+            output: request.output.clone(),
+        }]
+    })
+}
+
+async fn prepare_extract_audio_operation(
+    input_path: &Path,
+    targets: &[ExtractAudioOutputDescriptor],
+    request: &ExtractAudioRequest,
+) -> Result<AudioObservedFacts, TranscodeVideoError> {
+    reject_option_like_path("input_path", input_path)?;
+    for target in targets {
+        let output_path = Path::new(&target.output.path);
+        reject_option_like_path("output_path", output_path)?;
+        validate_staging_path(Path::new(&target.output.staging_root), output_path)?;
+        validate_output_missing(output_path).await?;
+    }
+    let input_pre = observe_audio_file_facts(input_path).await?;
+    verify_audio_expected_facts("input_pre", &input_pre, &request.input.expected)?;
+    Ok(input_pre)
+}
+
+async fn execute_extract_audio_target(
+    config: &FfmpegConfig,
+    input_path: &Path,
+    request: &ExtractAudioRequest,
+    target: &ExtractAudioOutputDescriptor,
+) -> Result<ExtractAudioOutputResult, TranscodeVideoError> {
+    let output_path = Path::new(&target.output.path);
+    let singleton = ExtractAudioRequest {
+        input: request.input.clone(),
+        output: target.output.clone(),
+        selection: target.selection.clone(),
+        outputs: None,
+    };
+    let probe = run_ffmpeg_extract_audio(config, input_path, output_path, &singleton)
+        .await
+        .map_err(TranscodeVideoError::from)?;
+    let output = observe_audio_file_facts(output_path).await?;
+    Ok(ExtractAudioOutputResult {
+        output_id: target.output_id.clone(),
+        selection: target.selection.clone(),
+        path: target.output.path.clone(),
         output,
         output_container: probe.container,
         output_audio_codec: probe
             .audio_codecs
             .first()
             .cloned()
-            .unwrap_or_else(|| request.output.audio_codec.clone()),
-        selected_snapshot_stream_id: request.selection.snapshot_stream_id.clone(),
+            .unwrap_or_else(|| target.output.audio_codec.clone()),
         output_language: probe.output_language,
         output_title: probe.output_title,
-        outputs: None,
     })
 }
 
@@ -689,13 +743,8 @@ fn validate_transcode_audio_contract(
 }
 
 fn validate_extract_audio_contract(request: &ExtractAudioRequest) -> Result<(), ExtractAudioError> {
-    if request.output.container != "ogg" || request.output.audio_codec != "opus" {
-        return Err(config_invalid(
-            "request",
-            "extract_audio output must request opus in ogg".to_owned(),
-        ));
-    }
-    Ok(())
+    validate_extract_audio_request(request)
+        .map_err(|error| config_invalid("request", error.to_string()))
 }
 
 async fn validate_output_missing(output_path: &Path) -> Result<(), TranscodeVideoError> {
