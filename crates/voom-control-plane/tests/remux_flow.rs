@@ -24,6 +24,8 @@ policy "remux track selection" {
   phase normalize {
     container mkv
     keep audio where language in ["eng", "und"]
+    remove audio where commentary
+    keep attachment where font
     remove subtitle where forced
     order tracks [video, audio, subtitle]
     defaults audio: first
@@ -155,7 +157,8 @@ async fn assert_scanned_stream_facts(
             .iter()
             .filter(|stream| stream["kind"].as_str() == Some("video"))
             .count(),
-        1
+        1,
+        "unexpected normalized source streams: {streams:#?}"
     );
     assert!(
         streams
@@ -172,6 +175,13 @@ async fn assert_scanned_stream_facts(
             .count()
             >= 2
     );
+    assert_eq!(
+        streams
+            .iter()
+            .filter(|stream| stream["kind"].as_str() == Some("attachment"))
+            .count(),
+        2
+    );
     assert!(streams.iter().all(|stream| {
         stream["id"]
             .as_str()
@@ -179,6 +189,22 @@ async fn assert_scanned_stream_facts(
     }));
     assert!(streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("subtitle") && stream["disposition"]["forced"] == true
+    }));
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("audio") && stream["disposition"]["commentary"] == true
+    }));
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("audio") && stream["disposition"]["commentary"] == false
+    }));
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("attachment")
+            && stream["filename"] == "OpenSans.ttf"
+            && stream["mime_type"] == "font/ttf"
+    }));
+    assert!(streams.iter().any(|stream| {
+        stream["kind"].as_str() == Some("attachment")
+            && stream["filename"] == "cover.bin"
+            && stream["mime_type"] == "application/octet-stream"
     }));
 }
 
@@ -200,7 +226,9 @@ async fn assert_remux_execution_result(
     assert!(staged_artifact_handle_id > 0);
     assert!(verification_id > 0);
     assert!(commit_record_id > 0);
-    assert!(out_dir.join("Movie.remux.mkv").is_file());
+    let output_path = out_dir.join("Movie.remux.mkv");
+    assert!(output_path.is_file());
+    assert_mkvmerge_attachment_inventory(&output_path);
 
     let pool = voom_store::connect(url).await.unwrap();
     assert_row_exists(
@@ -244,6 +272,11 @@ async fn assert_remux_execution_result(
         "matroska,webm"
     );
     let streams = result_snapshot.payload["streams"].as_array().unwrap();
+    assert_remux_result_streams(streams);
+    (result_file_version_id, result_media_snapshot_id)
+}
+
+fn assert_remux_result_streams(streams: &[serde_json::Value]) {
     assert!(streams.iter().all(|stream| {
         stream["id"]
             .as_str()
@@ -256,23 +289,62 @@ async fn assert_remux_execution_result(
             .count(),
         1
     );
-    assert!(streams.iter().any(|stream| {
-        stream["kind"].as_str() == Some("audio")
-            && stream["language"].as_str() == Some("eng")
-            && stream["disposition"]["default"] == true
-    }));
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["video", "audio", "subtitle", "attachment"]
+    );
+    let audio = streams
+        .iter()
+        .filter(|stream| stream["kind"].as_str() == Some("audio"))
+        .collect::<Vec<_>>();
+    assert_eq!(audio.len(), 1);
+    assert!(
+        audio[0]["language"].as_str() == Some("eng")
+            && audio[0]["disposition"]["commentary"] == false
+            && audio[0]["disposition"]["default"] == true
+    );
     assert!(!streams.iter().any(|stream| {
-        stream["kind"].as_str() == Some("audio") && stream["language"].as_str() == Some("spa")
+        stream["kind"].as_str() == Some("audio") && stream["disposition"]["commentary"] == true
     }));
     assert!(streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("subtitle")
             && stream["language"].as_str() == Some("eng")
-            && stream["disposition"]["forced"] != true
+            && stream["disposition"]["default"] == false
+            && stream["disposition"]["forced"] == false
     }));
     assert!(!streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("subtitle") && stream["disposition"]["forced"] == true
     }));
-    (result_file_version_id, result_media_snapshot_id)
+    let attachment = streams
+        .iter()
+        .filter(|stream| stream["kind"].as_str() == Some("attachment"))
+        .collect::<Vec<_>>();
+    assert_eq!(attachment.len(), 1);
+    assert_eq!(attachment[0]["filename"], "OpenSans.ttf");
+    assert_eq!(attachment[0]["mime_type"], "font/ttf");
+}
+
+fn assert_mkvmerge_attachment_inventory(path: &Path) {
+    let output = Command::new("mkvmerge")
+        .arg("--identify")
+        .arg("--identification-format")
+        .arg("json")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mkvmerge output inspection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let identify: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let attachments = identify["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["file_name"], "OpenSans.ttf");
+    assert_eq!(attachments[0]["content_type"], "font/ttf");
 }
 
 async fn assert_result_replans_from_authoritative_snapshot(
@@ -350,8 +422,11 @@ fn require_command(program: &str, args: &[&str]) {
 
 fn generate_remux_fixture(path: &Path) {
     let dir = path.parent().unwrap();
+    let base = dir.join("Movie.base.mkv");
     let subtitle = dir.join("english.srt");
     let forced_subtitle = dir.join("forced.srt");
+    let font = dir.join("OpenSans.ttf");
+    let cover = dir.join("cover.bin");
     std::fs::write(
         &subtitle,
         "1\n00:00:00,000 --> 00:00:00,900\nEnglish subtitle\n",
@@ -362,6 +437,8 @@ fn generate_remux_fixture(path: &Path) {
         "1\n00:00:00,000 --> 00:00:00,900\nForced subtitle\n",
     )
     .unwrap();
+    std::fs::write(&font, b"generated font attachment fixture").unwrap();
+    std::fs::write(&cover, b"generated cover attachment fixture").unwrap();
 
     let status = Command::new("ffmpeg")
         .args([
@@ -408,20 +485,50 @@ fn generate_remux_fixture(path: &Path) {
             "-metadata:s:a:0",
             "language=eng",
             "-metadata:s:a:1",
-            "language=spa",
+            "language=eng",
+            "-disposition:a:1",
+            "comment",
             "-metadata:s:s:0",
             "language=eng",
             "-metadata:s:s:1",
             "language=spa",
             "-disposition:s:1",
             "forced",
-            path.to_str().unwrap(),
+            base.to_str().unwrap(),
         ])
         .status()
         .unwrap();
     assert!(
         status.success(),
         "ffmpeg remux fixture generation failed: {status}"
+    );
+    attach_remux_fixture(path, &base, &font, &cover);
+}
+
+fn attach_remux_fixture(path: &Path, base: &Path, font: &Path, cover: &Path) {
+    let status = Command::new("mkvmerge")
+        .args([
+            "--output",
+            path.to_str().unwrap(),
+            "--attachment-name",
+            "OpenSans.ttf",
+            "--attachment-mime-type",
+            "font/ttf",
+            "--attach-file",
+            font.to_str().unwrap(),
+            "--attachment-name",
+            "cover.bin",
+            "--attachment-mime-type",
+            "application/octet-stream",
+            "--attach-file",
+            cover.to_str().unwrap(),
+            base.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "mkvmerge attachment fixture generation failed: {status}"
     );
 }
 
