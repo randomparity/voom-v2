@@ -44,8 +44,9 @@ For one unshadowed `DefaultStrategy::Best` action:
    rejects an execution that would remove every source audio stream.
 4. If `config.languages` is empty, select the first candidate. No language fact
    is needed because the policy supplied no language preference.
-5. Otherwise, map a missing language tag to `und` and reject a present
-   malformed language fact as insufficient snapshot facts.
+5. Otherwise, read the language fact for every candidate before ranking. Map a
+   missing language tag to `und` and reject any present malformed language fact
+   as insufficient snapshot facts, even if another candidate would win.
 6. Give a candidate the zero-based position of its language in
    `config.languages`. Languages absent from the list share a fallback rank
    after every configured language.
@@ -63,8 +64,11 @@ The same algorithm applies independently to audio and subtitle actions.
 
 Defaults operations reduce per target before ranking:
 
-- no explicit filter-addressed action: existing strategy actions remain and
-  each `best` action resolves as above;
+- no explicit filter-addressed action and zero or one strategy action: the
+  strategy remains, and `best` resolves as above;
+- no explicit action and multiple strategy actions: the file blocks with an
+  actionable conflicting-strategies diagnostic rather than allowing source
+  order to choose an outcome;
 - one explicit action: it is the only effective action for that target, so all
   strategy actions, including `best`, are discarded without reading language
   facts;
@@ -97,14 +101,25 @@ payloads cannot select a different fallback.
 When the target has no retained candidates, the planner omits the default
 action rather than serializing `best` without an ID.
 
+The additive payload predates a distinct provenance field, so the trust boundary
+uses the published lowering invariant:
+
+- `preserve` plus a selected ID is a resolved explicit filter action;
+- `best` plus a selected ID is a resolved ranked action; and
+- a selected ID on `first` or `none` is invalid.
+
+The control plane then repeats the planner's per-target reduction. Multiple
+explicit actions block; one explicit action discards all strategies; without an
+explicit action, multiple strategies block.
+
 ## Compliance and warnings
 
 The planner's existing default-state comparison consumes the resolved ID.
 Exactly that stream must be default and every other retained stream of the kind
 must be non-default. A matching snapshot is `NoOp`; any mismatch is `Planned`.
 
-When a non-empty language preference list causes `best` to evaluate an untagged
-candidate as `und`, planning emits the existing
+When a non-empty language preference list causes `best` to evaluate at least
+one untagged candidate as `und`, planning emits the existing
 `UntaggedTrackLanguageDefaulted` warning. A shadowed `best` and an empty
 preference list do not evaluate language and therefore do not emit that warning
 on their own.
@@ -131,6 +146,8 @@ retain only the font attachment, use the expected track order, and replan as
 - Missing stream inventory, duplicate provider indexes, or malformed language
   used for non-empty preference ranking blocks with
   `insufficient_snapshot_facts`.
+- Multiple unshadowed strategy actions for one target block with a conflicting
+  defaults-strategies diagnostic.
 - No configured language match falls back to the first retained source stream;
   it is not an error.
 - No retained target stream emits no default action.
@@ -148,10 +165,11 @@ is required.
 
 - Planner tests cover language-list priority, same-language ties, `und`,
   unmatched and empty-list fallback, malformed language, zero candidates,
-  shuffled snapshot arrays, `NoOp` replanning, and explicit-over-`best` in both
-  source orders.
+  shuffled snapshot arrays, `NoOp` replanning, conflicting strategies, and
+  explicit-over-`best` in both source orders.
 - Control-plane tests accept a resolved `best`, reject an unresolved `best`,
-  and prove no second ranking occurs.
+  reject invalid selected-ID shapes and conflicting strategies, and prove no
+  second ranking occurs.
 - The generated-media remux flow inspects exact audio defaults/order,
   commentary removal, attachment and subtitle dispositions, and compliant
   replanning.

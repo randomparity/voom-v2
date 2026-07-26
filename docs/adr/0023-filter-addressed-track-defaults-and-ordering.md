@@ -82,13 +82,22 @@ same target group regardless of source position. One explicit action discards
 all strategy actions for that target. Multiple explicit actions for one target
 are an unsupported policy shape and block the file with an actionable message.
 The planner performs this reduction before payload construction, and the
-control plane repeats it at the execution trust boundary. A shadowed `best`
-action is discarded before strategy support is checked; an unshadowed `best`
-uses `config.languages` order and then provider stream index to resolve one
-retained target-kind stream. With no preferred-language match or an empty
-preference list, the first retained source stream wins. With no retained target
-stream, the action is omitted. A missing language is `und`; a malformed
-language blocks when preferences are evaluated.
+control plane repeats it at the execution trust boundary. Without an explicit
+action, more than one strategy action for the same target is also unsupported
+and blocks the file; source order must not silently decide between conflicting
+default outcomes.
+
+A shadowed `best` action is discarded before strategy support is checked or
+language facts are read. An unshadowed `best` uses `config.languages` order and
+then provider stream index to resolve one retained target-kind stream. When the
+preference list is non-empty, planning reads the language fact for every
+retained candidate before choosing a winner. A missing language is `und`; any
+present non-string language blocks the file, even when another candidate would
+otherwise win. Evaluating at least one missing language emits the existing
+per-file `UntaggedTrackLanguageDefaulted` warning from ADR 0021. With no
+preferred-language match or an empty preference list, the first retained source
+stream wins. Empty preferences do not read language facts or emit that warning.
+With no retained target stream, the action is omitted.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
@@ -137,6 +146,18 @@ For `defaults ... best`, planning uses the same resolved snapshot-ID payload
 field as an explicit filter selection while retaining `strategy: "best"` as
 the source intent. Execution never repeats the language ranking. An unresolved
 `best` payload is invalid at that boundary.
+
+The existing payload has no separate provenance field. The control-plane trust
+boundary therefore recognizes only these selected-ID shapes:
+
+- `strategy: "preserve"` plus a selected ID is a resolved explicit filter
+  action, matching the compiler's compatibility sentinel.
+- `strategy: "best"` plus a selected ID is a planner-resolved `best` action.
+
+A selected ID on `first` or `none` is invalid. The control plane applies the
+same per-target reduction as the planner: multiple explicit actions block, one
+explicit action discards every strategy action, and multiple strategy actions
+without an explicit action block.
 
 Defaults filters are scoped to kept streams of their declared target kind.
 Order filters range over kept ordinary tracks; attachments are not track-order
