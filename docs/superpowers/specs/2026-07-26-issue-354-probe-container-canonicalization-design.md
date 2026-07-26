@@ -1,7 +1,7 @@
 # Probe Container Canonicalization Design
 
 **Issue:** #354
-**Status:** Draft
+**Status:** Approved
 **Base:** `main` at `de51a0da8d02d17ff5dc817e405af47516fd874f`
 
 ## Goal
