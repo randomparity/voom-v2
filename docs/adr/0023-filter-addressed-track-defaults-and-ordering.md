@@ -83,9 +83,11 @@ all strategy actions for that target. Multiple explicit actions for one target
 are an unsupported policy shape and block the file with an actionable message.
 The planner performs this reduction before payload construction, and the
 control plane repeats it at the execution trust boundary. Without an explicit
-action, more than one strategy action for the same target is also unsupported
-and blocks the file; source order must not silently decide between conflicting
-default outcomes.
+action, a `best` action combined with any other strategy action for the same
+target is also unsupported and blocks the file; source order must not silently
+decide how a resolved `best` composes with another outcome. Multiple legacy
+strategy actions that do not include `best` retain their existing ordered
+behavior.
 
 A shadowed `best` action is discarded before strategy support is checked or
 language facts are read. An unshadowed `best` uses `config.languages` order and
@@ -157,7 +159,8 @@ boundary therefore recognizes only these selected-ID shapes:
 A selected ID on `first` or `none` is invalid. The control plane applies the
 same per-target reduction as the planner: multiple explicit actions block, one
 explicit action discards every strategy action, and multiple strategy actions
-without an explicit action block.
+without an explicit action block when at least one is `best`. Legacy
+multi-strategy payloads without `best` keep their existing behavior.
 
 Defaults filters are scoped to kept streams of their declared target kind.
 Order filters range over kept ordinary tracks; attachments are not track-order

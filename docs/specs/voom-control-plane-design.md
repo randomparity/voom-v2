@@ -779,8 +779,10 @@ position. Multiple explicit selections for one target block the file as an
 unsupported policy shape. The control plane repeats this reduction when
 validating the typed payload, which pins explicit-over-`best` precedence for
 language-ranked selection without trusting planner serialization. If there is
-no explicit selection, multiple strategy actions for one target also block;
-source order never resolves conflicting strategies.
+no explicit selection, a `best` action combined with any other strategy action
+for one target also blocks; source order never decides how a resolved winner
+composes with another strategy. Multiple legacy strategy actions without
+`best` retain their existing ordered behavior.
 
 An unshadowed `defaults audio|subtitle best` ranks retained target-kind streams
 by `config.languages` position, then ascending provider stream index. With a
