@@ -778,9 +778,16 @@ selection discards strategy actions for that target regardless of source
 position. Multiple explicit selections for one target block the file as an
 unsupported policy shape. The control plane repeats this reduction when
 validating the typed payload, which pins explicit-over-`best` precedence for
-language-ranked selection without trusting planner serialization. The planner
-also discards a shadowed `best` before checking its deferred strategy support;
-an unshadowed `best` remains blocked until issue #336.
+language-ranked selection without trusting planner serialization.
+
+An unshadowed `defaults audio|subtitle best` ranks retained target-kind streams
+by `config.languages` position, then ascending provider stream index. Missing
+languages rank as `und`; malformed languages block when a non-empty preference
+list is evaluated. If no configured language matches, or the list is empty,
+the first retained source stream wins. With no retained stream of the target
+kind, no default action is emitted. Planning carries the winner in
+`selected_snapshot_stream_id`; execution validates that identity and never
+reruns ranking. An unresolved `best` payload is invalid.
 
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 
