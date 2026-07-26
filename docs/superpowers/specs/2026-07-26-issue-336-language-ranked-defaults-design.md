@@ -66,9 +66,12 @@ Defaults operations reduce per target before ranking:
 
 - no explicit filter-addressed action and zero or one strategy action: the
   strategy remains, and `best` resolves as above;
-- no explicit action and multiple strategy actions: the file blocks with an
-  actionable conflicting-strategies diagnostic rather than allowing source
-  order to choose an outcome;
+- no explicit action and multiple strategy actions including `best`: the file
+  blocks with an actionable conflicting-strategies diagnostic rather than
+  allowing source order to decide how a resolved winner composes with another
+  outcome;
+- no explicit action and multiple legacy strategies without `best`: preserve
+  the existing ordered behavior;
 - one explicit action: it is the only effective action for that target, so all
   strategy actions, including `best`, are discarded without reading language
   facts;
@@ -110,7 +113,8 @@ uses the published lowering invariant:
 
 The control plane then repeats the planner's per-target reduction. Multiple
 explicit actions block; one explicit action discards all strategies; without an
-explicit action, multiple strategies block.
+explicit action, multiple strategies block when at least one is `best`. Legacy
+multi-strategy payloads without `best` retain their existing behavior.
 
 ## Compliance and warnings
 
@@ -147,7 +151,7 @@ retain only the font attachment, use the expected track order, and replan as
   used for non-empty preference ranking blocks with
   `insufficient_snapshot_facts`.
 - Multiple unshadowed strategy actions for one target block with a conflicting
-  defaults-strategies diagnostic.
+  defaults-strategies diagnostic when at least one action is `best`.
 - No configured language match falls back to the first retained source stream;
   it is not an error.
 - No retained target stream emits no default action.
@@ -157,9 +161,13 @@ retain only the font attachment, use the expected track order, and replan as
 ## Compatibility and rollback
 
 This change is semantic only. Old compiled policy versions, remux payloads, and
-durable events keep their existing shapes and remain readable. A rollback reads
-the same data but again blocks unshadowed `best`; no migration or data rewrite
-is required.
+durable events keep their existing shapes and remain readable. After a rollback,
+the old planner again blocks an unshadowed `best` when generating a new plan.
+An already-materialized resolved `best` operation remains executable by the old
+control plane because `selected_snapshot_stream_id` predates this change and
+the old selector already treats a present selected ID as authoritative. Pending
+ranked-default work therefore must be drained or cancelled separately if an
+operator intends rollback to stop it. No migration or data rewrite is required.
 
 ## Test strategy
 
@@ -168,8 +176,10 @@ is required.
   shuffled snapshot arrays, `NoOp` replanning, conflicting strategies, and
   explicit-over-`best` in both source orders.
 - Control-plane tests accept a resolved `best`, reject an unresolved `best`,
-  reject invalid selected-ID shapes and conflicting strategies, and prove no
-  second ranking occurs.
+  reject invalid selected-ID shapes and `best` conflicts, preserve legacy
+  non-`best` composition, and prove no second ranking occurs. Acceptance of the
+  unchanged resolved payload shape covers execution of already-materialized
+  work across rollback.
 - The generated-media remux flow inspects exact audio defaults/order,
   commentary removal, attachment and subtitle dispositions, and compliant
   replanning.
