@@ -77,6 +77,7 @@ Files:
 - `crates/voom-plan/src/planner/remux/mod.rs`
 - `crates/voom-plan/src/planner/remux/selection.rs`
 - `crates/voom-plan/src/planner_test.rs`
+- `crates/voom-control-plane/src/remux/selection.rs`
 
 Tests first:
 
@@ -108,12 +109,16 @@ Implementation:
   assembly while preserving existing language-filter warnings.
 - Add an actionable planner block for conflicting `best` strategies and map it
   to the existing unsupported-media diagnostic code.
+- Extend the control plane's downstream exhaustive `RemuxPlanningBlock` match
+  with the new planner-only conflict variant. Do not implement payload
+  provenance/reduction changes until Step 3.
 
 Verification:
 
 ```text
 cargo test -p voom-plan --all-features defaults_best
 cargo test -p voom-plan --all-features explicit_default
+cargo check -p voom-control-plane --all-features
 cargo clippy -p voom-plan --all-targets --all-features -- -D warnings
 ```
 
@@ -189,10 +194,15 @@ Tests first:
   commentary, expected subtitle flags, and the one font attachment.
 - Replan from the authoritative output snapshot and assert `NoOp`.
 
-Expected red failure:
+Sensitivity check:
 
-- The updated policy's unshadowed `best` cannot currently produce an executable
-  remux selection.
+- Steps 1–3 make the new end-to-end test capable of passing on its first run, so
+  this is an integration acceptance step rather than a pre-implementation unit
+  red.
+- After the test passes, deliberately mutate the planner's language rank to
+  prefer source order over `config.languages`, rerun this test, and confirm the
+  exact selected-ID, Spanish-default/order, or `NoOp` assertion fails for the
+  intended reason. Restore the implementation and rerun green before commit.
 
 Implementation:
 
