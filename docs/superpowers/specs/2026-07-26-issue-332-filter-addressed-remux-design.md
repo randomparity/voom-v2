@@ -30,8 +30,9 @@ ADR 0023 already fixes the source grammar and the worker contract:
   order;
 - `RemuxSelection.head_streams` and per-track default vectors are the worker
   inputs;
-- MKVToolNix emits the requested flags/order and validates produced order and
-  defaults.
+- MKVToolNix emits the requested flags/order and validates produced defaults.
+  Its output-order validation does not yet account for a head selection; that
+  worker boundary is completed by this issue.
 
 The compiler already stores `SetDefaults.filter` and
 `ReorderTracks.head_filter` additively. Existing compiled policy versions with
@@ -47,8 +48,12 @@ absent fields remain readable and retain their meaning.
 - A defaults filter considers only kept streams of its declared target kind.
 - An order filter considers every kept ordinary stream. Attachments cannot be
   placed in MKV track order and therefore are not candidates.
-- Filter evaluation preserves existing fail-closed behavior for missing or
-  malformed facts.
+- Structured fact parsing preserves the distinction between absent and
+  malformed values. Missing or malformed facts required by an evaluated filter
+  block planning, including beneath `not`; the published exception remains an
+  absent language tag, which evaluates as `und`. A non-string language and a
+  missing or non-boolean `default`, `forced`, or `commentary` disposition do not
+  silently evaluate as false.
 - Source order is the stable `provider_stream_index` order.
 
 The resolver returns the final keep set, resolved default actions, resolved
@@ -78,7 +83,9 @@ The head field is absent when no order filter exists. It may be present while
 
 The control plane resolves each carried ID against the pinned snapshot and
 requires it to be kept and of the expected kind where applicable. It never
-reevaluates the source filter.
+reevaluates the source filter. It sorts retained stream references by ascending
+`provider_stream_index` before constructing the execution selection, regardless
+of the JSON array order in the snapshot.
 
 ### Cardinality diagnostics
 
@@ -110,6 +117,13 @@ Planning compares this full desired snapshot-stream ID sequence with the
 current kept ordinary sequence. It therefore recognizes both required changes
 and compliant `NoOp` results, including head-only ordering.
 
+The MKVToolNix worker treats ascending provider stream index as source order
+rather than trusting request-vector order. Its argument construction and output
+inspection use the same head, requested groups, then remaining-streams
+algorithm. Before invoking the provider, the worker rejects duplicate head
+references, heads absent from `keep_streams`, and attachment heads. This keeps a
+malformed request from being silently normalized by head lookup.
+
 ### Durable event visibility
 
 The durable remux event payloads gain additive, default-empty `head_streams`
@@ -126,12 +140,17 @@ Focused tests cover:
 
 - defaults and order filters with zero, one, and multiple retained matches;
 - filters that match a source stream removed by an earlier action;
-- malformed or missing facts required by a selected filter;
+- malformed or missing language/default/forced/commentary facts required by a
+  selected filter, including negated filters;
 - head-only and head-plus-group desired order;
+- shuffled snapshot arrays and request vectors proving that provider stream
+  index, not serialization order, defines source order;
 - exact default set/clear vectors;
 - payload parsing of old forms and rejection of malformed resolved IDs;
 - control-plane rejection of IDs missing from or inconsistent with the pinned
   snapshot;
+- worker rejection of malformed head selections and head-aware output-order
+  inspection;
 - durable event backward compatibility and head visibility.
 
 The generated-media remux flow uses the published `where` forms, inspects

@@ -765,6 +765,13 @@ schema, resolved per-file payload identity, wire
 `clear_forced_streams`), and mkvmerge (`--forced-track-flag`, head-pinned
 `--track-order`) contracts. The deferred forced DSL remains separate.
 
+Filter facts fail closed when a required structured value is missing or
+malformed, including beneath negation. An absent language tag remains the
+published `und` value, but a present non-string language is malformed. Source
+order is ascending provider stream index; planning, control-plane selection,
+worker argument construction, and output inspection do not derive order from
+snapshot-array or request-vector serialization order.
+
 #### Grammar amendment V1.1 — Audio track synthesis / downmix (2026-07-02, ADR 0026)
 
 Audio can be *added* as a new track derived from an existing one, not only
