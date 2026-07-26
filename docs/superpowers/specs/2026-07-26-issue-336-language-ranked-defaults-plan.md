@@ -95,8 +95,10 @@ Tests first:
 
 Expected red failure:
 
-- The current resolver never ranks `best`, cannot expose its language-read
-  decision, and has no `best`-conflict diagnostic.
+- After Step 1, ranking does not yet expose whether it consumed an untagged
+  candidate, so the required warning assertion fails. It also has no
+  `best`-conflict diagnostic, so same-target combinations containing `best` do
+  not block as required.
 
 Implementation:
 
