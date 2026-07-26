@@ -27,6 +27,36 @@ pub struct WorkflowRunSummary {
 }
 
 impl WorkflowRunSummary {
+    pub(crate) fn merge_invocation(&mut self, next: Self) {
+        self.branch_count = next.branch_count;
+        self.ticket_count = next.ticket_count;
+        self.dispatch_count += next.dispatch_count;
+        self.retry_count = next.retry_count;
+        self.failure_count = next.failure_count;
+        self.peak_active_workflow_leases = self
+            .peak_active_workflow_leases
+            .max(next.peak_active_workflow_leases);
+        self.elapsed += next.elapsed;
+        self.throughput_per_second = throughput(self.dispatch_count, self.elapsed);
+        for (operation, next) in next.per_operation {
+            let summary = self.per_operation.entry(operation).or_default();
+            summary.ticket_count = next.ticket_count;
+            summary.dispatch_count += next.dispatch_count;
+            summary.success_count += next.success_count;
+            summary.retry_count += next.retry_count;
+            summary.failure_count += next.failure_count;
+            if next.last_failure_class.is_some() {
+                summary.last_failure_class = next.last_failure_class;
+            }
+            summary.elapsed += next.elapsed;
+            summary.throughput_per_second = throughput(summary.dispatch_count, summary.elapsed);
+        }
+        for (worker_id, active) in next.max_active_by_worker {
+            let maximum = self.max_active_by_worker.entry(worker_id).or_default();
+            *maximum = (*maximum).max(active);
+        }
+    }
+
     #[cfg(test)]
     #[must_use]
     pub fn operation_count(&self, operation: OperationKind) -> u64 {

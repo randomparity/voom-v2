@@ -56,8 +56,10 @@ successful no-op before it can write honest per-file rows.
 
 5. A continued ticket failure is retained as the run's primary error while
    later phases execute for survivors. Completed phases still receive their
-   phase row and refreshed report. At the end, only surviving files' chain-tip
-   artifacts are eligible for promotion. The coordinator writes the cumulative
+   phase row and refreshed report. At the end, only artifacts associated with
+   surviving branches are eligible for promotion. Durable file-phase ticket
+   IDs and produced references define that association, including sidecars
+   owned by synthetic root tickets. The coordinator writes the cumulative
    workflow summary, marks the job failed, and returns `CoordinatorError` with
    the complete partial outcome. It never reports success when any continued
    ticket failed. A later abort-strategy or infrastructure failure supersedes
@@ -81,8 +83,8 @@ successful no-op before it can write honest per-file rows.
   durable phase summary, while the final job is honestly failed.
 - Terminal-failure issues remain owned by the existing atomic ticket-failure
   transition (ADR 0018); the coordinator does not create a second issue.
-- Promotion must filter by survivor asset rather than merely collecting every
-  successful ticket result from the job.
+- Promotion must follow durable surviving-branch ticket and produced-result
+  associations rather than collecting every successful ticket result.
 
 ## Considered and rejected alternatives
 

@@ -63,11 +63,9 @@ pub(super) fn phase_outcome(file_outcomes: &[FilePhaseOutcome]) -> PhaseOutcome 
     }
 }
 
-/// Reject a policy whose any `phase_order` phase declares a non-default
-/// `on_error` strategy. `continue`/`skip` are deferred this sprint (Sprint 16
-/// §11); honoring them partially would be indistinguishable at runtime from real
-/// handling, so they are rejected at resolve time before any job opens (#165).
-pub(super) fn reject_unhandled_on_error(
+/// Reject the legacy compiled `skip` strategy, which is not published source
+/// syntax and has no execution semantics. Abort and continue are executable.
+pub(super) fn reject_unpublished_on_error(
     policy: &voom_policy::CompiledPolicy,
 ) -> Result<(), VoomError> {
     for phase_name in &policy.phase_order {
@@ -75,13 +73,14 @@ pub(super) fn reject_unhandled_on_error(
             continue;
         };
         let label = match phase.on_error {
-            None | Some(voom_policy::ErrorStrategy::Abort) => continue,
-            Some(voom_policy::ErrorStrategy::Continue) => "continue",
+            None
+            | Some(voom_policy::ErrorStrategy::Abort | voom_policy::ErrorStrategy::Continue) => {
+                continue;
+            }
             Some(voom_policy::ErrorStrategy::Skip) => "skip",
         };
         return Err(VoomError::PolicyValidationError(format!(
-            "phase `{phase_name}` declares on_error `{label}`, which is not supported this sprint \
-             (only the default abort); see Sprint 16 §11"
+            "phase `{phase_name}` declares unpublished on_error `{label}`"
         )));
     }
     Ok(())

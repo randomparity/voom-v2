@@ -33,8 +33,9 @@
 ## 3. Finish honestly and restrict promotion
 
 - Files: `workflow/coordinator/{mod.rs,promotion.rs}` and sibling tests.
-- Promote only artifacts belonging to survivor assets. When a continued error
-  exists, persist cumulative summary data, fail the job, and return every
+- Promote only artifacts associated with surviving branches through their
+  durable file-phase ticket IDs and produced references. When a continued
+  error exists, persist cumulative summary data, fail the job, and return every
   completed phase/file row in the partial outcome.
 - First write tests that expose false success and promotion of a failed file's
   earlier artifact.

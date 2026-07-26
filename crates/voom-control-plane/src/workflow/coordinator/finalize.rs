@@ -255,7 +255,9 @@ impl ControlPlane {
                 continue;
             }
             let workflow_node_id = policy_workflow_node_id(node_id);
-            let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
+            let ticket_ids = self
+                .ticket_ids_for_phase_node(job_id, phase_ordinal, &workflow_node_id)
+                .await?;
             let produced = ProducedRefs::resolve(self, tip.id, &snapshot).await?;
             let row = self
                 .write_file_row(
@@ -359,7 +361,9 @@ impl ControlPlane {
             }
             Disposition::Planned { node_id } => {
                 let workflow_node_id = policy_workflow_node_id(node_id);
-                let ticket_ids = self.ticket_ids_for_node(job_id, &workflow_node_id).await?;
+                let ticket_ids = self
+                    .ticket_ids_for_phase_node(job_id, phase_ordinal, &workflow_node_id)
+                    .await?;
                 let (tip, snapshot) = self
                     .identity
                     .get_active_version_with_snapshot(file.asset_id)
@@ -435,20 +439,24 @@ impl ControlPlane {
             .await
     }
 
-    /// Ticket ids whose payload `node_id` matches a workflow node, in id order.
-    pub(super) async fn ticket_ids_for_node(
+    /// Ticket ids whose invocation and payload `node_id` match a phase node.
+    pub(super) async fn ticket_ids_for_phase_node(
         &self,
         job_id: JobId,
+        phase_ordinal: u32,
         workflow_node_id: &str,
     ) -> Result<Vec<TicketId>, VoomError> {
+        let workflow_id = format!("workflow-{}-phase-{phase_ordinal}", job_id.0);
         let rows = sqlx::query(
             "SELECT id FROM tickets \
-             WHERE job_id = ? AND json_extract(payload, '$.node_id') = ? ORDER BY id ASC",
+             WHERE job_id = ? AND json_extract(payload, '$.workflow_id') = ? \
+               AND json_extract(payload, '$.node_id') = ? ORDER BY id ASC",
         )
         .bind(
             i64::try_from(job_id.0)
                 .map_err(|e| VoomError::Internal(format!("job id exceeds SQLite integer: {e}")))?,
         )
+        .bind(workflow_id)
         .bind(workflow_node_id)
         .fetch_all(&self.pool)
         .await

@@ -38,8 +38,10 @@ a complete partial result.
    rows and a refreshed phase report.
 7. Any continued ticket failure makes the final job failed and the public
    result an error with `partial: Some(...)`. Counts include all phases.
-8. Only survivor assets are promoted. Failed files' earlier successful
-   artifacts stay in working storage for diagnosis/recovery.
+8. Only artifacts associated with surviving branches are promoted. Durable
+   file-phase ticket IDs preserve that association for synthetic root sidecars.
+   Failed files' earlier successful artifacts stay in working storage for
+   diagnosis/recovery.
 9. Resume excludes blocked files and never retries their terminal phase.
 10. Existing compiled versions remain readable; source grammar does not change.
 
@@ -69,7 +71,8 @@ each planned node's ticket states, finalizes all entering files, persists the
 phase row/report, removes blocked files, and continues. An abort phase uses the
 existing immediate partial-finalization path.
 
-At loop completion, promotion is restricted to current survivor asset IDs. If
+At loop completion, promotion is restricted to ticket results and produced
+references recorded in the durable file-phase rows for surviving branches. If
 promotion succeeds and a continued error exists, the coordinator inserts the
 cumulative summary, fails the job, and returns the accumulated phase/file rows
 as the partial outcome. Promotion or persistence failures remain fatal and may
