@@ -42,6 +42,18 @@ fn compiled_policy_with_ops(operations: Vec<CompiledOperation>) -> CompiledPolic
     }
 }
 
+fn compiled_policy_with_languages_and_ops(
+    languages: &[&str],
+    operations: Vec<CompiledOperation>,
+) -> CompiledPolicy {
+    let mut policy = compiled_policy_with_ops(operations);
+    policy.config.languages = languages
+        .iter()
+        .map(|language| (*language).to_owned())
+        .collect();
+    policy
+}
+
 fn compiled_policy_with_phases(phases: &[(&str, Vec<CompiledOperation>)]) -> CompiledPolicy {
     CompiledPolicy {
         policy_name: "container metadata".to_owned(),
@@ -627,31 +639,129 @@ fn remux_operations_in_different_phases_remain_separate_nodes() {
 }
 
 #[test]
-fn defaults_best_blocks_instead_of_joining_executable_group() {
-    let policy = compiled_policy_with_ops(vec![
-        CompiledOperation::SetContainer {
-            container: "mkv".to_owned(),
-        },
-        CompiledOperation::SetDefaults {
+fn defaults_best_prefers_configured_language_before_source_order() {
+    let policy = compiled_policy_with_languages_and_ops(
+        &["spa", "eng"],
+        vec![CompiledOperation::SetDefaults {
             target: TrackTarget::Audio,
             strategy: DefaultStrategy::Best,
             filter: None,
-        },
-    ]);
-
-    let plan = generate_plan(request(policy, snapshot_mp4_with_video_audio_subtitle())).unwrap();
-
-    assert!(
-        plan.nodes
-            .iter()
-            .any(|node| node.operation_kind == PlanOperationKind::Remux
-                && node.status == NodeStatus::Planned)
+        }],
     );
-    assert!(
-        plan.nodes
-            .iter()
-            .any(|node| node.operation_kind == PlanOperationKind::SetDefaults
-                && node.status == NodeStatus::Blocked)
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]),
+    ))
+    .unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].operation_kind, PlanOperationKind::Remux);
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"],
+        serde_json::json!([{
+            "target": "audio",
+            "strategy": "best",
+            "selected_snapshot_stream_id": "stream-2"
+        }])
+    );
+}
+
+#[test]
+fn defaults_best_uses_canonical_source_order_and_detects_compliance() {
+    let policy = compiled_policy_with_languages_and_ops(
+        &["eng"],
+        vec![CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        }],
+    );
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("eng", false)]);
+    snapshot.stream_summary["streams"]
+        .as_array_mut()
+        .unwrap()
+        .swap(1, 2);
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"],
+        "stream-1"
+    );
+}
+
+#[test]
+fn defaults_best_fallbacks_and_duplicate_preferences_are_deterministic() {
+    for (languages, snapshot_languages, selected_id) in [
+        (
+            vec!["jpn"],
+            vec![("eng", false), ("spa", false)],
+            "stream-1",
+        ),
+        (Vec::new(), vec![("eng", false), ("spa", false)], "stream-1"),
+        (
+            vec!["eng", "spa", "eng"],
+            vec![("spa", false), ("eng", false)],
+            "stream-2",
+        ),
+    ] {
+        let policy = compiled_policy_with_languages_and_ops(
+            &languages,
+            vec![CompiledOperation::SetDefaults {
+                target: TrackTarget::Audio,
+                strategy: DefaultStrategy::Best,
+                filter: None,
+            }],
+        );
+
+        let plan = generate_plan(request(
+            policy,
+            snapshot_mkv_with_audio_languages_and_defaults(&snapshot_languages),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            plan.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"],
+            selected_id
+        );
+    }
+}
+
+#[test]
+fn defaults_best_supports_subtitle_selection_and_an_empty_subtitle_set() {
+    let operation = CompiledOperation::SetDefaults {
+        target: TrackTarget::Subtitle,
+        strategy: DefaultStrategy::Best,
+        filter: None,
+    };
+    let selected = generate_plan(request(
+        compiled_policy_with_languages_and_ops(&["spa"], vec![operation.clone()]),
+        snapshot_mkv_with_video_audio_subtitle(),
+    ))
+    .unwrap();
+
+    assert_eq!(selected.nodes.len(), 1);
+    assert_eq!(
+        selected.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"],
+        "stream-3"
+    );
+
+    let empty = generate_plan(request(
+        compiled_policy_with_languages_and_ops(&["spa"], vec![operation]),
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true)]),
+    ))
+    .unwrap();
+
+    assert_eq!(empty.nodes.len(), 1);
+    assert_eq!(empty.nodes[0].status, NodeStatus::NoOp);
+    assert_eq!(
+        empty.nodes[0].operation_payload["defaults"],
+        serde_json::json!([])
     );
 }
 
