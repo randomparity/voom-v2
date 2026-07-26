@@ -85,16 +85,18 @@ The set contains these exact cases:
   run, while F1a continues and commits.
 - Resume F1a after two durable boundaries: first after the `inspect` per-file
   summary is committed and before `normalize` dispatch, then after the
-  `normalize` summary is committed and before `organize` dispatch. The #330
-  coordinator test stops the driver at each named boundary, reopens the same
-  database, and resumes the same job rather than compiling or planning anew.
+  `normalize` summary is committed and before `organize` dispatch. Each resume
+  opens a new job, copies the prior job's inherited committed/skipped outcomes,
+  and produces the same per-file gate decision without walking older jobs.
 
 - Expected mutation: for the passing source, the matching conditional remuxes
   to MKV, the first-rule phase transcodes video to HEVC, and the all-rules phase
   applies all matching track actions. The deliberate failure never prevents
   successful-file commits.
-- Oracle: per-file VOOM phase summaries prove skip/rule decisions, true and
-  false `completed` and `modified` gates, and identical decisions after resume.
+- Oracle: per-file VOOM phase summaries prove skip/rule decisions, `completed`
+  admission after committed or skipped predecessors, true and false `modified`
+  gates, visible failure for missing predecessor history, and identical
+  decisions after repeated resume.
   The batch report and exit status identify partial failure while retaining the
   successful file's committed output and artifact-verification result.
 

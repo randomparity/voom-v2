@@ -107,6 +107,18 @@ fn file_run_start(branch_id: &str, version_id: u64, phase_ordinal: u32) -> NewFi
     }
 }
 
+fn file_run_history(
+    branch_id: &str,
+    phase_ordinal: u32,
+    outcome: FilePhaseOutcome,
+) -> NewFileRunHistory {
+    NewFileRunHistory {
+        branch_id: branch_id.to_owned(),
+        phase_ordinal,
+        outcome,
+    }
+}
+
 #[tokio::test]
 async fn file_run_starts_insert_atomically_and_list_by_branch() {
     let (repo, _tmp) = repo().await;
@@ -149,6 +161,67 @@ async fn file_run_start_batch_rolls_back_on_invalid_member() {
     assert_eq!(
         repo.file_run_starts_for_job(JOB).await.unwrap(),
         Vec::<FileRunStart>::new()
+    );
+}
+
+#[tokio::test]
+async fn file_run_history_inserts_atomically_and_lists_by_branch_then_phase() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(
+        JOB,
+        vec![file_run_start("zeta", 1, 2), file_run_start("alpha", 1, 2)],
+    )
+    .await
+    .unwrap();
+
+    let inserted = repo
+        .insert_file_run_history(
+            JOB,
+            vec![
+                file_run_history("zeta", 1, FilePhaseOutcome::Skipped),
+                file_run_history("alpha", 1, FilePhaseOutcome::Committed),
+                file_run_history("alpha", 0, FilePhaseOutcome::Skipped),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        inserted
+            .iter()
+            .map(|row| (row.branch_id.as_str(), row.phase_ordinal, row.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            ("alpha", 0, FilePhaseOutcome::Skipped),
+            ("alpha", 1, FilePhaseOutcome::Committed),
+            ("zeta", 1, FilePhaseOutcome::Skipped),
+        ]
+    );
+    assert_eq!(repo.file_run_history_for_job(JOB).await.unwrap(), inserted);
+}
+
+#[tokio::test]
+async fn file_run_history_batch_rolls_back_on_invalid_outcome() {
+    let (repo, _tmp) = repo().await;
+    repo.insert_file_run_starts(JOB, vec![file_run_start("alpha", 1, 2)])
+        .await
+        .unwrap();
+
+    let error = repo
+        .insert_file_run_history(
+            JOB,
+            vec![
+                file_run_history("alpha", 0, FilePhaseOutcome::Committed),
+                file_run_history("alpha", 1, FilePhaseOutcome::Blocked),
+            ],
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), "DB_UNREACHABLE");
+    assert_eq!(
+        repo.file_run_history_for_job(JOB).await.unwrap(),
+        Vec::<FileRunHistory>::new()
     );
 }
 

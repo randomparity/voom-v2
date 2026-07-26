@@ -309,10 +309,91 @@ impl Default for PolicyProvenance {
 pub struct CompiledPhase {
     pub name: String,
     pub depends_on: Vec<String>,
-    pub run_if: Option<CompiledCondition>,
+    pub run_if: Option<CompiledRunIf>,
     pub skip_if: Option<CompiledCondition>,
     pub on_error: Option<ErrorStrategy>,
     pub operations: Vec<CompiledOperation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "CompiledRunIfWire", into = "CompiledRunIfWire")]
+pub struct CompiledRunIf {
+    pub trigger: RunIfTrigger,
+    pub phase: String,
+}
+
+impl CompiledRunIf {
+    pub(crate) fn parse(name: &str) -> Result<Self, String> {
+        let Some((trigger, phase)) = name.split_once(' ') else {
+            return Err("compiled run_if requires a trigger and phase".to_owned());
+        };
+        let trigger = match trigger {
+            "completed" => RunIfTrigger::Completed,
+            "modified" => RunIfTrigger::Modified,
+            _ => {
+                return Err(format!(
+                    "compiled run_if trigger `{trigger}` must be completed or modified"
+                ));
+            }
+        };
+        if phase.is_empty() || phase.chars().any(char::is_whitespace) {
+            return Err("compiled run_if requires exactly one phase name".to_owned());
+        }
+        Ok(Self {
+            trigger,
+            phase: phase.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunIfTrigger {
+    Completed,
+    Modified,
+}
+
+impl RunIfTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Modified => "modified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompiledRunIfWire {
+    #[serde(rename = "type")]
+    kind: CompiledRunIfWireKind,
+    name: String,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CompiledRunIfWireKind {
+    Predicate,
+}
+
+impl TryFrom<CompiledRunIfWire> for CompiledRunIf {
+    type Error = String;
+
+    fn try_from(value: CompiledRunIfWire) -> Result<Self, Self::Error> {
+        let CompiledRunIfWire {
+            kind: CompiledRunIfWireKind::Predicate,
+            name,
+        } = value;
+        Self::parse(&name)
+    }
+}
+
+impl From<CompiledRunIf> for CompiledRunIfWire {
+    fn from(value: CompiledRunIf) -> Self {
+        Self {
+            kind: CompiledRunIfWireKind::Predicate,
+            name: format!("{} {}", value.trigger.as_str(), value.phase),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

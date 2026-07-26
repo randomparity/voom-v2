@@ -27,7 +27,7 @@ async fn probe_returns_uninitialized_on_fresh_db() {
 #[tokio::test]
 async fn expected_migrations_matches_embedded_count() {
     // review whenever a migration is added/removed.
-    assert_eq!(expected_migrations(), 22);
+    assert_eq!(expected_migrations(), 23);
 }
 
 #[tokio::test]
@@ -66,6 +66,48 @@ async fn workflow_file_run_start_schema_is_strict_and_job_owned() {
     assert_eq!(
         version_fk,
         ("file_versions".to_owned(), "RESTRICT".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn workflow_file_run_history_schema_is_strict_and_run_owned() {
+    let (pool, _tmp) = fresh_pool().await;
+
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'workflow_file_run_history'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(table_sql.contains("PRIMARY KEY (job_id, branch_id, phase_ordinal)"));
+    assert!(table_sql.contains("CHECK (phase_ordinal >= 0)"));
+    assert!(table_sql.contains("CHECK (outcome IN ('committed', 'skipped'))"));
+    assert!(table_sql.ends_with("STRICT"));
+
+    let run_fk_columns: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT \"from\", \"to\", on_delete \
+         FROM pragma_foreign_key_list('workflow_file_run_history') \
+         WHERE \"table\" = 'workflow_file_run_starts' \
+         ORDER BY seq ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        run_fk_columns,
+        vec![
+            (
+                "job_id".to_owned(),
+                "job_id".to_owned(),
+                "CASCADE".to_owned()
+            ),
+            (
+                "branch_id".to_owned(),
+                "branch_id".to_owned(),
+                "CASCADE".to_owned()
+            ),
+        ]
     );
 }
 

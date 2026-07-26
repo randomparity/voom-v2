@@ -371,31 +371,26 @@ impl<'a> Validator<'a> {
     ) {
         let text = statement_text(statement);
         let tokens = words(text.as_ref());
-        let Some(trigger) = tokens.get(1).or_else(|| tokens.get(2)) else {
+        if tokens.len() != 3 {
             self.error(
                 DiagnosticCode::InvalidRunIfTrigger,
                 statement.span(),
-                "run_if requires a trigger",
+                "run_if requires exactly one trigger and one phase",
             );
             return;
-        };
-        if !matches!(*trigger, "modified" | "completed") {
+        }
+
+        let trigger = tokens[1];
+        if trigger != "modified" && trigger != "completed" {
             self.error(
                 DiagnosticCode::InvalidRunIfTrigger,
                 statement.span(),
                 "run_if trigger must be modified or completed",
             );
+            return;
         }
-        for token in tokens.into_iter().skip(2) {
-            if conditions::is_reference_token(token) {
-                self.validate_phase_reference(
-                    &phase.name.value,
-                    token,
-                    phase_names,
-                    statement.span(),
-                );
-            }
-        }
+
+        self.validate_phase_reference(&phase.name.value, tokens[2], phase_names, statement.span());
     }
 
     fn validate_phase(&mut self, phase: &PhaseAst) {

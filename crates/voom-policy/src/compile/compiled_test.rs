@@ -16,6 +16,37 @@ fn compiled_json_is_deterministic() {
 }
 
 #[test]
+fn compiled_run_if_keeps_the_published_predicate_wire_shape() {
+    let json = serde_json::json!({
+        "type": "predicate",
+        "name": "modified normalize"
+    });
+
+    let gate: CompiledRunIf = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        gate,
+        CompiledRunIf {
+            trigger: RunIfTrigger::Modified,
+            phase: "normalize".to_owned(),
+        }
+    );
+    assert_eq!(serde_json::to_value(gate).unwrap(), json);
+}
+
+#[test]
+fn compiled_run_if_rejects_noncanonical_predicate_names() {
+    for name in ["modified", "completed inspect extra", "changed inspect"] {
+        let error = serde_json::from_value::<CompiledRunIf>(serde_json::json!({
+            "type": "predicate",
+            "name": name
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("compiled run_if"));
+    }
+}
+
+#[test]
 fn published_config_lowers_to_typed_defaults_and_fills_omitted_phases() {
     let policy = crate::compile_policy(
         "policy \"p\" { \

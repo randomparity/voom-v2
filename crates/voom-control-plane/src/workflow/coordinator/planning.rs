@@ -98,6 +98,31 @@ pub(super) fn phase_draft(base: &PolicyInputSetDraft, files: &[PhaseFile]) -> Po
     draft
 }
 
+/// Clear a coordinator-resolved phase gate. When every file failed the gate,
+/// also clear operations so the planner can produce a truthful zero-node report
+/// from a non-empty input set.
+pub(super) fn resolved_phase_policy(
+    policy: &voom_policy::CompiledPolicy,
+    phase_name: &str,
+    suppress_operations: bool,
+) -> Result<voom_policy::CompiledPolicy, VoomError> {
+    let mut policy = policy.clone();
+    let phase = policy
+        .phases
+        .iter_mut()
+        .find(|phase| phase.name == phase_name)
+        .ok_or_else(|| {
+            VoomError::PolicyExecution(format!(
+                "phase `{phase_name}` is in phase_order but has no compiled phase"
+            ))
+        })?;
+    phase.run_if = None;
+    if suppress_operations {
+        phase.operations.clear();
+    }
+    Ok(policy)
+}
+
 /// Regenerate the per-phase compliance report against the phase's refreshed facts
 /// (ADR-0008): re-project every file that *entered* the phase at its refreshed
 /// chain tip (committed files at their produced version + re-probe snapshot,
@@ -110,15 +135,36 @@ pub(super) fn regenerate_phase_report(
     base_draft: &PolicyInputSetDraft,
     phase_name: &str,
     refreshed: &[(u32, MediaSnapshot)],
+    gate_admission: &[bool],
 ) -> Result<PhaseReport, VoomError> {
+    if refreshed.len() != gate_admission.len() {
+        return Err(VoomError::Internal(format!(
+            "phase `{phase_name}` refreshed {} files for {} gate decisions",
+            refreshed.len(),
+            gate_admission.len()
+        )));
+    }
+    let admitted = refreshed
+        .iter()
+        .zip(gate_admission)
+        .filter(|(_, admitted)| **admitted)
+        .map(|(refreshed, _)| refreshed.clone())
+        .collect::<Vec<_>>();
+    let suppress_operations = admitted.is_empty();
+    let report_inputs = if suppress_operations {
+        refreshed
+    } else {
+        admitted.as_slice()
+    };
     let mut draft = base_draft.clone();
-    draft.media_snapshots = refreshed
+    draft.media_snapshots = report_inputs
         .iter()
         .map(|(ordinal, snapshot)| planning_input(*ordinal, snapshot))
         .collect();
+    let policy = resolved_phase_policy(policy, phase_name, suppress_operations)?;
     let plan = voom_plan::plan_phase(
         PlanningRequest {
-            policy: policy.clone(),
+            policy,
             input: draft,
             context: context.clone(),
         },
@@ -221,6 +267,7 @@ pub(super) fn initial_phase_files(
                 branch_id,
                 ordinal: resolved.ordinal,
                 resume_ordinal: 0,
+                phase_history: std::collections::BTreeMap::new(),
             })
         })
         .collect()
