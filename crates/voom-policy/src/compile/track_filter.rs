@@ -10,10 +10,13 @@ pub(super) fn parse_track_filter(text: &str) -> Result<TrackFilter, ParseError> 
 }
 
 pub(super) fn parse_optional_filter(text: &str) -> Result<Option<TrackFilter>, ParseError> {
-    let Some((_, filter)) = text.split_once(" where ") else {
-        return Ok(None);
-    };
-    parse_track_filter(filter).map(Some)
+    if let Some((_, filter)) = text.split_once(" where ") {
+        return parse_track_filter(filter).map(Some);
+    }
+    if text.split_ascii_whitespace().any(|word| word == "where") {
+        return Err(ParseError);
+    }
+    Ok(None)
 }
 
 pub(super) fn parse_required_filter(text: &str) -> Result<TrackFilter, ParseError> {
