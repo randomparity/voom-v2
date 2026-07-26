@@ -30,12 +30,10 @@ DSL surface to express filter-addressed intent, the compiled/wire schema fields
 to carry it, and the worker emission for ordering and forced flags. Filter
 *resolution* to a concrete stream is a planner concern.
 
-This feature spans three crate-ownership boundaries under the parallel Sprint
-12–17 workstream: the DSL edges (`voom-policy`), the wire/worker edges
-(`voom-worker-protocol`, `voom-mkvtoolnix-worker`), and the middle
-(`voom-plan` planner resolution + `voom-control-plane` selection population,
-owned by the #272/audio workstream). This ADR fixes the contract at the edges
-so the middle can be wired independently.
+This feature spans three crate-ownership boundaries: the DSL edges
+(`voom-policy`), the wire/worker edges (`voom-worker-protocol`,
+`voom-mkvtoolnix-worker`), and the middle (`voom-plan` planner resolution plus
+`voom-control-plane` selection population).
 
 ## Decision
 
@@ -70,45 +68,34 @@ forced audio|subtitle where <track-filter>
   amendment therefore publishes only the `defaults … where` and `order tracks …
   where` productions as compiler-accepted.
 
-The single-match enforcement, the plan-time diagnostic, and filter resolution to
-a concrete stream are **planner responsibilities not implemented in this PR**
-(see section 5 and the "Not in this PR" list under Consequences). This ADR fixes
-the DSL/wire/worker contract; the compiler parses, validates the *shape* of, and
-lowers the two shipped forms, but never counts matches — it cannot, because it
-does not see the media's streams. Precedence when a strategy default and a
-filter-addressed default target the same kind group is likewise a planner rule,
-deferred with the resolution work; this PR does not define it.
+The compiler parses, validates the *shape* of, and lowers the two shipped forms,
+but never counts matches because it does not see a file's streams. The planner
+resolves each filter against streams retained after ordered keep/remove actions.
+Zero or multiple retained matches block that file before execution with distinct
+diagnostics.
 
-**Interim plannability of the two shipped forms (until the planner follow-up):**
-the compiler accepts them, but the planner does not yet read `filter` /
-`head_filter`. `defaults … where` is inert (the `where` form lowers `strategy` to
-`Preserve`, a verified no-op). `order tracks [<targets>] where <filter>` applies
-its group order and ignores the head pin. Bare `order tracks where <filter>` (no
-target list) lowers to `ReorderTracks { targets: [], head_filter: Some }`; the
-existing planner blocks an empty-target reorder as `UnsupportedMediaShape`
-(`crates/voom-plan/src/planner/remux/mod.rs`), so that specific form fails the
-file loudly at plan time rather than being inert. Policies should not adopt these
-forms in production until the planner follow-up lands.
+Planning carries the resolved snapshot stream ID in the typed remux payload.
+The control plane validates that ID against the pinned snapshot and populates
+`default_streams` or `head_streams`; it does not reevaluate the filter. Explicit
+filter-addressed defaults are authoritative over strategy selection for the same
+target group.
 
 ### 2. Compiled schema (`voom-policy`, additive-only per ADR 0013)
 
 - `SetDefaults` gains `filter: Option<TrackFilter>`
   (`#[serde(default, skip_serializing_if = "Option::is_none")]`). `None`
   preserves the existing strategy-only meaning. When `Some`, the operation is
-  filter-addressed and `strategy` is not consulted; the `where` form lowers
-  `strategy` to `Preserve` so that, until the planner honours `filter`, the
-  operation is inert rather than silently applying a group-wide default —
-  `set_defaults_changes`'s `Preserve` arm returns `false`
-  (`crates/voom-plan/src/planner/remux/mod.rs:510`), a verified no-op.
+  filter-addressed and `strategy` is not consulted. The `where` form continues
+  to lower `strategy` to `Preserve` as a compatibility sentinel; planning
+  carries the resolved snapshot stream ID separately.
 - `ReorderTracks` gains `head_filter: Option<TrackFilter>` (same serde
   attributes). `targets` keeps its meaning; `head_filter` pins one track first.
 - A compiled representation for forced (`SetForced { target, filter }`) is
-  **deferred** (see "Not in this PR"). A new `CompiledOperation` variant forces a
+  **deferred** (see "Still deferred"). A new `CompiledOperation` variant forces a
   new `PlanOperationKind`, which ripples through exhaustive matches in `voom-plan`
   (`model.rs`, `planner.rs`, `compliance/report.rs`) and `voom-control-plane`
-  (`policy_bridge.rs`, `cases/policy/compliance.rs`) — a wide edit for a variant
-  that would be inert in this PR (nothing plans it until filter resolution lands).
-  It lands with the planner follow-up that can populate `forced_streams`.
+  (`policy_bridge.rs`, `cases/policy/compliance.rs`). Publishing that separate
+  operation requires its own planning, execution, and acceptance work.
 
 ### 3. Wire schema (`voom-worker-protocol::RemuxSelection`, additive)
 
@@ -128,22 +115,19 @@ Three new `Vec<RemuxStreamRef>` fields, each `#[serde(default)]`:
   `forced_streams` and `id:0` for `clear_forced_streams`, mirroring
   `extend_default_flags()` (set wins over clear on collision).
 
-### 5. Boundary / deferral
+### 5. Planner and control-plane boundary
 
-Filter *resolution* (compiled filter → the concrete `RemuxStreamRef`, including
-the "exactly one match or diagnostic" enforcement for the default and order
-filters) is a planner responsibility in `voom-plan`, and populating
-`head_streams` / `forced_streams` / `clear_forced_streams` into `RemuxSelection`
-is a `voom-control-plane/remux` responsibility. Both are owned by the #272 /
-audio workstream. This PR lands the edges — the `defaults … where` and
-`order tracks … where` DSL (validate + lower + fixtures), the additive `filter` /
-`head_filter` compiled fields, the additive `RemuxSelection` wire fields
-(including forced), and the mkvmerge worker emission with conformance tests —
-plus the mechanical, behaviour-preserving edits needed to keep the workspace
-compiling. The planner resolution and control-plane population are an
-explicitly-tracked follow-up; until they land, the new wire fields default empty
-and the shipped forms are inert (or, for bare `order tracks where`, blocked),
-never wrong.
+`voom-plan` owns filter evaluation, retained-stream cardinality, and the resolved
+snapshot identity stored in the per-file remux payload.
+`voom-control-plane/remux` owns validation of that identity against the pinned
+snapshot and conversion to `RemuxStreamRef`. The MKVToolNix worker receives only
+resolved stream references.
+
+Defaults filters are scoped to kept streams of their declared target kind.
+Order filters range over kept ordinary tracks; attachments are not track-order
+candidates. Bare `order tracks where <filter>` carries an empty group order plus
+one resolved head stream, so every remaining ordinary track stays in source
+order.
 
 ## Consequences
 
@@ -151,6 +135,9 @@ never wrong.
   and the golden fixture `filter-addressed-tracks.{voom,json}` pins the compiled
   shape. `compiled_json` stays backward compatible: absent fields read as
   `None`/empty, `source_hash` for existing policies is unchanged.
+- The typed per-file remux payload carries additive optional resolved snapshot
+  stream IDs for filter-addressed defaults and ordering. Old payloads read with
+  those fields absent.
 - The mkvmerge worker emits `--forced-track-flag id:1|0` and head-pinned
   `--track-order`, covered by worker conformance tests that build a
   `RemuxRequest` directly.
@@ -169,31 +156,19 @@ never wrong.
   rows deserialize (absent ⇒ `None`) and unchanged policies serialize
   identically, so their `source_hash` — a hash of the *source text*, not the
   compiled JSON — is unaffected.
-- Until the planner/control-plane follow-up lands, the two shipped DSL forms are
-  parsed and stored but do not yet change a produced artifact (and bare
-  `order tracks where` blocks at plan time, as noted above).
+- Durable remux events record resolved `head_streams` additively. Existing
+  events deserialize with an empty head selection.
 
-**Not in this PR (tracked follow-up, #272 / audio + control-plane workstream):**
+**Still deferred:**
 
 - The `forced audio|subtitle where <filter>` DSL op and its compiled `SetForced`
   variant. Forced is delivered only at the wire (`RemuxSelection.forced_streams`
   / `clear_forced_streams`) and worker (`--forced-track-flag`) layer here; the
-  DSL surface waits for the planner follow-up (it needs a new `PlanOperationKind`
-  and would be inert until filter resolution exists).
-- Planner filter resolution (compiled filter → concrete `RemuxStreamRef`),
-  including making bare `order tracks where <filter>` (empty target list)
-  plannable rather than `UnsupportedMediaShape`.
-- The single-match enforcement and its plan-time diagnostic for
-  `defaults … where` and `order tracks … where`. The compiler validates only the
-  shape; the "exactly one match or fail" acceptance criterion of #277 is met by
-  the planner work, not here.
-- Control-plane population of `head_streams` / `forced_streams` /
-  `clear_forced_streams` into `RemuxSelection`.
-- Extending the remux **event** payload (`voom-events`
-  `ArtifactRemux…`) with the forced/head decisions. Today `default_streams` /
-  `clear_default_streams` / `track_order` are recorded but forced and head-order
-  decisions would not be, an observability gap to close when the population work
-  lands. `voom-events` is outside this PR's scope.
+  DSL surface needs a new `PlanOperationKind` and a separate published
+  execution contract.
+- Populating `forced_streams` / `clear_forced_streams` from policy remains tied
+  to the unpublished forced DSL operation. No forced selection is inferred from
+  defaults or ordering.
 
 ## Considered & rejected
 
