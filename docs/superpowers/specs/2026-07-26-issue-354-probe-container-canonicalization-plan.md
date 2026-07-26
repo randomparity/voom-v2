@@ -62,6 +62,8 @@ or malformed values as an absent container fact.
 - Modify: `crates/voom-control-plane/tests/audio_transcode_flow.rs`
 - Modify: `crates/voom-control-plane/tests/phase_barrier_flow.rs`
 - Modify: `crates/voom-cli/tests/multi_phase_flow.rs`
+- Modify: `crates/voom-cli/tests/multi_phase_preview_envelope.rs`
+- Modify: `crates/voom-cli/tests/compliance_envelope.rs`
 - Modify these files under `crates/voom-cli/tests/snapshots/`:
   - `multi_phase_preview_envelope__compliance_report_previews_combined_multi_phase_policy.snap`
   - `compliance_envelope__execute_scanned_remux_outputs_committed_file_phase.snap`
@@ -81,14 +83,15 @@ or malformed values as an absent container fact.
 5. Apply the same independently necessary `hevc-archive` second phase to the
    CLI multi-phase execution fixture. Preserve its two-commit and durable
    report-read-back assertions.
-6. Regenerate the CLI multi-phase preview golden and both scanned-remux
-   compliance-execution goldens. Review canonical `mkv`/`mp4` observations,
-   statuses, diagnostics, and content-derived report identities. Do not change
-   raw durable snapshot fixtures.
+6. Before their snapshot assertions, add semantic CLI assertions that the
+   multi-phase preview observes canonical `mkv` and its already-satisfied remux
+   is `NoOp`, and that both scanned-remux executions observe canonical `mp4`.
+   These assertions pin behavior without predicting content-derived IDs.
 7. Run the four generated-media flows and confirm the new `NoOp` assertions
    fail under raw alias comparison. Run the phase-barrier test separately and
    confirm the independent lineage fixture passes. Run the affected CLI tests
-   and review snapshots through `cargo insta review`:
+   and confirm the semantic canonical-value assertions fail before snapshot
+   review:
 
    ```sh
    cargo test -p voom-control-plane --test remux_flow
@@ -100,7 +103,6 @@ or malformed values as an absent container fact.
    cargo test -p voom-cli --test multi_phase_flow
    cargo test -p voom-cli --test multi_phase_preview_envelope
    cargo test -p voom-cli --test compliance_envelope
-   cargo insta review
    ```
 
 ## Task 3: Implement the single canonical projection
@@ -116,7 +118,15 @@ or malformed values as an absent container fact.
 3. Call it once from `planning_input`; do not alter snapshot persistence,
    ffprobe normalization, planner comparison, or caller-specific code.
 4. Re-run every focused test from Tasks 1 and 2. All must pass.
-5. Mutate one accepted mapping and one rejection case locally, confirm the
+5. Regenerate the CLI multi-phase preview golden and both scanned-remux
+   compliance-execution goldens. Review canonical `mkv`/`mp4` observations,
+   statuses, diagnostics, and content-derived report identities:
+
+   ```sh
+   cargo insta review
+   ```
+
+6. Mutate one accepted mapping and one rejection case locally, confirm the
    relevant table tests fail, then restore the implementation.
 
 ## Task 4: Reconcile current architecture documentation
@@ -160,7 +170,7 @@ or malformed values as an absent container fact.
 3. Commit the implementation as one logical behavior change:
 
    ```sh
-   git add crates/voom-control-plane docs/adr
+   git add crates/voom-control-plane crates/voom-cli/tests docs/adr
    git commit -m "fix(control-plane): canonicalize probe containers"
    ```
 
