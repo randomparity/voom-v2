@@ -608,26 +608,12 @@ fn validate_output_track_identity(
             ),
         ));
     }
-    if expected_track.kind == crate::mkvmerge::MkvmergeTrackKind::Attachment {
-        if output_track.fingerprint == expected_track.fingerprint {
-            return Ok(());
-        }
-        return Err(malformed_worker_result(
-            "output_probe",
-            format!(
-                "selected stream identity mismatch: expected {} at output index {output_index}",
-                kept_stream.snapshot_stream_id
-            ),
-        ));
-    }
-    if input_mapping
-        .provider_indexes_for_kind(expected_track.kind)
-        .len()
-        <= 1
-    {
-        return Ok(());
-    }
-    if output_track.fingerprint != expected_track.fingerprint {
+    let identity_must_match = expected_track.kind == crate::mkvmerge::MkvmergeTrackKind::Attachment
+        || input_mapping
+            .provider_indexes_for_kind(expected_track.kind)
+            .len()
+            > 1;
+    if identity_must_match && output_track.fingerprint != expected_track.fingerprint {
         return Err(malformed_worker_result(
             "output_probe",
             format!(
