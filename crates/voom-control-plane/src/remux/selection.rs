@@ -299,6 +299,9 @@ fn remux_block_error(block: RemuxPlanningBlock) -> VoomError {
         | RemuxPlanningBlock::ConflictingExplicitDefaults { .. } => VoomError::Config(
             "remux payload contains unresolved filter-addressed selection".to_owned(),
         ),
+        RemuxPlanningBlock::ConflictingBestDefaultStrategies { .. } => {
+            VoomError::Config("remux payload contains conflicting defaults strategies".to_owned())
+        }
     }
 }
 

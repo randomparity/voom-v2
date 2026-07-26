@@ -766,6 +766,203 @@ fn defaults_best_supports_subtitle_selection_and_an_empty_subtitle_set() {
 }
 
 #[test]
+fn defaults_best_validates_every_candidate_language() {
+    let policy = compiled_policy_with_languages_and_ops(
+        &["eng"],
+        vec![CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        }],
+    );
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
+    snapshot.stream_summary["streams"][2]["language"] = serde_json::json!(17);
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.diagnostics[0].code,
+        PlanningDiagnosticCode::InsufficientSnapshotFacts
+    );
+}
+
+#[test]
+fn defaults_best_warns_when_nonempty_preferences_consume_untagged_language() {
+    let policy = compiled_policy_with_languages_and_ops(
+        &["eng"],
+        vec![CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        }],
+    );
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
+    snapshot.stream_summary["streams"][2]
+        .as_object_mut()
+        .unwrap()
+        .remove("language");
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn defaults_best_empty_preferences_do_not_read_or_warn_on_language_facts() {
+    let policy = compiled_policy_with_languages_and_ops(
+        &[],
+        vec![CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Best,
+            filter: None,
+        }],
+    );
+    let mut snapshot =
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", false), ("spa", false)]);
+    snapshot.stream_summary["streams"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("language");
+    snapshot.stream_summary["streams"][2]["language"] = serde_json::json!(17);
+
+    let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+    assert_eq!(plan.nodes[0].status, NodeStatus::Planned);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"][0]["selected_snapshot_stream_id"],
+        "stream-1"
+    );
+    assert!(plan.diagnostics.iter().all(|diagnostic| {
+        diagnostic.code != PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted
+    }));
+}
+
+#[test]
+fn defaults_best_shadowed_by_explicit_does_not_read_or_warn_on_languages() {
+    let explicit = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Preserve,
+        filter: Some(TrackFilter::Commentary),
+    };
+    let best = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Best,
+        filter: None,
+    };
+    for operations in [
+        vec![explicit.clone(), best.clone()],
+        vec![best.clone(), explicit.clone()],
+    ] {
+        let policy = compiled_policy_with_languages_and_ops(&["eng"], operations);
+        let mut snapshot =
+            snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
+        snapshot.stream_summary["streams"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("language");
+        snapshot.stream_summary["streams"][1]["disposition"]["commentary"] =
+            serde_json::json!(true);
+        snapshot.stream_summary["streams"][2]["language"] = serde_json::json!(17);
+        snapshot.stream_summary["streams"][2]["disposition"]["commentary"] =
+            serde_json::json!(false);
+
+        let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+        assert_eq!(plan.nodes[0].status, NodeStatus::NoOp);
+        assert_eq!(
+            plan.nodes[0].operation_payload["defaults"],
+            serde_json::json!([{
+                "target": "audio",
+                "strategy": "preserve",
+                "selected_snapshot_stream_id": "stream-1"
+            }])
+        );
+        assert!(plan.diagnostics.iter().all(|diagnostic| {
+            diagnostic.code != PlanningDiagnosticCode::UntaggedTrackLanguageDefaulted
+        }));
+    }
+}
+
+#[test]
+fn defaults_best_conflicts_with_other_same_target_strategies() {
+    let best = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::Best,
+        filter: None,
+    };
+    let none = CompiledOperation::SetDefaults {
+        target: TrackTarget::Audio,
+        strategy: DefaultStrategy::None,
+        filter: None,
+    };
+    for operations in [
+        vec![best.clone(), none.clone()],
+        vec![none, best.clone()],
+        vec![best.clone(), best],
+    ] {
+        let policy = compiled_policy_with_languages_and_ops(&["eng"], operations);
+        let snapshot =
+            snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true), ("spa", false)]);
+
+        let plan = generate_plan(request(policy, snapshot)).unwrap();
+
+        assert_eq!(plan.nodes[0].status, NodeStatus::Blocked);
+        assert_eq!(
+            plan.diagnostics[0].code,
+            PlanningDiagnosticCode::UnsupportedMediaShape
+        );
+        assert!(
+            plan.nodes[0]
+                .status_reason
+                .contains("defaults strategy operations target audio and include best")
+        );
+    }
+}
+
+#[test]
+fn defaults_best_preserves_legacy_non_best_strategy_composition() {
+    let policy = compiled_policy_with_ops(vec![
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::None,
+            filter: None,
+        },
+        CompiledOperation::SetDefaults {
+            target: TrackTarget::Audio,
+            strategy: DefaultStrategy::Preserve,
+            filter: None,
+        },
+    ]);
+
+    let plan = generate_plan(request(
+        policy,
+        snapshot_mkv_with_audio_languages_and_defaults(&[("eng", true)]),
+    ))
+    .unwrap();
+
+    assert_ne!(plan.nodes[0].status, NodeStatus::Blocked);
+    assert_eq!(
+        plan.nodes[0].operation_payload["defaults"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn attachment_target_track_selection_is_plannable() {
     for operation in [
         CompiledOperation::KeepTracks {
