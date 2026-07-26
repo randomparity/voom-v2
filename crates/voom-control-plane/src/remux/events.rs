@@ -40,6 +40,7 @@ pub async fn record_started(
             selected_streams: stream_payloads(&selection.keep_streams),
             default_streams: stream_payloads(&selection.default_streams),
             clear_default_streams: stream_payloads(&selection.clear_default_streams),
+            head_streams: stream_payloads(&selection.head_streams),
             track_order: selection
                 .track_order
                 .iter()
@@ -87,6 +88,7 @@ pub async fn record_progress(
             selected_streams: stream_payloads(&event.selection.keep_streams),
             default_streams: stream_payloads(&event.selection.default_streams),
             clear_default_streams: stream_payloads(&event.selection.clear_default_streams),
+            head_streams: stream_payloads(&event.selection.head_streams),
             percent_bps: event.percent.map(u16::from),
             message: event.message,
             provider: None,
@@ -121,6 +123,7 @@ pub(crate) struct RemuxSucceededEvent {
     pub selected_streams: Vec<ArtifactRemuxStreamPayload>,
     pub default_streams: Vec<ArtifactRemuxStreamPayload>,
     pub clear_default_streams: Vec<ArtifactRemuxStreamPayload>,
+    pub head_streams: Vec<ArtifactRemuxStreamPayload>,
     pub kept_snapshot_stream_ids: Vec<String>,
     pub default_snapshot_stream_ids: Vec<String>,
     pub output_container: String,
@@ -142,6 +145,7 @@ impl RemuxSucceededEvent {
             selected_streams: stream_payloads(&event.selection.keep_streams),
             default_streams: stream_payloads(&event.selection.default_streams),
             clear_default_streams: stream_payloads(&event.selection.clear_default_streams),
+            head_streams: stream_payloads(&event.selection.head_streams),
             kept_snapshot_stream_ids: event.result.kept_snapshot_stream_ids.clone(),
             default_snapshot_stream_ids: event.result.default_snapshot_stream_ids.clone(),
             output_container: event.result.output_container.clone(),
@@ -186,6 +190,7 @@ pub(crate) async fn append_succeeded_in_tx(
             selected_streams: event.selected_streams.clone(),
             default_streams: event.default_streams.clone(),
             clear_default_streams: event.clear_default_streams.clone(),
+            head_streams: event.head_streams.clone(),
             kept_snapshot_stream_ids: event.kept_snapshot_stream_ids.clone(),
             default_snapshot_stream_ids: event.default_snapshot_stream_ids.clone(),
             output_container: event.output_container.clone(),
@@ -246,6 +251,9 @@ pub async fn record_failed(
             }),
             clear_default_streams: event.selection.map_or_else(Vec::new, |selection| {
                 stream_payloads(&selection.clear_default_streams)
+            }),
+            head_streams: event.selection.map_or_else(Vec::new, |selection| {
+                stream_payloads(&selection.head_streams)
             }),
             failure_class: failure_class_for_error(event.error),
             error_code: event.error.code().to_owned(),

@@ -321,6 +321,10 @@ fn artifact_remux_started_payload_serializes_selection_correlation_fields() {
             provider_stream_index: 1,
         }],
         clear_default_streams: Vec::new(),
+        head_streams: vec![ArtifactRemuxStreamPayload {
+            snapshot_stream_id: "stream-1".to_owned(),
+            provider_stream_index: 1,
+        }],
         track_order: vec!["video".to_owned(), "audio".to_owned()],
         provider: Some("mkvtoolnix".to_owned()),
         provider_version: None,
@@ -350,13 +354,101 @@ fn artifact_remux_started_payload_serializes_selection_correlation_fields() {
         json["payload"]["track_order"],
         serde_json::json!(["video", "audio"])
     );
+    assert_eq!(
+        json["payload"]["head_streams"][0]["snapshot_stream_id"],
+        "stream-1"
+    );
 
-    let back: Event = serde_json::from_value(json).unwrap();
+    let back: Event = serde_json::from_value(json.clone()).unwrap();
     assert!(matches!(back, Event::ArtifactRemuxStarted(q) if q == p));
+    let mut old_json = json;
+    old_json["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("head_streams");
+    let old: Event = serde_json::from_value(old_json).unwrap();
+    assert!(matches!(old, Event::ArtifactRemuxStarted(payload) if payload.head_streams.is_empty()));
     assert_eq!(
         Event::ArtifactRemuxStarted(p).kind(),
         EventKind::ArtifactRemuxStarted
     );
+}
+
+#[test]
+fn old_remux_event_payloads_default_absent_head_streams() {
+    let events = [
+        serde_json::json!({
+            "kind": "artifact.remux_progress",
+            "payload": {
+                "job_id": 1,
+                "ticket_id": 2,
+                "lease_id": 3,
+                "source_file_version_id": 4,
+                "source_file_location_id": 5,
+                "staging_path": "/tmp/out.mkv",
+                "selected_streams": [],
+                "default_streams": [],
+                "clear_default_streams": [],
+                "percent_bps": null,
+                "message": null,
+                "provider": null,
+                "provider_version": null
+            }
+        }),
+        serde_json::json!({
+            "kind": "artifact.remux_succeeded",
+            "payload": {
+                "job_id": 1,
+                "ticket_id": 2,
+                "lease_id": 3,
+                "source_file_version_id": 4,
+                "source_file_location_id": 5,
+                "artifact_handle_id": 6,
+                "artifact_location_id": 7,
+                "staging_path": "/tmp/out.mkv",
+                "selected_streams": [],
+                "default_streams": [],
+                "clear_default_streams": [],
+                "kept_snapshot_stream_ids": [],
+                "default_snapshot_stream_ids": [],
+                "output_container": "mkv",
+                "provider": "mkvtoolnix",
+                "provider_version": "1"
+            }
+        }),
+        serde_json::json!({
+            "kind": "artifact.remux_failed",
+            "payload": {
+                "job_id": 1,
+                "ticket_id": 2,
+                "lease_id": 3,
+                "source_file_version_id": 4,
+                "source_file_location_id": 5,
+                "artifact_handle_id": null,
+                "artifact_location_id": null,
+                "staging_path": "/tmp/out.mkv",
+                "selected_streams": [],
+                "default_streams": [],
+                "clear_default_streams": [],
+                "failure_class": "worker_crash",
+                "error_code": "WORKER_CRASH",
+                "message": "failed",
+                "provider": null,
+                "provider_version": null
+            }
+        }),
+    ];
+
+    for event in events {
+        let event: Event = serde_json::from_value(event).unwrap();
+        let head_streams = match event {
+            Event::ArtifactRemuxProgress(payload) => Some(payload.head_streams),
+            Event::ArtifactRemuxSucceeded(payload) => Some(payload.head_streams),
+            Event::ArtifactRemuxFailed(payload) => Some(payload.head_streams),
+            _ => None,
+        };
+        assert_eq!(head_streams, Some(Vec::new()));
+    }
 }
 
 #[test]
@@ -692,6 +784,7 @@ fn artifact_remux_failed_payload_serializes_public_error_code() {
         selected_streams: Vec::new(),
         default_streams: Vec::new(),
         clear_default_streams: Vec::new(),
+        head_streams: Vec::new(),
         failure_class: voom_core::FailureClass::MalformedWorkerResult,
         error_code: "MALFORMED_WORKER_RESULT".to_owned(),
         message: "worker result did not match requested remux streams".to_owned(),
