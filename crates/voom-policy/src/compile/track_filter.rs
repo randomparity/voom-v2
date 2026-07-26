@@ -1,3 +1,5 @@
+use crate::text::quoted_text_end;
+
 use super::compiled::{ComparisonOp, TrackFilter};
 
 const MAX_FILTER_DEPTH: usize = 64;
@@ -123,30 +125,16 @@ fn parse_channels(text: &str) -> Result<TrackFilter, ParseError> {
 fn parse_title(text: &str) -> Result<TrackFilter, ParseError> {
     let value = text.strip_prefix("title contains ").ok_or(ParseError)?;
     let value = value.trim();
-    let end = quoted_string_end(value)?;
+    if !value.starts_with('"') {
+        return Err(ParseError);
+    }
+    let end = quoted_text_end(value).ok_or(ParseError)?;
     if end != value.len() || end == 2 {
         return Err(ParseError);
     }
     Ok(TrackFilter::TitleContains {
         value: value.trim_matches('"').to_owned(),
     })
-}
-
-fn quoted_string_end(text: &str) -> Result<usize, ParseError> {
-    if !text.starts_with('"') {
-        return Err(ParseError);
-    }
-    let mut escaped = false;
-    for (index, ch) in text[1..].char_indices() {
-        if escaped {
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Ok(index + 2);
-        }
-    }
-    Err(ParseError)
 }
 
 fn parse_quoted_token(text: &str) -> Result<String, ParseError> {

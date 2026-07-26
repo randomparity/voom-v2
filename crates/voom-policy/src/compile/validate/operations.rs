@@ -839,7 +839,7 @@ impl Validator<'_> {
         statement: &StatementAst,
         text: &str,
         where_index: usize,
-    ) -> bool {
+    ) {
         let tokens = words(text);
         if !text.contains(" where ") {
             if tokens.len() > where_index {
@@ -848,9 +848,8 @@ impl Validator<'_> {
                     statement.span(),
                     "operation does not accept extra arguments without `where`",
                 );
-                return false;
             }
-            return true;
+            return;
         }
         if tokens.get(where_index).copied() != Some("where") {
             self.error(
@@ -858,7 +857,7 @@ impl Validator<'_> {
                 statement.span(),
                 "track filter must follow the operation header",
             );
-            return false;
+            return;
         }
         let Some((_, filter)) = text.split_once(" where ") else {
             self.error(
@@ -866,22 +865,21 @@ impl Validator<'_> {
                 statement.span(),
                 "operation requires a track filter after `where`",
             );
-            return false;
+            return;
         };
-        self.validate_filter(statement, filter.trim())
+        self.validate_filter(statement, filter.trim());
     }
 
-    fn validate_filter(&mut self, statement: &StatementAst, text: &str) -> bool {
+    fn validate_filter(&mut self, statement: &StatementAst, text: &str) {
         let Ok(filter) = parse_track_filter(text) else {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "unknown track filter predicate",
             );
-            return false;
+            return;
         };
         self.validate_filter_languages(statement, &filter);
-        true
     }
 
     fn validate_filter_languages(&mut self, statement: &StatementAst, filter: &TrackFilter) {
