@@ -107,6 +107,25 @@ fn track_fingerprint_distinguishes_same_kind_languages() {
 }
 
 #[test]
+fn track_fingerprint_distinguishes_commentary_disposition() {
+    let main = serde_json::json!({
+        "id": 1,
+        "type": "audio",
+        "properties": {"language": "eng", "flag_commentary": false}
+    });
+    let commentary = serde_json::json!({
+        "id": 2,
+        "type": "audio",
+        "properties": {"language": "eng", "flag_commentary": true}
+    });
+
+    assert_ne!(
+        MkvmergeTrackFingerprint::from_identify(&main),
+        MkvmergeTrackFingerprint::from_identify(&commentary)
+    );
+}
+
+#[test]
 fn reads_real_mkvmerge_container_type_string() {
     let identify = serde_json::json!({
         "container": {

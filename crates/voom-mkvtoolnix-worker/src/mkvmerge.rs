@@ -240,7 +240,8 @@ fn required_attachment_string<'a>(
 
 const TRACK_FINGERPRINT_FIELDS: &[&str] = &["type"];
 
-const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] = &["forced_track", "language", "track_name"];
+const TRACK_PROPERTY_FINGERPRINT_FIELDS: &[&str] =
+    &["flag_commentary", "forced_track", "language", "track_name"];
 
 fn collect_fingerprint_fields(track: &Value, fields: &mut Vec<String>) {
     for key in TRACK_FINGERPRINT_FIELDS {
