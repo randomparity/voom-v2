@@ -169,7 +169,7 @@ pub enum RemuxTrackActionKind {
 pub struct RemuxDefaultAction {
     pub target: TrackTarget,
     pub strategy: DefaultStrategy,
-    /// Snapshot stream selected by an explicit defaults filter.
+    /// Snapshot stream selected by planner-resolved default intent.
     pub selected_snapshot_stream_id: Option<String>,
 }
 

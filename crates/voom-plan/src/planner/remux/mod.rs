@@ -38,10 +38,7 @@ pub(super) fn candidate_kind(operation: &CompiledOperation) -> Option<PlanOperat
     }
 }
 
-pub(super) fn candidate_support(
-    operation: &CompiledOperation,
-    explicit_default_targets: &[TrackTarget],
-) -> CandidateSupport {
+pub(super) fn candidate_support(operation: &CompiledOperation) -> CandidateSupport {
     match operation {
         CompiledOperation::SetContainer { container } if container.eq_ignore_ascii_case("mkv") => {
             CandidateSupport::Supported
@@ -62,13 +59,6 @@ pub(super) fn candidate_support(
                 CandidateSupport::Supported
             }
         }
-        CompiledOperation::SetDefaults {
-            target,
-            strategy: DefaultStrategy::Best,
-            ..
-        } if !explicit_default_targets.contains(target) => CandidateSupport::Unsupported(
-            "default strategy best is not supported by remux planning",
-        ),
         CompiledOperation::ReorderTracks { targets, .. } => {
             if duplicate_track_targets(targets) {
                 CandidateSupport::Unsupported("track order contains duplicate target groups")
@@ -158,8 +148,9 @@ pub(super) fn plan_group(
     phase_name: &str,
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
+    preferred_languages: &[String],
 ) -> OperationPlan {
-    let resolution = resolve_remux_operations(snapshot, operations);
+    let resolution = resolve_remux_operations(snapshot, operations, preferred_languages);
     let payload = match &resolution {
         Ok(resolution) => resolution.payload.clone().into_value(),
         Err(_) => remux_payload(snapshot, operations),
@@ -510,6 +501,7 @@ fn remux_group_shape(
 fn resolve_remux_operations(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
+    preferred_languages: &[String],
 ) -> Result<RemuxResolution, RemuxPlanningBlock> {
     let mut payload = base_remux_payload(snapshot, operations);
     let has_track_operation = operations
@@ -541,7 +533,7 @@ fn resolve_remux_operations(
     let mut changed = facts
         .iter()
         .any(|stream| !keep_ids.contains(&stream.snapshot_stream_id));
-    payload.defaults = resolve_default_actions(operations, &facts, &keep_ids)?;
+    payload.defaults = resolve_default_actions(operations, &facts, &keep_ids, preferred_languages)?;
     changed |= defaults_change(&payload.defaults, &facts, &keep_ids)?;
     let (track_order, head_snapshot_stream_id, order_changed) =
         resolve_track_order(operations, &facts, &keep_ids)?;
@@ -559,6 +551,7 @@ fn resolve_default_actions(
     operations: &[&CompiledOperation],
     facts: &[SnapshotStreamFact],
     keep_ids: &BTreeSet<String>,
+    preferred_languages: &[String],
 ) -> Result<Vec<RemuxDefaultAction>, RemuxPlanningBlock> {
     let explicit_targets = explicit_default_targets(operations)?;
     let mut defaults = Vec::new();
@@ -574,14 +567,21 @@ fn resolve_default_actions(
         if filter.is_none() && explicit_targets.contains(target) {
             continue;
         }
-        let selected_snapshot_stream_id = match filter {
-            Some(filter) => Some(resolve_unique_filter(
+        let selected_snapshot_stream_id = match (filter, strategy) {
+            (Some(filter), _) => Some(resolve_unique_filter(
                 retained_streams(facts, keep_ids, Some(*target)),
                 filter,
                 RemuxFilterOperation::Defaults(*target),
             )?),
-            None => None,
+            (None, DefaultStrategy::Best) => resolve_best_default(
+                retained_streams(facts, keep_ids, Some(*target)),
+                preferred_languages,
+            )?,
+            (None, _) => None,
         };
+        if *strategy == DefaultStrategy::Best && selected_snapshot_stream_id.is_none() {
+            continue;
+        }
         defaults.push(RemuxDefaultAction {
             target: *target,
             strategy: *strategy,
@@ -589,6 +589,39 @@ fn resolve_default_actions(
         });
     }
     Ok(defaults)
+}
+
+fn resolve_best_default(
+    streams: Vec<&SnapshotStreamFact>,
+    preferred_languages: &[String],
+) -> Result<Option<String>, RemuxPlanningBlock> {
+    let Some(first) = streams.first() else {
+        return Ok(None);
+    };
+    if preferred_languages.is_empty() {
+        return Ok(Some(first.snapshot_stream_id.clone()));
+    }
+
+    let mut selected = *first;
+    let mut selected_rank = usize::MAX;
+    for stream in streams {
+        let language = match &stream.language {
+            SnapshotFact::Value(language) => language.as_str(),
+            SnapshotFact::Missing => "und",
+            SnapshotFact::Malformed => {
+                return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
+            }
+        };
+        let rank = preferred_languages
+            .iter()
+            .position(|preferred| preferred == language)
+            .unwrap_or(preferred_languages.len());
+        if rank < selected_rank {
+            selected = stream;
+            selected_rank = rank;
+        }
+    }
+    Ok(Some(selected.snapshot_stream_id.clone()))
 }
 
 fn explicit_default_targets(
