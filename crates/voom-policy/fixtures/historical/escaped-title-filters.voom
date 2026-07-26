@@ -1,0 +1,14 @@
+policy "escaped-title-filters" {
+  phase escaped_quote {
+    keep subtitle where title contains "Director \"Cut\""
+  }
+  phase escaped_backslash {
+    keep subtitle where title contains "Path\\Name"
+  }
+  phase interior_quotes {
+    keep subtitle where title contains "\"Quoted\" middle"
+  }
+  phase other_pair {
+    keep subtitle where title contains "Other\qPair"
+  }
+}

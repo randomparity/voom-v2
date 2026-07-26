@@ -4,8 +4,8 @@
     "severity": "error",
     "stage": "validate",
     "span": {
-      "start": 477,
-      "end": 584
+      "start": 485,
+      "end": 592
     },
     "location": {
       "line": 23,

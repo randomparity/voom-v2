@@ -1,10 +1,10 @@
 policy "language cleanup" {
   phase normalize {
     container mkv
-    keep audio where lang in [eng, und]
-    keep subtitle where lang in [eng]
+    keep audio where language in ["eng", "und"]
+    keep subtitle where language in ["eng"]
     order tracks [video, audio, subtitle]
-    defaults audio where lang in [eng]
+    defaults audio where language in ["eng"]
     defaults subtitle where forced
   }
 }

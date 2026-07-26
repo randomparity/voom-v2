@@ -35,7 +35,7 @@ policy "extract commentary audio" {
 const EXTRACT_ENGLISH_POLICY: &str = r#"
 policy "extract english audio" {
   phase normalize {
-    extract audio where lang in [eng]
+    extract audio where language in ["eng"]
   }
 }
 "#;

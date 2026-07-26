@@ -17,9 +17,9 @@ policy "reference user library normalize" {
 
   phase normalize {
     container mkv
-    keep audio where lang in [eng, und]
+    keep audio where language in ["eng", "und"]
     order tracks [video, audio, subtitle]
-    defaults audio where lang in [eng]
+    defaults audio where language in ["eng"]
     defaults subtitle where forced
   }
 
@@ -30,7 +30,7 @@ policy "reference user library normalize" {
 
   phase audio {
     depends_on: [video]
-    transcode audio to eac3 where lang in [eng, und]
+    transcode audio to eac3 where language in ["eng", "und"]
     synthesize audio from channels >= 6 { codec aac  channels 2 }
   }
 

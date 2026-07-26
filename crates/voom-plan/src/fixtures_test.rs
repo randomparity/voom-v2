@@ -15,7 +15,7 @@ const REMUX_TRACK_SELECTION_POLICY: &str = r#"
 policy "remux track selection" {
   phase normalize {
     container mkv
-    keep audio where lang in [eng, und]
+    keep audio where language in ["eng", "und"]
     remove subtitle where forced
     order tracks [video, audio, subtitle]
     defaults audio: first

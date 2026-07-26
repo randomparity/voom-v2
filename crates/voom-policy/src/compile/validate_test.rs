@@ -144,16 +144,22 @@ fn rejects_unknown_codec() {
 #[test]
 fn accepts_sprint14_audio_operations() {
     assert!(
-        compile_policy("policy \"p\" { phase a { transcode audio to aac where lang in [eng] } }")
-            .is_ok()
+        compile_policy(
+            "policy \"p\" { phase a { transcode audio to aac where language in [\"eng\"] } }",
+        )
+        .is_ok()
     );
     assert!(
-        compile_policy("policy \"p\" { phase a { transcode audio to opus where codec in [aac] } }")
-            .is_ok()
+        compile_policy(
+            "policy \"p\" { phase a { transcode audio to opus where codec in [\"aac\"] } }",
+        )
+        .is_ok()
     );
     assert!(
-        compile_policy("policy \"p\" { phase a { transcode audio to eac3 where lang in [eng] } }")
-            .is_ok()
+        compile_policy(
+            "policy \"p\" { phase a { transcode audio to eac3 where language in [\"eng\"] } }",
+        )
+        .is_ok()
     );
     assert!(compile_policy("policy \"p\" { phase a { extract audio where commentary } }").is_ok());
 }
@@ -169,7 +175,7 @@ fn rejects_unsupported_transcode_shapes() {
             .contains(&"unsupported_transcode_shape".to_owned())
     );
     assert!(
-        codes("policy \"p\" { phase a { transcode audio to flac where lang in [eng] } }")
+        codes("policy \"p\" { phase a { transcode audio to flac where language in [\"eng\"] } }",)
             .contains(&"unsupported_transcode_shape".to_owned())
     );
 }
@@ -333,7 +339,7 @@ fn rejects_duplicate_config_settings() {
 #[test]
 fn rejects_invalid_language_filter_alias() {
     assert!(
-        codes("policy \"p\" { phase a { keep audio where language in [english] } }")
+        codes("policy \"p\" { phase a { keep audio where language in [\"english\"] } }")
             .contains(&"invalid_language_code".to_owned())
     );
 }
@@ -477,7 +483,9 @@ fn rejects_defaults_with_extra_tokens() {
 
 #[test]
 fn accepts_defaults_where_track_filter() {
-    assert!(codes("policy \"p\" { phase a { defaults audio where lang in [eng] } }").is_empty());
+    assert!(
+        codes("policy \"p\" { phase a { defaults audio where language in [\"eng\"] } }").is_empty()
+    );
     assert!(codes("policy \"p\" { phase a { defaults subtitle where forced } }").is_empty());
 }
 
@@ -492,7 +500,7 @@ fn rejects_defaults_where_unknown_filter() {
 #[test]
 fn rejects_defaults_where_invalid_language_code() {
     assert!(
-        codes("policy \"p\" { phase a { defaults audio where lang in [english] } }")
+        codes("policy \"p\" { phase a { defaults audio where language in [\"english\"] } }")
             .contains(&"invalid_language_code".to_owned())
     );
 }
@@ -505,8 +513,12 @@ fn accepts_order_tracks_where_track_filter() {
 #[test]
 fn accepts_order_tracks_list_and_where_filter() {
     assert!(
-        codes("policy \"p\" { phase a { order tracks [video, audio] where lang in [eng] } }")
-            .is_empty()
+        codes(
+            "policy \"p\" { phase a { \
+             order tracks [video, audio] where language in [\"eng\"] \
+             } }",
+        )
+        .is_empty()
     );
 }
 
@@ -646,7 +658,7 @@ fn accepts_channel_count_track_filter() {
 #[test]
 fn rejects_unknown_boolean_track_filter_branch() {
     assert!(
-        codes("policy \"p\" { phase a { keep audio where lang in [eng] or banana } }")
+        codes("policy \"p\" { phase a { keep audio where language in [\"eng\"] or banana } }",)
             .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
 }
@@ -654,8 +666,12 @@ fn rejects_unknown_boolean_track_filter_branch() {
 #[test]
 fn rejects_malformed_audio_filter_tails() {
     assert!(
-        codes("policy \"p\" { phase a { transcode audio to aac where lang in [eng] garbage } }")
-            .contains(&"unknown_phase_statement_or_operation".to_owned())
+        codes(
+            "policy \"p\" { phase a { \
+             transcode audio to aac where language in [\"eng\"] garbage \
+             } }",
+        )
+        .contains(&"unknown_phase_statement_or_operation".to_owned())
     );
     assert!(
         codes("policy \"p\" { phase a { extract audio where commentary and } }")
@@ -761,7 +777,10 @@ fn rejects_comparison_numeric_literal_exceeding_u64() {
 fn rejects_count_numeric_literal_exceeding_u64() {
     assert!(
         codes(
-            "policy \"p\" { phase a { when count audio > 9999999999999999999999999 { keep audio where lang in [eng] } } }"
+            "policy \"p\" { phase a { \
+             when count audio > 9999999999999999999999999 { \
+             keep audio where language in [\"eng\"] \
+             } } }"
         )
         .contains(&"numeric_literal_out_of_range".to_owned())
     );

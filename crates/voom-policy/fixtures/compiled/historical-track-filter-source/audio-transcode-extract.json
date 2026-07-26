@@ -1,7 +1,7 @@
 {
-  "policy_name": "audio transcode eac3",
-  "slug": "audio-transcode-eac3",
-  "source_hash": "ffe92411d6804eb7fdd14a93bcdca2f25512080c3c79ed7176a70a1dcd36b798",
+  "policy_name": "audio transcode extract",
+  "slug": "audio-transcode-extract",
+  "source_hash": "785dd7429b362f0dd0ab290c2326b194d9a6067de1cd09f8dfdf4f3a8fa2d583",
   "schema_version": 2,
   "metadata": {},
   "config": {},
@@ -15,7 +15,7 @@
       "operations": [
         {
           "type": "transcode_audio",
-          "target_codec": "eac3",
+          "target_codec": "aac",
           "container": "mkv",
           "filter": {
             "type": "language_in",
@@ -23,6 +23,14 @@
               "eng",
               "und"
             ]
+          }
+        },
+        {
+          "type": "extract_audio",
+          "target_codec": "opus",
+          "container": "ogg",
+          "filter": {
+            "type": "commentary"
           }
         }
       ]

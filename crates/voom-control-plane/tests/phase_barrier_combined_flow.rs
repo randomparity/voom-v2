@@ -47,11 +47,11 @@ use voom_test_support::worker::{
 ///
 /// Phase order is `remux -> transcode -> audio`:
 ///
-/// * The remux phase's `keep audio where lang in [eng, und]` drops the fixture's
+/// * The remux phase's `keep audio where language in ["eng", "und"]` drops the fixture's
 ///   `spa` track (genuine track selection, not a no-op), leaving the `eng` track.
 /// * The transcode phase re-encodes the video to hevc; its `-c:a copy` carries the
 ///   audio stream (and its language/title/disposition tags) through untouched.
-/// * The audio phase's `transcode audio to opus where lang in [eng, und]` plans
+/// * The audio phase's `transcode audio to opus where language in ["eng", "und"]` plans
 ///   against the *re-probed* transcode output. Per ADR-0011 the planner gates
 ///   transcode plannability on the source codec + container only, so this commits
 ///   even though the fixture's audio tracks are title-less — the case real media
@@ -60,7 +60,7 @@ const COMBINED_POLICY: &str = r#"
 policy "sprint 16 combined" {
   phase remux {
     container mkv
-    keep audio where lang in [eng, und]
+    keep audio where language in ["eng", "und"]
     order tracks [video, audio, subtitle]
     defaults audio: first
   }
@@ -70,7 +70,7 @@ policy "sprint 16 combined" {
   }
   phase audio {
     depends_on: [transcode]
-    transcode audio to opus where lang in [eng, und]
+    transcode audio to opus where language in ["eng", "und"]
   }
 }
 "#;
@@ -149,7 +149,8 @@ async fn phase_barrier_runs_transcode_remux_audio_chain_end_to_end() {
 /// a transcode that stream-copies) yet still committing a new version:
 ///
 /// * remux (`produced[0]`): the `spa` track is gone — exactly one audio stream
-///   survives, in `eng` — proving `keep audio where lang in [eng, und]` selected
+///   survives, in `eng` — proving
+///   `keep audio where language in ["eng", "und"]` selected
 ///   tracks rather than copying the source's two audio streams through.
 /// * transcode (`produced[1]`): the video stream is now `hevc`.
 /// * audio (`produced[2]`): the surviving audio stream is now `opus`.
@@ -512,7 +513,7 @@ fn require_command(program: &str, args: &[&str]) {
 
 /// One-second 32x32 h264 video plus two aac audio tracks (`eng`, `spa`) in an
 /// mkv container (the path extension selects the muxer). The `spa` track exists
-/// so the remux phase's `keep audio where lang in [eng, und]` removes it — making
+/// so the remux phase's `keep audio where language in ["eng", "und"]` removes it — making
 /// the remux real work rather than a no-op — leaving `eng` for the audio phase to
 /// transcode.
 fn generate_combined_fixture(path: &Path) {

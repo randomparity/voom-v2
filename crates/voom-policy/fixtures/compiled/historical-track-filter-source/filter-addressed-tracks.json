@@ -1,7 +1,7 @@
 {
   "policy_name": "filter addressed tracks",
   "slug": "filter-addressed-tracks",
-  "source_hash": "3b8621a35ee590885bfb5b3ba12712cedc270c00978538b5c35837a06a26b190",
+  "source_hash": "c8bf610ee2cffdf5af32df062b11f9a064824291309992a34a8dfc4c543201d4",
   "schema_version": 2,
   "metadata": {},
   "config": {},

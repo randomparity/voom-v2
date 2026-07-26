@@ -119,8 +119,9 @@ vocabulary; each has a planner-oracle test in
 | `verify-heavy.voom` | An artifact verification between each mutating phase. |
 
 For a real whole-library run, `reference-user.voom` is the closest to a
-production policy. Its language filters (`keep audio where lang in [eng, und]`,
-`transcode audio to eac3 where lang in [eng, und]`) behave predictably on a messy
+production policy. Its language filters
+(`keep audio where language in ["eng", "und"]`,
+`transcode audio to eac3 where language in ["eng", "und"]`) behave predictably on a messy
 library (ADR 0021):
 
 - **Untagged audio is treated as `und`.** A file whose audio carries no language

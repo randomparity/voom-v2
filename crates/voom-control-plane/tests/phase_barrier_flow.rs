@@ -868,7 +868,9 @@ async fn phase_barrier_promotes_terminal_artifact_from_earlier_phase() {
             "remux-then-audio",
             "policy \"remux then audio\" {\n  \
                phase normalize { container mkv }\n  \
-               phase audio { depends_on: [normalize] transcode audio to opus where lang in [eng, und] }\n}",
+               phase audio { depends_on: [normalize] \
+                 transcode audio to opus where language in [\"eng\", \"und\"] \
+               }\n}",
         )
         .await
         .unwrap();

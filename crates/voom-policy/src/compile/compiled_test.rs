@@ -386,7 +386,7 @@ fn legacy_bare_string_profile_round_trips_through_compiled_json() {
 #[test]
 fn compiles_sprint14_audio_aac_transcode_operation() {
     let policy = crate::compile_policy(
-        "policy \"p\" { phase a { transcode audio to aac where lang in [eng, und] } }",
+        "policy \"p\" { phase a { transcode audio to aac where language in [\"eng\", \"und\"] } }",
     )
     .unwrap()
     .policy;
@@ -423,7 +423,7 @@ fn compiles_sprint14_audio_extract_operation() {
 #[test]
 fn rejects_invalid_boolean_audio_filter_children() {
     let err = crate::compile_policy(
-        "policy \"p\" { phase a { transcode audio to aac where lang in [eng] or banana } }",
+        "policy \"p\" { phase a { transcode audio to aac where language in [\"eng\"] or banana } }",
     )
     .unwrap_err();
 
