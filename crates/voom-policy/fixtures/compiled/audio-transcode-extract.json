@@ -1,7 +1,7 @@
 {
   "policy_name": "audio transcode extract",
   "slug": "audio-transcode-extract",
-  "source_hash": "785dd7429b362f0dd0ab290c2326b194d9a6067de1cd09f8dfdf4f3a8fa2d583",
+  "source_hash": "2c0cfc103f27522eb5cca65b8a7d6f4ca71ca9edb10730c524236dd14fce5fba",
   "schema_version": 2,
   "metadata": {},
   "config": {},

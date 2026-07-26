@@ -1,0 +1,90 @@
+{
+  "policy_name": "escaped-title-filters",
+  "slug": "escaped-title-filters",
+  "source_hash": "c4b99a0bae2445fac2f4c2662909d55b91fbb1fe63847dac5fa770541a5e69ba",
+  "schema_version": 2,
+  "metadata": {},
+  "config": {},
+  "phases": [
+    {
+      "name": "escaped_quote",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "Director \\\"Cut\\"
+          }
+        }
+      ]
+    },
+    {
+      "name": "escaped_backslash",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "Path\\\\Name"
+          }
+        }
+      ]
+    },
+    {
+      "name": "interior_quotes",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "\\\"Quoted\\\" middle"
+          }
+        }
+      ]
+    },
+    {
+      "name": "other_pair",
+      "depends_on": [],
+      "run_if": null,
+      "skip_if": null,
+      "on_error": null,
+      "operations": [
+        {
+          "type": "keep_tracks",
+          "target": "subtitle",
+          "filter": {
+            "type": "title_contains",
+            "value": "Other\\qPair"
+          }
+        }
+      ]
+    }
+  ],
+  "phase_order": [
+    "escaped_quote",
+    "escaped_backslash",
+    "interior_quotes",
+    "other_pair"
+  ],
+  "warnings": [],
+  "provenance": {
+    "compiler": "voom-policy",
+    "format": "sprint4-v2",
+    "flags": {}
+  }
+}

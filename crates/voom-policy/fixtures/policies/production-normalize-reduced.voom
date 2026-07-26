@@ -11,7 +11,7 @@ policy "production-normalize-reduced" {
 
   phase normalize {
     container mkv
-    keep audio where lang in [eng, und]
+    keep audio where language in ["eng", "und"]
     remove attachments where not font
     order tracks [video, audio, subtitle]
     defaults audio: first

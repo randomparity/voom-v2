@@ -20,7 +20,9 @@ fn compile_policy_preserves_sprint12_video_hevc_transcode() {
 #[test]
 fn compile_policy_lowers_defaults_where_to_filter_addressed_default() {
     let out = compile_policy(
-        "policy \"p\" { phase a { defaults audio where lang in [eng] and not commentary } }",
+        "policy \"p\" { phase a { \
+         defaults audio where language in [\"eng\"] and not commentary \
+         } }",
     )
     .unwrap();
 
@@ -57,7 +59,7 @@ fn compile_policy_keeps_strategy_default_without_filter() {
 #[test]
 fn compile_policy_lowers_order_tracks_where_to_head_filter() {
     let out = compile_policy(
-        "policy \"p\" { phase a { order tracks [video, audio] where lang in [eng] } }",
+        "policy \"p\" { phase a { order tracks [video, audio] where language in [\"eng\"] } }",
     )
     .unwrap();
 
@@ -175,9 +177,10 @@ fn compile_policy_lowers_count_phase_skip_condition() {
 
 #[test]
 fn compile_policy_preserves_boolean_track_filters() {
-    let out =
-        compile_policy("policy \"p\" { phase a { keep audio where lang in [eng] or commentary } }")
-            .unwrap();
+    let out = compile_policy(
+        "policy \"p\" { phase a { keep audio where language in [\"eng\"] or commentary } }",
+    )
+    .unwrap();
     let CompiledOperation::KeepTracks {
         filter: Some(TrackFilter::Or { filters }),
         ..
@@ -257,7 +260,9 @@ fn compile_policy_preserves_parenthesized_boolean_conditions() {
 #[test]
 fn compile_policy_preserves_parenthesized_boolean_track_filters() {
     let out = compile_policy(
-        "policy \"p\" { phase a { keep audio where (lang in [eng] or commentary) and not forced } }",
+        "policy \"p\" { phase a { \
+         keep audio where (language in [\"eng\"] or commentary) and not forced \
+         } }",
     )
     .unwrap();
     let CompiledOperation::KeepTracks {
@@ -642,8 +647,8 @@ fn conformance_working_v1_productions_compile_clean() {
     for body in [
         "container mkv",
         "transcode video to hevc",
-        "keep audio where language in [eng, und]",
-        "keep subtitle where codec in [srt]",
+        "keep audio where language in [\"eng\", \"und\"]",
+        "keep subtitle where codec in [\"srt\"]",
         "remove audio where commentary",
         "keep audio where channels >= 6",
         "keep attachment where font",

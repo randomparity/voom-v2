@@ -30,7 +30,7 @@ const COMBINED_POLICY: &str = r#"
 policy "sprint 16 combined" {
   phase remux {
     container mkv
-    keep audio where lang in [eng, und]
+    keep audio where language in ["eng", "und"]
     order tracks [video, audio, subtitle]
     defaults audio: first
   }
@@ -40,7 +40,7 @@ policy "sprint 16 combined" {
   }
   phase audio {
     depends_on: [transcode]
-    transcode audio to opus where lang in [eng, und]
+    transcode audio to opus where language in ["eng", "und"]
   }
 }
 "#;

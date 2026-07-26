@@ -23,7 +23,7 @@ use voom_test_support::worker::{
 const AUDIO_TRANSCODE_POLICY: &str = r#"
 policy "audio transcode opus" {
   phase normalize {
-    transcode audio to opus where lang in [eng, jpn]
+    transcode audio to opus where language in ["eng", "jpn"]
   }
 }
 "#;
