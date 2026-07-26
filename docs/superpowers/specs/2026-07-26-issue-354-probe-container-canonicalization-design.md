@@ -137,6 +137,10 @@ observations, the V0 -> V1 -> V2 `produced_from` chain, and both reprobe
 snapshot identities. Coordinator alias behavior gets a separate focused
 planning test.
 
+A CLI multi-phase execution fixture has the same repeated-default-HEVC
+dependency. It uses the same `normalize` then dependent `hevc-archive` policy
+shape and continues asserting two committed phases and durable CLI read-back.
+
 ### Generated-media evidence
 
 The existing real-media flows retain assertions that committed snapshots store
@@ -153,6 +157,14 @@ Coverage includes:
 
 The remux flow gains the authoritative replan assertion it does not currently
 have.
+
+CLI snapshots are planning views rather than raw durable inspection evidence,
+so their observed containers become canonical. The multi-phase preview golden
+changes from `matroska,webm` to `mkv`, including the affected status,
+diagnostic, and report identities. Both scanned-remux execution goldens change
+their observed source container from the real MP4 probe spelling
+`mov,mp4,m4a,3gp,3g2,mj2` to `mp4`; the remux itself remains planned because
+the target is MKV.
 
 ## Compatibility and rollout
 
@@ -196,10 +208,15 @@ facts.
 - Assert remux, video transcode, named-profile transcode, and audio transcode
   outputs replan as `NoOp`.
 - Assert the `NoOp` observed state carries `mkv`, not the raw ffprobe alias.
+- Reshape both control-plane and CLI two-phase execution fixtures to make
+  `hevc-archive` the independently necessary second mutation.
+- Regenerate and review the multi-phase preview golden and both scanned-remux
+  compliance-execution goldens. Assert canonical planning observations without
+  changing raw durable snapshot fixtures.
 
 ### Guardrails
 
-- Focused `voom-control-plane` unit and integration tests.
+- Focused `voom-control-plane` and `voom-cli` unit and integration tests.
 - `prek run` before each implementation commit.
 - `just ci` before shipping and again after any rebase.
 
