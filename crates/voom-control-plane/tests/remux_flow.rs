@@ -21,14 +21,16 @@ use voom_test_support::worker::{
 
 const REMUX_POLICY: &str = r#"
 policy "remux track selection" {
+  config {
+    languages: ["spa", "eng"]
+  }
   phase normalize {
     container mkv
-    keep audio where language in ["eng", "und"]
     remove audio where commentary
     keep attachment where font
     remove subtitle where forced
-    order tracks [video, audio, subtitle] where codec in ["aac"] and not commentary
-    defaults audio where language == "eng" and not commentary
+    order tracks [video, audio, subtitle] where language == "spa"
+    defaults audio: best
     defaults subtitle: none
   }
 }
@@ -169,13 +171,13 @@ async fn assert_scanned_stream_facts(
         1,
         "unexpected normalized source streams: {streams:#?}"
     );
-    assert!(
+    assert_eq!(
         streams
             .iter()
             .filter(|stream| stream["kind"].as_str() == Some("audio"))
-            .count()
-            >= 2,
-        "expected at least two audio streams, got {streams:?}"
+            .count(),
+        3,
+        "unexpected source audio streams: {streams:?}"
     );
     assert!(
         streams
@@ -205,6 +207,13 @@ async fn assert_scanned_stream_facts(
     assert!(streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("audio") && stream["disposition"]["commentary"] == false
     }));
+    for language in ["eng", "spa"] {
+        assert!(streams.iter().any(|stream| {
+            stream["kind"].as_str() == Some("audio")
+                && stream["language"].as_str() == Some(language)
+                && stream["disposition"]["commentary"] == false
+        }));
+    }
     assert!(streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("attachment")
             && stream["filename"] == "OpenSans.ttf"
@@ -303,18 +312,19 @@ fn assert_remux_result_streams(streams: &[serde_json::Value]) {
             .iter()
             .map(|stream| stream["kind"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["audio", "video", "subtitle", "attachment"]
+        ["audio", "video", "audio", "subtitle", "attachment"]
     );
     let audio = streams
         .iter()
         .filter(|stream| stream["kind"].as_str() == Some("audio"))
         .collect::<Vec<_>>();
-    assert_eq!(audio.len(), 1);
-    assert!(
-        audio[0]["language"].as_str() == Some("eng")
-            && audio[0]["disposition"]["commentary"] == false
-            && audio[0]["disposition"]["default"] == true
-    );
+    assert_eq!(audio.len(), 2);
+    assert_eq!(audio[0]["language"], "spa");
+    assert_eq!(audio[0]["disposition"]["commentary"], false);
+    assert_eq!(audio[0]["disposition"]["default"], true);
+    assert_eq!(audio[1]["language"], "eng");
+    assert_eq!(audio[1]["disposition"]["commentary"], false);
+    assert_eq!(audio[1]["disposition"]["default"], false);
     assert!(!streams.iter().any(|stream| {
         stream["kind"].as_str() == Some("audio") && stream["disposition"]["commentary"] == true
     }));
@@ -467,6 +477,10 @@ fn generate_remux_fixture(path: &Path) {
             "lavfi",
             "-i",
             "sine=frequency=660:sample_rate=48000",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=48000",
             "-i",
             subtitle.to_str().unwrap(),
             "-i",
@@ -480,9 +494,11 @@ fn generate_remux_fixture(path: &Path) {
             "-map",
             "2:a:0",
             "-map",
-            "3:s:0",
+            "3:a:0",
             "-map",
             "4:s:0",
+            "-map",
+            "5:s:0",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -494,8 +510,10 @@ fn generate_remux_fixture(path: &Path) {
             "-metadata:s:a:0",
             "language=eng",
             "-metadata:s:a:1",
+            "language=spa",
+            "-metadata:s:a:2",
             "language=eng",
-            "-disposition:a:1",
+            "-disposition:a:2",
             "comment",
             "-metadata:s:s:0",
             "language=eng",
