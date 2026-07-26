@@ -176,7 +176,7 @@ async fn handler_rejects_attachment_track_order_before_provider_run() {
 
 #[tokio::test]
 async fn handler_executes_and_validates_attachment_keep_stream() {
-    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf").await;
+    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf", "font/ttf").await;
     let mut request = fixture.request;
     request.selection.keep_streams = vec![
         video_ref("stream-0", 0),
@@ -195,7 +195,24 @@ async fn handler_executes_and_validates_attachment_keep_stream() {
 
 #[tokio::test]
 async fn handler_rejects_changed_output_attachment_identity() {
-    let fixture = remux_fixture_with_attachment_output("renamed.ttf").await;
+    let fixture = remux_fixture_with_attachment_output("renamed.ttf", "font/ttf").await;
+    let mut request = fixture.request;
+    request.selection.keep_streams = vec![
+        video_ref("stream-0", 0),
+        audio_ref("stream-1", 1),
+        attachment_ref("stream-2", 2),
+    ];
+
+    let err = handle_remux(&request, &fixture.config).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::MalformedWorkerResult);
+    assert!(err.to_string().contains("stream-2"), "{err}");
+}
+
+#[tokio::test]
+async fn handler_rejects_changed_output_attachment_font_class() {
+    let fixture =
+        remux_fixture_with_attachment_output("OpenSans.ttf", "application/octet-stream").await;
     let mut request = fixture.request;
     request.selection.keep_streams = vec![
         video_ref("stream-0", 0),
@@ -211,7 +228,7 @@ async fn handler_rejects_changed_output_attachment_identity() {
 
 #[tokio::test]
 async fn handler_rejects_attachment_in_track_flag_selection() {
-    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf").await;
+    let fixture = remux_fixture_with_attachment_output("OpenSans.ttf", "font/ttf").await;
     let mut request = fixture.request;
     request.selection.keep_streams = vec![
         video_ref("stream-0", 0),
@@ -717,8 +734,15 @@ async fn remux_fixture_with_two_input_videos_and_forbidden_provider_run() -> Rem
         .await
 }
 
-async fn remux_fixture_with_attachment_output(output_name: &str) -> RemuxFixture {
-    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_attachment_output(output_name)).await
+async fn remux_fixture_with_attachment_output(
+    output_name: &str,
+    output_mime_type: &str,
+) -> RemuxFixture {
+    remux_fixture_with_mkvmerge(&fake_mkvmerge_body_with_attachment_output(
+        output_name,
+        output_mime_type,
+    ))
+    .await
 }
 
 async fn remux_fixture_with_mkvmerge(body: &str) -> RemuxFixture {
@@ -1088,7 +1112,7 @@ exit 42
     .to_owned()
 }
 
-fn fake_mkvmerge_body_with_attachment_output(output_name: &str) -> String {
+fn fake_mkvmerge_body_with_attachment_output(output_name: &str, output_mime_type: &str) -> String {
     format!(
         r#"#!/bin/sh
 set -eu
@@ -1098,7 +1122,7 @@ if [ "${{1:-}}" = "--identify" ]; then
   case "$last" in
     *out.mkv)
       cat <<'JSON'
-{{"container":{{"type":"Matroska"}},"tracks":[{{"id":20,"type":"video","properties":{{"default_track":false,"number":1}}}},{{"id":21,"type":"audio","properties":{{"default_track":true,"number":2}}}}],"attachments":[{{"id":5,"file_name":"{output_name}","content_type":"font/ttf","size":26}}]}}
+{{"container":{{"type":"Matroska"}},"tracks":[{{"id":20,"type":"video","properties":{{"default_track":false,"number":1}}}},{{"id":21,"type":"audio","properties":{{"default_track":true,"number":2}}}}],"attachments":[{{"id":5,"file_name":"{output_name}","content_type":"{output_mime_type}","size":26}}]}}
 JSON
       ;;
     *)

@@ -149,8 +149,9 @@ cargo clippy -p voom-plan -p voom-control-plane --all-targets --all-features -- 
    `--no-attachments`;
 3. attachments never appear in `--track-order` or default/forced flag arguments;
 4. missing/duplicate provider references fail before provider execution;
-5. output inspection accepts exact selected filename/size fingerprints;
-6. missing, extra, wrong-kind, renamed, or resized output attachments fail;
+5. output inspection accepts selected filename/size fingerprints and recognized font MIME
+   canonicalization;
+6. missing, extra, wrong-kind, renamed, resized, or font-to-non-font output attachments fail;
 7. the worker result includes kept attachment snapshot IDs.
 
 Expected initial failures: top-level attachments are absent from the mapping, attachment references

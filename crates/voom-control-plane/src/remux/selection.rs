@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashSet};
 use serde_json::Value;
 use voom_core::VoomError;
 use voom_plan::remux::{
-    RemuxOperationPayload, RemuxPlanningBlock, RemuxTrackActionKind, SnapshotStreamFact,
-    evaluate_filter, stream_facts,
+    RemuxOperationPayload, RemuxPlanningBlock, SnapshotStreamFact, resolve_track_keep_ids,
+    stream_facts,
 };
 use voom_policy::{DefaultStrategy, TrackTarget};
 use voom_store::repo::identity::MediaSnapshot;
@@ -29,29 +29,17 @@ pub fn selection_from_payload_and_snapshot(
             "remux selection requires at least one video stream".to_owned(),
         ));
     }
-    let mut keep_ids = facts
+    if payload
+        .track_actions
         .iter()
-        .map(|stream| stream.snapshot_stream_id.clone())
-        .collect::<BTreeSet<_>>();
-    for action in &payload.track_actions {
-        if action.target == TrackTarget::Video {
-            return Err(VoomError::Config(
-                "video track policy is unsupported".to_owned(),
-            ));
-        }
-        let matching_ids = matching_stream_ids(&facts, action.target, action.filter.as_ref())?;
-        match action.kind {
-            RemuxTrackActionKind::KeepTracks => {
-                remove_target(&facts, action.target, &mut keep_ids);
-                keep_ids.extend(matching_ids);
-            }
-            RemuxTrackActionKind::RemoveTracks => {
-                for id in matching_ids {
-                    keep_ids.remove(&id);
-                }
-            }
-        }
+        .any(|action| action.target == TrackTarget::Video)
+    {
+        return Err(VoomError::Config(
+            "video track policy is unsupported".to_owned(),
+        ));
     }
+    let mut keep_ids =
+        resolve_track_keep_ids(&facts, &payload.track_actions).map_err(remux_block_error)?;
 
     for stream in facts
         .iter()
@@ -83,24 +71,6 @@ pub fn selection_from_payload_and_snapshot(
     })
 }
 
-fn matching_stream_ids(
-    facts: &[SnapshotStreamFact],
-    target: TrackTarget,
-    filter: Option<&voom_policy::TrackFilter>,
-) -> Result<Vec<String>, VoomError> {
-    let mut ids = Vec::new();
-    for stream in facts.iter().filter(|stream| stream.kind == target) {
-        let matched = match filter {
-            Some(filter) => evaluate_filter(filter, stream).map_err(remux_block_error)?,
-            None => true,
-        };
-        if matched {
-            ids.push(stream.snapshot_stream_id.clone());
-        }
-    }
-    Ok(ids)
-}
-
 /// A remux must never strip a source's audio to nothing: a file with audio that
 /// keeps zero audio streams is unplayable (ADR 0021, issue #158). When the source
 /// has audio but the resolved keep set retains none, this is a per-file failure —
@@ -121,16 +91,6 @@ fn reject_empty_audio(
         ));
     }
     Ok(())
-}
-
-fn remove_target(
-    facts: &[SnapshotStreamFact],
-    target: TrackTarget,
-    keep_ids: &mut BTreeSet<String>,
-) {
-    for stream in facts.iter().filter(|stream| stream.kind == target) {
-        keep_ids.remove(&stream.snapshot_stream_id);
-    }
 }
 
 fn default_refs(

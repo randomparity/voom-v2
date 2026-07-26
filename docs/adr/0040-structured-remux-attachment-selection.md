@@ -91,18 +91,20 @@ The output probe maps attachments the same way and validates:
 
 - the exact number and kinds of selected output items;
 - ordinary-track fingerprints and order as before;
-- attachment filename and byte-size fingerprints.
+- attachment filename, byte-size, and MIME-identity fingerprints.
 
-MIME type is deliberately excluded from the preservation fingerprint. MKVToolNix 99 and later may
-map legacy font MIME types to current registered types while preserving the attachment. Replanning
-uses the exact allowlist above, so both the legacy input fact and canonical output fact remain
-classifiable as fonts.
+MIME identity maps every recognized legacy or registered font MIME type to one `font` class and
+keeps every non-font MIME value exact. MKVToolNix 99 and later may therefore canonicalize a legacy
+font MIME type without causing a false identity mismatch, while a font-to-non-font change fails
+output validation and cannot commit an artifact that immediately replans as noncompliant.
 
 ### Planning and safety
 
 Attachment keep/remove actions use the same deterministic initial-keep-set algorithm as audio and
 subtitle actions. Every source stream starts kept; an action changes only streams of its target
-kind. All video streams are re-added, and the existing final-audio guard runs after all actions.
+kind. Planning and execution share the same ordered reducer, so later actions may deliberately
+restore streams removed by earlier actions. All video streams are re-added, and the existing
+final-audio guard runs after all actions.
 
 A container-only remux therefore preserves every attachment. A filtered remux preserves all
 unselected video, audio, subtitle, and attachment items. Missing or malformed facts needed by a

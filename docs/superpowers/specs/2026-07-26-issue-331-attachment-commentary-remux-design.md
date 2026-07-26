@@ -22,7 +22,8 @@ the produced inventory, and replan a compliant MKV as `NoOp`.
 5. The mkvtoolnix worker maps ffprobe provider indexes to ordinary tracks and attachments without
    filename, title, codec, or MIME guessing.
 6. The worker emits `--attachments <ids>` for selected attachments and `--no-attachments` for none.
-7. Output inspection verifies selected ordinary tracks and attachment filename/size fingerprints.
+7. Output inspection verifies selected ordinary tracks and attachment filename/size/MIME identity
+   fingerprints.
 8. A generated MKV proves:
    - the main audio, video, subtitle, and font attachment remain;
    - the commentary audio and non-font attachment are absent;
@@ -163,8 +164,9 @@ their current enumerate-derived provider indexes. Attachments follow them in top
 array order. Each item holds its mkvmerge ID, kind, default flag where applicable, and a
 kind-specific fingerprint.
 
-Attachment fingerprints contain exact `file_name` and `size`. Ordinary-track fingerprints remain
-unchanged.
+Attachment fingerprints contain exact `file_name` and `size`. Recognized registered and legacy
+font MIME values share a `font` identity; every non-font MIME value remains exact. Ordinary-track
+fingerprints remain unchanged.
 
 Argument construction partitions the selected items:
 
@@ -181,8 +183,9 @@ The output mapping includes ordinary tracks followed by attachments. Expected ou
 group ordering to ordinary tracks, appends any remaining ordinary tracks, and then appends selected
 attachments in source order.
 
-Validation compares item count, kind, ordinary-track identity, attachment filename/size identity,
-video presence, and default flags. A mismatch is a malformed worker result and prevents commit.
+Validation compares item count, kind, ordinary-track identity, attachment
+filename/size/MIME identity, video presence, and default flags. A mismatch is a malformed worker
+result and prevents commit.
 
 ## Compatibility and migration
 
