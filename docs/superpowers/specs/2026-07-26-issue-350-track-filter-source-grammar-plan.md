@@ -87,6 +87,12 @@ policy "escaped-title-filters" {
 
 Step 2 recompiles these identical bytes and requires complete JSON equality,
 including the unchanged `source_hash`, for all four historical values.
+Step 1 also adds
+`historical_escaped_title_compiled_fixture_matches_pre_refactor_compiler`,
+which compiles the exact source with the unmodified lowerer and compares the
+complete deterministic JSON to this file. Review the JSON before committing,
+including all four `title_contains.value` strings; do not generate or first
+accept it after Step 2. Keep this test and golden unchanged through Step 2.
 
 Tests:
 
@@ -98,30 +104,34 @@ Tests:
   suggestion; only source-derived span/location values may change;
 - all active valid fixtures and integration policies remain green under the old
   permissive compiler; and
-- the published corpus guard still accepts every canonical corpus file.
+- the published corpus guard still accepts every canonical corpus file; and
+- the escaped-title historical source compiles under the pre-refactor compiler
+  to the reviewed complete JSON and identical source hash.
 
-Before committing, run this exact inventory:
+Before committing, run these exact representation-aware inventories:
 
 ```text
+rg -n '\blang\b' crates docs/runbooks -g '*.rs' -g '*.voom' -g '*.md'
+rg -n 'language\s*==\s*[a-z]' crates docs/runbooks -g '*.rs' -g '*.voom' -g '*.md'
 rg -n --pcre2 \
-  '\blang\b|language\s*==\s*[a-z]|language\s+in\s+\[(?!\s*")|codec\s+in\s+\[(?!\s*")' \
+  '(?:language|codec)\s+in\s+\[(?:\s*[a-z]|[^\]\n]*,\s*[a-z])' \
   crates docs/runbooks -g '*.rs' -g '*.voom' -g '*.md'
+rg -n 'title matches' crates docs/runbooks -g '*.rs' -g '*.voom' -g '*.md'
 ```
 
-Every result must appear in the checked table above or be one of these explicit
-Step 2/unchanged classes:
+The only retained source cases after Step 1 are:
 
-- Step 2 implementation:
-  `compile/validate/conditions.rs`, `compile/validate/operations.rs`,
-  `compile/lower/conditions.rs`;
-- Step 2 rejection/conformance tests:
-  `compile/pipeline_test.rs`, `compile/validate_test.rs`,
-  `compile/compiled_test.rs`, `published_grammar_corpus.rs`;
-- parser-only: `syntax/parser_test.rs`;
-- grammar placeholder:
-  `published-grammar-coverage.md`.
+| Exact retained case | Reason |
+|---|---|
+| `pipeline_test::conformance_language_equals_accepts_bare_token` | Renamed and flipped to rejection in Step 2 |
+| `published_grammar_corpus::UNPUBLISHED_FORMS` literals `lang ` and `title matches` | Canonical corpus exclusion guard |
+| the three alias-bearing cases in `syntax/parser_test.rs` | Parser-only AST tests |
+| alias/matches branches and comments in `compile/validate/conditions.rs`, `compile/validate/operations.rs`, and `compile/lower/conditions.rs` | Removed/replaced in Step 2 |
 
-An unclassified result blocks the commit.
+The bare-list inventory must have zero matches after Step 1. Every other
+positive and unrelated-negative compiler test source is canonicalized in Step
+1. Any result outside this exact case table blocks the commit; a whole file is
+never an allowed class.
 
 Implementation:
 
@@ -308,6 +318,17 @@ Verification:
 ```text
 cargo test -p voom-policy track_filter
 cargo test -p voom-policy compiled
+cargo test -p voom-policy policy_fixtures
+cargo test -p voom-plan fixtures
+cargo test -p voom-cli --test multi_phase_preview_envelope
+cargo test -p voom-control-plane --test published_grammar_corpus
+cargo test -p voom-control-plane --test remux_flow
+cargo test -p voom-control-plane --test audio_transcode_flow
+cargo test -p voom-control-plane --test audio_extract_flow
+cargo test -p voom-control-plane --test phase_barrier_flow
+cargo test -p voom-control-plane --test phase_barrier_combined_flow
+cargo test -p voom-control-plane --test sample_policies_plan
+prek run
 ```
 
 Commit:
