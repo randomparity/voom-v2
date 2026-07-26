@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashSet};
+
 use serde_json::json;
 use voom_policy::{
     CompiledOperation, DefaultStrategy, MediaSnapshotInput, TrackFilter, TrackTarget,
@@ -11,7 +13,8 @@ pub use payload::{
     RemuxTrackActionKind,
 };
 pub use selection::{
-    RemuxPlanningBlock, SnapshotStreamFact, evaluate_filter, resolve_track_keep_ids, stream_facts,
+    RemuxFilterOperation, RemuxPlanningBlock, SnapshotFact, SnapshotStreamFact, evaluate_filter,
+    resolve_track_keep_ids, stream_facts,
 };
 
 use crate::{NodeStatus, PlanOperationKind, PlanningDiagnostic, PlanningDiagnosticCode};
@@ -152,7 +155,11 @@ pub(super) fn plan_group(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
 ) -> OperationPlan {
-    let payload = remux_payload(snapshot, operations);
+    let resolution = resolve_remux_operations(snapshot, operations);
+    let payload = match &resolution {
+        Ok(resolution) => resolution.payload.clone().into_value(),
+        Err(_) => remux_payload(snapshot, operations),
+    };
     let observed_state = snapshot
         .container
         .as_ref()
@@ -161,39 +168,58 @@ pub(super) fn plan_group(
         .get("container")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("mkv");
-    let (status, status_reason, capability, diagnostic) =
-        match remux_group_shape(snapshot, operations, target_container) {
-            RemuxGroupShape::NoOp => (
-                NodeStatus::NoOp,
-                format!("container is already {target_container} and track selection is unchanged"),
-                None,
-                None,
-            ),
-            RemuxGroupShape::ContainerChange { current } => (
-                NodeStatus::Planned,
-                format!("container {current} will be changed to {target_container}"),
-                Some("remux_container".to_owned()),
-                None,
-            ),
-            RemuxGroupShape::TrackSelectionChange => (
-                NodeStatus::Planned,
-                "track selection will be changed".to_owned(),
-                Some("remux".to_owned()),
-                None,
-            ),
-            RemuxGroupShape::InsufficientFacts(message) => (
-                NodeStatus::Blocked,
-                message.to_owned(),
-                None,
-                Some(PlanningDiagnosticCode::InsufficientSnapshotFacts),
-            ),
-            RemuxGroupShape::UnsupportedShape(message) => (
-                NodeStatus::Blocked,
-                message.to_owned(),
-                None,
-                Some(PlanningDiagnosticCode::UnsupportedMediaShape),
-            ),
-        };
+    let shape = match resolution {
+        Ok(resolution) => remux_group_shape(
+            snapshot,
+            target_container,
+            resolution.track_selection_changed,
+        ),
+        Err(block) => remux_block_shape(block),
+    };
+    let (status, status_reason, capability, diagnostic) = match shape {
+        RemuxGroupShape::NoOp => (
+            NodeStatus::NoOp,
+            format!("container is already {target_container} and track selection is unchanged"),
+            None,
+            None,
+        ),
+        RemuxGroupShape::ContainerChange { current } => (
+            NodeStatus::Planned,
+            format!("container {current} will be changed to {target_container}"),
+            Some("remux_container".to_owned()),
+            None,
+        ),
+        RemuxGroupShape::TrackSelectionChange => (
+            NodeStatus::Planned,
+            "track selection will be changed".to_owned(),
+            Some("remux".to_owned()),
+            None,
+        ),
+        RemuxGroupShape::InsufficientFacts(message) => (
+            NodeStatus::Blocked,
+            message,
+            None,
+            Some(PlanningDiagnosticCode::InsufficientSnapshotFacts),
+        ),
+        RemuxGroupShape::UnsupportedShape(message) => (
+            NodeStatus::Blocked,
+            message,
+            None,
+            Some(PlanningDiagnosticCode::UnsupportedMediaShape),
+        ),
+        RemuxGroupShape::EmptyFilterSelection(message) => (
+            NodeStatus::Blocked,
+            message,
+            None,
+            Some(PlanningDiagnosticCode::EmptyTrackFilterSelection),
+        ),
+        RemuxGroupShape::AmbiguousFilterSelection(message) => (
+            NodeStatus::Blocked,
+            message,
+            None,
+            Some(PlanningDiagnosticCode::AmbiguousTrackFilterSelection),
+        ),
+    };
 
     let plan = OperationPlan::new(
         PlanOperationKind::Remux,
@@ -252,9 +278,9 @@ fn remux_defaults_untagged_language(
         };
         filter.as_ref().is_some_and(|filter| {
             filter_references_language(filter)
-                && facts
-                    .iter()
-                    .any(|stream| stream.kind == *target && stream.language.is_none())
+                && facts.iter().any(|stream| {
+                    stream.kind == *target && stream.language == SnapshotFact::Missing
+                })
         })
     })
 }
@@ -282,8 +308,16 @@ enum RemuxGroupShape {
     NoOp,
     ContainerChange { current: String },
     TrackSelectionChange,
-    InsufficientFacts(&'static str),
-    UnsupportedShape(&'static str),
+    InsufficientFacts(String),
+    UnsupportedShape(String),
+    EmptyFilterSelection(String),
+    AmbiguousFilterSelection(String),
+}
+
+#[derive(Debug, Clone)]
+struct RemuxResolution {
+    payload: RemuxOperationPayload,
+    track_selection_changed: bool,
 }
 
 fn with_optional_diagnostic(
@@ -352,6 +386,13 @@ fn remux_payload(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
 ) -> serde_json::Value {
+    base_remux_payload(snapshot, operations).into_value()
+}
+
+fn base_remux_payload(
+    snapshot: &MediaSnapshotInput,
+    operations: &[&CompiledOperation],
+) -> RemuxOperationPayload {
     let container = operations
         .iter()
         .find_map(|operation| match operation {
@@ -397,6 +438,7 @@ fn remux_payload(
             } => Some(RemuxDefaultAction {
                 target: *target,
                 strategy: *strategy,
+                selected_snapshot_stream_id: None,
             }),
             _ => None,
         })
@@ -407,9 +449,9 @@ fn remux_payload(
         source_media_snapshot_id: snapshot.existing_media_snapshot_id.map(|id| id.0),
         track_actions,
         track_order,
+        head_snapshot_stream_id: None,
         defaults,
     }
-    .into_value()
 }
 
 fn track_action_payload(
@@ -435,16 +477,11 @@ fn remux_track_group(target: TrackTarget) -> voom_core::RemuxTrackGroup {
 
 fn remux_group_shape(
     snapshot: &MediaSnapshotInput,
-    operations: &[&CompiledOperation],
     target_container: &str,
+    track_selection_changed: bool,
 ) -> RemuxGroupShape {
-    let track_selection_changed = match evaluate_remux_track_operations(snapshot, operations) {
-        Ok(changed) => changed,
-        Err(block) => return remux_block_shape(block),
-    };
-
     let Some(current_container) = snapshot.container.as_deref() else {
-        return RemuxGroupShape::InsufficientFacts("snapshot container is unknown");
+        return RemuxGroupShape::InsufficientFacts("snapshot container is unknown".to_owned());
     };
     if current_container.eq_ignore_ascii_case(target_container) && !track_selection_changed {
         RemuxGroupShape::NoOp
@@ -457,10 +494,11 @@ fn remux_group_shape(
     }
 }
 
-fn evaluate_remux_track_operations(
+fn resolve_remux_operations(
     snapshot: &MediaSnapshotInput,
     operations: &[&CompiledOperation],
-) -> Result<bool, RemuxPlanningBlock> {
+) -> Result<RemuxResolution, RemuxPlanningBlock> {
+    let mut payload = base_remux_payload(snapshot, operations);
     let has_track_operation = operations
         .iter()
         .any(|operation| !matches!(operation, CompiledOperation::SetContainer { .. }));
@@ -469,7 +507,10 @@ fn evaluate_remux_track_operations(
         if video_stream_count(snapshot) == Some(0) {
             return Err(RemuxPlanningBlock::UnsupportedMediaShape);
         }
-        return Ok(false);
+        return Ok(RemuxResolution {
+            payload,
+            track_selection_changed: false,
+        });
     }
 
     let facts = stream_facts(snapshot)?;
@@ -477,109 +518,248 @@ fn evaluate_remux_track_operations(
         return Err(RemuxPlanningBlock::UnsupportedMediaShape);
     }
     if !has_track_operation {
-        return Ok(false);
+        return Ok(RemuxResolution {
+            payload,
+            track_selection_changed: false,
+        });
     }
 
-    let track_actions = operations
-        .iter()
-        .filter_map(|operation| match operation {
-            CompiledOperation::KeepTracks { target, filter } => Some(RemuxTrackAction {
-                kind: RemuxTrackActionKind::KeepTracks,
-                target: *target,
-                filter: filter.clone(),
-            }),
-            CompiledOperation::RemoveTracks { target, filter } => Some(RemuxTrackAction {
-                kind: RemuxTrackActionKind::RemoveTracks,
-                target: *target,
-                filter: filter.clone(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let keep_ids = resolve_track_keep_ids(&facts, &track_actions)?;
+    let keep_ids = resolve_track_keep_ids(&facts, &payload.track_actions)?;
     let mut changed = facts
         .iter()
         .any(|stream| !keep_ids.contains(&stream.snapshot_stream_id));
-    let mut seen_reorder = false;
+    payload.defaults = resolve_default_actions(operations, &facts, &keep_ids)?;
+    changed |= defaults_change(&payload.defaults, &facts, &keep_ids)?;
+    let (track_order, head_snapshot_stream_id, order_changed) =
+        resolve_track_order(operations, &facts, &keep_ids)?;
+    payload.track_order = track_order;
+    payload.head_snapshot_stream_id = head_snapshot_stream_id;
+    changed |= order_changed;
+
+    Ok(RemuxResolution {
+        payload,
+        track_selection_changed: changed,
+    })
+}
+
+fn resolve_default_actions(
+    operations: &[&CompiledOperation],
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<Vec<RemuxDefaultAction>, RemuxPlanningBlock> {
+    let explicit_targets = explicit_default_targets(operations)?;
+    let mut defaults = Vec::new();
     for operation in operations {
-        match operation {
-            CompiledOperation::SetDefaults {
-                target, strategy, ..
-            } => {
-                if !facts.iter().any(|stream| stream.kind == *target)
-                    && !matches!(strategy, DefaultStrategy::None | DefaultStrategy::Preserve)
-                {
-                    return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
-                }
-                changed |= set_defaults_changes(&facts, *target, *strategy);
-            }
-            CompiledOperation::ReorderTracks { targets, .. } => {
-                if seen_reorder || targets.is_empty() || duplicate_track_targets(targets) {
-                    return Err(RemuxPlanningBlock::UnsupportedMediaShape);
-                }
-                seen_reorder = true;
-                changed |= reorder_tracks_changes(&facts, targets)?;
-            }
-            CompiledOperation::KeepTracks { .. }
-            | CompiledOperation::RemoveTracks { .. }
-            | CompiledOperation::SetContainer { .. } => {}
-            _ => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
+        let CompiledOperation::SetDefaults {
+            target,
+            strategy,
+            filter,
+        } = operation
+        else {
+            continue;
+        };
+        if filter.is_none() && explicit_targets.contains(target) {
+            continue;
+        }
+        let selected_snapshot_stream_id = match filter {
+            Some(filter) => Some(resolve_unique_filter(
+                retained_streams(facts, keep_ids, Some(*target)),
+                filter,
+                RemuxFilterOperation::Defaults(*target),
+            )?),
+            None => None,
+        };
+        defaults.push(RemuxDefaultAction {
+            target: *target,
+            strategy: *strategy,
+            selected_snapshot_stream_id,
+        });
+    }
+    Ok(defaults)
+}
+
+fn explicit_default_targets(
+    operations: &[&CompiledOperation],
+) -> Result<Vec<TrackTarget>, RemuxPlanningBlock> {
+    let mut targets = Vec::new();
+    for operation in operations {
+        let CompiledOperation::SetDefaults {
+            target,
+            filter: Some(_),
+            ..
+        } = operation
+        else {
+            continue;
+        };
+        if targets.contains(target) {
+            return Err(RemuxPlanningBlock::ConflictingExplicitDefaults { target: *target });
+        }
+        targets.push(*target);
+    }
+    Ok(targets)
+}
+
+fn resolve_track_order(
+    operations: &[&CompiledOperation],
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<(Vec<voom_core::RemuxTrackGroup>, Option<String>, bool), RemuxPlanningBlock> {
+    let reorders = operations
+        .iter()
+        .filter_map(|operation| {
+            let CompiledOperation::ReorderTracks {
+                targets,
+                head_filter,
+            } = operation
+            else {
+                return None;
+            };
+            Some((targets, head_filter))
+        })
+        .collect::<Vec<_>>();
+    let [] = reorders.as_slice() else {
+        let [(targets, head_filter)] = reorders.as_slice() else {
+            return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+        };
+        if targets.contains(&TrackTarget::Attachment)
+            || duplicate_track_targets(targets)
+            || targets.is_empty() && head_filter.is_none()
+        {
+            return Err(RemuxPlanningBlock::UnsupportedMediaShape);
+        }
+        let head = head_filter
+            .as_ref()
+            .map(|filter| {
+                resolve_unique_filter(
+                    retained_streams(facts, keep_ids, None),
+                    filter,
+                    RemuxFilterOperation::OrderTracks,
+                )
+            })
+            .transpose()?;
+        let changed = desired_order_changes(facts, keep_ids, targets, head.as_deref());
+        let order = targets
+            .iter()
+            .copied()
+            .map(remux_track_group)
+            .collect::<Vec<_>>();
+        return Ok((order, head, changed));
+    };
+    Ok((default_track_order(), None, false))
+}
+
+fn retained_streams<'a>(
+    facts: &'a [SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+    target: Option<TrackTarget>,
+) -> Vec<&'a SnapshotStreamFact> {
+    let mut streams = facts
+        .iter()
+        .filter(|stream| keep_ids.contains(&stream.snapshot_stream_id))
+        .filter(|stream| target.is_none_or(|target| stream.kind == target))
+        .filter(|stream| target.is_some() || stream.kind != TrackTarget::Attachment)
+        .collect::<Vec<_>>();
+    streams.sort_by_key(|stream| stream.provider_stream_index);
+    streams
+}
+
+fn resolve_unique_filter(
+    streams: Vec<&SnapshotStreamFact>,
+    filter: &TrackFilter,
+    operation: RemuxFilterOperation,
+) -> Result<String, RemuxPlanningBlock> {
+    let mut matches = Vec::new();
+    for stream in streams {
+        if evaluate_filter(filter, stream)? {
+            matches.push(stream.snapshot_stream_id.clone());
         }
     }
+    match matches.as_slice() {
+        [snapshot_stream_id] => Ok(snapshot_stream_id.clone()),
+        [] => Err(RemuxPlanningBlock::EmptyTrackFilterSelection { operation }),
+        _ => Err(RemuxPlanningBlock::AmbiguousTrackFilterSelection {
+            operation,
+            match_count: matches.len(),
+        }),
+    }
+}
 
+fn defaults_change(
+    defaults: &[RemuxDefaultAction],
+    facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
+) -> Result<bool, RemuxPlanningBlock> {
+    let mut changed = false;
+    for action in defaults {
+        let streams = retained_streams(facts, keep_ids, Some(action.target));
+        if let Some(selected_id) = &action.selected_snapshot_stream_id {
+            for stream in streams {
+                changed |= required_default(stream)? != (stream.snapshot_stream_id == *selected_id);
+            }
+            continue;
+        }
+        match action.strategy {
+            DefaultStrategy::First => {
+                let Some(first) = streams.first() else {
+                    return Err(RemuxPlanningBlock::InsufficientSnapshotFacts);
+                };
+                let first_id = first.snapshot_stream_id.clone();
+                for stream in streams {
+                    changed |= required_default(stream)? != (stream.snapshot_stream_id == first_id);
+                }
+            }
+            DefaultStrategy::None => {
+                for stream in streams {
+                    changed |= required_default(stream)?;
+                }
+            }
+            DefaultStrategy::Preserve => {}
+            DefaultStrategy::Best => return Err(RemuxPlanningBlock::UnsupportedMediaShape),
+        }
+    }
     Ok(changed)
 }
 
-fn set_defaults_changes(
-    facts: &[SnapshotStreamFact],
-    target: TrackTarget,
-    strategy: DefaultStrategy,
-) -> bool {
-    let target_streams = facts
-        .iter()
-        .filter(|stream| stream.kind == target)
-        .collect::<Vec<_>>();
-    match strategy {
-        DefaultStrategy::First => target_streams
-            .iter()
-            .min_by_key(|stream| stream.provider_stream_index)
-            .is_none_or(|first| {
-                !first.is_default
-                    || target_streams.iter().any(|stream| {
-                        stream.provider_stream_index != first.provider_stream_index
-                            && stream.is_default
-                    })
-            }),
-        DefaultStrategy::None => target_streams.iter().any(|stream| stream.is_default),
-        DefaultStrategy::Preserve => false,
-        DefaultStrategy::Best => true,
+fn required_default(stream: &SnapshotStreamFact) -> Result<bool, RemuxPlanningBlock> {
+    match stream.is_default {
+        SnapshotFact::Value(value) => Ok(value),
+        SnapshotFact::Missing | SnapshotFact::Malformed => {
+            Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+        }
     }
 }
 
-fn reorder_tracks_changes(
+fn desired_order_changes(
     facts: &[SnapshotStreamFact],
+    keep_ids: &BTreeSet<String>,
     targets: &[TrackTarget],
-) -> Result<bool, RemuxPlanningBlock> {
-    if targets.contains(&TrackTarget::Attachment) {
-        return Err(RemuxPlanningBlock::UnsupportedMediaShape);
-    }
-    let mut streams = facts
-        .iter()
-        .filter(|stream| stream.kind != TrackTarget::Attachment)
-        .collect::<Vec<_>>();
-    streams.sort_by_key(|stream| stream.provider_stream_index);
-    let mut current_order = Vec::new();
-    for stream in streams {
-        if current_order.last().copied() != Some(stream.kind) {
-            current_order.push(stream.kind);
+    head_id: Option<&str>,
+) -> bool {
+    let source = retained_streams(facts, keep_ids, None);
+    let mut desired = Vec::with_capacity(source.len());
+    let mut used = HashSet::new();
+    if let Some(head_id) = head_id {
+        for stream in &source {
+            if stream.snapshot_stream_id == head_id
+                && used.insert(stream.snapshot_stream_id.as_str())
+            {
+                desired.push(*stream);
+            }
         }
     }
-    let requested_present_order = targets
-        .iter()
-        .copied()
-        .filter(|target| current_order.contains(target))
-        .collect::<Vec<_>>();
-    Ok(current_order != requested_present_order)
+    for target in targets {
+        for stream in &source {
+            if stream.kind == *target && used.insert(stream.snapshot_stream_id.as_str()) {
+                desired.push(*stream);
+            }
+        }
+    }
+    for stream in &source {
+        if used.insert(stream.snapshot_stream_id.as_str()) {
+            desired.push(*stream);
+        }
+    }
+    source != desired
 }
 
 fn has_remux_stream_fact_shape(snapshot: &MediaSnapshotInput) -> bool {
@@ -600,10 +780,52 @@ fn has_remux_stream_fact_shape(snapshot: &MediaSnapshotInput) -> bool {
 fn remux_block_shape(block: RemuxPlanningBlock) -> RemuxGroupShape {
     match block {
         RemuxPlanningBlock::InsufficientSnapshotFacts => RemuxGroupShape::InsufficientFacts(
-            "snapshot stream facts are insufficient for remux planning",
+            "snapshot stream facts are insufficient for remux planning".to_owned(),
         ),
-        RemuxPlanningBlock::UnsupportedMediaShape => {
-            RemuxGroupShape::UnsupportedShape("media shape is not supported by remux planning")
+        RemuxPlanningBlock::UnsupportedMediaShape => RemuxGroupShape::UnsupportedShape(
+            "media shape is not supported by remux planning".to_owned(),
+        ),
+        RemuxPlanningBlock::EmptyTrackFilterSelection { operation } => {
+            RemuxGroupShape::EmptyFilterSelection(filter_selection_message(operation, 0))
         }
+        RemuxPlanningBlock::AmbiguousTrackFilterSelection {
+            operation,
+            match_count,
+        } => RemuxGroupShape::AmbiguousFilterSelection(filter_selection_message(
+            operation,
+            match_count,
+        )),
+        RemuxPlanningBlock::ConflictingExplicitDefaults { target } => {
+            RemuxGroupShape::UnsupportedShape(format!(
+                "multiple explicit defaults operations target {}; keep exactly one `defaults {} \
+                 where` operation",
+                track_target_label(target),
+                track_target_label(target)
+            ))
+        }
+    }
+}
+
+fn filter_selection_message(operation: RemuxFilterOperation, match_count: usize) -> String {
+    match operation {
+        RemuxFilterOperation::Defaults(target) => format!(
+            "defaults {} filter matched {match_count} retained streams; update it to select \
+             exactly one kept {} stream",
+            track_target_label(target),
+            track_target_label(target)
+        ),
+        RemuxFilterOperation::OrderTracks => format!(
+            "order tracks filter matched {match_count} retained streams; update it to select \
+             exactly one kept ordinary stream"
+        ),
+    }
+}
+
+fn track_target_label(target: TrackTarget) -> &'static str {
+    match target {
+        TrackTarget::Video => "video",
+        TrackTarget::Audio => "audio",
+        TrackTarget::Subtitle => "subtitle",
+        TrackTarget::Attachment => "attachment",
     }
 }

@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashSet};
 use serde_json::Value;
 use voom_core::VoomError;
 use voom_plan::remux::{
-    RemuxOperationPayload, RemuxPlanningBlock, SnapshotStreamFact, resolve_track_keep_ids,
-    stream_facts,
+    RemuxOperationPayload, RemuxPlanningBlock, SnapshotFact, SnapshotStreamFact,
+    resolve_track_keep_ids, stream_facts,
 };
 use voom_policy::{DefaultStrategy, TrackTarget};
 use voom_store::repo::identity::MediaSnapshot;
@@ -135,7 +135,7 @@ fn default_refs(
                 default_streams.extend(
                     kept_target
                         .into_iter()
-                        .filter(|stream| stream.is_default)
+                        .filter(|stream| stream.is_default == SnapshotFact::Value(true))
                         .map(stream_ref),
                 );
             }
@@ -152,7 +152,7 @@ fn default_refs(
         }
         for stream in facts.iter().filter(|stream| {
             stream.kind == target
-                && stream.is_default
+                && stream.is_default == SnapshotFact::Value(true)
                 && keep_ids.contains(&stream.snapshot_stream_id)
         }) {
             default_streams.push(stream_ref(stream));
@@ -187,6 +187,11 @@ fn remux_block_error(block: RemuxPlanningBlock) -> VoomError {
         RemuxPlanningBlock::UnsupportedMediaShape => {
             VoomError::Config("remux selector is unsupported for this media shape".to_owned())
         }
+        RemuxPlanningBlock::EmptyTrackFilterSelection { .. }
+        | RemuxPlanningBlock::AmbiguousTrackFilterSelection { .. }
+        | RemuxPlanningBlock::ConflictingExplicitDefaults { .. } => VoomError::Config(
+            "remux payload contains unresolved filter-addressed selection".to_owned(),
+        ),
     }
 }
 
