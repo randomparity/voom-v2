@@ -147,11 +147,18 @@ fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value
     // by spec. Folding `language`/`title` too is intentional and harmless — real
     // ffprobe emits those lowercase, so folding only adds tolerance and never
     // changes current output.
-    for key in ["language", "title", "role", "handler_name"] {
+    for (input_key, output_key) in [
+        ("language", "language"),
+        ("title", "title"),
+        ("role", "role"),
+        ("handler_name", "handler_name"),
+        ("filename", "filename"),
+        ("mimetype", "mime_type"),
+    ] {
         let value = tags
             .iter()
             .find_map(|(tag_key, tag_value)| {
-                if tag_key.eq_ignore_ascii_case(key) {
+                if tag_key.eq_ignore_ascii_case(input_key) {
                     tag_value.as_str()
                 } else {
                     None
@@ -161,7 +168,7 @@ fn insert_stream_tags(input: &Map<String, Value>, output: &mut Map<String, Value
             // the durable snapshot — the same guard insert_string_as applies.
             .filter(|value| !is_unknown_value(value));
         if let Some(value) = value {
-            output.insert(key.to_owned(), Value::String(value.to_owned()));
+            output.insert(output_key.to_owned(), Value::String(value.to_owned()));
         }
     }
 }

@@ -47,6 +47,7 @@ fn remux_stream_facts_parse_normalized_streams() {
                 title: None,
                 mime_type: None,
                 filename: None,
+                commentary: None,
                 is_default: true,
                 is_forced: false,
             },
@@ -60,6 +61,7 @@ fn remux_stream_facts_parse_normalized_streams() {
                 title: Some("Main".to_owned()),
                 mime_type: None,
                 filename: None,
+                commentary: None,
                 is_default: false,
                 is_forced: true,
             },
@@ -193,6 +195,7 @@ fn remux_title_contains_is_case_sensitive() {
         title: Some("Main Audio".to_owned()),
         mime_type: None,
         filename: None,
+        commentary: None,
         is_default: false,
         is_forced: false,
     };
@@ -220,6 +223,7 @@ fn remux_channels_filter_uses_comparison_op() {
         title: None,
         mime_type: None,
         filename: None,
+        commentary: None,
         is_default: false,
         is_forced: false,
     };
@@ -246,8 +250,9 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
         language: None,
         channels: None,
         title: None,
-        mime_type: None,
+        mime_type: Some("image/jpeg".to_owned()),
         filename: Some("cover.jpg".to_owned()),
+        commentary: None,
         is_default: false,
         is_forced: false,
     };
@@ -255,6 +260,116 @@ fn remux_font_filter_is_false_for_non_font_attachment() {
     let matched = evaluate_filter(&TrackFilter::Font, &stream).unwrap();
 
     assert!(!matched);
+}
+
+#[test]
+fn remux_font_filter_accepts_only_published_matroska_font_media_types() {
+    let media_types = [
+        "font/sfnt",
+        "font/ttf",
+        "font/otf",
+        "font/collection",
+        "font/woff",
+        "font/woff2",
+        "application/x-truetype-font",
+        "application/x-font-ttf",
+        "application/vnd.ms-opentype",
+        "application/font-sfnt",
+        "application/font-woff",
+    ];
+
+    for media_type in media_types {
+        let stream = attachment_stream(Some(media_type));
+        assert_eq!(
+            evaluate_filter(&TrackFilter::Font, &stream),
+            Ok(true),
+            "expected {media_type} to be classified as a font"
+        );
+    }
+
+    let unpublished = attachment_stream(Some("application/font-awesome"));
+    assert_eq!(evaluate_filter(&TrackFilter::Font, &unpublished), Ok(false));
+}
+
+#[test]
+fn remux_font_filter_blocks_when_attachment_mime_type_is_missing() {
+    let stream = attachment_stream(None);
+
+    assert_eq!(
+        evaluate_filter(&TrackFilter::Font, &stream),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
+fn remux_commentary_filter_requires_a_boolean_disposition_fact() {
+    let streams = json!([
+        {
+            "id": "commentary",
+            "index": 1,
+            "kind": "audio",
+            "disposition": {"commentary": true}
+        },
+        {
+            "id": "main",
+            "index": 2,
+            "kind": "audio",
+            "disposition": {"commentary": false}
+        },
+        {
+            "id": "unknown",
+            "index": 3,
+            "kind": "audio",
+            "disposition": {}
+        }
+    ]);
+    let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
+
+    assert_eq!(
+        evaluate_filter(&TrackFilter::Commentary, &facts[0]),
+        Ok(true)
+    );
+    assert_eq!(
+        evaluate_filter(&TrackFilter::Commentary, &facts[1]),
+        Ok(false)
+    );
+    assert_eq!(
+        evaluate_filter(&TrackFilter::Commentary, &facts[2]),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+#[test]
+fn remux_commentary_filter_blocks_on_non_boolean_durable_value() {
+    let streams = json!([{
+        "id": "malformed",
+        "index": 1,
+        "kind": "audio",
+        "disposition": {"commentary": 1}
+    }]);
+    let facts = stream_facts(&snapshot_with_streams(&streams)).unwrap();
+
+    assert_eq!(
+        evaluate_filter(&TrackFilter::Commentary, &facts[0]),
+        Err(RemuxPlanningBlock::InsufficientSnapshotFacts)
+    );
+}
+
+fn attachment_stream(mime_type: Option<&str>) -> SnapshotStreamFact {
+    SnapshotStreamFact {
+        snapshot_stream_id: "stream-2".to_owned(),
+        provider_stream_index: 2,
+        kind: TrackTarget::Attachment,
+        codec_name: Some("ttf".to_owned()),
+        language: None,
+        channels: None,
+        title: None,
+        mime_type: mime_type.map(str::to_owned),
+        filename: Some("OpenSans.ttf".to_owned()),
+        commentary: None,
+        is_default: false,
+        is_forced: false,
+    }
 }
 
 fn audio_stream(language: Option<&str>) -> SnapshotStreamFact {
@@ -268,6 +383,7 @@ fn audio_stream(language: Option<&str>) -> SnapshotStreamFact {
         title: None,
         mime_type: None,
         filename: None,
+        commentary: None,
         is_default: false,
         is_forced: false,
     }
