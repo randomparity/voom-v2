@@ -36,6 +36,32 @@ Files:
 - `crates/voom-policy/fixtures/diagnostics/production-normalize-reduced.json`
   when canonical source movement changes only its span offsets.
 
+Checked migration inventory:
+
+| Class | Paths | Step 1 action |
+|---|---|---|
+| Active `voom-policy` valid source | `fixtures/policies/audio-transcode-eac3.voom`, `audio-transcode-extract.voom`, `filter-addressed-tracks.voom` | Rewrite aliases/bare values; update active hashes |
+| Active `voom-policy` invalid source | `fixtures/policies/production-normalize-reduced.voom` | Rewrite its unrelated filter; preserve the single intended filtered-`exists` diagnostic |
+| Historical compiled compatibility | `fixtures/compiled/production-normalize-reduced.json` | Leave unchanged and readable |
+| Current compiler test source | `src/compile/compiled_test.rs`, `pipeline_test.rs`, `validate_test.rs` | Rewrite positive and unrelated-negative source; leave only cases explicitly reassigned to Step 2 rejection |
+| `voom-plan` test source | `crates/voom-plan/src/fixtures_test.rs` | Rewrite |
+| CLI test source | `crates/voom-cli/tests/multi_phase_preview_envelope.rs` | Rewrite |
+| Control-plane integration source | `audio_extract_flow.rs`, `audio_transcode_flow.rs`, `remux_flow.rs`, `phase_barrier_flow.rs`, `phase_barrier_combined_flow.rs` | Rewrite policy text and matching live test comments |
+| Operator policy source | `tests/fixtures/policies/language-cleanup.voom`, `reference-user.voom` | Rewrite |
+| Operator policy tests | `tests/sample_policies_plan.rs` | Run against rewritten fixture files |
+| Current operator docs | `docs/runbooks/operator-real-media-execution.md` | Rewrite examples |
+| Parser-only source | `crates/voom-policy/src/syntax/parser_test.rs` | Leave unchanged; parser permissiveness is intentional |
+| Compiler implementation spellings | `compile/validate/conditions.rs`, `compile/validate/operations.rs`, `compile/lower/conditions.rs` | Leave for Step 2 |
+| Corpus exclusions and grammar placeholders | `published_grammar_corpus.rs`, `published-grammar-coverage.md` | Leave existing guard strings/placeholders; extend rejection guard in Step 2 |
+
+Historical/current golden pairs:
+
+| Historical copy | Active canonical golden |
+|---|---|
+| `fixtures/compiled/historical-track-filter-source/audio-transcode-eac3.json` | `fixtures/compiled/audio-transcode-eac3.json` |
+| `fixtures/compiled/historical-track-filter-source/audio-transcode-extract.json` | `fixtures/compiled/audio-transcode-extract.json` |
+| `fixtures/compiled/historical-track-filter-source/filter-addressed-tracks.json` | `fixtures/compiled/filter-addressed-tracks.json` |
+
 Tests:
 
 - rewritten source fixtures have the hash of their canonical source;
@@ -47,6 +73,11 @@ Tests:
 - all active valid fixtures and integration policies remain green under the old
   permissive compiler; and
 - the published corpus guard still accepts every canonical corpus file.
+
+Before committing, run the exact noncanonical-source `rg --pcre2` inventory from
+the design review and reconcile every remaining match to one of: Step 2
+implementation, Step 2 rejection test, parser-only source, historical record,
+or grammar placeholder. An unclassified match blocks the commit.
 
 Implementation:
 
@@ -78,6 +109,9 @@ cargo test -p voom-control-plane --test published_grammar_corpus
 cargo test -p voom-control-plane --test remux_flow
 cargo test -p voom-control-plane --test audio_transcode_flow
 cargo test -p voom-control-plane --test audio_extract_flow
+cargo test -p voom-control-plane --test phase_barrier_flow
+cargo test -p voom-control-plane --test phase_barrier_combined_flow
+cargo test -p voom-control-plane --test sample_policies_plan
 prek run
 ```
 
@@ -112,7 +146,12 @@ Red tests:
   unpublished comparators, malformed lists, missing Boolean operands,
   unbalanced/empty groups, numeric overflow, non-ASCII digits, and trailing
   input;
-- quoted tokens reject whitespace, commas, quotes, backslashes, and escapes;
+- both equality and list token readers accept lowercase ASCII letters, ASCII
+  digits, `_`, and `-`;
+- both readers reject empty tokens, uppercase ASCII, non-ASCII, `.`, `/`, `+`,
+  `:`, whitespace, commas/delimiters, quotes, backslashes, and escapes;
+- codec-filter cases exercise the complete token matrix independently of
+  language-code validation;
 - title strings retain the exact historical `strip_quotes` result, including
   escaped quote, escaped backslash, terminal escaped quote, and other
   backslash pairs under the identical source hash;
@@ -125,12 +164,17 @@ Red tests:
   the sibling or panicking;
 - three-or-more top-level `and` and `or` children retain n-ary compiled arrays
   in source order, with mixed precedence and grouping unchanged;
-- a forced second-pass failure in an optional consumer returns a compile
-  diagnostic and cannot lower to `None`;
-- a separate forced second-pass failure in required `synthesize audio from`
-  returns a compile diagnostic and cannot lower to `None`;
-- unterminated strings retain their general-parser diagnostic while complete
-  malformed clauses use the track-filter validation diagnostic; and
+- a direct `compile_ast` test bypasses validation with an invalid optional
+  filter AST and proves compile-stage `unknown_phase_statement_or_operation`,
+  the exact filter-lowering message, statement span/location, one diagnostic,
+  and no operation result;
+- a separate direct `compile_ast` test does the same for required
+  `synthesize audio from`;
+- an unterminated string asserts outer `POLICY_PARSE_ERROR`, one parse-stage
+  `unexpected_token`, exact message, and source span/location;
+- a complete malformed clause asserts outer `POLICY_VALIDATION_ERROR`, one
+  validation-stage `unknown_phase_statement_or_operation`, message
+  `unknown track filter predicate`, and statement span/location; and
 - historical compiled `title_matches` JSON still deserializes.
 
 Expected failure before implementation:
@@ -153,7 +197,8 @@ Implementation:
 - route operation validation and diagnostics-bearing lowering through the same
   extractor and parser;
 - change `lower_operation` and `lower_synthesize` call chains to propagate
-  optional and required filter parse errors as `PolicyDiagnostic` values;
+  optional and required filter parse errors as one compile-stage
+  `PolicyDiagnostic` with the statement span and an exact actionable message;
 - recursively validate parsed language values with the existing diagnostic;
 - omit unpublished `lang` and `title matches` source branches; and
 - leave the compiled enum and serde behavior unchanged.
