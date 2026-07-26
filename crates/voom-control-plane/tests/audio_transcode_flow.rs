@@ -458,15 +458,13 @@ async fn assert_result_replans_from_authoritative_snapshot(
         .await
         .unwrap();
     assert_eq!(result_plan.plan.nodes.len(), 1);
-    // Stored planning trusts the durable raw probe alias, not the cached "mkv".
-    // Canonical probe-container mapping is tracked separately.
     assert_eq!(
         result_plan.plan.nodes[0].status,
-        voom_plan::NodeStatus::Planned
+        voom_plan::NodeStatus::NoOp
     );
     assert_eq!(
         result_plan.plan.nodes[0].observed_state.as_ref().unwrap()["container"],
-        "matroska,webm"
+        "mkv"
     );
 }
 

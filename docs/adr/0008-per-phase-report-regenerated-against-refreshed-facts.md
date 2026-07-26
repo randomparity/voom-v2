@@ -105,10 +105,11 @@ applied to reporting.
   previously was not). Two caveats follow from re-planning the same phase against the
   produced facts (`plan_phase` re-evaluates per-file `run_if`/`skip_if` and operation
   status against the refreshed snapshot, `planner.rs:210-226`):
-  - The compliance **verdict** for a freshly-produced artifact may still read
-    non-compliant: by ADR-0007 the planner compares the raw probe `format_name` (e.g.
-    `matroska,webm`) against a policy's canonical container (`mkv`), so a container-bearing
-    transform can re-plan its own output as `Planned`.
+  - Supported probe container names are canonicalized at the shared planning
+    projection boundary (ADR-0007). A freshly produced artifact whose
+    container and other policy facts are satisfied therefore reports
+    compliant; unknown or malformed container values still produce a blocked
+    insufficient-facts check.
   - A phase whose `run_if`/`skip_if` guard is *satisfied* by the produced artifact emits
     **no node** for that file, so the regenerated report contains no check for it; a guard
     that reads a fact the re-probe snapshot omits yields a `Blocked` node (the `Unknown`
@@ -117,10 +118,10 @@ applied to reporting.
     linkage.
 
   "Reflects produced artifacts" is therefore a claim about the `target`/`observed_state`
-  a check records *when the phase plans one*, not a guarantee that every committed file
-  yields a compliant check. Acceptance tests pin the produced-version linkage via the
-  `Committed` per-`(file, phase)` row, and the `observed_state` via an unguarded phase's
-  check; they do not assert a compliant verdict.
+  a check records *when the phase plans one*, not a guarantee that every
+  committed file yields a check. Acceptance tests pin the produced-version
+  linkage via the `Committed` per-`(file, phase)` row and pin canonical observed
+  state and compliant replanning for supported produced containers.
 - A completed phase runs two plan passes: one to dispatch, one to regenerate the report.
   Both are pure functions over snapshots; the second runs only after commits land and
   over the files that entered the phase (re-projected at refreshed tips).

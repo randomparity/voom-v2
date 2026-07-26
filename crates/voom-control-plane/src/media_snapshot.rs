@@ -18,12 +18,7 @@ pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSna
                 .iter()
                 .find(|stream| stream.get("kind").and_then(Value::as_str) == Some("video"))
         });
-    let container = payload.get("container").and_then(|container| {
-        container
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| payload_str(container, "format_name"))
-    });
+    let container = canonical_container(payload);
     let video_codec = video_stream
         .and_then(|stream| payload_str(stream, "codec_name"))
         .or_else(|| payload_str(payload, "video_codec"));
@@ -46,6 +41,25 @@ pub(crate) fn planning_input(ordinal: u32, snapshot: &MediaSnapshot) -> MediaSna
         health_flags: Vec::new(),
         existing_media_snapshot_id: Some(snapshot.id),
     }
+}
+
+fn canonical_container(payload: &Value) -> Option<String> {
+    let container = payload.get("container")?;
+    let container = container
+        .as_str()
+        .or_else(|| container.get("format_name").and_then(Value::as_str))?;
+    let canonical = if container == "mkv" || container == "matroska" || container == "matroska,webm"
+    {
+        "mkv"
+    } else if container == "mp4" || container == "mov,mp4" || container == "mov,mp4,m4a,3gp,3g2,mj2"
+    {
+        "mp4"
+    } else if container == "ogg" {
+        "ogg"
+    } else {
+        return None;
+    };
+    Some(canonical.to_owned())
 }
 
 fn payload_str(value: &Value, key: &str) -> Option<String> {

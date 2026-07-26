@@ -73,6 +73,10 @@ async fn compliance_report_previews_combined_multi_phase_policy() {
         kinds["transcode_audio"], 1,
         "report previews the audio mutation"
     );
+    let remux = &json["data"]["plan"]["nodes"][0];
+    assert_eq!(remux["operation_kind"], "remux");
+    assert_eq!(remux["observed_state"]["container"], "mkv");
+    assert_eq!(remux["status"], "no_op");
 
     redact_local(&mut json);
     insta::assert_json_snapshot!(

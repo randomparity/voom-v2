@@ -78,6 +78,10 @@ async fn execute_scanned_remux_outputs_committed_file_phase() {
     // per-(file, phase) row carrying the produced references.
     assert_eq!(json["data"]["phases"].as_array().unwrap().len(), 1);
     assert_eq!(json["data"]["phases"][0]["outcome"], "completed");
+    assert_eq!(
+        json["data"]["phases"][0]["report"]["checks"][0]["observed_state"]["container"],
+        "mp4"
+    );
     let file_phases = json["data"]["file_phases"].as_array().unwrap();
     assert_eq!(file_phases.len(), 1);
     assert_eq!(file_phases[0]["outcome"], "committed");
@@ -141,6 +145,10 @@ async fn execute_scanned_remux_existing_target_outputs_failure_envelope() {
     let file_phases = json["data"]["file_phases"].as_array().unwrap();
     assert_eq!(file_phases.len(), 1, "the committed remux row must survive");
     assert_eq!(file_phases[0]["outcome"], "committed");
+    assert_eq!(
+        json["data"]["phases"][0]["report"]["checks"][0]["observed_state"]["container"],
+        "mp4"
+    );
     redact_local(&mut json);
     redact_execute_ids(&mut json);
     redact_temp_path_values(&mut json, &remux_root);

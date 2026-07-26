@@ -11,11 +11,11 @@
 //! `crates/voom-control-plane/tests/phase_barrier_flow.rs` asserts fields).
 //!
 //! A two-`transcode video` phase policy is the proven two-commit shape: phase 0
-//! transcodes the scanned h264 to hevc and commits; phase 1 re-plans against the
-//! committed artifact and re-transcodes because the probe reports the container
-//! as `matroska,webm`, not the canonical `mkv` (ADR-0007 normalization quirk),
-//! committing a second time. Both phases land a `Committed` per-`(file, phase)`
-//! row, and `compliance report --job-id` reads the durable two-phase chain back.
+//! transcodes the scanned h264 to default hevc and commits; phase 1 re-plans
+//! against the committed artifact and applies the independently necessary
+//! 10-bit `hevc-archive` profile. Both phases land a `Committed`
+//! per-`(file, phase)` row, and `compliance report --job-id` reads the durable
+//! two-phase chain back.
 
 #![expect(
     clippy::unwrap_used,
@@ -65,10 +65,11 @@ async fn multi_phase_execute_then_report_by_job_id() {
     let file = scan_one(&cp, &source).await;
     let policy = cp
         .create_policy_document(
-            "video-transcode-hevc-twice",
-            "policy \"video transcode hevc twice\" {\n  \
+            "video-transcode-hevc-archive",
+            "policy \"video transcode hevc archive\" {\n  \
                phase normalize { transcode video to hevc }\n  \
-               phase reverify { depends_on: [normalize] transcode video to hevc }\n}",
+               phase archive { depends_on: [normalize] \
+               transcode video to hevc using profile \"hevc-archive\" }\n}",
         )
         .await
         .unwrap();
@@ -124,7 +125,7 @@ async fn assert_execute_committed_two_phases(url: &str, execute: &std::process::
     assert_eq!(phases.len(), 2, "two phases recorded: {phases:?}");
     assert_eq!(phases[0]["phase_name"], "normalize");
     assert_eq!(phases[0]["outcome"], "completed");
-    assert_eq!(phases[1]["phase_name"], "reverify");
+    assert_eq!(phases[1]["phase_name"], "archive");
     assert_eq!(phases[1]["outcome"], "completed");
 
     let file_phases = execute_json["data"]["file_phases"].as_array().unwrap();
@@ -172,7 +173,7 @@ fn assert_report_reads_back_chain(url: &str, job_id: u64, run_phases: &[Value]) 
         "post-run read returns the full chain"
     );
     assert_eq!(report_phases[0]["phase_name"], "normalize");
-    assert_eq!(report_phases[1]["phase_name"], "reverify");
+    assert_eq!(report_phases[1]["phase_name"], "archive");
     assert_eq!(
         report_json["data"]["latest_phase_index"], 1,
         "latest index points at the highest-ordinal phase"

@@ -223,10 +223,9 @@ async fn assert_rows_durable(url: &str, job_id: voom_core::JobId) {
 /// into the planner: its report targets phase 0's produced `FileVersion` and
 /// observes the committed hevc codec. If the coordinator had not advanced the
 /// chain tip, phase 1 would instead target the original version and observe
-/// h264 — so the phase-1 report proves the chain advance. (The repeated
-/// transcode here is intentional fixture shaping; per ADR-0007 the planner
-/// re-runs it because the probe reports the container as `matroska,webm`, not
-/// the canonical `mkv` — orthogonal to the chain-advance behavior under test.)
+/// h264 — so the phase-1 report proves the chain advance. The second phase uses
+/// the independently necessary 10-bit `hevc-archive` profile, preserving the
+/// two-commit fixture without relying on a container-alias mismatch.
 #[tokio::test]
 async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let _ffprobe_guard = hide_stale_fake_ffprobe_sibling("phase-barrier-flow").unwrap();
@@ -251,10 +250,11 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     let scanned_version = file.file_version_id;
     let policy = cp
         .create_policy_document(
-            "video-transcode-hevc-twice",
-            "policy \"video transcode hevc twice\" {\n  \
+            "video-transcode-hevc-archive",
+            "policy \"video transcode hevc archive\" {\n  \
                phase normalize { transcode video to hevc }\n  \
-               phase reverify { depends_on: [normalize] transcode video to hevc }\n}",
+               phase archive { depends_on: [normalize] \
+               transcode video to hevc using profile \"hevc-archive\" }\n}",
         )
         .await
         .unwrap();
@@ -283,6 +283,8 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     assert_eq!(outcome.phases.len(), 2);
     assert_eq!(outcome.phases[0].phase_name, "normalize");
     assert_eq!(outcome.phases[0].outcome, PhaseOutcome::Completed);
+    assert_eq!(outcome.phases[1].phase_name, "archive");
+    assert_eq!(outcome.phases[1].outcome, PhaseOutcome::Completed);
     let phase0_commit = outcome
         .file_phases
         .iter()
@@ -305,7 +307,7 @@ async fn phase_barrier_chains_committed_artifact_into_the_next_phase() {
     );
     assert!(
         out_dir
-            .join("Chain.default-hevc.hevc.default-hevc.hevc.mkv")
+            .join("Chain.default-hevc.hevc.hevc-archive.hevc.mkv")
             .is_file(),
         "the terminal (phase 1) artifact is promoted to --output-dir"
     );
@@ -362,12 +364,8 @@ async fn assert_reprobe_and_lineage_chain(
     let phase0_snapshot = phase0_commit
         .reprobe_snapshot_id
         .expect("phase 0 committed row records its reprobe snapshot");
-    // Phase 1 produces V2 only because the planner re-runs the transcode under
-    // the ADR-0007 container-normalization quirk (probe reports `matroska,webm`,
-    // not canonical `mkv`; see this test's docstring). If that quirk is ever
-    // fixed, phase 1 becomes a NoOp and this lookup fails — the chain/lineage
-    // behavior under test is unaffected; switch the policy's second phase to a
-    // genuinely-needed mutation (e.g. remux) to keep producing V2.
+    // Phase 1 produces V2 because its 10-bit archive profile remains
+    // independently unsatisfied after the default HEVC phase.
     let phase1_commit = outcome
         .file_phases
         .iter()
@@ -379,6 +377,16 @@ async fn assert_reprobe_and_lineage_chain(
     let phase1_snapshot = phase1_commit
         .reprobe_snapshot_id
         .expect("phase 1 committed row records its reprobe snapshot");
+    assert_eq!(
+        snapshot_pixel_format(url, phase0_snapshot).await,
+        Some("yuv420p".to_owned()),
+        "phase 0 records the default HEVC pixel format"
+    );
+    assert_eq!(
+        snapshot_pixel_format(url, phase1_snapshot).await,
+        Some("yuv420p10le".to_owned()),
+        "phase 1 records the archive profile's 10-bit pixel format"
+    );
 
     // Issue #164: phase 1's recorded report reflects phase 1's produced artifact
     // (V2), regenerated after its commit — not phase 0's output (V1).
@@ -1114,6 +1122,25 @@ async fn snapshots_for_version(url: &str, version: FileVersionId) -> Vec<i64> {
     .fetch_all(&pool)
     .await
     .unwrap()
+}
+
+async fn snapshot_pixel_format(url: &str, snapshot: MediaSnapshotId) -> Option<String> {
+    let pool = voom_store::connect(url).await.unwrap();
+    let payload: String = sqlx::query_scalar("SELECT payload FROM media_snapshots WHERE id = ?")
+        .bind(i64::try_from(snapshot.0).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    payload["streams"]
+        .as_array()
+        .and_then(|streams| {
+            streams
+                .iter()
+                .find(|stream| stream["kind"].as_str() == Some("video"))
+        })
+        .and_then(|stream| stream["pixel_format"].as_str())
+        .map(str::to_owned)
 }
 
 /// The `source_file_version_id` recorded in each `transcode_video` artifact
