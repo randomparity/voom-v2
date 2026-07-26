@@ -179,7 +179,6 @@ pub async fn handle_remux(
     }
     validate_all_source_video_streams_kept(request, &input_mapping)?;
     validate_source_audio_preserved(request, &input_mapping)?;
-    validate_track_only_selection_refs(request, &input_mapping)?;
     run_mkvmerge_remux(config, request, &input_mapping)
         .await
         .map_err(MkvtoolnixWorkerError::from)?;
@@ -235,16 +234,6 @@ fn validate_request_contract(request: &RemuxRequest) -> Result<(), MkvtoolnixWor
         return Err(config_invalid(
             "selection",
             "selection must include at least one video stream".to_owned(),
-        ));
-    }
-    if request
-        .selection
-        .track_order
-        .contains(&RemuxTrackGroup::Attachment)
-    {
-        return Err(config_invalid(
-            "selection",
-            "track_order cannot contain attachment".to_owned(),
         ));
     }
     reject_duplicate_refs("keep_streams", &request.selection.keep_streams)?;
@@ -392,45 +381,6 @@ fn validate_source_audio_preserved(
         "selection",
         "selection must include at least one source audio stream".to_owned(),
     ))
-}
-
-fn validate_track_only_selection_refs(
-    request: &RemuxRequest,
-    input_mapping: &crate::mkvmerge::MkvmergeTrackMapping,
-) -> Result<(), MkvtoolnixWorkerError> {
-    let selection_fields = [
-        (
-            "default_streams",
-            request.selection.default_streams.as_slice(),
-        ),
-        (
-            "clear_default_streams",
-            request.selection.clear_default_streams.as_slice(),
-        ),
-        ("head_streams", request.selection.head_streams.as_slice()),
-        (
-            "forced_streams",
-            request.selection.forced_streams.as_slice(),
-        ),
-        (
-            "clear_forced_streams",
-            request.selection.clear_forced_streams.as_slice(),
-        ),
-    ];
-    for (field, streams) in selection_fields {
-        for stream in streams {
-            let is_attachment = input_mapping
-                .track_for_provider_index(stream.provider_stream_index)
-                .is_some_and(|track| track.kind.matches_group(RemuxTrackGroup::Attachment));
-            if is_attachment {
-                return Err(config_invalid(
-                    "selection",
-                    format!("{field} cannot contain attachments"),
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn canonical_existing_dir_no_symlink(path: &Path) -> Result<PathBuf, MkvtoolnixWorkerError> {

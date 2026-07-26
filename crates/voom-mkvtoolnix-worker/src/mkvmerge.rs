@@ -26,7 +26,6 @@ impl MkvmergeTrackKind {
             "video" => Self::Video,
             "audio" => Self::Audio,
             "subtitles" | "subtitle" => Self::Subtitle,
-            "attachments" | "attachment" => Self::Attachment,
             _ => Self::Other,
         }
     }
@@ -165,10 +164,13 @@ pub fn track_mapping_from_identify(
         let id = track.get("id").and_then(Value::as_u64).ok_or_else(|| {
             MkvtoolnixError::IdentifyFailed("identify track missing id".to_owned())
         })?;
-        let kind = track
-            .get("type")
-            .and_then(Value::as_str)
-            .map_or(MkvmergeTrackKind::Other, MkvmergeTrackKind::from_identify);
+        let identify_type = track.get("type").and_then(Value::as_str);
+        if identify_type.is_some_and(|value| matches!(value, "attachment" | "attachments")) {
+            return Err(MkvtoolnixError::IdentifyFailed(
+                "identify attachments must use the top-level attachments array".to_owned(),
+            ));
+        }
+        let kind = identify_type.map_or(MkvmergeTrackKind::Other, MkvmergeTrackKind::from_identify);
         let default = track
             .pointer("/properties/default_track")
             .and_then(Value::as_bool)
@@ -262,6 +264,7 @@ pub fn build_mkvmerge_args(
     request: &RemuxRequest,
     mapping: &MkvmergeTrackMapping,
 ) -> Result<Vec<String>, MkvtoolnixError> {
+    validate_attachment_selection_boundaries(&request.selection, mapping)?;
     let keep = selected_tracks(&request.selection.keep_streams, mapping)?;
     let mut args = vec![
         "--output".to_owned(),
@@ -298,6 +301,43 @@ pub fn build_mkvmerge_args(
     }
     args.push(request.input.path.clone());
     Ok(args)
+}
+
+fn validate_attachment_selection_boundaries(
+    selection: &RemuxSelection,
+    mapping: &MkvmergeTrackMapping,
+) -> Result<(), MkvtoolnixError> {
+    if selection.track_order.contains(&RemuxTrackGroup::Attachment) {
+        return Err(MkvtoolnixError::ConfigInvalid(
+            "track_order cannot contain attachment".to_owned(),
+        ));
+    }
+    let selection_fields = [
+        ("default_streams", selection.default_streams.as_slice()),
+        (
+            "clear_default_streams",
+            selection.clear_default_streams.as_slice(),
+        ),
+        ("head_streams", selection.head_streams.as_slice()),
+        ("forced_streams", selection.forced_streams.as_slice()),
+        (
+            "clear_forced_streams",
+            selection.clear_forced_streams.as_slice(),
+        ),
+    ];
+    for (field, streams) in selection_fields {
+        for stream in streams {
+            let is_attachment = mapping
+                .track_for_provider_index(stream.provider_stream_index)
+                .is_some_and(|track| track.kind == MkvmergeTrackKind::Attachment);
+            if is_attachment {
+                return Err(MkvtoolnixError::ConfigInvalid(format!(
+                    "{field} cannot contain attachments"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn identify_tracks(

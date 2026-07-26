@@ -62,6 +62,25 @@ fn identify_rejects_attachment_without_structured_identity_facts() {
 }
 
 #[test]
+fn identify_rejects_attachment_entries_inside_tracks() {
+    let identify = serde_json::json!({
+        "tracks": [{
+            "id": 3,
+            "type": "attachments",
+            "properties": {"number": 1}
+        }]
+    });
+
+    let err = track_mapping_from_identify(&identify).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("attachments must use the top-level attachments array"),
+        "{err}"
+    );
+}
+
+#[test]
 fn track_fingerprint_ignores_remux_changed_fields() {
     let before = serde_json::json!({
         "tracks": [
@@ -250,6 +269,50 @@ fn build_args_selects_attachments_without_putting_them_in_track_order() {
     assert_eq!(first_arg_value(&args, "--attachments"), Some("3"));
     assert!(!args.contains(&"--no-attachments".to_owned()));
     assert_eq!(first_arg_value(&args, "--track-order"), Some("0:7,0:12"));
+}
+
+#[test]
+fn build_args_rejects_attachment_in_track_only_selection_fields() {
+    let identify = serde_json::json!({
+        "tracks": [
+            {"id": 7, "type": "video", "properties": {"number": 1}},
+            {"id": 12, "type": "audio", "properties": {"number": 2}}
+        ],
+        "attachments": [{
+            "id": 3,
+            "file_name": "OpenSans.ttf",
+            "content_type": "font/ttf",
+            "size": 26
+        }]
+    });
+    let mapping = track_mapping_from_identify(&identify).unwrap();
+    let mut selection = base_selection(vec![stream(0), stream(1), stream(2)]);
+    selection.default_streams = vec![stream(2)];
+    let request = remux_request(selection);
+
+    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("default_streams cannot contain attachments"),
+        "{err}"
+    );
+}
+
+#[test]
+fn build_args_rejects_attachment_track_order() {
+    let request = remux_request(base_selection(vec![stream(0)]));
+    let mut request = request;
+    request.selection.track_order = vec![RemuxTrackGroup::Attachment];
+    let mapping = MkvmergeTrackMapping::from_pairs([(0, 7)]);
+
+    let err = build_mkvmerge_args(&request, &mapping).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("track_order cannot contain attachment"),
+        "{err}"
+    );
 }
 
 fn stream(provider_stream_index: u32) -> RemuxStreamRef {
