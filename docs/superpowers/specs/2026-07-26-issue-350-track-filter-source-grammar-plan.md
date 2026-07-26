@@ -25,8 +25,11 @@ Files:
 - `crates/voom-policy/src/compile/validate/operations.rs`
 - `crates/voom-policy/src/compile/validate_test.rs`
 - `crates/voom-policy/src/compile/pipeline_test.rs`
+- `crates/voom-policy/src/compile/track_filter.rs`
+- `crates/voom-policy/src/compile/mod.rs`
 - `crates/voom-policy/src/compile/lower/conditions.rs`
 - `crates/voom-policy/src/compile/compiled_test.rs`
+- a dedicated historical compiled track-filter fixture
 
 Red tests:
 
@@ -39,7 +42,11 @@ Red tests:
 - each consumer rejects `lang`, bare equality/list values, `title matches`,
   unpublished comparators, malformed lists, missing Boolean operands,
   unbalanced/empty groups, numeric overflow, non-ASCII digits, and trailing
-  input; and
+  input;
+- quoted tokens reject whitespace, commas, quotes, backslashes, and escapes;
+- title strings decode `\"` and `\\` into their exact compiled value and reject
+  every other malformed escape;
+- every validator-accepted filter lowers to `Some(TrackFilter)`; and
 - historical compiled `title_matches` JSON still deserializes.
 
 Expected failure before implementation:
@@ -49,11 +56,13 @@ Expected failure before implementation:
 
 Implementation:
 
-- make the recursive validator consume exact grammar-specific leaves;
-- add strict quoted-value and quoted-list recognition;
+- replace separate validation/lowering recognizers with one recursive parser
+  that returns the compiled `TrackFilter`;
+- add a quote-aware stable-token list reader and quoted-string decoder;
 - reuse the six-comparator and ASCII `u64` checks;
-- keep the operation validators routed through the one recognizer;
-- remove unpublished `lang` and `title matches` lowering branches; and
+- route operation validation and lowering through the one parser;
+- recursively validate parsed language values with the existing diagnostic;
+- omit unpublished `lang` and `title matches` source branches; and
 - leave the compiled enum and serde behavior unchanged.
 
 Verification:
@@ -77,13 +86,17 @@ Files:
 - current operator fixtures under
   `crates/voom-control-plane/tests/fixtures/policies/`;
 - `crates/voom-control-plane/tests/published_grammar_corpus.rs`; and
-- `docs/runbooks/operator-real-media-execution.md`.
+- `docs/runbooks/operator-real-media-execution.md`;
+- active compiled goldens whose source hashes change; and
+- retained pre-#350 compiled fixtures used as historical comparison evidence.
 
 Red tests:
 
 - the narrowed compiler identifies every active fixture or integration policy
   still using an alias or bare token;
-- rewritten source fixtures reproduce their existing compiled JSON goldens;
+- rewritten source fixtures have the hash of their canonical source;
+- historical and canonical compiled fixtures are completely equal after
+  normalizing only `source_hash`; and
 - the published corpus rejects representative unpublished bare-value forms.
 
 Expected failure before implementation:
@@ -97,7 +110,8 @@ Implementation:
 - preserve parser-only and historical documentation examples that are not
   current compilable policy;
 - extend the corpus source guard without claiming execution behavior; and
-- regenerate no compiled golden unless its semantic value actually changes.
+- update active compiled-golden hashes while retaining the pre-#350 values as
+  compatibility fixtures.
 
 Verification:
 
