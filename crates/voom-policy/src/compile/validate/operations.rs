@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::compile::compiled::{TrackFilter, is_canonical_language_code};
+use crate::compile::track_filter::parse_track_filter;
 use crate::text::{
     is_single_value, list_values, quoted_value, rule_header, setting_value, statement_text,
     text_after_list, text_after_quoted_value, words,
 };
 use crate::{DiagnosticCode, ExprAst, SourceSpan, StatementAst};
 
-use super::conditions::is_valid_track_filter;
 use super::{TagEffects, Validator};
 
 impl Validator<'_> {
@@ -100,7 +101,6 @@ impl Validator<'_> {
     pub(super) fn validate_track_operation(&mut self, statement: &StatementAst, text: &str) {
         let tokens = words(text);
         self.validate_track_target(statement.span(), tokens.get(1).copied().unwrap_or_default());
-        self.validate_language_tokens(statement, text);
         self.validate_field_paths(statement, text);
         if text.contains(" where ") {
             if tokens.get(2).copied() != Some("where") {
@@ -117,14 +117,8 @@ impl Validator<'_> {
                 "track operation does not accept extra arguments without `where`",
             );
         }
-        if let Some((_, filter)) = text.split_once(" where ")
-            && !is_valid_track_filter(filter.trim())
-        {
-            self.error(
-                DiagnosticCode::UnknownPhaseStatementOrOperation,
-                statement.span(),
-                "unknown track filter predicate",
-            );
+        if let Some((_, filter)) = text.split_once(" where ") {
+            self.validate_filter(statement, filter.trim());
         }
     }
 
@@ -197,25 +191,13 @@ impl Validator<'_> {
 
     /// Validate the `where <track-filter>` clause shared by the filter-addressed
     /// `defaults` and `order tracks` forms (ADR 0023). Rejects an unknown filter
-    /// predicate and validates language codes in the filter against the
-    /// `where`-onward slice, so a preceding target-list bracket (e.g.
-    /// `order tracks [video] where lang in […]`) is not read as the language
-    /// list.
+    /// predicate and validates language codes from the parsed filter, so a
+    /// preceding target-list bracket is never read as the language list.
     fn validate_where_filter(&mut self, statement: &StatementAst, text: &str) {
         let Some((_, filter)) = text.split_once(" where ") else {
             return;
         };
-        if !is_valid_track_filter(filter.trim()) {
-            self.error(
-                DiagnosticCode::UnknownPhaseStatementOrOperation,
-                statement.span(),
-                "unknown track filter predicate",
-            );
-            return;
-        }
-        if let Some(pos) = text.find(" where ") {
-            self.validate_language_tokens(statement, &text[pos..]);
-        }
+        self.validate_filter(statement, filter.trim());
     }
 
     pub(super) fn validate_actions(&mut self, statement: &StatementAst, text: &str) {
@@ -359,9 +341,7 @@ impl Validator<'_> {
                 ["transcode", "audio", "to", "aac" | "opus" | "eac3"]
             )
         }) {
-            if self.validate_optional_track_filter(statement, text, 4) {
-                self.validate_language_tokens(statement, text);
-            }
+            self.validate_optional_track_filter(statement, text, 4);
             return;
         }
         self.error(
@@ -689,9 +669,7 @@ impl Validator<'_> {
         let text = statement_text(statement);
         let tokens = words(text.as_ref());
         if tokens.get(0..2) == Some(&["extract", "audio"]) {
-            if self.validate_optional_track_filter(statement, text.as_ref(), 2) {
-                self.validate_language_tokens(statement, text.as_ref());
-            }
+            self.validate_optional_track_filter(statement, text.as_ref(), 2);
             return;
         }
         self.error(
@@ -772,17 +750,7 @@ impl Validator<'_> {
             );
             return;
         }
-        if !is_valid_track_filter(filter) {
-            self.error(
-                DiagnosticCode::UnknownPhaseStatementOrOperation,
-                statement.span(),
-                "unknown track filter predicate",
-            );
-            return;
-        }
-        if let Some(pos) = header.find(" from ") {
-            self.validate_language_tokens(statement, &header[pos..]);
-        }
+        self.validate_filter(statement, filter);
     }
 
     fn validate_synthesize_body(
@@ -900,15 +868,51 @@ impl Validator<'_> {
             );
             return false;
         };
-        if !is_valid_track_filter(filter.trim()) {
+        self.validate_filter(statement, filter.trim())
+    }
+
+    fn validate_filter(&mut self, statement: &StatementAst, text: &str) -> bool {
+        let Ok(filter) = parse_track_filter(text) else {
             self.error(
                 DiagnosticCode::UnknownPhaseStatementOrOperation,
                 statement.span(),
                 "unknown track filter predicate",
             );
             return false;
-        }
+        };
+        self.validate_filter_languages(statement, &filter);
         true
+    }
+
+    fn validate_filter_languages(&mut self, statement: &StatementAst, filter: &TrackFilter) {
+        match filter {
+            TrackFilter::LanguageIn { values } => {
+                for value in values {
+                    if !is_canonical_language_code(value) {
+                        self.error(
+                            DiagnosticCode::InvalidLanguageCode,
+                            statement.span(),
+                            "language code must be eng, und, or a three-letter \
+                             lowercase ASCII code",
+                        );
+                    }
+                }
+            }
+            TrackFilter::And { filters } | TrackFilter::Or { filters } => {
+                for filter in filters {
+                    self.validate_filter_languages(statement, filter);
+                }
+            }
+            TrackFilter::Not { inner } => self.validate_filter_languages(statement, inner),
+            TrackFilter::CodecIn { .. }
+            | TrackFilter::Channels { .. }
+            | TrackFilter::Commentary
+            | TrackFilter::Forced
+            | TrackFilter::Default
+            | TrackFilter::Font
+            | TrackFilter::TitleContains { .. }
+            | TrackFilter::TitleMatches { .. } => {}
+        }
     }
 
     pub(super) fn validate_rules(

@@ -1,6 +1,5 @@
 use crate::text::{
-    comparison_rhs, is_single_value, list_values, split_bool_expression, strip_outer_group,
-    text_after_list, title_filter_value, words,
+    comparison_rhs, is_single_value, split_bool_expression, strip_outer_group, words,
 };
 use crate::{DiagnosticCode, SourceSpan, StatementAst};
 
@@ -98,30 +97,6 @@ impl Validator<'_> {
         }
     }
 
-    pub(super) fn validate_language_tokens(&mut self, statement: &StatementAst, text: &str) {
-        if !(text.contains(" lang ") || text.contains(" language ") || text.contains("languages "))
-        {
-            return;
-        }
-        let mut values: Vec<String> = list_values(text)
-            .into_iter()
-            .map(|value| value.trim_matches('"').to_owned())
-            .collect();
-        values.extend(language_equality_values(text));
-        for value in values {
-            if value != "eng"
-                && value != "und"
-                && !(value.len() == 3 && value.bytes().all(|byte| byte.is_ascii_lowercase()))
-            {
-                self.error(
-                    DiagnosticCode::InvalidLanguageCode,
-                    statement.span(),
-                    "language code must be eng, und, or a three-letter lowercase ASCII code",
-                );
-            }
-        }
-    }
-
     pub(super) fn validate_field_paths(&mut self, statement: &StatementAst, text: &str) {
         for token in field_path_tokens(text) {
             let Some((root, rest)) = token.split_once('.') else {
@@ -152,58 +127,12 @@ impl Validator<'_> {
     }
 }
 
-/// Language codes on the right-hand side of `lang|language == <token>` filters.
-/// `list_values` only reads bracketed `in [...]` lists, so the equality form
-/// needs its own extraction to be language-code validated.
-#[must_use]
-fn language_equality_values(text: &str) -> Vec<String> {
-    let tokens = words(text);
-    let mut values = Vec::new();
-    for window in tokens.windows(3) {
-        if matches!(window[0], "lang" | "language") && window[1] == "==" {
-            values.push(window[2].trim_matches('"').to_owned());
-        }
-    }
-    values
-}
-
 #[must_use]
 pub(super) fn is_reference_token(token: &str) -> bool {
     token
         .bytes()
         .next()
         .is_some_and(|byte| byte.is_ascii_alphabetic())
-}
-
-#[must_use]
-pub(super) fn is_valid_track_filter(text: &str) -> bool {
-    let text = strip_outer_group(text.trim());
-    if let Some(parts) = split_bool_filter(text, " or ") {
-        return parts.into_iter().all(is_valid_track_filter);
-    }
-    if let Some(parts) = split_bool_filter(text, " and ") {
-        return parts.into_iter().all(is_valid_track_filter);
-    }
-    if let Some(inner) = text.trim().strip_prefix("not ") {
-        return is_valid_track_filter(inner.trim());
-    }
-
-    let tokens = words(text);
-    match tokens.as_slice() {
-        ["lang" | "language" | "codec", "in", ..] => {
-            !list_values(text).is_empty() && text_after_list(text).is_some_and(str::is_empty)
-        }
-        ["lang" | "language", "==", value] => !value.is_empty(),
-        ["channels", op, value] => is_comparison_op(op) && value.parse::<u64>().is_ok(),
-        ["commentary" | "forced" | "default" | "font"] => true,
-        ["title", "contains", ..] => {
-            title_filter_value(text, "contains").is_some_and(is_single_value)
-        }
-        ["title", "matches", ..] => {
-            title_filter_value(text, "matches").is_some_and(is_single_value)
-        }
-        _ => false,
-    }
 }
 
 #[must_use]
@@ -375,11 +304,6 @@ fn is_comparison_op(token: &str) -> bool {
         token,
         "==" | "=" | "!=" | "<" | "<=" | ">" | ">=" | "contains" | "matches"
     )
-}
-
-#[must_use]
-fn split_bool_filter<'a>(text: &'a str, delimiter: &str) -> Option<Vec<&'a str>> {
-    split_bool_expression(text, delimiter)
 }
 
 #[must_use]

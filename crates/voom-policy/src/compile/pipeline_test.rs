@@ -408,16 +408,64 @@ fn conformance_quoted_filter_lists_lower_without_quote_characters() {
 }
 
 #[test]
-fn conformance_language_equals_accepts_bare_token() {
-    assert_eq!(
-        single_op("keep audio where language == eng"),
-        CompiledOperation::KeepTracks {
-            target: crate::TrackTarget::Audio,
-            filter: Some(TrackFilter::LanguageIn {
-                values: vec!["eng".to_owned()],
-            }),
-        }
+fn conformance_language_equals_rejects_bare_token() {
+    assert!(
+        compile_policy("policy \"p\" { phase a { keep audio where language == eng } }").is_err()
     );
+}
+
+#[test]
+fn conformance_rejects_unpublished_track_filter_spellings() {
+    for filter in [
+        "lang in [\"eng\"]",
+        "language in [eng]",
+        "codec in [aac]",
+        "title matches \"Signs\"",
+        "channels = 2",
+        "language in []",
+        "language in [\"eng\",]",
+        "language in [\"eng\",, \"und\"]",
+        "language == \"eng\" trailing",
+        "commentary trailing",
+        "commentary and and forced",
+        "(commentary",
+        "()",
+    ] {
+        let source = format!("policy \"p\" {{ phase a {{ keep audio where {filter} }} }}");
+        assert!(compile_policy(&source).is_err(), "accepted `{filter}`");
+    }
+}
+
+#[test]
+fn conformance_every_track_filter_consumer_rejects_aliases() {
+    for operation in [
+        "keep audio where lang in [\"eng\"]",
+        "remove audio where lang in [\"eng\"]",
+        "transcode audio to aac where lang in [\"eng\"]",
+        "extract audio where lang in [\"eng\"]",
+        "defaults audio where lang in [\"eng\"]",
+        "order tracks [video, audio] where lang in [\"eng\"]",
+        "synthesize audio from lang in [\"eng\"] { codec aac channels 2 }",
+    ] {
+        let source = format!("policy \"p\" {{ phase a {{ {operation} }} }}");
+        assert!(compile_policy(&source).is_err(), "accepted `{operation}`");
+    }
+}
+
+#[test]
+fn conformance_every_track_filter_consumer_accepts_canonical_source() {
+    for operation in [
+        "keep audio where language in [\"eng\"]",
+        "remove audio where language in [\"eng\"]",
+        "transcode audio to aac where language in [\"eng\"]",
+        "extract audio where language in [\"eng\"]",
+        "defaults audio where language in [\"eng\"]",
+        "order tracks [video, audio] where language in [\"eng\"]",
+        "synthesize audio from language in [\"eng\"] { codec aac channels 2 }",
+    ] {
+        let source = format!("policy \"p\" {{ phase a {{ {operation} }} }}");
+        assert!(compile_policy(&source).is_ok(), "rejected `{operation}`");
+    }
 }
 
 #[test]

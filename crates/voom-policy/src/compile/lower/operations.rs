@@ -9,12 +9,10 @@ use crate::{
 };
 
 use super::super::compiled::{
-    CompiledOperation, CompiledRule, DefaultStrategy, RuleMatchMode, TrackTarget,
+    CompiledOperation, CompiledRule, DefaultStrategy, RuleMatchMode, TrackFilter, TrackTarget,
 };
-use super::conditions::{
-    compiled_value, condition_from_text, strip_quotes, track_filter, track_filter_clause,
-    track_target,
-};
+use super::super::track_filter::{parse_optional_filter, parse_required_filter};
+use super::conditions::{compiled_value, condition_from_text, strip_quotes, track_target};
 
 pub(super) fn lower_operations(
     source: &str,
@@ -41,40 +39,69 @@ fn lower_operation(
         header, settings, ..
     } = statement
     {
-        return Ok(lower_synthesize(header, settings));
+        return lower_synthesize(source, statement, header, settings);
     }
     let text = statement_text(statement);
     let tokens = words(text.as_ref());
+    lower_text_operation(source, statement, text.as_ref(), &tokens)
+}
+
+fn lower_text_operation(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+    tokens: &[&str],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
     let Some(keyword) = tokens.first().copied() else {
         return Err(vec![unknown_operation(source, statement.span())]);
     };
     match keyword {
         "container" => Ok(CompiledOperation::SetContainer {
-            container: token_string(&tokens, 1, "mkv"),
+            container: token_string(tokens, 1, "mkv"),
         }),
+        "keep" | "remove" | "order" | "defaults" => {
+            lower_track_operation(source, statement, text, tokens)
+        }
+        "actions" | "clear_tags" | "set_tag" | "delete_tag" => {
+            lower_tag_operation(source, statement, text, tokens)
+        }
+        "transcode" | "extract" | "verify" => {
+            lower_media_operation(source, statement, text, tokens)
+        }
+        "when" | "rules" => lower_control_operation(source, statement, text, tokens),
+        _ => Err(vec![unknown_operation(source, statement.span())]),
+    }
+}
+
+fn lower_track_operation(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+    tokens: &[&str],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
+    match tokens.first().copied().unwrap_or_default() {
         "keep" => Ok(CompiledOperation::KeepTracks {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
-            filter: track_filter(text.as_ref()),
+            filter: lower_optional_filter(source, statement, text)?,
         }),
         "remove" => Ok(CompiledOperation::RemoveTracks {
             target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
-            filter: track_filter(text.as_ref()),
+            filter: lower_optional_filter(source, statement, text)?,
         }),
         "order" if tokens.get(1).copied() == Some("tracks") => {
             let list_text = text
-                .as_ref()
                 .split_once(" where ")
-                .map_or(text.as_ref(), |(before, _)| before);
+                .map_or(text, |(before, _)| before);
             Ok(CompiledOperation::ReorderTracks {
                 targets: list_values(list_text)
                     .into_iter()
                     .filter_map(|target| track_target(Some(target)))
                     .collect(),
-                head_filter: track_filter(text.as_ref()),
+                head_filter: lower_optional_filter(source, statement, text)?,
             })
         }
         "defaults" => {
-            let filter = track_filter(text.as_ref());
+            let filter = lower_optional_filter(source, statement, text)?;
             Ok(CompiledOperation::SetDefaults {
                 target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
                 strategy: if filter.is_some() {
@@ -85,6 +112,17 @@ fn lower_operation(
                 filter,
             })
         }
+        _ => Err(vec![unknown_operation(source, statement.span())]),
+    }
+}
+
+fn lower_tag_operation(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+    tokens: &[&str],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
+    match tokens.first().copied().unwrap_or_default() {
         "actions" if tokens.get(2).copied() == Some("clear") => {
             Ok(CompiledOperation::ClearTrackActions {
                 target: track_target(tokens.get(1).copied()).unwrap_or(TrackTarget::Audio),
@@ -92,32 +130,54 @@ fn lower_operation(
         }
         "clear_tags" => Ok(CompiledOperation::ClearTags),
         "set_tag" => Ok(CompiledOperation::SetTag {
-            key: quoted_value(text.as_ref()).unwrap_or_default(),
-            value: compiled_value(text_after_quoted_value(text.as_ref()).unwrap_or_default()),
+            key: quoted_value(text).unwrap_or_default(),
+            value: compiled_value(text_after_quoted_value(text).unwrap_or_default()),
         }),
         "delete_tag" => Ok(CompiledOperation::DeleteTag {
-            key: quoted_value(text.as_ref()).unwrap_or_default(),
+            key: quoted_value(text).unwrap_or_default(),
         }),
+        _ => Err(vec![unknown_operation(source, statement.span())]),
+    }
+}
+
+fn lower_media_operation(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+    tokens: &[&str],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
+    match tokens.first().copied().unwrap_or_default() {
         "transcode" if tokens.get(1).copied() == Some("audio") => {
             Ok(CompiledOperation::TranscodeAudio {
-                target_codec: token_string(&tokens, 3, "opus"),
+                target_codec: token_string(tokens, 3, "opus"),
                 container: "mkv".to_owned(),
-                filter: track_filter(text.as_ref()),
+                filter: lower_optional_filter(source, statement, text)?,
             })
         }
-        "transcode" => Ok(lower_transcode_raw(&tokens)),
+        "transcode" => Ok(lower_transcode_raw(tokens)),
         "extract" if tokens.get(1).copied() == Some("audio") => {
             Ok(CompiledOperation::ExtractAudio {
                 target_codec: "opus".to_owned(),
                 container: "ogg".to_owned(),
-                filter: track_filter(text.as_ref()),
+                filter: lower_optional_filter(source, statement, text)?,
             })
         }
         "verify" if tokens.get(1).copied() == Some("artifact") => {
             Ok(CompiledOperation::VerifyArtifact)
         }
+        _ => Err(vec![unknown_operation(source, statement.span())]),
+    }
+}
+
+fn lower_control_operation(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+    tokens: &[&str],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
+    match tokens.first().copied().unwrap_or_default() {
         "when" => Ok(CompiledOperation::Conditional {
-            condition: condition_from_text(text.as_ref().trim_start_matches("when").trim()),
+            condition: condition_from_text(text.trim_start_matches("when").trim()),
             operations: match statement {
                 StatementAst::Block { statements, .. } => lower_operations(source, statements)?,
                 StatementAst::Raw { .. }
@@ -167,7 +227,12 @@ fn lower_transcode_inline(header: &str, settings: &[crate::SettingAst]) -> Compi
 /// The validator has already checked the shape, so defaults here only guard a
 /// diagnostics-bearing compile: `codec` and `channels` are always present in a
 /// clean policy.
-fn lower_synthesize(header: &str, settings: &[crate::SettingAst]) -> CompiledOperation {
+fn lower_synthesize(
+    source: &str,
+    statement: &StatementAst,
+    header: &str,
+    settings: &[crate::SettingAst],
+) -> Result<CompiledOperation, Vec<PolicyDiagnostic>> {
     let mut target_codec = "aac".to_owned();
     let mut target_channels = 2u64;
     for setting in settings {
@@ -183,13 +248,36 @@ fn lower_synthesize(header: &str, settings: &[crate::SettingAst]) -> CompiledOpe
     }
     let filter = header
         .split_once(" from ")
-        .and_then(|(_, filter)| track_filter_clause(filter));
-    CompiledOperation::SynthesizeAudio {
+        .ok_or_else(|| validated_filter_error(source, statement.span()))
+        .and_then(|(_, filter)| {
+            parse_required_filter(filter)
+                .map(Some)
+                .map_err(|_| validated_filter_error(source, statement.span()))
+        })?;
+    Ok(CompiledOperation::SynthesizeAudio {
         target_codec,
         container: "mkv".to_owned(),
         target_channels,
         filter,
-    }
+    })
+}
+
+fn lower_optional_filter(
+    source: &str,
+    statement: &StatementAst,
+    text: &str,
+) -> Result<Option<TrackFilter>, Vec<PolicyDiagnostic>> {
+    parse_optional_filter(text).map_err(|_| validated_filter_error(source, statement.span()))
+}
+
+fn validated_filter_error(source: &str, span: SourceSpan) -> Vec<PolicyDiagnostic> {
+    vec![PolicyDiagnostic::error(
+        DiagnosticCode::UnknownPhaseStatementOrOperation,
+        DiagnosticStage::Compile,
+        span,
+        line_column(source, span.start),
+        "validated track filter could not be lowered",
+    )]
 }
 
 fn inline_settings_from(settings: &[crate::SettingAst]) -> crate::VideoProfileSettings {

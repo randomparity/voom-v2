@@ -130,13 +130,6 @@ pub(crate) fn strip_outer_group(text: &str) -> &str {
     }
 }
 
-#[must_use]
-pub(crate) fn title_filter_value<'a>(text: &'a str, op: &str) -> Option<&'a str> {
-    let prefix = format!("title {op} ");
-    let value = text.trim().strip_prefix(&prefix)?.trim();
-    if value.is_empty() { None } else { Some(value) }
-}
-
 fn quoted_text_end(text: &str) -> Option<usize> {
     let mut cursor = 1usize;
     let mut escaped = false;

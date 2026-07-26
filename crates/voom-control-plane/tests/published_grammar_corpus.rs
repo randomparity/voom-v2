@@ -10,13 +10,16 @@ const MATRIX_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/policies/published-grammar-coverage.md"
 );
-const UNPUBLISHED_FORMS: [&str; 10] = [
+const UNPUBLISHED_FORMS: [&str; 13] = [
     "extends ",
     "set_tag ",
     "delete_tag ",
     "clear_tags",
     "actions ",
     "lang ",
+    "language == eng",
+    "language in [eng",
+    "codec in [aac",
     "languages audio",
     "title matches",
     "attachments ",
