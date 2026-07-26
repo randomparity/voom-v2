@@ -78,9 +78,17 @@ The accepted values are exact, case-sensitive strings:
 
 The implementation uses an exact `match`, not token-set inference. It does not
 trim, lowercase, reorder, deduplicate, or accept a subset/superset of a listed
-value. Examples that project to no fact include:
+value.
 
-- missing, `null`, object, array, number, or boolean values;
+The projection accepts either the legacy top-level container string or the
+normalizer's container object when that object has a string `format_name`.
+Other fields in the normalizer object remain raw inspection evidence and do
+not affect planning. Missing container values, `null`, arrays, numbers,
+booleans, objects without `format_name`, and objects whose `format_name` is not
+a string project to no fact.
+
+Unrecognized strings that project to no fact include:
+
 - empty or whitespace-padded strings;
 - uppercase or mixed-case values;
 - `webm`, `mov`, and `m4a` alone;
@@ -115,10 +123,19 @@ the same projection for each chain-tip snapshot. Repeating an already-satisfied
 MKV transform becomes `NoOp`; no second ticket or artifact is created.
 
 An existing phase-barrier lineage test currently relies on the alias bug to
-force a second identical transcode. That fixture must use a genuinely needed
-second transformation so it continues testing two-commit lineage without
-depending on incorrect container comparison. Coordinator alias behavior gets a
-separate focused planning test.
+force a second identical transcode. Its policy becomes:
+
+1. phase `normalize`: `transcode video to hevc`;
+2. phase `archive`, depending on `normalize`:
+   `transcode video to hevc using profile "hevc-archive"`.
+
+The first phase produces default HEVC with `yuv420p`; the second remains
+independently necessary because `hevc-archive` requires `main10` and
+`yuv420p10le`. The test continues pinning two committed versions, the distinct
+`default-hevc` then `hevc-archive` target paths, phase-specific pixel-format
+observations, the V0 -> V1 -> V2 `produced_from` chain, and both reprobe
+snapshot identities. Coordinator alias behavior gets a separate focused
+planning test.
 
 ### Generated-media evidence
 
@@ -161,8 +178,11 @@ facts.
 ### Unit and stored-path tests
 
 - Table-test every accepted mapping.
-- Reject missing, wrong-typed, empty, padded, case-shifted, reordered,
-  duplicated, subset, superset, and mixed-unknown values.
+- Exercise both accepted extraction shapes: a legacy container string and a
+  normalizer object with string `format_name` plus unrelated inspection fields.
+- Reject missing, wrong-typed, object-without-string-`format_name`, empty,
+  padded, case-shifted, reordered, duplicated, subset, superset, and
+  mixed-unknown values.
 - Assert stored plan and report paths reproject `matroska,webm` as `mkv` and
   produce `NoOp` for `container mkv`.
 - Assert unknown and malformed durable values produce a blocked
