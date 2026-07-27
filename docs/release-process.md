@@ -60,9 +60,17 @@ rather than silently dropping a field:
 - **Breaking change (rename/remove/retype a field):** roll the new binary out and
   do not roll it back while old-shape rows may still exist.
 - **Rollback across a payload change is not transparent:** the older binary will
-  intentionally reject rows the newer binary wrote. A rollback across such a change
-  requires restoring the pre-upgrade database snapshot
+  intentionally reject rows the newer binary wrote. A rollback across such a
+  change requires restoring the pre-upgrade database snapshot
   (see `docs/runbooks/migration-rollback.md`).
+
+`policy_versions.compiled_json` follows this contract. Existing compiled policy
+versions remain readable by a newer binary, including documented legacy wire
+forms. Add a field only as optional/defaulted, deploy the reader before any
+writer can persist it, and take the pre-upgrade snapshot before that write path
+is enabled. If rollback is required after the newer field has been written,
+restore that snapshot; an older binary must reject the newer row rather than
+silently reinterpret the policy.
 
 ## Never
 
