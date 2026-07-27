@@ -1,9 +1,10 @@
-//! `voom job list|show` — durable job inspection with keyset pagination
-//! (ADR 0031).
+//! `voom job list|show|cancel` — durable job inspection and cancellation
+//! (ADRs 0031 and 0046).
 
 use std::io;
 
 use serde::Serialize;
+use voom_core::JobId;
 use voom_store::repo::jobs::{Job, JobFilter};
 
 use crate::cli::{JobCommand, JobStateArg};
@@ -55,6 +56,7 @@ pub async fn run(database_url: &str, local: Local, command: JobCommand) -> io::R
             limit,
         } => list(database_url, local, state, after_id, limit).await,
         JobCommand::Show { job_id } => show(database_url, local, job_id).await,
+        JobCommand::Cancel { job_id, reason } => cancel(database_url, local, job_id, reason).await,
     }
 }
 
@@ -115,6 +117,26 @@ async fn show(database_url: &str, local: Local, job_id: u64) -> io::Result<i32> 
             )?;
             Ok(2)
         }
+        Err(err) => emit_voom_error(COMMAND, &err, local),
+    }
+}
+
+async fn cancel(database_url: &str, local: Local, job_id: u64, reason: String) -> io::Result<i32> {
+    let cp = match open_control_plane(COMMAND, database_url, &local).await? {
+        Ok(cp) => cp,
+        Err(code) => return Ok(code),
+    };
+    let now = cp.clock().now();
+    match cp.cancel_job(JobId(job_id), reason, now).await {
+        Ok(job) => emit_ok(
+            COMMAND,
+            ShowData {
+                job: JobData::from(job),
+            },
+            Some(local),
+            Vec::new(),
+        )
+        .map(|()| 0),
         Err(err) => emit_voom_error(COMMAND, &err, local),
     }
 }

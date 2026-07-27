@@ -216,6 +216,31 @@ read-only while the run is in flight — reads never block the running writer.
   `report --job-id` to read the recorded breakdown of a run (or a resumed run's
   last recorded summary).
 
+### Cancel queued work
+
+To stop an open job from dispatching more work, run:
+
+```sh
+voom job cancel \
+  --job-id <job_id> \
+  --reason "operator requested stop"
+```
+
+Success is the standard single JSON envelope with `command: "job"` and a job
+whose `state` is `cancelled`. Missing jobs return `NOT_FOUND`; jobs that are
+already succeeded, failed, or cancelled return `CONFLICT`.
+
+Cancellation preserves pending and ready ticket rows as audit evidence, but
+those tickets are no longer candidates and cannot acquire a new scheduler
+lease. Inspect them with `voom ticket list` and inspect existing leases with
+`voom scheduler leases list` or `voom scheduler leases show --lease-id <id>`.
+
+Cancellation does not preempt work that already has a held lease, and there is
+no scheduler-lease force-release or worker-abort CLI. A held operation may
+finish after the parent job is cancelled. Stop the relevant `worker run-local`
+supervisor separately when the worker process itself must stop; do not treat
+the cancellation envelope as proof that it stopped.
+
 ## Output layout
 
 Outputs mirror the source tree. Each terminal artifact lands under

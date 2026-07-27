@@ -200,9 +200,10 @@ values fail before a transaction begins. The command does not log credentials,
 call a network service, or expose new filesystem access.
 
 The success envelope includes the resulting state and epoch. Operators can use
-existing `job show`, `ticket list`, `event list`, and lease inspection commands
-to verify the durable outcome. The runbook states that cancellation stops new
-leases but does not kill already-held work.
+existing `job show`, `ticket list`, `event list`, and scheduler-lease
+inspection commands to verify the durable outcome. No scheduler-lease
+force-release or worker-abort CLI exists. The runbook states that cancellation
+stops new leases but does not kill already-held work.
 
 ## Test strategy
 

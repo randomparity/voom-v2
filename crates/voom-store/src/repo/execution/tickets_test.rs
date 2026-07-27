@@ -1,8 +1,9 @@
 use super::*;
 
 use time::{Duration, OffsetDateTime};
-use voom_core::{TicketOperation, VoomError};
+use voom_core::{JobId, TicketOperation, VoomError};
 
+use crate::repo::jobs::{NewJob, SqliteJobRepo};
 use crate::test_support::fresh_initialized_pool_at;
 
 async fn pool() -> (sqlx::SqlitePool, tempfile::NamedTempFile) {
@@ -159,6 +160,68 @@ async fn next_ready_for_operations_uses_ticket_id_as_final_tiebreaker() {
 
     assert_eq!(selected.id, first.id);
     assert_ne!(selected.id, second.id);
+}
+
+#[tokio::test]
+async fn ready_for_operations_excludes_cancelled_job_tickets() {
+    let (pool, _tmp) = pool().await;
+    let jobs = SqliteJobRepo::new(pool.clone());
+    let tickets = SqliteTicketRepo::new(pool.clone());
+    let open_job = jobs.create(sample_job()).await.unwrap();
+    let cancelled_job = jobs.create(sample_job()).await.unwrap();
+    jobs.cancel(cancelled_job.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap();
+    let open = ready_ticket_for_job(&tickets, Some(open_job.id)).await;
+    let cancelled = ready_ticket_for_job(&tickets, Some(cancelled_job.id)).await;
+    let jobless = ready_ticket_for_job(&tickets, None).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    let selected = tickets
+        .ready_for_operations_in_tx(
+            &mut tx,
+            &[ticket_op("transcode_video")],
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let ids = selected
+        .into_iter()
+        .map(|ticket| ticket.id)
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&open.id));
+    assert!(ids.contains(&jobless.id));
+    assert!(!ids.contains(&cancelled.id));
+}
+
+fn sample_job() -> NewJob {
+    NewJob {
+        kind: "policy_execute".to_owned(),
+        priority: 0,
+        created_at: OffsetDateTime::UNIX_EPOCH,
+    }
+}
+
+async fn ready_ticket_for_job(tickets: &SqliteTicketRepo, job_id: Option<JobId>) -> Ticket {
+    let ticket = tickets
+        .create(NewTicket {
+            job_id,
+            kind: ticket_op("transcode_video"),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        })
+        .await
+        .unwrap();
+    tickets
+        .mark_ready_if_unblocked(ticket.id, OffsetDateTime::UNIX_EPOCH)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
 }
 
 #[tokio::test]

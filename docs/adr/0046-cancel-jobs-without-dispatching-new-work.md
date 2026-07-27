@@ -75,9 +75,10 @@ operation can finish and persist its ticket result after the parent job is
 cancelled. Its downstream pending or ready tickets remain durable but cannot
 acquire a lease.
 
-An operator who needs to terminate a stuck held lease can use the existing
-lease force-release controls. Adding coordinated worker abort is a separate
-protocol and lifecycle decision.
+There is no scheduler-lease force-release or worker-abort CLI. An operator can
+inspect held work and stop a local worker supervisor, but must not interpret
+job cancellation itself as proof that the worker process stopped. Adding
+coordinated worker abort is a separate protocol and lifecycle decision.
 
 ## Consequences
 

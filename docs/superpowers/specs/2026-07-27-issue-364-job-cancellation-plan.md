@@ -124,8 +124,8 @@ fix(store): stop leasing cancelled job tickets
 1. Document the exact cancel command and standard envelope outcome.
 2. State that pending and ready ticket rows remain visible but cannot acquire
    new leases.
-3. State that held leases are not preempted and point to existing inspection
-   and force-release commands.
+3. State that held leases are not preempted, point to existing inspection
+   commands, and do not imply that a scheduler force-release CLI exists.
 4. Reread ADR 0046 and the runbook together for any implied worker kill or
    ticket-state rewrite.
 

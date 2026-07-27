@@ -12,7 +12,7 @@ use voom_store::repo::jobs::{Job, NewJob};
 
 use crate::ControlPlane;
 
-use super::{append_event, begin_tx, commit_tx};
+use super::{append_event, begin_tx, commit_tx, require_audit_field};
 
 impl ControlPlane {
     /// Open a job and append its audit event in the caller's transaction.
@@ -110,6 +110,7 @@ impl ControlPlane {
         reason: String,
         now: OffsetDateTime,
     ) -> Result<Job, VoomError> {
+        require_audit_field("reason", &reason)?;
         let mut tx = begin_tx(&self.pool).await?;
         let job = self.jobs.cancel_in_tx(&mut tx, id, now).await?;
         append_event(

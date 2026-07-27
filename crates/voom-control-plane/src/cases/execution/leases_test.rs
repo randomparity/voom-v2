@@ -1,11 +1,15 @@
 use super::*;
 
 use time::{Duration as TDuration, OffsetDateTime};
-use voom_core::{FailureClass, TicketId, TicketOperation, VoomError};
+use voom_core::{FailureClass, JobId, TicketId, TicketOperation, VoomError};
 use voom_events::EventKind;
 use voom_store::repo::events::{EventFilter, EventRepo, Page};
-use voom_store::repo::tickets::{NewTicket, TicketState};
-use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, Worker, WorkerKind};
+use voom_store::repo::jobs::{JobState, NewJob};
+use voom_store::repo::leases::{LeaseFilter, LeaseState};
+use voom_store::repo::tickets::{NewTicket, Ticket, TicketState};
+use voom_store::repo::workers::{
+    NewCapability, NewGrant, NewWorker, Worker, WorkerKind,
+};
 
 use crate::cases::{count, cp, issue_link_targets, terminal_failure_issues};
 
@@ -19,6 +23,13 @@ fn ticket(kind: &str, max_attempts: u32) -> NewTicket {
         payload: serde_json::json!({}),
         max_attempts,
         created_at: T0,
+    }
+}
+
+fn ticket_for_job(kind: &str, max_attempts: u32, job_id: JobId) -> NewTicket {
+    NewTicket {
+        job_id: Some(job_id),
+        ..ticket(kind, max_attempts)
     }
 }
 
@@ -96,6 +107,99 @@ async fn acquire_lease_emits_lease_acquired_and_ticket_leased() {
     };
     assert_eq!(payload.attempt, 1, "first dispatch bumps attempt to 1");
     assert_eq!(payload.lease_id, lease.id.0);
+}
+
+#[tokio::test]
+async fn acquire_lease_rejects_cancelled_job_without_durable_side_effects() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "policy_execute".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let ticket = cp
+        .create_ticket(ticket_for_job("noop", 2, job.id))
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    let ready = cp.tickets().get(ticket.id).await.unwrap().unwrap();
+    let worker = eligible_worker(&cp, "cancelled-job-worker", &ticket.kind).await;
+    cp.cancel_job(job.id, "operator cancel".to_owned(), T0)
+        .await
+        .unwrap();
+    let lease_events = count(&cp, EventKind::LeaseAcquired).await;
+    let ticket_events = count(&cp, EventKind::TicketLeased).await;
+
+    let err = cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, VoomError::Conflict(_)), "got: {err:?}");
+    assert_ticket_unchanged(&cp, &ready).await;
+    assert!(
+        cp.leases()
+            .list(LeaseFilter::default(), None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(count(&cp, EventKind::LeaseAcquired).await, lease_events);
+    assert_eq!(count(&cp, EventKind::TicketLeased).await, ticket_events);
+}
+
+#[tokio::test]
+async fn cancel_job_does_not_preempt_held_lease() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(NewJob {
+            kind: "policy_execute".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let ticket = cp
+        .create_ticket(ticket_for_job("noop", 2, job.id))
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked(ticket.id, T0).await.unwrap();
+    let worker = eligible_worker(&cp, "held-job-worker", &ticket.kind).await;
+    let lease = cp
+        .acquire_lease(NewLease {
+            ticket_id: ticket.id,
+            worker_id: worker.id,
+            ttl: TDuration::seconds(60),
+            now: T0,
+        })
+        .await
+        .unwrap();
+
+    cp.cancel_job(job.id, "operator cancel".to_owned(), T0)
+        .await
+        .unwrap();
+
+    let stored_job = cp.get_job(job.id.0).await.unwrap().unwrap();
+    let stored_ticket = cp.tickets().get(ticket.id).await.unwrap().unwrap();
+    let stored_lease = cp.leases().get(lease.id).await.unwrap().unwrap();
+    assert_eq!(stored_job.state, JobState::Cancelled);
+    assert_eq!(stored_ticket.state, TicketState::Leased);
+    assert_eq!(stored_lease.state, LeaseState::Held);
+}
+
+async fn assert_ticket_unchanged(cp: &crate::ControlPlane, expected: &Ticket) {
+    let actual = cp.tickets().get(expected.id).await.unwrap().unwrap();
+    assert_eq!(actual.state, expected.state);
+    assert_eq!(actual.attempt, expected.attempt);
+    assert_eq!(actual.epoch, expected.epoch);
 }
 
 #[tokio::test]
