@@ -168,6 +168,12 @@ voom compliance execute \
   failed). Re-running `compliance execute` resumes via the Sprint 16
   per-file-phase resume path (issue-165) — already-completed files are not
   redone. Read partial state with `voom compliance report --job-id <job_id>`.
+- **`verify artifact` is a durable read-only phase.** A successful phase reports
+  `outcome: "verified"` without advancing the file version. Both
+  `compliance execute` and `compliance report --job-id` include the persisted
+  verification id, expected and observed facts, worker, status, and any failure
+  code. A resumed run reuses that evidence instead of verifying the same phase
+  again.
   In that report, `file_phases[*].outcome` and produced artifact IDs are the
   execution results. `phases[*].report` is the compliance snapshot captured for
   that phase, and `latest_phase_index` points at the highest-ordinal phase
