@@ -1,7 +1,8 @@
 use serde_json::json;
 use time::OffsetDateTime;
-use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId};
-use voom_policy::{FixtureName, TargetRef, load_fixture};
+use voom_core::{ErrorCode, FileVersionId, MediaSnapshotId, MediaWorkId, VoomError};
+use voom_policy::{FixtureName, PolicyInputSetDraft, TargetRef, load_fixture};
+use voom_store::repo::events::EventFilter;
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
 use voom_store::repo::policy_inputs::PolicyInputTargetRef;
 
@@ -15,6 +16,326 @@ use crate::cases::cp;
 use super::{PolicyInputFromScanInput, RootScopedScanInput, WholeScanInput};
 
 const T0: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PolicyInputAggregateCounts {
+    input_sets: i64,
+    fixture_labels: i64,
+    synthetic_targets: i64,
+    media_snapshots: i64,
+    identity_evidence: i64,
+    bundle_targets: i64,
+    quality_profiles: i64,
+    issues: i64,
+}
+
+async fn policy_input_aggregate_counts(cp: &crate::ControlPlane) -> PolicyInputAggregateCounts {
+    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64, i64, i64)>(
+        "SELECT \
+         (SELECT COUNT(*) FROM policy_input_sets), \
+         (SELECT COUNT(*) FROM policy_input_set_fixture_labels), \
+         (SELECT COUNT(*) FROM policy_input_synthetic_targets), \
+         (SELECT COUNT(*) FROM policy_media_snapshot_inputs), \
+         (SELECT COUNT(*) FROM policy_identity_evidence_inputs), \
+         (SELECT COUNT(*) FROM policy_bundle_target_inputs), \
+         (SELECT COUNT(*) FROM policy_quality_profile_selections), \
+         (SELECT COUNT(*) FROM policy_issue_inputs)",
+    )
+    .fetch_one(cp.pool_for_test())
+    .await
+    .unwrap();
+    PolicyInputAggregateCounts {
+        input_sets: row.0,
+        fixture_labels: row.1,
+        synthetic_targets: row.2,
+        media_snapshots: row.3,
+        identity_evidence: row.4,
+        bundle_targets: row.5,
+        quality_profiles: row.6,
+        issues: row.7,
+    }
+}
+
+async fn event_count(cp: &crate::ControlPlane) -> usize {
+    cp.list_events(EventFilter::default(), None, 200)
+        .await
+        .unwrap()
+        .len()
+}
+
+async fn observer_for(tmp: &tempfile::NamedTempFile) -> crate::ControlPlane {
+    let url = format!("sqlite://{}", tmp.path().display());
+    let pool = voom_store::connect(&url).await.unwrap();
+    crate::ControlPlane::open_with_pool(pool, std::sync::Arc::new(voom_core::SystemClock))
+        .await
+        .unwrap()
+}
+
+fn linked_draft(
+    file_version_id: FileVersionId,
+    media_snapshot_id: MediaSnapshotId,
+) -> PolicyInputSetDraft {
+    let mut draft = load_fixture(FixtureName::SyntheticCompliantBaseline).unwrap();
+    draft.slug = format!("linked-snapshot-{}", media_snapshot_id.0);
+    draft.fixture_labels = vec![format!("linked_snapshot_{}", media_snapshot_id.0)];
+    draft.media_snapshots[0].target = TargetRef::FileVersion {
+        id: file_version_id,
+    };
+    draft.media_snapshots[0].existing_media_snapshot_id = Some(media_snapshot_id);
+    draft
+}
+
+async fn assert_rejected_without_policy_state(
+    observer: &crate::ControlPlane,
+    before_events: usize,
+    err: &VoomError,
+    expected_code: ErrorCode,
+) {
+    assert_eq!(err.error_code(), expected_code);
+    assert_eq!(
+        policy_input_aggregate_counts(observer).await,
+        PolicyInputAggregateCounts::default()
+    );
+    assert_eq!(event_count(observer).await, before_events);
+}
+
+#[tokio::test]
+async fn generic_input_accepts_exact_snapshot_file_version_link() {
+    let (cp, _tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/exact.mp4", "hash-exact").await;
+    let draft = linked_draft(file_version_id, media_snapshot_id);
+
+    let created = cp.create_policy_input_set(draft).await.unwrap();
+    let fetched = cp.get_policy_input_set(created.id).await.unwrap().unwrap();
+
+    assert_eq!(
+        fetched.media_snapshots[0].existing_media_snapshot_id,
+        Some(media_snapshot_id)
+    );
+    assert_eq!(
+        fetched.media_snapshots[0].target,
+        PolicyInputTargetRef::FileVersion {
+            id: file_version_id
+        }
+    );
+}
+
+#[tokio::test]
+async fn generic_input_model_validation_precedes_live_and_closed_database() {
+    let (live, live_tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&live, "/srv/invalid.mp4", "hash-invalid").await;
+    let observer = observer_for(&live_tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut invalid = linked_draft(file_version_id, media_snapshot_id);
+    invalid.slug = " ".to_owned();
+    invalid.media_snapshots[0].target = TargetRef::MediaWork {
+        id: MediaWorkId(9_999),
+    };
+
+    let live_err = live
+        .create_policy_input_set(invalid.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(live_err.code(), "POLICY_VALIDATION_ERROR");
+    assert_rejected_without_policy_state(
+        &observer,
+        before_events,
+        &live_err,
+        ErrorCode::PolicyValidationError,
+    )
+    .await;
+
+    live.pool_for_test().close().await;
+    let closed_err = live.create_policy_input_set(invalid).await.unwrap_err();
+    assert_eq!(closed_err.code(), "POLICY_VALIDATION_ERROR");
+    assert_rejected_without_policy_state(
+        &observer,
+        before_events,
+        &closed_err,
+        ErrorCode::PolicyValidationError,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn generic_input_transaction_failure_precedes_link_validation() {
+    let (cp, tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/closed.mp4", "hash-closed").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(file_version_id, media_snapshot_id);
+    draft.media_snapshots[0].target = TargetRef::MediaWork {
+        id: MediaWorkId(9_999),
+    };
+    cp.pool_for_test().close().await;
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::DbUnreachable)
+        .await;
+}
+
+#[tokio::test]
+async fn generic_input_missing_snapshot_is_not_found_without_policy_state() {
+    let (cp, tmp) = cp().await;
+    let (file_version_id, _) = scanned_snapshot(&cp, "/srv/missing.mp4", "hash-missing").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let draft = linked_draft(file_version_id, MediaSnapshotId(999_999));
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::NotFound).await;
+}
+
+#[tokio::test]
+async fn generic_input_non_file_target_conflicts_without_policy_state() {
+    let (cp, tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/non-file.mp4", "hash-non-file").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(file_version_id, media_snapshot_id);
+    draft.media_snapshots[0].target = TargetRef::MediaWork {
+        id: MediaWorkId(9_999),
+    };
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::Conflict).await;
+}
+
+#[tokio::test]
+async fn generic_input_checks_snapshot_existence_before_target_shape() {
+    let (cp, tmp) = cp().await;
+    let (file_version_id, _) =
+        scanned_snapshot(&cp, "/srv/precedence.mp4", "hash-precedence").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(file_version_id, MediaSnapshotId(999_999));
+    draft.media_snapshots[0].target = TargetRef::MediaWork {
+        id: MediaWorkId(9_999),
+    };
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::NotFound).await;
+}
+
+#[tokio::test]
+async fn generic_input_reports_link_errors_in_draft_order() {
+    let (cp, tmp) = cp().await;
+    let (first_version_id, first_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/first.mp4", "hash-first").await;
+    let (second_version_id, second_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/second.mp4", "hash-second").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(first_version_id, first_snapshot_id);
+    let mut first_member = draft.media_snapshots[0].clone();
+    first_member.ordinal = 0;
+    first_member.existing_media_snapshot_id = Some(second_snapshot_id);
+    first_member.target = TargetRef::FileVersion {
+        id: first_version_id,
+    };
+    let mut second_member = draft.media_snapshots[0].clone();
+    second_member.ordinal = 1;
+    second_member.existing_media_snapshot_id = Some(first_snapshot_id);
+    second_member.target = TargetRef::FileVersion {
+        id: second_version_id,
+    };
+    draft.media_snapshots = vec![first_member, second_member];
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "conflict: media snapshot {second_snapshot_id} does not belong to \
+             file version {first_version_id}"
+        )
+    );
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::Conflict).await;
+}
+
+#[tokio::test]
+async fn generic_input_later_mismatch_leaves_no_partial_policy_state() {
+    let (cp, tmp) = cp().await;
+    let (first_version_id, first_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/valid-first.mp4", "hash-valid-first").await;
+    let (second_version_id, second_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/invalid-second.mp4", "hash-invalid-second").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(first_version_id, first_snapshot_id);
+    let mut second = draft.media_snapshots[0].clone();
+    second.ordinal = 1;
+    second.existing_media_snapshot_id = Some(second_snapshot_id);
+    second.target = TargetRef::FileVersion {
+        id: first_version_id,
+    };
+    draft.media_snapshots.push(second);
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "conflict: media snapshot {second_snapshot_id} does not belong to \
+             file version {first_version_id}"
+        )
+    );
+    assert_ne!(first_version_id, second_version_id);
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::Conflict).await;
+}
+
+#[tokio::test]
+async fn generic_input_identity_read_failure_precedes_member_conflict() {
+    let (cp, tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/read-failure.mp4", "hash-read-failure").await;
+    let observer = observer_for(&tmp).await;
+    let before_events = event_count(&observer).await;
+    let mut draft = linked_draft(file_version_id, media_snapshot_id);
+    draft.media_snapshots[0].target = TargetRef::MediaWork {
+        id: MediaWorkId(9_999),
+    };
+    sqlx::query("ALTER TABLE media_snapshots RENAME TO unreadable_media_snapshots")
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+
+    let err = cp.create_policy_input_set(draft).await.unwrap_err();
+
+    assert_eq!(err.error_code(), ErrorCode::DbUnreachable);
+    assert!(err.to_string().contains("media snapshot provenance lookup"));
+    assert_rejected_without_policy_state(&observer, before_events, &err, ErrorCode::DbUnreachable)
+        .await;
+}
+
+#[tokio::test]
+async fn generic_input_accepts_exact_historical_file_version_link() {
+    let (cp, _tmp) = cp().await;
+    let (file_version_id, media_snapshot_id) =
+        scanned_snapshot(&cp, "/srv/historical.mp4", "hash-historical").await;
+    sqlx::query("UPDATE file_versions SET retired_at = '1970-01-01T00:00:01Z' WHERE id = ?")
+        .bind(i64::try_from(file_version_id.0).unwrap())
+        .execute(cp.pool_for_test())
+        .await
+        .unwrap();
+    let draft = linked_draft(file_version_id, media_snapshot_id);
+
+    let created = cp.create_policy_input_set(draft).await.unwrap();
+
+    assert_eq!(created.media_snapshots.len(), 1);
+    assert_eq!(
+        created.media_snapshots[0].existing_media_snapshot_id,
+        Some(media_snapshot_id)
+    );
+}
 
 #[tokio::test]
 async fn create_policy_input_set_round_trips_fixture() {

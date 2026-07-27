@@ -36,7 +36,8 @@ pub use fixtures::{FixtureName, load_fixture};
 pub use model::{
     BundleTargetInput, BundleTargetState, IdentityEvidenceInput, IssueInput, IssueInputState,
     MediaSnapshotInput, PolicyInputSetDraft, PolicyInputSetValidationError, PolicyInputSourceKind,
-    PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef, validate_input_set,
+    PolicySyntheticTarget, QualityProfileSelection, TargetKind, TargetRef,
+    ValidatedPolicyInputSetDraft, validate_input_set,
 };
 pub use parser::{ParseError, parse_policy_source};
 pub use pipeline::{

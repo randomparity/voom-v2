@@ -75,6 +75,35 @@ pub struct PolicyInputSetDraft {
     pub issues: Vec<IssueInput>,
 }
 
+/// A policy input-set draft that has passed all policy-domain validation.
+///
+/// Construction consumes the draft so callers cannot mutate it after
+/// validation. Persistence code accepts this proof instead of revalidating
+/// while holding a database write lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedPolicyInputSetDraft(PolicyInputSetDraft);
+
+impl ValidatedPolicyInputSetDraft {
+    /// Validate and wrap a policy input-set draft.
+    ///
+    /// # Errors
+    /// Returns the first policy-domain validation error.
+    pub fn new(input: PolicyInputSetDraft) -> Result<Self, PolicyInputSetValidationError> {
+        validate_input_set(&input)?;
+        Ok(Self(input))
+    }
+
+    #[must_use]
+    pub const fn as_draft(&self) -> &PolicyInputSetDraft {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_draft(self) -> PolicyInputSetDraft {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PolicySyntheticTarget {
     pub synthetic_key: String,
