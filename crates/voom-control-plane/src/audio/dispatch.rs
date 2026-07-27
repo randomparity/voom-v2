@@ -29,15 +29,22 @@ pub struct BundledExtractAudioDispatcher;
 impl TranscodeAudioDispatcher for BundledTranscodeAudioDispatcher {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: LeaseId,
+        idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
         let command = bundled_ffmpeg_worker_command();
         let worker = BundledWorkerProcess::launch(WorkerId(0), command)
             .await
             .map_err(|err| VoomError::WorkerCrash(err.to_string()))?;
-        let result =
-            dispatch_transcode_audio_with_client(&worker.client, &worker.credentials, request)
-                .await;
+        let result = dispatch_transcode_audio_with_client_context(
+            &worker.client,
+            &worker.credentials,
+            dispatch_lease_id,
+            idempotency_key,
+            request,
+        )
+        .await;
         let _status = worker.shutdown(Duration::from_secs(5)).await;
         result
     }
@@ -65,24 +72,6 @@ impl ExtractAudioDispatcher for BundledExtractAudioDispatcher {
         let _status = worker.shutdown(Duration::from_secs(5)).await;
         result
     }
-}
-
-pub(crate) async fn dispatch_transcode_audio_with_client<C>(
-    client: &C,
-    credentials: &WorkerCredentials,
-    request: TranscodeAudioRequest,
-) -> Result<TranscodeAudioResult, VoomError>
-where
-    C: ClientHandle + ?Sized,
-{
-    dispatch_transcode_audio_with_client_context(
-        client,
-        credentials,
-        LeaseId(0),
-        "transcode-audio-control-plane",
-        request,
-    )
-    .await
 }
 
 pub(crate) async fn dispatch_transcode_audio_with_client_context<C>(

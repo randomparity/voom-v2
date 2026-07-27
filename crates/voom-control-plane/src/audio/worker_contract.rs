@@ -34,11 +34,8 @@ pub fn transcode_audio_request_for(
         audio: TranscodeAudioSettings {
             target_codec: selection.target_codec.clone(),
             profile: "default".to_owned(),
-            // Transcode replaces streams in place. `synthesize audio` (ADR 0026)
-            // sets these to add a downmixed companion; that execute-path wiring
-            // is a follow-up (see PR / issue #276).
-            add_track: false,
-            target_channels: None,
+            add_track: selection.add_track,
+            target_channels: selection.target_channels,
         },
     }
 }
@@ -139,10 +136,11 @@ pub fn validate_transcode_result(
             "audio transcode selected output stream ordering does not match request".to_owned(),
         ));
     }
-    if result
-        .output_audio_codecs
-        .iter()
-        .any(|codec| codec != &selection.target_codec)
+    if result.output_audio_codecs.len() != selection.selected_streams.len()
+        || result
+            .output_audio_codecs
+            .iter()
+            .any(|codec| codec != &selection.target_codec)
         || result
             .selected_output_streams
             .iter()
@@ -152,15 +150,21 @@ pub fn validate_transcode_result(
             "audio transcode output codec does not match request".to_owned(),
         ));
     }
+    let mut provider_indexes = std::collections::HashSet::new();
     for (expected, actual) in selection
         .selected_streams
         .iter()
         .zip(&result.selected_output_streams)
     {
+        let expected_channels = if selection.add_track {
+            selection.target_channels
+        } else {
+            expected.source.channels.map(u64::from)
+        };
         if actual.language != expected.source.language
             || actual.title != expected.source.title
             || actual.default != Some(expected.source.default)
-            || actual.channels != expected.source.channels.map(u64::from)
+            || actual.channels != expected_channels
             || actual
                 .disposition
                 .as_ref()
@@ -176,6 +180,7 @@ pub fn validate_transcode_result(
                 .as_ref()
                 .and_then(|disposition| disposition.commentary)
                 != expected.source.disposition.commentary
+            || !provider_indexes.insert(actual.output_provider_stream_index)
         {
             return Err(VoomError::MalformedWorkerResult(
                 "audio transcode preserved stream facts do not match source snapshot".to_owned(),

@@ -506,6 +506,9 @@ fn event_kind_matches_serde_tag() {
             output_container: "mka".to_owned(),
             provider: None,
             provider_version: None,
+            synthesis_operation_id: None,
+            synthesis_operation_key: None,
+            synthesized_companions: Vec::new(),
         }),
         Event::ArtifactAudioTranscodeProgress(ArtifactAudioTranscodeProgressPayload {
             job_id: 1,
@@ -538,6 +541,9 @@ fn event_kind_matches_serde_tag() {
             output_audio_codecs: Vec::new(),
             provider: "ffmpeg".to_owned(),
             provider_version: "1".to_owned(),
+            synthesis_operation_id: None,
+            synthesis_operation_key: None,
+            synthesized_companions: Vec::new(),
         }),
         Event::ArtifactAudioTranscodeFailed(ArtifactAudioTranscodeFailedPayload {
             job_id: 1,
@@ -556,6 +562,9 @@ fn event_kind_matches_serde_tag() {
             message: "m".to_owned(),
             provider: None,
             provider_version: None,
+            synthesis_operation_id: None,
+            synthesis_operation_key: None,
+            synthesized_companions: Vec::new(),
         }),
         Event::ArtifactAudioExtractStarted(ArtifactAudioExtractStartedPayload {
             job_id: 1,

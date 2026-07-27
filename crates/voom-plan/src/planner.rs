@@ -4,7 +4,7 @@ use serde_json::json;
 use voom_policy::{
     ComparisonOp, CompiledCondition, CompiledOperation, CompiledPolicy, CompiledRule,
     CompiledValue, DiagnosticSeverity, MediaSnapshotInput, PolicyDiagnostic, PolicyInputSetDraft,
-    RuleMatchMode, TrackTarget,
+    RuleMatchMode, TrackFilter, TrackTarget,
 };
 
 use crate::{
@@ -445,43 +445,39 @@ impl<'a> PlanBuilder<'a> {
                 target_codec,
                 container,
                 filter,
-            } => {
-                let operation_id = node_id(
-                    phase_name,
-                    checked_ordinal(self.nodes.len()),
-                    PlanOperationKind::ExtractAudio.as_str(),
-                    &target_key(&snapshot.target),
-                );
-                self.push_operation_plan(
-                    phase_name,
-                    snapshot,
-                    audio::plan_extract(
-                        phase_name,
-                        snapshot,
-                        target_codec,
-                        container,
-                        filter.as_ref(),
-                        &operation_id,
-                    ),
-                );
-            }
+            } => self.push_extract_audio_plan(
+                phase_name,
+                snapshot,
+                target_codec,
+                container,
+                filter.as_ref(),
+            ),
             CompiledOperation::SynthesizeAudio {
                 target_codec,
                 container,
                 target_channels,
                 filter,
-            } => self.push_operation_plan(
-                phase_name,
-                snapshot,
-                audio::plan_synthesize(
+            } => {
+                let operation_id = next_operation_id(
+                    self.nodes.len(),
                     phase_name,
                     snapshot,
-                    target_codec,
-                    container,
-                    *target_channels,
-                    filter.as_ref(),
-                ),
-            ),
+                    PlanOperationKind::TranscodeAudio,
+                );
+                self.push_operation_plan(
+                    phase_name,
+                    snapshot,
+                    audio::plan_synthesize(
+                        phase_name,
+                        snapshot,
+                        target_codec,
+                        container,
+                        *target_channels,
+                        filter.as_ref(),
+                        &operation_id,
+                    ),
+                );
+            }
             CompiledOperation::VerifyArtifact => {
                 self.push_operation_plan(phase_name, snapshot, plan_verify_artifact(snapshot));
             }
@@ -496,6 +492,34 @@ impl<'a> PlanBuilder<'a> {
                 );
             }
         }
+    }
+
+    fn push_extract_audio_plan(
+        &mut self,
+        phase_name: &str,
+        snapshot: &MediaSnapshotInput,
+        target_codec: &str,
+        container: &str,
+        filter: Option<&TrackFilter>,
+    ) {
+        let operation_id = next_operation_id(
+            self.nodes.len(),
+            phase_name,
+            snapshot,
+            PlanOperationKind::ExtractAudio,
+        );
+        self.push_operation_plan(
+            phase_name,
+            snapshot,
+            audio::plan_extract(
+                phase_name,
+                snapshot,
+                target_codec,
+                container,
+                filter,
+                &operation_id,
+            ),
+        );
     }
 
     fn push_operation_plan(
@@ -1241,6 +1265,20 @@ fn target_key(target: &TargetRef) -> String {
         TargetRef::FileLocation { id } => format!("file_location:{id}"),
         TargetRef::Synthetic { key, kind } => format!("synthetic:{}:{key}", kind.as_str()),
     }
+}
+
+fn next_operation_id(
+    node_count: usize,
+    phase_name: &str,
+    snapshot: &MediaSnapshotInput,
+    operation_kind: PlanOperationKind,
+) -> String {
+    node_id(
+        phase_name,
+        checked_ordinal(node_count),
+        operation_kind.as_str(),
+        &target_key(&snapshot.target),
+    )
 }
 
 fn checked_ordinal(value: usize) -> u32 {

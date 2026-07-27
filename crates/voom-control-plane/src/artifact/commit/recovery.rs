@@ -42,15 +42,37 @@ pub(super) async fn recover_commit_inner(
     cp: &ControlPlane,
     artifact_handle_id: ArtifactHandleId,
 ) -> Result<CommitArtifactReport, VoomError> {
+    recover_commit_from_state(
+        cp,
+        artifact_handle_id,
+        ArtifactCommitState::RecoveryRequired,
+    )
+    .await
+}
+
+async fn recover_commit_from_state(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    state: ArtifactCommitState,
+) -> Result<CommitArtifactReport, VoomError> {
+    let prepared = prepare_commit_recovery(cp, artifact_handle_id, state).await?;
+    finalize_commit(cp, &prepared.prepared, &prepared.promotion).await
+}
+
+pub(crate) async fn prepare_commit_recovery(
+    cp: &ControlPlane,
+    artifact_handle_id: ArtifactHandleId,
+    state: ArtifactCommitState,
+) -> Result<super::PreparedArtifactCommit, VoomError> {
     let record = cp
         .artifacts
         .list_commit_records(artifact_handle_id)
         .await?
         .into_iter()
-        .find(|record| record.state == ArtifactCommitState::RecoveryRequired)
+        .find(|record| record.state == state)
         .ok_or_else(|| {
             VoomError::Conflict(format!(
-                "artifact_handle {artifact_handle_id} has no commit in recovery_required state"
+                "artifact_handle {artifact_handle_id} has no commit in {state:?} state"
             ))
         })?;
     let target_path = PathBuf::from(&record.target_path);
@@ -151,7 +173,10 @@ pub(super) async fn recover_commit_inner(
         promote_prepared(cp, &prepared, &NoCommitArtifactHooks).await?
     };
 
-    finalize_commit(cp, &prepared, &promotion).await
+    Ok(super::PreparedArtifactCommit {
+        prepared,
+        promotion,
+    })
 }
 
 pub(super) async fn transition_recovery(

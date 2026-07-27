@@ -15,6 +15,7 @@ use voom_events::payload::{
 use voom_events::{Event, SubjectType};
 use voom_store::repo::audio_extract_operations::SqliteAudioExtractOperationRepo;
 use voom_store::repo::leases::{ExpireReport, ForceReleaseOutcome, Lease, NewLease};
+use voom_store::repo::media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo;
 use voom_store::repo::tickets::TicketState;
 
 use crate::ControlPlane;
@@ -119,6 +120,13 @@ impl ControlPlane {
     ) -> Result<Lease, VoomError> {
         let lease = self.leases.heartbeat_in_tx(tx, lease_id, ttl, now).await?;
         SqliteAudioExtractOperationRepo::renew_claims_for_lease_in_tx(
+            tx,
+            lease_id,
+            lease.expires_at,
+            now,
+        )
+        .await?;
+        SqliteAudioSynthesisOperationRepo::renew_claims_for_lease_in_tx(
             tx,
             lease_id,
             lease.expires_at,

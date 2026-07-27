@@ -45,6 +45,7 @@ const EXPECTED_MIGRATION_FILES: &[&str] = &[
     "0022_workflow_file_run_starts.sql",
     "0023_workflow_file_run_history.sql",
     "0024_atomic_audio_extract_operations.sql",
+    "0025_recoverable_audio_synthesis.sql",
 ];
 
 fn workspace_root() -> PathBuf {

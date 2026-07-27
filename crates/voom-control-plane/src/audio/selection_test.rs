@@ -266,10 +266,7 @@ fn transcode_untagged_language_selects_under_und_and_excludes_under_eng() {
 }
 
 #[test]
-fn transcode_selection_rejects_synthesize_payload_with_clear_message() {
-    // Synthesis compiles and plans, but its execute path is not wired yet
-    // (ADR 0026): the transcode path must fail loud with a self-explanatory
-    // message rather than run the source through replace-in-place transcode.
+fn transcode_selection_resolves_synthesize_companion_against_pinned_source() {
     let mut payload = payload(
         "synthesize_audio",
         "aac",
@@ -277,22 +274,31 @@ fn transcode_selection_rejects_synthesize_payload_with_clear_message() {
         &json!({"type": "channels", "op": "gte", "value": 6}),
     );
     payload["target_channels"] = json!(2);
-    let snapshot = snapshot_with_streams(vec![audio(
-        "a-1",
-        1,
-        "eac3",
-        Some("eng"),
-        Some("Main"),
-        Some(false),
-    )]);
+    let operation_id = "node_test_synthesis";
+    let companion_id = voom_plan::planner::audio::synthesis_companion_id(operation_id, "a-1");
+    payload["operation_id"] = json!(operation_id);
+    payload["companions"] = json!([{
+        "companion_id": companion_id,
+        "source_snapshot_stream_id": "a-1",
+        "source_provider_stream_index": 1,
+        "result_snapshot_stream_id": companion_id
+    }]);
+    let mut source = audio("a-1", 1, "eac3", Some("eng"), Some("Main"), Some(false));
+    source["channels"] = json!(6);
+    let snapshot = snapshot_with_streams(vec![source]);
 
-    let err = transcode_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap_err();
+    let selection = transcode_selection_from_payload_and_snapshot(&payload, &snapshot).unwrap();
 
-    assert_eq!(err.error_code(), ErrorCode::ConfigInvalid);
-    assert!(
-        err.to_string()
-            .contains("synthesize_audio execution is not yet supported"),
-        "{err}"
+    assert!(selection.add_track);
+    assert_eq!(selection.operation_id.as_deref(), Some(operation_id));
+    assert_eq!(selection.target_channels, Some(2));
+    assert_eq!(
+        selection.selection.selected_streams[0].snapshot_stream_id,
+        companion_id
+    );
+    assert_eq!(
+        selection.selected_streams[0].source.snapshot_stream_id,
+        "a-1"
     );
 }
 

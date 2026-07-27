@@ -3,7 +3,8 @@ use voom_core::VoomError;
 use voom_plan::audio::{
     AUDIO_EXTRACT_CODEC, AUDIO_EXTRACT_CONTAINER, AUDIO_TRANSCODE_CONTAINER, AudioBundleRole,
     AudioOperationPayload, AudioOperationType, AudioPlanningBlock, SnapshotAudioStreamFact,
-    extract_audio_outputs, extraction_role, selected_audio_streams,
+    extract_audio_outputs, extraction_role, selected_audio_streams, synthesize_audio_companions,
+    synthesize_audio_shape,
 };
 use voom_store::repo::identity::MediaSnapshot;
 use voom_worker_protocol::{AudioStreamRef, TranscodeAudioSelection};
@@ -20,6 +21,9 @@ pub struct TranscodeAudioSelectionPlan {
     pub selected_streams: Vec<SelectedAudioStream>,
     pub target_codec: String,
     pub container: String,
+    pub operation_id: Option<String>,
+    pub add_track: bool,
+    pub target_channels: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,18 +53,12 @@ pub fn transcode_selection_from_payload_and_snapshot(
     snapshot: &MediaSnapshot,
 ) -> Result<TranscodeAudioSelectionPlan, VoomError> {
     let payload = parse_payload(payload)?;
-    if payload.operation_type == AudioOperationType::SynthesizeAudio {
-        // Synthesis compiles and plans (ADR 0026) but the execute path that
-        // builds a downmix worker request and registers the derived track's
-        // lineage is not wired yet. Fail loud and clearly rather than silently
-        // running the source through the replace-in-place transcode path.
+    if !matches!(
+        payload.operation_type,
+        AudioOperationType::TranscodeAudio | AudioOperationType::SynthesizeAudio
+    ) {
         return Err(VoomError::Config(
-            "synthesize_audio execution is not yet supported".to_owned(),
-        ));
-    }
-    if payload.operation_type != AudioOperationType::TranscodeAudio {
-        return Err(VoomError::Config(
-            "audio transcode payload type must be transcode_audio".to_owned(),
+            "audio transcode payload type must be transcode_audio or synthesize_audio".to_owned(),
         ));
     }
     if payload.container != AUDIO_TRANSCODE_CONTAINER {
@@ -74,6 +72,9 @@ pub fn transcode_selection_from_payload_and_snapshot(
         .map_err(audio_block_error)?;
     if selected.is_empty() {
         return Err(audio_block_error(AudioPlanningBlock::ZeroMatches));
+    }
+    if payload.operation_type == AudioOperationType::SynthesizeAudio {
+        return synthesis_selection(payload, &snapshot_input, &selected);
     }
     let selected_streams = selected
         .into_iter()
@@ -92,7 +93,85 @@ pub fn transcode_selection_from_payload_and_snapshot(
         selected_streams,
         target_codec: payload.target_codec,
         container: payload.container,
+        operation_id: None,
+        add_track: false,
+        target_channels: None,
     })
+}
+
+fn synthesis_selection(
+    payload: AudioOperationPayload,
+    snapshot: &voom_policy::MediaSnapshotInput,
+    selected: &[SnapshotAudioStreamFact],
+) -> Result<TranscodeAudioSelectionPlan, VoomError> {
+    let Some(operation_id) = payload.operation_id.as_deref() else {
+        return Err(VoomError::Config(
+            "synthesize_audio operation_id is required".to_owned(),
+        ));
+    };
+    let Some(target_channels) = payload.target_channels else {
+        return Err(VoomError::Config(
+            "synthesize_audio target_channels is required".to_owned(),
+        ));
+    };
+    if let voom_plan::audio::AudioPlanShape::Blocked(block) =
+        synthesize_audio_shape(snapshot, target_channels, payload.filter.as_ref())
+    {
+        return Err(audio_block_error(block));
+    }
+    let expected = synthesize_audio_companions(snapshot, payload.filter.as_ref(), operation_id)
+        .map_err(audio_block_error)?;
+    if payload.companions.as_ref() != Some(&expected) {
+        return Err(VoomError::Config(
+            "synthesize_audio companions do not match the pinned source snapshot".to_owned(),
+        ));
+    }
+    let selected_streams = resolve_synthesis_streams(&expected, selected)?;
+    Ok(TranscodeAudioSelectionPlan {
+        selection: TranscodeAudioSelection {
+            selected_streams: selected_streams
+                .iter()
+                .map(|selected| selected.stream.clone())
+                .collect(),
+        },
+        selected_streams,
+        target_codec: payload.target_codec,
+        container: payload.container,
+        operation_id: Some(operation_id.to_owned()),
+        add_track: true,
+        target_channels: Some(target_channels),
+    })
+}
+
+fn resolve_synthesis_streams(
+    descriptors: &[voom_plan::audio::SynthesizeAudioCompanionDescriptor],
+    selected: &[SnapshotAudioStreamFact],
+) -> Result<Vec<SelectedAudioStream>, VoomError> {
+    descriptors
+        .iter()
+        .map(|descriptor| {
+            let source = selected
+                .iter()
+                .find(|source| {
+                    source.snapshot_stream_id == descriptor.source_snapshot_stream_id
+                        && source.provider_stream_index == descriptor.source_provider_stream_index
+                })
+                .ok_or_else(|| {
+                    VoomError::Config(format!(
+                        "synthesize_audio companion {} has no selected source",
+                        descriptor.companion_id
+                    ))
+                })?
+                .clone();
+            Ok(SelectedAudioStream {
+                stream: AudioStreamRef {
+                    snapshot_stream_id: descriptor.result_snapshot_stream_id.clone(),
+                    provider_stream_index: descriptor.source_provider_stream_index,
+                },
+                source,
+            })
+        })
+        .collect()
 }
 
 pub fn extract_selection_from_payload_and_snapshot(

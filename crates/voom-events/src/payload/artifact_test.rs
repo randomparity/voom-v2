@@ -469,6 +469,9 @@ fn artifact_audio_transcode_started_payload_serializes_audit_correlation_fields(
         output_container: "mkv".to_owned(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: None,
+        synthesis_operation_id: None,
+        synthesis_operation_key: None,
+        synthesized_companions: Vec::new(),
     };
 
     let json = serde_json::to_value(Event::ArtifactAudioTranscodeStarted(p.clone())).unwrap();
@@ -568,6 +571,9 @@ fn artifact_audio_transcode_succeeded_payload_carries_artifact_result_and_provid
         output_audio_codecs: vec!["aac".to_owned()],
         provider: "ffmpeg".to_owned(),
         provider_version: "6.1".to_owned(),
+        synthesis_operation_id: None,
+        synthesis_operation_key: None,
+        synthesized_companions: Vec::new(),
     };
 
     let json = serde_json::to_value(Event::ArtifactAudioTranscodeSucceeded(p.clone())).unwrap();
@@ -627,6 +633,9 @@ fn artifact_audio_transcode_failed_payload_carries_public_error_code_and_known_i
         message: "unsupported audio codec".to_owned(),
         provider: Some("ffmpeg".to_owned()),
         provider_version: Some("6.1".to_owned()),
+        synthesis_operation_id: None,
+        synthesis_operation_key: None,
+        synthesized_companions: Vec::new(),
     };
 
     let json = serde_json::to_value(Event::ArtifactAudioTranscodeFailed(p.clone())).unwrap();

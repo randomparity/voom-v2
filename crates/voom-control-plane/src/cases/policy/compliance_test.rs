@@ -1345,6 +1345,145 @@ fn compliance_audio_extract_outputs_reject_unknown_legacy_fields() {
 }
 
 #[tokio::test]
+async fn compliance_audio_synthesis_companions_preserve_ticket_and_descriptor_order() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(voom_store::repo::jobs::NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let replacement = create_transcode_audio_ticket(&cp, job.id).await;
+    let synthesis = create_transcode_audio_ticket(&cp, job.id).await;
+    set_succeeded_ticket_result(
+        &cp,
+        replacement.id,
+        &serde_json::json!({"result_file_location_id": 10}),
+    )
+    .await;
+    set_succeeded_ticket_result(
+        &cp,
+        synthesis.id,
+        &serde_json::json!({
+            "synthesis_operation_id": "node-synthesis",
+            "synthesis_operation_key": "synthesize:7:node-synthesis",
+            "synthesized_companions": [
+                published_synthesis_companion("companion-a", "a-1", 1, 3, 1),
+                published_synthesis_companion("companion-b", "a-2", 2, 4, 2)
+            ]
+        }),
+    )
+    .await;
+
+    let companions = cp.audio_synthesis_companions_for_job(job.id).await.unwrap();
+
+    assert_eq!(companions.len(), 2);
+    assert_eq!(companions[0].synthesis_operation_id, "node-synthesis");
+    assert_eq!(
+        companions[0].synthesis_operation_key,
+        "synthesize:7:node-synthesis"
+    );
+    assert_eq!(companions[0].companion.companion_id, "companion-a");
+    assert_eq!(companions[1].companion.companion_id, "companion-b");
+    assert_eq!(companions[1].companion.result_provider_stream_index, 4);
+}
+
+#[test]
+fn compliance_audio_synthesis_companions_reject_incomplete_or_unknown_fields() {
+    let incomplete = serde_json::json!({
+        "synthesis_operation_id": "node-synthesis",
+        "synthesized_companions": [
+            published_synthesis_companion("companion-a", "a-1", 1, 3, 1)
+        ]
+    });
+    let error = super::decode_compliance_synthesis_result(42, &incomplete.to_string()).unwrap_err();
+    assert!(error.to_string().contains(
+        "audio synthesis ticket 42 must contain operation id, operation key, and non-empty"
+    ));
+
+    let mut companion = published_synthesis_companion("companion-a", "a-1", 1, 3, 1);
+    companion["unexpected"] = serde_json::json!(true);
+    let malformed = serde_json::json!({
+        "synthesis_operation_id": "node-synthesis",
+        "synthesis_operation_key": "synthesize:7:node-synthesis",
+        "synthesized_companions": [companion]
+    });
+    let error = super::decode_compliance_synthesis_result(42, &malformed.to_string()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("audio synthesis ticket 42 companion is malformed")
+    );
+}
+
+async fn create_transcode_audio_ticket(
+    cp: &crate::ControlPlane,
+    job_id: voom_core::JobId,
+) -> voom_store::repo::tickets::Ticket {
+    cp.create_ticket(NewTicket {
+        job_id: Some(job_id),
+        kind: TicketOperation::new("synthetic.workflow.operation.transcode_audio").unwrap(),
+        priority: 0,
+        payload: serde_json::json!({}),
+        max_attempts: 1,
+        created_at: T0,
+    })
+    .await
+    .unwrap()
+}
+
+async fn set_succeeded_ticket_result(
+    cp: &crate::ControlPlane,
+    ticket_id: voom_core::TicketId,
+    result: &serde_json::Value,
+) {
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(result).unwrap())
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(ticket_id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+}
+
+fn published_synthesis_companion(
+    companion_id: &str,
+    source_snapshot_stream_id: &str,
+    source_provider_stream_index: u32,
+    result_provider_stream_index: u32,
+    seed: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ordinal": seed - 1,
+        "companion_id": companion_id,
+        "source_file_version_id": 100 + seed,
+        "source_media_snapshot_id": 200 + seed,
+        "source_snapshot_stream_id": source_snapshot_stream_id,
+        "source_provider_stream_index": source_provider_stream_index,
+        "result_file_version_id": 300 + seed,
+        "result_file_location_id": 400 + seed,
+        "result_media_snapshot_id": 500 + seed,
+        "result_snapshot_stream_id": companion_id,
+        "result_provider_stream_index": result_provider_stream_index,
+        "artifact_handle_id": 600 + seed,
+        "artifact_location_id": 700 + seed,
+        "lineage_id": 800 + seed,
+        "location": format!("/target/{companion_id}.mkv"),
+        "codec": "aac",
+        "channels": 2,
+        "language": "eng",
+        "title": "Main",
+        "disposition_default": true,
+        "disposition_forced": false,
+        "disposition_commentary": false
+    })
+}
+
+#[tokio::test]
 async fn read_compliance_run_report_in_flight_job_has_no_summary() {
     let (cp, _tmp) = cp().await;
     // A job that opened but never finalized a workflow summary row: the read must

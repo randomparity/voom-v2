@@ -226,6 +226,15 @@ impl ComplianceAudioExtractOutput {
     }
 }
 
+/// One ordered synthesized companion collected from a successful workflow ticket.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ComplianceAudioSynthesisCompanion {
+    pub synthesis_operation_id: String,
+    pub synthesis_operation_key: String,
+    #[serde(flatten)]
+    pub companion: crate::audio::ExecuteSynthesisCompanionReport,
+}
+
 fn decode_compliance_extract_result(
     ticket_id: i64,
     result: &str,
@@ -256,6 +265,64 @@ fn decode_compliance_extract_result(
     }
 }
 
+fn decode_compliance_synthesis_result(
+    ticket_id: i64,
+    result: &str,
+) -> Result<Vec<ComplianceAudioSynthesisCompanion>, VoomError> {
+    let value: serde_json::Value = serde_json::from_str(result).map_err(|error| {
+        VoomError::database(format!(
+            "audio synthesis ticket {ticket_id} result is malformed: {error}"
+        ))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        VoomError::database(format!(
+            "audio synthesis ticket {ticket_id} result must be an object"
+        ))
+    })?;
+    let operation_id = object.get("synthesis_operation_id");
+    let operation_key = object.get("synthesis_operation_key");
+    let companions = object.get("synthesized_companions");
+    if operation_id.is_none() && operation_key.is_none() && companions.is_none() {
+        return Ok(Vec::new());
+    }
+    let operation_id = operation_id
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| malformed_synthesis_report(ticket_id))?;
+    let operation_key = operation_key
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| malformed_synthesis_report(ticket_id))?;
+    let companions = companions
+        .and_then(serde_json::Value::as_array)
+        .filter(|companions| !companions.is_empty())
+        .ok_or_else(|| malformed_synthesis_report(ticket_id))?;
+    companions
+        .iter()
+        .cloned()
+        .map(|companion| {
+            serde_json::from_value(companion)
+                .map(|companion| ComplianceAudioSynthesisCompanion {
+                    synthesis_operation_id: operation_id.to_owned(),
+                    synthesis_operation_key: operation_key.to_owned(),
+                    companion,
+                })
+                .map_err(|error| {
+                    VoomError::database(format!(
+                        "audio synthesis ticket {ticket_id} companion is malformed: {error}"
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn malformed_synthesis_report(ticket_id: i64) -> VoomError {
+    VoomError::database(format!(
+        "audio synthesis ticket {ticket_id} must contain operation id, operation key, and \
+         non-empty ordered companions together"
+    ))
+}
+
 /// The durable result of a `compliance execute` run: the issues applied from
 /// the initial report, plus the phase-barrier coordinator's job-grain summary
 /// and per-phase / per-`(file, phase)` rows. The flat single-report / flat-ticket
@@ -273,6 +340,8 @@ pub struct ComplianceExecuteData {
     pub file_phases: Vec<FilePhaseSummaryView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_synthesis_companions: Vec<ComplianceAudioSynthesisCompanion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -282,6 +351,7 @@ impl ComplianceExecuteData {
         issues: IssueApplicationSummary,
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
         audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
+        audio_synthesis_companions: Vec<ComplianceAudioSynthesisCompanion>,
     ) -> Self {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
@@ -297,6 +367,7 @@ impl ComplianceExecuteData {
             phases,
             file_phases,
             audio_extract_outputs,
+            audio_synthesis_companions,
             latest_phase_index,
         }
     }
@@ -625,6 +696,8 @@ pub struct ComplianceRunReportData {
     pub file_phases: Vec<FilePhaseSummaryView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_extract_outputs: Vec<ComplianceAudioExtractOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_synthesis_companions: Vec<ComplianceAudioSynthesisCompanion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -956,8 +1029,12 @@ impl ControlPlane {
                     .audio_extract_outputs_for_job(outcome.job_id)
                     .await
                     .map_err(no_partial)?;
+                let companions = self
+                    .audio_synthesis_companions_for_job(outcome.job_id)
+                    .await
+                    .map_err(no_partial)?;
                 Ok(ComplianceExecuteData::from_outcome(
-                    issues, &outcome, outputs,
+                    issues, &outcome, outputs, companions,
                 ))
             }
             Err(err) => {
@@ -966,8 +1043,12 @@ impl ControlPlane {
                         .audio_extract_outputs_for_job(outcome.job_id)
                         .await
                         .map_err(no_partial)?;
+                    let companions = self
+                        .audio_synthesis_companions_for_job(outcome.job_id)
+                        .await
+                        .map_err(no_partial)?;
                     Some(ComplianceExecuteData::from_outcome(
-                        issues, &outcome, outputs,
+                        issues, &outcome, outputs, companions,
                     ))
                 } else {
                     None
@@ -1250,12 +1331,14 @@ impl ControlPlane {
             .map(FilePhaseSummaryView::from)
             .collect();
         let audio_extract_outputs = self.audio_extract_outputs_for_job(job_id).await?;
+        let audio_synthesis_companions = self.audio_synthesis_companions_for_job(job_id).await?;
         let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
             summary: WorkflowSummaryView::from_summary(&summary, &file_phases),
             phases,
             file_phases,
             audio_extract_outputs,
+            audio_synthesis_companions,
             latest_phase_index,
         })
     }
@@ -1284,6 +1367,32 @@ impl ControlPlane {
             outputs.extend(decode_compliance_extract_result(ticket_id, &result)?);
         }
         Ok(outputs)
+    }
+
+    async fn audio_synthesis_companions_for_job(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<Vec<ComplianceAudioSynthesisCompanion>, VoomError> {
+        let job_id = i64::try_from(job_id.0).map_err(|error| {
+            VoomError::Internal(format!("audio synthesis report job id overflow: {error}"))
+        })?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, result FROM tickets \
+             WHERE job_id = ? AND state = 'succeeded' AND result IS NOT NULL \
+               AND kind = 'synthetic.workflow.operation.transcode_audio' \
+             ORDER BY id ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("compliance audio synthesis companion report", error)
+        })?;
+        let mut companions = Vec::new();
+        for (ticket_id, result) in rows {
+            companions.extend(decode_compliance_synthesis_result(ticket_id, &result)?);
+        }
+        Ok(companions)
     }
 }
 

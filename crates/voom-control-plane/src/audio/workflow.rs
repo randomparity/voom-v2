@@ -18,7 +18,6 @@ use crate::workflow::execution::leases::{
 
 use crate::workflow::execution::operation_adapters::{
     OperationAdapterContext, RuntimeDispatchContext, await_with_lease_heartbeats,
-    workflow_idempotency_key,
 };
 
 pub(crate) async fn dispatch_control_plane_transcode_audio(
@@ -36,7 +35,7 @@ pub(crate) async fn dispatch_control_plane_transcode_audio(
             .await;
         }
     };
-    let report = match execute_transcode_audio_with_dispatchers(
+    let report = match Box::pin(execute_transcode_audio_with_dispatchers(
         context.control,
         input,
         &RuntimeTranscodeAudioDispatcher {
@@ -44,7 +43,7 @@ pub(crate) async fn dispatch_control_plane_transcode_audio(
         },
         &crate::artifact::verify::BundledVerifyArtifactDispatcher,
         &crate::audio::commit::BundledAudioResultProbeDispatcher,
-    )
+    ))
     .await
     {
         Ok(report) => report,
@@ -189,18 +188,18 @@ struct RuntimeTranscodeAudioDispatcher<'a> {
 impl TranscodeAudioDispatcher for RuntimeTranscodeAudioDispatcher<'_> {
     async fn dispatch_transcode_audio(
         &self,
+        dispatch_lease_id: voom_core::LeaseId,
+        idempotency_key: &str,
         request: TranscodeAudioRequest,
     ) -> Result<TranscodeAudioResult, VoomError> {
-        let idempotency_key =
-            workflow_idempotency_key(self.context.ticket_id, self.context.lease_id);
         await_with_lease_heartbeats(
             self.context,
             OperationKind::TranscodeAudio,
             crate::audio::dispatch::dispatch_transcode_audio_with_client_context(
                 self.context.runtime.client.as_ref(),
                 &self.context.runtime.credentials,
-                self.context.lease_id,
-                &idempotency_key,
+                dispatch_lease_id,
+                idempotency_key,
                 request,
             ),
         )

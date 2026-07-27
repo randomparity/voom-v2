@@ -32,6 +32,9 @@ fn transcode_succeeded_payload_carries_result_and_source_ids() {
             source_media_snapshot: 6,
             artifact_handle: ArtifactHandleId(8),
             artifact_location: ArtifactLocationId(9),
+            synthesis_operation_id: None,
+            synthesis_operation_key: None,
+            synthesized_companions: Vec::new(),
         },
         "/tmp/voom-stage/2/3/out.mkv".to_owned(),
         stream_payloads(&[AudioStreamRef {
@@ -91,6 +94,9 @@ fn transcode_failed_payload_carries_worker_output_streams_when_result_exists() {
         }]),
         result: Some(&result),
         error: &error,
+        synthesis_operation_id: None,
+        synthesis_operation_key: None,
+        synthesized_companions: Vec::new(),
     });
 
     assert_eq!(payload.source_file_location_id, Some(5));

@@ -42,6 +42,57 @@ pub async fn transcode_target_path(
     target_path(target_dir, &transcode_file_name(source_path, codec)).await
 }
 
+pub async fn synthesis_target_path(
+    target_dir: &Path,
+    source_path: &Path,
+    codec: &str,
+) -> Result<PathBuf, VoomError> {
+    let canonical_dir = prepare_target_directory(target_dir).await?;
+    Ok(canonical_dir.join(transcode_file_name(source_path, codec)))
+}
+
+pub async fn prepare_synthesis_staging_path(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    source_path: &Path,
+    codec: &str,
+) -> Result<PreparedStagingPath, VoomError> {
+    require_safe_component(operation_token, "audio synthesis operation token")?;
+    let components = [
+        format!("operation-{operation_token}"),
+        format!("generation-{generation}"),
+    ];
+    let (canonical_root, canonical_parent) =
+        prepare_staging_parent(staging_root, &components).await?;
+    let path = canonical_parent.join(transcode_file_name(source_path, codec));
+    reject_existing_file(&path, "staging path").await?;
+    Ok(PreparedStagingPath {
+        canonical_root,
+        path,
+    })
+}
+
+pub async fn resolve_synthesis_staging_path(
+    staging_root: &Path,
+    operation_token: &str,
+    generation: u32,
+    source_path: &Path,
+    codec: &str,
+) -> Result<PreparedStagingPath, VoomError> {
+    require_safe_component(operation_token, "audio synthesis operation token")?;
+    let components = [
+        format!("operation-{operation_token}"),
+        format!("generation-{generation}"),
+    ];
+    let (canonical_root, canonical_parent) =
+        prepare_staging_parent(staging_root, &components).await?;
+    Ok(PreparedStagingPath {
+        canonical_root,
+        path: canonical_parent.join(transcode_file_name(source_path, codec)),
+    })
+}
+
 pub async fn extract_target_paths(
     target_dir: &Path,
     source_path: &Path,

@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use voom_policy::{ComparisonOp, MediaSnapshotInput, TrackFilter};
 
-use super::payload::{ExtractAudioOutputDescriptor, extract_output_id};
+use super::payload::{
+    ExtractAudioOutputDescriptor, SynthesizeAudioCompanionDescriptor, extract_output_id,
+    synthesis_companion_id,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAudioStreamFact {
@@ -266,6 +269,30 @@ pub fn synthesize_audio_shape(
         }
     }
     AudioPlanShape::Planned
+}
+
+pub fn synthesize_audio_companions(
+    snapshot: &MediaSnapshotInput,
+    filter: Option<&TrackFilter>,
+    operation_id: &str,
+) -> Result<Vec<SynthesizeAudioCompanionDescriptor>, AudioPlanningBlock> {
+    let mut selected = selected_audio_streams(snapshot, filter)?;
+    if selected.is_empty() {
+        return Err(AudioPlanningBlock::ZeroMatches);
+    }
+    selected.sort_by_key(|stream| stream.provider_stream_index);
+    Ok(selected
+        .into_iter()
+        .map(|stream| {
+            let companion_id = synthesis_companion_id(operation_id, &stream.snapshot_stream_id);
+            SynthesizeAudioCompanionDescriptor {
+                result_snapshot_stream_id: companion_id.clone(),
+                companion_id,
+                source_snapshot_stream_id: stream.snapshot_stream_id,
+                source_provider_stream_index: stream.provider_stream_index,
+            }
+        })
+        .collect())
 }
 
 pub fn extract_audio_outputs(
