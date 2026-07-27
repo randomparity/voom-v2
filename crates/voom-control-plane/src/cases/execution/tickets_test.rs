@@ -116,6 +116,49 @@ async fn mark_ready_emits_nothing_when_not_eligible() {
 }
 
 #[tokio::test]
+async fn ticket_lifecycle_in_tx_commits_multiple_ready_roots_and_events() {
+    let (cp, _tmp) = cp().await;
+    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let mut created = Vec::new();
+
+    for kind in ["root.one", "root.two"] {
+        let ticket = cp.create_ticket_in_tx(&mut tx, ticket(kind)).await.unwrap();
+        let promoted = cp
+            .mark_ready_if_unblocked_in_tx(&mut tx, ticket.id, T0)
+            .await
+            .unwrap();
+        assert_eq!(promoted.len(), 1);
+        created.push(ticket.id);
+    }
+    commit_tx(tx).await.unwrap();
+
+    for ticket_id in created {
+        let ticket = cp.tickets().get(ticket_id).await.unwrap().unwrap();
+        assert_eq!(ticket.state, TicketState::Ready);
+    }
+    assert_eq!(event_count(&cp, EventKind::TicketCreated).await, 2);
+    assert_eq!(event_count(&cp, EventKind::TicketReady).await, 2);
+}
+
+#[tokio::test]
+async fn ticket_lifecycle_in_tx_rolls_back_rows_and_events_together() {
+    let (cp, _tmp) = cp().await;
+    let mut tx = begin_tx(&cp.pool).await.unwrap();
+    let ticket = cp
+        .create_ticket_in_tx(&mut tx, ticket("root.rollback"))
+        .await
+        .unwrap();
+    cp.mark_ready_if_unblocked_in_tx(&mut tx, ticket.id, T0)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(ticket_count(&cp).await, 0);
+    assert_eq!(event_count(&cp, EventKind::TicketCreated).await, 0);
+    assert_eq!(event_count(&cp, EventKind::TicketReady).await, 0);
+}
+
+#[tokio::test]
 async fn pre_lease_no_eligible_worker_requeues_without_creating_lease() {
     let (cp, _tmp) = cp().await;
     let t = cp
@@ -387,6 +430,13 @@ async fn event_count(cp: &crate::ControlPlane, kind: EventKind) -> usize {
 
 async fn lease_count(cp: &crate::ControlPlane) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM leases")
+        .fetch_one(&cp.pool)
+        .await
+        .unwrap()
+}
+
+async fn ticket_count(cp: &crate::ControlPlane) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM tickets")
         .fetch_one(&cp.pool)
         .await
         .unwrap()

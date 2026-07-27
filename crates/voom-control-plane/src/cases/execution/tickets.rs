@@ -28,10 +28,20 @@ impl ControlPlane {
     /// Propagates `SqliteTicketRepo::create_in_tx` and event-append errors.
     pub async fn create_ticket(&self, input: NewTicket) -> Result<Ticket, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
-        let ticket = self.tickets.create_in_tx(&mut tx, input.clone()).await?;
+        let ticket = self.create_ticket_in_tx(&mut tx, input).await?;
+        commit_tx(tx).await?;
+        Ok(ticket)
+    }
+
+    pub(crate) async fn create_ticket_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: NewTicket,
+    ) -> Result<Ticket, VoomError> {
+        let ticket = self.tickets.create_in_tx(tx, input.clone()).await?;
         append_event(
             &self.events,
-            &mut tx,
+            tx,
             SubjectType::Ticket,
             Some(ticket.id.0),
             input.created_at,
@@ -44,7 +54,6 @@ impl ControlPlane {
             }),
         )
         .await?;
-        commit_tx(tx).await?;
         Ok(ticket)
     }
 
@@ -62,13 +71,26 @@ impl ControlPlane {
     ) -> Result<Vec<Ticket>, VoomError> {
         let mut tx = begin_tx(&self.pool).await?;
         let promoted = self
-            .tickets
             .mark_ready_if_unblocked_in_tx(&mut tx, ticket_id, now)
+            .await?;
+        commit_tx(tx).await?;
+        Ok(promoted)
+    }
+
+    pub(crate) async fn mark_ready_if_unblocked_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        ticket_id: TicketId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Ticket>, VoomError> {
+        let promoted = self
+            .tickets
+            .mark_ready_if_unblocked_in_tx(tx, ticket_id, now)
             .await?;
         for t in &promoted {
             append_event(
                 &self.events,
-                &mut tx,
+                tx,
                 SubjectType::Ticket,
                 Some(t.id.0),
                 now,
@@ -76,7 +98,6 @@ impl ControlPlane {
             )
             .await?;
         }
-        commit_tx(tx).await?;
         Ok(promoted)
     }
 
