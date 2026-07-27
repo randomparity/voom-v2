@@ -1,0 +1,8 @@
+policy "escaped-title-filter-boundaries" {
+  phase terminal_escaped_backslash {
+    keep subtitle where title contains "Path\\"
+  }
+  phase escaped_unicode_scalar {
+    keep subtitle where title contains "Caf\é"
+  }
+}
