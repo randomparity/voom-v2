@@ -990,3 +990,71 @@ async fn eac3_transcode_preserves_5_1_channels() {
         "eac3 output must preserve the 5.1 (6-channel) layout"
     );
 }
+
+#[tokio::test]
+async fn add_track_synthesis_preserves_surround_and_appends_stereo_companion() {
+    let preflight = preflight_from_process_env()
+        .expect("preflight failed — ensure ffmpeg and ffprobe are available");
+    let config = ffmpeg_config(&preflight);
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.mkv");
+    let output = dir.path().join("synthesized.mkv");
+    generate_5_1_audio_fixture(&preflight.ffmpeg_path, &input);
+    let companion_id = "synth_companion_stable".to_owned();
+    let request = TranscodeAudioRequest {
+        input: TranscodeAudioInput {
+            path: input.to_string_lossy().into_owned(),
+            expected: audio_expected(&input).await,
+        },
+        output: TranscodeAudioOutput {
+            staging_root: dir.path().to_string_lossy().into_owned(),
+            path: output.to_string_lossy().into_owned(),
+            container: "mkv".to_owned(),
+            overwrite: false,
+        },
+        selection: TranscodeAudioSelection {
+            selected_streams: vec![AudioStreamRef {
+                snapshot_stream_id: companion_id.clone(),
+                provider_stream_index: 0,
+            }],
+        },
+        audio: TranscodeAudioSettings {
+            target_codec: "aac".to_owned(),
+            profile: AUDIO_PROFILE_DEFAULT.to_owned(),
+            add_track: true,
+            target_channels: Some(2),
+        },
+    };
+
+    let result = handle_transcode_audio(&request, &config)
+        .await
+        .expect("stereo companion synthesis failed");
+
+    assert_eq!(result.selected_snapshot_stream_ids, vec![companion_id]);
+    assert_eq!(result.selected_output_streams[0].channels, Some(2));
+    assert_eq!(
+        result.selected_output_streams[0].output_provider_stream_index,
+        1
+    );
+    let probe = Command::new(&preflight.ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=index,codec_name,channels",
+            "-of",
+            "json",
+        ])
+        .arg(&output)
+        .output()
+        .expect("ffprobe synthesized media failed to start");
+    assert!(probe.status.success());
+    let payload: serde_json::Value =
+        serde_json::from_slice(&probe.stdout).expect("ffprobe emitted invalid JSON");
+    let streams = payload["streams"].as_array().unwrap();
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams[0]["codec_name"], "flac");
+    assert_eq!(streams[0]["channels"], 6);
+    assert_eq!(streams[1]["codec_name"], "aac");
+    assert_eq!(streams[1]["channels"], 2);
+}

@@ -1016,7 +1016,12 @@ fn audio_stream_values(json: &Value) -> impl Iterator<Item = &Value> {
 fn stream_tag(stream: &Value, tag: &str) -> Option<String> {
     stream
         .get("tags")
-        .and_then(|tags| tags.get(tag))
+        .and_then(Value::as_object)
+        .and_then(|tags| {
+            tags.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(tag))
+                .map(|(_, value)| value)
+        })
         .and_then(Value::as_str)
         .map(str::to_owned)
 }
