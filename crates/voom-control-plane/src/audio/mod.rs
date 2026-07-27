@@ -517,15 +517,6 @@ async fn execute_extract_audio_inner(
     let selected =
         source::select_source(cp, input.source_file_version_id, input.source_location_id).await?;
     context.source_location_id = Some(selected.location.id);
-    crate::backup::maybe_back_up_source(
-        cp,
-        input.backup_root.as_deref(),
-        &selected.canonical_path,
-        input.source_file_version_id,
-        input.job_id,
-        input.ticket_id,
-    )
-    .await?;
     let snapshot =
         source::read_media_snapshot(cp, input.source_file_version_id, &input.operation_payload)
             .await?;
@@ -536,6 +527,15 @@ async fn execute_extract_audio_inner(
     )?;
     context.selection = Some(selection.clone());
     require_single_extract_output(&selection)?;
+    crate::backup::maybe_back_up_source(
+        cp,
+        input.backup_root.as_deref(),
+        &selected.canonical_path,
+        input.source_file_version_id,
+        input.job_id,
+        input.ticket_id,
+    )
+    .await?;
     let staging = stage::prepare_extract_staging_path(
         &input.staging_root,
         input.ticket_id,

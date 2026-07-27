@@ -171,6 +171,8 @@ async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
     ]);
     let staging_root = input.staging_root.clone();
     let target_dir = input.target_dir.clone();
+    let backup_root = dir.path().join("backups");
+    input.backup_root = Some(backup_root.clone());
 
     let error = execute_extract_audio_with_dispatchers(
         &cp,
@@ -181,10 +183,16 @@ async fn extract_audio_plural_rejects_before_staging_target_or_dispatch() {
     .await
     .unwrap_err();
 
-    assert_eq!(error.error_code(), voom_core::ErrorCode::ConfigInvalid);
+    assert_eq!(
+        error.error_code(),
+        voom_core::ErrorCode::ConfigInvalid,
+        "{error}"
+    );
     assert!(error.to_string().contains("planned 2 outputs"));
     assert!(!staging_root.exists());
     assert!(!target_dir.exists());
+    assert!(!backup_root.exists());
+    assert_table_count(&cp, "backups", 0).await;
     assert_table_count(&cp, "artifact_handles", 0).await;
     assert_table_count(&cp, "artifact_commit_records", 0).await;
     assert_table_count(&cp, "file_versions", 1).await;
