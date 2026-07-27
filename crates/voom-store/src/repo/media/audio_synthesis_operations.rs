@@ -2,10 +2,15 @@
 
 use std::collections::HashSet;
 
+use serde_json::Value;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use time::OffsetDateTime;
-use voom_core::{FileVersionId, LeaseId, MediaSnapshotId, VoomError};
+use voom_core::ids::{ArtifactCommitRecordId, ArtifactVerificationId};
+use voom_core::{
+    ArtifactHandleId, ArtifactLocationId, FileAssetId, FileLocationId, FileVersionId, LeaseId,
+    MediaSnapshotId, VoomError, WorkerId,
+};
 
 use super::Repository;
 use super::common::{i64_from_u64, iso8601, map_row_err, u32_from_i64, u64_from_i64};
@@ -52,6 +57,18 @@ pub struct AudioSynthesisOperation {
     pub target_path: String,
     pub state: AudioSynthesisOperationState,
     pub dispatch_generation: u32,
+    pub staging_path: Option<String>,
+    pub artifact_handle_id: Option<ArtifactHandleId>,
+    pub artifact_location_id: Option<ArtifactLocationId>,
+    pub verification_id: Option<ArtifactVerificationId>,
+    pub commit_record_id: Option<ArtifactCommitRecordId>,
+    pub probe_worker_id: Option<WorkerId>,
+    pub probe_payload: Option<Value>,
+    pub worker_result: Option<Value>,
+    pub result_file_asset_id: Option<FileAssetId>,
+    pub result_file_version_id: Option<FileVersionId>,
+    pub result_file_location_id: Option<FileLocationId>,
+    pub result_media_snapshot_id: Option<MediaSnapshotId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +115,47 @@ pub struct NewAudioSynthesisDispatchAttempt {
     pub staging_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageAudioSynthesisOperation {
+    pub operation_id: u64,
+    pub claim: NewAudioSynthesisClaim,
+    pub staging_path: String,
+    pub expected_size_bytes: u64,
+    pub expected_checksum: String,
+    pub worker_result: Value,
+    pub artifact_handle_id: ArtifactHandleId,
+    pub artifact_location_id: ArtifactLocationId,
+    pub verification_id: ArtifactVerificationId,
+    pub probe_worker_id: WorkerId,
+    pub probe_payload: Value,
+    pub companions: Vec<StagedAudioSynthesisCompanion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedAudioSynthesisCompanion {
+    pub companion_id: String,
+    pub result_provider_stream_index: u32,
+    pub codec: String,
+    pub channels: u32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub disposition_default: bool,
+    pub disposition_forced: bool,
+    pub disposition_commentary: bool,
+    pub result_facts: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeAudioSynthesisOperation {
+    pub operation_id: u64,
+    pub commit_record_id: ArtifactCommitRecordId,
+    pub result_file_asset_id: FileAssetId,
+    pub result_file_version_id: FileVersionId,
+    pub result_file_location_id: FileLocationId,
+    pub result_media_snapshot_id: MediaSnapshotId,
+    pub recorded_at: OffsetDateTime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioSynthesisDispatchAttempt {
     pub id: u64,
@@ -111,7 +169,7 @@ pub struct AudioSynthesisDispatchAttempt {
     pub status: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SqliteAudioSynthesisOperationRepo {
     pool: SqlitePool,
 }
@@ -172,6 +230,135 @@ impl SqliteAudioSynthesisOperationRepo {
         Ok(record)
     }
 
+    pub async fn stage(
+        &self,
+        input: &StageAudioSynthesisOperation,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| VoomError::database_context("audio synthesis stage begin", error))?;
+        require_live_planned_claim(&mut tx, &input.claim, now).await?;
+        if input.companions.is_empty() {
+            return Err(VoomError::Config(
+                "audio synthesis stage requires companion facts".to_owned(),
+            ));
+        }
+        for companion in &input.companions {
+            let result = sqlx::query(
+                "UPDATE audio_synthesis_companions SET result_provider_stream_index = ?, \
+                 codec = ?, channels = ?, language = ?, title = ?, disposition_default = ?, \
+                 disposition_forced = ?, disposition_commentary = ?, result_facts = ? \
+                 WHERE operation_id = ? AND companion_id = ? \
+                 AND result_provider_stream_index IS NULL",
+            )
+            .bind(i64::from(companion.result_provider_stream_index))
+            .bind(&companion.codec)
+            .bind(i64::from(companion.channels))
+            .bind(&companion.language)
+            .bind(&companion.title)
+            .bind(i64::from(companion.disposition_default))
+            .bind(i64::from(companion.disposition_forced))
+            .bind(i64::from(companion.disposition_commentary))
+            .bind(
+                serde_json::to_string(&companion.result_facts).map_err(|error| {
+                    VoomError::Internal(format!("encode audio synthesis result facts: {error}"))
+                })?,
+            )
+            .bind(i64_from_u64(input.operation_id))
+            .bind(&companion.companion_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                VoomError::database_context("stage audio synthesis companion", error)
+            })?;
+            require_one_update(
+                result.rows_affected(),
+                &format!("audio synthesis companion {}", companion.companion_id),
+            )?;
+        }
+        let result = sqlx::query(
+            "UPDATE audio_synthesis_operations SET state = 'staged', staging_path = ?, \
+             expected_size_bytes = ?, expected_checksum = ?, worker_result = ?, \
+             artifact_handle_id = ?, artifact_location_id = ?, verification_id = ?, \
+             probe_worker_id = ?, probe_payload = ? \
+             WHERE id = ? AND state = 'planned' AND claim_lease_id = ? AND claim_token = ? \
+             AND claim_expires_at > ?",
+        )
+        .bind(&input.staging_path)
+        .bind(i64_from_u64(input.expected_size_bytes))
+        .bind(&input.expected_checksum)
+        .bind(
+            serde_json::to_string(&input.worker_result).map_err(|error| {
+                VoomError::Internal(format!("encode audio synthesis worker result: {error}"))
+            })?,
+        )
+        .bind(i64_from_u64(input.artifact_handle_id.0))
+        .bind(i64_from_u64(input.artifact_location_id.0))
+        .bind(i64_from_u64(input.verification_id.0))
+        .bind(i64_from_u64(input.probe_worker_id.0))
+        .bind(
+            serde_json::to_string(&input.probe_payload).map_err(|error| {
+                VoomError::Internal(format!("encode audio synthesis probe payload: {error}"))
+            })?,
+        )
+        .bind(i64_from_u64(input.operation_id))
+        .bind(i64_from_u64(input.claim.lease_id.0))
+        .bind(&input.claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| VoomError::database_context("stage audio synthesis operation", error))?;
+        require_one_update(result.rows_affected(), "audio synthesis operation stage")?;
+        tx.commit()
+            .await
+            .map_err(|error| VoomError::database_context("audio synthesis stage commit", error))
+    }
+
+    pub async fn finalize_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        input: &FinalizeAudioSynthesisOperation,
+    ) -> Result<(), VoomError> {
+        let operation = load_record_by_id(tx, input.operation_id)
+            .await?
+            .ok_or_else(|| VoomError::NotFound("audio synthesis operation".to_owned()))?;
+        if operation.operation.state == AudioSynthesisOperationState::Committed {
+            return require_exact_finalization(&operation.operation, input);
+        }
+        if operation.operation.state != AudioSynthesisOperationState::Staged {
+            return Err(VoomError::Conflict(
+                "audio synthesis operation is not staged for finalization".to_owned(),
+            ));
+        }
+        for companion in &operation.companions {
+            insert_stream_lineage(tx, &operation.operation, companion, input).await?;
+        }
+        let result = sqlx::query(
+            "UPDATE audio_synthesis_operations SET state = 'committed', commit_record_id = ?, \
+             result_file_asset_id = ?, result_file_version_id = ?, result_file_location_id = ?, \
+             result_media_snapshot_id = ?, claim_lease_id = NULL, claim_token = NULL, \
+             claim_expires_at = NULL, finished_at = ? WHERE id = ? AND state = 'staged'",
+        )
+        .bind(i64_from_u64(input.commit_record_id.0))
+        .bind(i64_from_u64(input.result_file_asset_id.0))
+        .bind(i64_from_u64(input.result_file_version_id.0))
+        .bind(i64_from_u64(input.result_file_location_id.0))
+        .bind(i64_from_u64(input.result_media_snapshot_id.0))
+        .bind(iso8601(input.recorded_at)?)
+        .bind(i64_from_u64(input.operation_id))
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("finalize audio synthesis operation", error)
+        })?;
+        require_one_update(
+            result.rows_affected(),
+            "audio synthesis operation finalization",
+        )
+    }
+
     pub async fn acquire_claim(
         &self,
         claim: &NewAudioSynthesisClaim,
@@ -227,6 +414,37 @@ impl SqliteAudioSynthesisOperationRepo {
             "audio synthesis operation {} lost its exact live claim",
             claim.operation_key
         )))
+    }
+
+    pub async fn abandon_planned_generation(
+        &self,
+        claim: &NewAudioSynthesisClaim,
+        now: OffsetDateTime,
+    ) -> Result<(), VoomError> {
+        let result = sqlx::query(
+            "UPDATE audio_synthesis_operations \
+             SET dispatch_generation = dispatch_generation + 1, claim_lease_id = NULL, \
+                 claim_token = NULL, claim_expires_at = NULL \
+             WHERE operation_key = ? AND state = 'planned' AND dispatch_generation = ? \
+             AND claim_lease_id = ? AND claim_token = ? AND claim_expires_at > ?",
+        )
+        .bind(&claim.operation_key)
+        .bind(i64::from(claim.expected_generation))
+        .bind(i64_from_u64(claim.lease_id.0))
+        .bind(&claim.claim_token)
+        .bind(iso8601(now)?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("abandon audio synthesis generation", error)
+        })?;
+        require_one_update(
+            result.rows_affected(),
+            &format!(
+                "audio synthesis operation {} generation",
+                claim.operation_key
+            ),
+        )
     }
 
     pub async fn record_dispatch_attempt(
@@ -508,6 +726,19 @@ fn decode_operation(row: &SqliteRow) -> Result<AudioSynthesisOperation, VoomErro
             row.try_get("dispatch_generation")
                 .map_err(synthesis_row_err)?,
         )?,
+        staging_path: row.try_get("staging_path").map_err(synthesis_row_err)?,
+        artifact_handle_id: optional_u64(row, "artifact_handle_id")?.map(ArtifactHandleId),
+        artifact_location_id: optional_u64(row, "artifact_location_id")?.map(ArtifactLocationId),
+        verification_id: optional_u64(row, "verification_id")?.map(ArtifactVerificationId),
+        commit_record_id: optional_u64(row, "commit_record_id")?.map(ArtifactCommitRecordId),
+        probe_worker_id: optional_u64(row, "probe_worker_id")?.map(WorkerId),
+        probe_payload: optional_json(row, "probe_payload")?,
+        worker_result: optional_json(row, "worker_result")?,
+        result_file_asset_id: optional_u64(row, "result_file_asset_id")?.map(FileAssetId),
+        result_file_version_id: optional_u64(row, "result_file_version_id")?.map(FileVersionId),
+        result_file_location_id: optional_u64(row, "result_file_location_id")?.map(FileLocationId),
+        result_media_snapshot_id: optional_u64(row, "result_media_snapshot_id")?
+            .map(MediaSnapshotId),
     })
 }
 
@@ -564,6 +795,95 @@ fn optional_bool(row: &SqliteRow, field: &str) -> Result<Option<bool>, VoomError
         Some(value) => Err(VoomError::database(format!(
             "{field} contains invalid boolean {value}"
         ))),
+    }
+}
+
+fn optional_json(row: &SqliteRow, field: &str) -> Result<Option<Value>, VoomError> {
+    row.try_get::<Option<String>, _>(field)
+        .map_err(synthesis_row_err)?
+        .map(|value| {
+            serde_json::from_str(&value).map_err(|error| {
+                VoomError::database(format!("audio synthesis {field} is invalid JSON: {error}"))
+            })
+        })
+        .transpose()
+}
+
+async fn insert_stream_lineage(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    operation: &AudioSynthesisOperation,
+    companion: &AudioSynthesisCompanion,
+    input: &FinalizeAudioSynthesisOperation,
+) -> Result<(), VoomError> {
+    let result_index = companion.result_provider_stream_index.ok_or_else(|| {
+        VoomError::Conflict("audio synthesis companion has no result provider index".to_owned())
+    })?;
+    let codec = companion
+        .codec
+        .as_deref()
+        .ok_or_else(|| VoomError::Conflict("audio synthesis companion has no codec".to_owned()))?;
+    let channels = companion.channels.ok_or_else(|| {
+        VoomError::Conflict("audio synthesis companion has no channels".to_owned())
+    })?;
+    let defaults = (
+        companion.disposition_default,
+        companion.disposition_forced,
+        companion.disposition_commentary,
+    );
+    let (Some(disposition_default), Some(disposition_forced), Some(disposition_commentary)) =
+        defaults
+    else {
+        return Err(VoomError::Conflict(
+            "audio synthesis companion has incomplete disposition facts".to_owned(),
+        ));
+    };
+    sqlx::query(
+        "INSERT INTO audio_synthesis_stream_lineage \
+         (companion_id, source_file_version_id, source_media_snapshot_id, \
+          source_snapshot_stream_id, source_provider_stream_index, result_file_version_id, \
+          result_media_snapshot_id, result_snapshot_stream_id, result_provider_stream_index, \
+          codec, channels, language, title, disposition_default, disposition_forced, \
+          disposition_commentary, recorded_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(i64_from_u64(companion.id))
+    .bind(i64_from_u64(operation.source_file_version_id.0))
+    .bind(i64_from_u64(operation.source_media_snapshot_id.0))
+    .bind(&companion.source_snapshot_stream_id)
+    .bind(i64::from(companion.source_provider_stream_index))
+    .bind(i64_from_u64(input.result_file_version_id.0))
+    .bind(i64_from_u64(input.result_media_snapshot_id.0))
+    .bind(&companion.result_snapshot_stream_id)
+    .bind(i64::from(result_index))
+    .bind(codec)
+    .bind(i64::from(channels))
+    .bind(&companion.language)
+    .bind(&companion.title)
+    .bind(i64::from(disposition_default))
+    .bind(i64::from(disposition_forced))
+    .bind(i64::from(disposition_commentary))
+    .bind(iso8601(input.recorded_at)?)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| VoomError::database_context("insert audio synthesis lineage", error))?;
+    Ok(())
+}
+
+fn require_exact_finalization(
+    operation: &AudioSynthesisOperation,
+    input: &FinalizeAudioSynthesisOperation,
+) -> Result<(), VoomError> {
+    let exact = operation.commit_record_id == Some(input.commit_record_id)
+        && operation.result_file_asset_id == Some(input.result_file_asset_id)
+        && operation.result_file_version_id == Some(input.result_file_version_id)
+        && operation.result_file_location_id == Some(input.result_file_location_id)
+        && operation.result_media_snapshot_id == Some(input.result_media_snapshot_id);
+    if exact {
+        Ok(())
+    } else {
+        Err(VoomError::Conflict(
+            "committed audio synthesis finalization differs from replay".to_owned(),
+        ))
     }
 }
 

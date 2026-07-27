@@ -34,6 +34,7 @@ use voom_store::repo::{
     jobs::{Job, JobFilter, SqliteJobRepo},
     leases::{Lease, LeaseFilter, SqliteLeaseRepo},
     library::SqliteLibraryRepo,
+    media::audio_synthesis_operations::SqliteAudioSynthesisOperationRepo,
     nodes::SqliteNodeRepo,
     policies::SqlitePolicyRepo,
     policy_inputs::SqlitePolicyInputRepo,
@@ -110,9 +111,9 @@ pub use artifact::{
 };
 pub use audio::{
     AcknowledgeExtractDispatchQuiescenceInput, ExecuteExtractAudioInput,
-    ExecuteExtractAudioOutputReport, ExecuteExtractAudioReport, ExecuteTranscodeAudioInput,
-    ExecuteTranscodeAudioReport, ExtractAudioDispatcher, TranscodeAudioDispatcher,
-    TranscodePostCommitRecoveryReport,
+    ExecuteExtractAudioOutputReport, ExecuteExtractAudioReport, ExecuteSynthesisCompanionReport,
+    ExecuteTranscodeAudioInput, ExecuteTranscodeAudioReport, ExtractAudioDispatcher,
+    TranscodeAudioDispatcher, TranscodePostCommitRecoveryReport,
 };
 pub use cases::policy::plans::{plan_compiled_policy_with_input, plan_policy_source_with_input};
 pub use local_worker::{LocalWorkerHandle, LocalWorkerKind, RunningLocalWorker};
@@ -145,6 +146,7 @@ pub struct ControlPlane {
     pub(crate) artifact_access_plans: SqliteArtifactAccessPlanRepo,
     pub(crate) artifacts: SqliteArtifactRepo,
     pub(crate) audio_extract_operations: SqliteAudioExtractOperationRepo,
+    pub(crate) audio_synthesis_operations: SqliteAudioSynthesisOperationRepo,
     pub(crate) issues: SqliteIssueRepo,
     pub(crate) identity: SqliteIdentityRepo,
     pub(crate) bundles: SqliteBundleRepo,
@@ -183,6 +185,10 @@ impl std::fmt::Debug for ControlPlane {
             .field("artifact_access_plans", &self.artifact_access_plans)
             .field("artifacts", &self.artifacts)
             .field("audio_extract_operations", &self.audio_extract_operations)
+            .field(
+                "audio_synthesis_operations",
+                &self.audio_synthesis_operations,
+            )
             .field("issues", &self.issues)
             .field("identity", &self.identity)
             .field("bundles", &self.bundles)
@@ -294,6 +300,7 @@ impl ControlPlane {
             artifact_access_plans: SqliteArtifactAccessPlanRepo::new(pool.clone()),
             artifacts: SqliteArtifactRepo::new(pool.clone()),
             audio_extract_operations: SqliteAudioExtractOperationRepo::new(pool.clone()),
+            audio_synthesis_operations: SqliteAudioSynthesisOperationRepo::new(pool.clone()),
             issues: SqliteIssueRepo::new(pool.clone()),
             identity: SqliteIdentityRepo::new(pool.clone()),
             bundles: SqliteBundleRepo::new(pool.clone()),
