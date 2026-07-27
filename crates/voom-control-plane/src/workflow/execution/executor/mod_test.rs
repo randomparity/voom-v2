@@ -1470,6 +1470,15 @@ async fn policy_extract_audio_dispatch_sends_worker_protocol_payload() {
             .unwrap()
             .ends_with("Movie.stream-audio-1.opus.ogg")
     );
+    assert_eq!(result["outputs"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        result["outputs"][0]["result_file_location_id"],
+        result["result_file_location_id"]
+    );
+    assert_eq!(
+        result["outputs"][0]["source_snapshot_stream_id"],
+        "stream-audio-1"
+    );
 }
 
 fn workflow_tempdir() -> tempfile::TempDir {

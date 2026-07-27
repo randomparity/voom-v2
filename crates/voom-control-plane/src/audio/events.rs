@@ -3,10 +3,10 @@ use std::path::Path;
 use voom_core::{ArtifactHandleId, ArtifactLocationId, FailureClass, FileLocationId, VoomError};
 use voom_events::payload::{
     ArtifactAudioDispositionPayload, ArtifactAudioExtractFailedPayload,
-    ArtifactAudioExtractStartedPayload, ArtifactAudioExtractSucceededPayload,
-    ArtifactAudioOutputStreamPayload, ArtifactAudioStreamPayload,
-    ArtifactAudioTranscodeFailedPayload, ArtifactAudioTranscodeStartedPayload,
-    ArtifactAudioTranscodeSucceededPayload,
+    ArtifactAudioExtractOutputPayload, ArtifactAudioExtractStartedPayload,
+    ArtifactAudioExtractSucceededPayload, ArtifactAudioOutputStreamPayload,
+    ArtifactAudioStreamPayload, ArtifactAudioTranscodeFailedPayload,
+    ArtifactAudioTranscodeStartedPayload, ArtifactAudioTranscodeSucceededPayload,
 };
 use voom_events::{Event, SubjectType};
 use voom_plan::audio::AudioBundleRole;
@@ -16,7 +16,9 @@ use voom_worker_protocol::{
 };
 
 use super::selection::{ExtractAudioSelectionPlan, TranscodeAudioSelectionPlan};
-use super::{ExecuteExtractAudioInput, ExecuteTranscodeAudioInput};
+use super::{
+    ExecuteExtractAudioInput, ExecuteExtractAudioOutputReport, ExecuteTranscodeAudioInput,
+};
 use crate::ControlPlane;
 use crate::cases::{append_event, begin_tx, commit_tx};
 
@@ -166,6 +168,7 @@ pub struct ExtractSucceededEventInput<'a> {
     pub artifact_location_id: ArtifactLocationId,
     pub selection: &'a ExtractAudioSelectionPlan,
     pub result: &'a ExtractAudioResult,
+    pub outputs: &'a [ExecuteExtractAudioOutputReport],
 }
 
 pub async fn record_extract_succeeded(
@@ -200,9 +203,30 @@ pub async fn record_extract_succeeded(
             output_audio_codec: event.result.output_audio_codec.clone(),
             provider: event.result.provider.clone(),
             provider_version: event.result.provider_version.clone(),
+            outputs: event.outputs.iter().map(extract_output_payload).collect(),
         }),
     )
     .await
+}
+
+fn extract_output_payload(
+    output: &ExecuteExtractAudioOutputReport,
+) -> ArtifactAudioExtractOutputPayload {
+    ArtifactAudioExtractOutputPayload {
+        output_id: output.output_id.clone(),
+        source_snapshot_stream_id: output.source_snapshot_stream_id.clone(),
+        source_provider_stream_index: output.source_provider_stream_index,
+        role: output.role.clone(),
+        artifact_handle_id: output.staged_artifact_handle_id.0,
+        artifact_location_id: output.staged_artifact_location_id.0,
+        verification_id: output.verification_id.0,
+        commit_record_id: output.commit_record_id.0,
+        result_file_version_id: output.result_file_version_id.0,
+        result_file_location_id: output.result_file_location_id.0,
+        bundle_member_id: output.bundle_member_id,
+        staging_path: output.staging_path.display().to_string(),
+        target_path: output.target_path.display().to_string(),
+    }
 }
 
 #[derive(Debug)]

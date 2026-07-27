@@ -727,6 +727,7 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
         output_audio_codec: "opus".to_owned(),
         provider: "ffmpeg".to_owned(),
         provider_version: "6.1".to_owned(),
+        outputs: Vec::new(),
     };
     let failed = ArtifactAudioExtractFailedPayload {
         job_id: 10,
@@ -760,6 +761,15 @@ fn artifact_audio_extract_succeeded_and_failed_payloads_round_trip() {
     );
     assert_eq!(failed_json["payload"]["error_code"], "CONFIG_INVALID");
 
+    let mut historical = succeeded_json.clone();
+    historical["payload"]
+        .as_object_mut()
+        .unwrap()
+        .remove("outputs");
+    assert!(matches!(
+        serde_json::from_value::<Event>(historical).unwrap(),
+        Event::ArtifactAudioExtractSucceeded(payload) if payload.outputs.is_empty()
+    ));
     assert!(matches!(
         serde_json::from_value::<Event>(succeeded_json).unwrap(),
         Event::ArtifactAudioExtractSucceeded(q) if q == succeeded

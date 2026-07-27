@@ -203,6 +203,21 @@ async fn extract_audio_plural_commits_every_output_and_lineage_atomically() {
     assert_table_count(&cp, "asset_bundle_members", 2).await;
     assert_table_count(&cp, "audio_extract_output_lineage", 2).await;
     assert_event_count(&cp, "artifact.audio_extract_succeeded", 1).await;
+    let event = latest_event_payload(&cp, "artifact.audio_extract_succeeded").await;
+    assert_eq!(event["outputs"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        event["outputs"][0]["output_id"],
+        voom_plan::audio::extract_output_id(operation_id, "a-1")
+    );
+    assert_eq!(event["outputs"][1]["source_snapshot_stream_id"], "a-2");
+    assert_eq!(
+        event["outputs"][1]["result_file_location_id"],
+        report.outputs[1].result_file_location_id.0
+    );
+    assert_eq!(
+        event["outputs"][1]["bundle_member_id"],
+        report.outputs[1].bundle_member_id
+    );
 }
 
 #[tokio::test]

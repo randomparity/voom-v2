@@ -118,6 +118,8 @@ pub struct ComplianceExecuteData {
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_extract_outputs: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -126,6 +128,7 @@ impl ComplianceExecuteData {
     fn from_outcome(
         issues: IssueApplicationSummary,
         outcome: &crate::workflow::coordinator::CoordinatorOutcome,
+        audio_extract_outputs: Vec<serde_json::Value>,
     ) -> Self {
         let phases: Vec<PhaseSummaryView> =
             outcome.phases.iter().map(PhaseSummaryView::from).collect();
@@ -140,6 +143,7 @@ impl ComplianceExecuteData {
             summary: WorkflowSummaryView::from_summary(&outcome.summary, &file_phases),
             phases,
             file_phases,
+            audio_extract_outputs,
             latest_phase_index,
         }
     }
@@ -466,6 +470,8 @@ pub struct ComplianceRunReportData {
     pub summary: WorkflowSummaryView,
     pub phases: Vec<PhaseSummaryView>,
     pub file_phases: Vec<FilePhaseSummaryView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_extract_outputs: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_phase_index: Option<usize>,
 }
@@ -792,13 +798,32 @@ impl ControlPlane {
             .map_err(no_partial)?;
         let issues = apply_data.issues;
         match Box::pin(self.run_prepared_phase_barrier(prepared, options, runtimes)).await {
-            Ok(outcome) => Ok(ComplianceExecuteData::from_outcome(issues, &outcome)),
-            Err(err) => Err(ComplianceExecuteError {
-                source: err.source,
-                partial: err
-                    .partial
-                    .map(|outcome| ComplianceExecuteData::from_outcome(issues, &outcome)),
-            }),
+            Ok(outcome) => {
+                let outputs = self
+                    .audio_extract_outputs_for_job(outcome.job_id)
+                    .await
+                    .map_err(no_partial)?;
+                Ok(ComplianceExecuteData::from_outcome(
+                    issues, &outcome, outputs,
+                ))
+            }
+            Err(err) => {
+                let partial = if let Some(outcome) = err.partial {
+                    let outputs = self
+                        .audio_extract_outputs_for_job(outcome.job_id)
+                        .await
+                        .map_err(no_partial)?;
+                    Some(ComplianceExecuteData::from_outcome(
+                        issues, &outcome, outputs,
+                    ))
+                } else {
+                    None
+                };
+                Err(ComplianceExecuteError {
+                    source: err.source,
+                    partial,
+                })
+            }
         }
     }
 
@@ -1071,13 +1096,47 @@ impl ControlPlane {
             .iter()
             .map(FilePhaseSummaryView::from)
             .collect();
+        let audio_extract_outputs = self.audio_extract_outputs_for_job(job_id).await?;
         let latest_phase_index = latest_phase_index(&phases);
         Ok(ComplianceRunReportData {
             summary: WorkflowSummaryView::from_summary(&summary, &file_phases),
             phases,
             file_phases,
+            audio_extract_outputs,
             latest_phase_index,
         })
+    }
+
+    async fn audio_extract_outputs_for_job(
+        &self,
+        job_id: voom_core::JobId,
+    ) -> Result<Vec<serde_json::Value>, VoomError> {
+        let job_id = i64::try_from(job_id.0).map_err(|error| {
+            VoomError::Internal(format!("audio extract report job id overflow: {error}"))
+        })?;
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT member.value \
+             FROM tickets t, json_each(t.result, '$.outputs') AS member \
+             WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+               AND t.kind = 'synthetic.workflow.operation.extract_audio' \
+               AND json_type(t.result, '$.outputs') = 'array' \
+             ORDER BY t.id ASC, CAST(member.key AS INTEGER) ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            VoomError::database_context("compliance audio extract output report", error)
+        })?;
+        rows.into_iter()
+            .map(|(value,)| {
+                serde_json::from_str(&value).map_err(|error| {
+                    VoomError::database(format!(
+                        "compliance audio extract output is malformed: {error}"
+                    ))
+                })
+            })
+            .collect()
     }
 }
 

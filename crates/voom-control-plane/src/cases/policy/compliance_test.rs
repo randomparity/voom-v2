@@ -6,6 +6,7 @@ use voom_events::EventKind;
 use voom_plan::PlanOperationKind;
 use voom_policy::{FixtureName, load_fixture, load_policy_fixture};
 use voom_store::repo::identity::{DiscoveredFile, FileLocationKind, IngestOutcome};
+use voom_store::repo::tickets::NewTicket;
 use voom_store::repo::workers::{NewCapability, NewGrant, NewWorker, WorkerKind};
 
 use crate::cases::policy::policy_inputs::PolicyInputFromScanInput;
@@ -1151,6 +1152,60 @@ async fn read_compliance_run_report_unknown_job_is_not_found() {
         ),
         "unknown job must be NotFound(no job with id), got {err:?}"
     );
+}
+
+#[tokio::test]
+async fn compliance_audio_extract_outputs_preserve_ticket_and_descriptor_order() {
+    let (cp, _tmp) = cp().await;
+    let job = cp
+        .open_job(voom_store::repo::jobs::NewJob {
+            kind: "synthetic.workflow".to_owned(),
+            priority: 0,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let ticket = cp
+        .create_ticket(NewTicket {
+            job_id: Some(job.id),
+            kind: TicketOperation::new("synthetic.workflow.operation.extract_audio").unwrap(),
+            priority: 0,
+            payload: serde_json::json!({}),
+            max_attempts: 1,
+            created_at: T0,
+        })
+        .await
+        .unwrap();
+    let result = serde_json::json!({
+        "result_file_location_id": 11,
+        "outputs": [
+            {
+                "output_id": "output-a",
+                "source_snapshot_stream_id": "a-1",
+                "result_file_location_id": 11
+            },
+            {
+                "output_id": "output-b",
+                "source_snapshot_stream_id": "a-2",
+                "result_file_location_id": 12
+            }
+        ]
+    });
+    sqlx::query(
+        "UPDATE tickets SET state = 'succeeded', result = ?, state_changed_at = ? WHERE id = ?",
+    )
+    .bind(serde_json::to_string(&result).unwrap())
+    .bind("1970-01-01T00:00:00Z")
+    .bind(i64::try_from(ticket.id.0).unwrap())
+    .execute(cp.pool_for_test())
+    .await
+    .unwrap();
+
+    let outputs = cp.audio_extract_outputs_for_job(job.id).await.unwrap();
+
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0]["output_id"], "output-a");
+    assert_eq!(outputs[1]["output_id"], "output-b");
 }
 
 #[tokio::test]

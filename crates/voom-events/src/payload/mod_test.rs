@@ -614,6 +614,7 @@ fn event_kind_matches_serde_tag() {
             output_audio_codec: "aac".to_owned(),
             provider: "ffmpeg".to_owned(),
             provider_version: "1".to_owned(),
+            outputs: Vec::new(),
         }),
         Event::ArtifactAudioExtractFailed(ArtifactAudioExtractFailedPayload {
             job_id: 1,

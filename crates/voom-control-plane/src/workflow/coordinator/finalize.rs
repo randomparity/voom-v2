@@ -154,14 +154,24 @@ impl ControlPlane {
         job_id: JobId,
     ) -> Result<Vec<FileLocationId>, VoomError> {
         let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT json_extract(result, '$.result_file_location_id') \
-             FROM tickets \
-             WHERE job_id = ? \
-               AND state = 'succeeded' \
-               AND result IS NOT NULL \
-               AND json_type(result, '$.result_file_location_id') = 'integer' \
-             ORDER BY id ASC",
+            "SELECT location_id FROM ( \
+               SELECT t.id AS ticket_id, 0 AS ordinal, \
+                      json_extract(t.result, '$.result_file_location_id') AS location_id \
+               FROM tickets t \
+               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND json_type(t.result, '$.result_file_location_id') = 'integer' \
+                 AND (json_type(t.result, '$.outputs') IS NULL \
+                      OR json_type(t.result, '$.outputs') != 'array' \
+                      OR json_array_length(t.result, '$.outputs') = 0) \
+               UNION ALL \
+               SELECT t.id AS ticket_id, CAST(member.key AS INTEGER) AS ordinal, \
+                      json_extract(member.value, '$.result_file_location_id') AS location_id \
+               FROM tickets t, json_each(t.result, '$.outputs') AS member \
+               WHERE t.job_id = ? AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND json_type(member.value, '$.result_file_location_id') = 'integer' \
+             ) ORDER BY ticket_id ASC, ordinal ASC",
         )
+        .bind(sqlite_i64(job_id.0, "promotion job id")?)
         .bind(sqlite_i64(job_id.0, "promotion job id")?)
         .fetch_all(&self.pool)
         .await

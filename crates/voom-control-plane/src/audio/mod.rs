@@ -1110,6 +1110,7 @@ async fn commit_verified_extract_audio(
             artifact_location_id: first.staged_artifact_location_id,
             selection: &request.selection,
             result: &request.result,
+            outputs: &report_outputs,
         },
     )
     .await

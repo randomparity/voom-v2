@@ -462,6 +462,24 @@ pub struct ArtifactAudioExtractProgressPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ArtifactAudioExtractOutputPayload {
+    pub output_id: Option<String>,
+    pub source_snapshot_stream_id: String,
+    pub source_provider_stream_index: u32,
+    pub role: String,
+    pub artifact_handle_id: u64,
+    pub artifact_location_id: u64,
+    pub verification_id: u64,
+    pub commit_record_id: u64,
+    pub result_file_version_id: u64,
+    pub result_file_location_id: u64,
+    pub bundle_member_id: u64,
+    pub staging_path: String,
+    pub target_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactAudioExtractSucceededPayload {
     pub job_id: u64,
     pub ticket_id: u64,
@@ -480,6 +498,8 @@ pub struct ArtifactAudioExtractSucceededPayload {
     pub output_audio_codec: String,
     pub provider: String,
     pub provider_version: String,
+    #[serde(default)]
+    pub outputs: Vec<ArtifactAudioExtractOutputPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

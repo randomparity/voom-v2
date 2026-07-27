@@ -387,13 +387,27 @@ impl ControlPlane {
         let ticket_ids = serde_json::to_string(&ticket_ids)
             .map_err(|error| VoomError::Internal(format!("promotion tickets encode: {error}")))?;
         let rows: Vec<(i64,)> = sqlx::query_as(
-            "SELECT json_extract(result, '$.result_file_location_id') FROM tickets \
-             WHERE id IN (SELECT value FROM json_each(?)) \
-               AND state = 'succeeded' AND result IS NOT NULL \
-               AND json_type(result, '$.result_file_location_id') = 'integer' \
-             ORDER BY id ASC",
+            "SELECT location_id FROM ( \
+               SELECT t.id AS ticket_id, 0 AS ordinal, \
+                      json_extract(t.result, '$.result_file_location_id') AS location_id \
+               FROM tickets t \
+               WHERE t.id IN (SELECT value FROM json_each(?)) \
+                 AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND json_type(t.result, '$.result_file_location_id') = 'integer' \
+                 AND (json_type(t.result, '$.outputs') IS NULL \
+                      OR json_type(t.result, '$.outputs') != 'array' \
+                      OR json_array_length(t.result, '$.outputs') = 0) \
+               UNION ALL \
+               SELECT t.id AS ticket_id, CAST(member.key AS INTEGER) AS ordinal, \
+                      json_extract(member.value, '$.result_file_location_id') AS location_id \
+               FROM tickets t, json_each(t.result, '$.outputs') AS member \
+               WHERE t.id IN (SELECT value FROM json_each(?)) \
+                 AND t.state = 'succeeded' AND t.result IS NOT NULL \
+                 AND json_type(member.value, '$.result_file_location_id') = 'integer' \
+             ) ORDER BY ticket_id ASC, ordinal ASC",
         )
-        .bind(ticket_ids)
+        .bind(&ticket_ids)
+        .bind(&ticket_ids)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| VoomError::database_context("branch promotion results", error))?;
